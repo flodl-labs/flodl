@@ -18,6 +18,10 @@ pub struct FlowBuilder {
     pub(super) on_target: Option<NodeRef>,
     pub(super) counter: usize,
     pub(super) err: Option<String>,
+    /// Pending forward references: Using("x") called before Tag("x").
+    pub(super) pending: HashMap<String, Vec<PendingUsing>>,
+    /// Resolved forward references ready for Graph::build.
+    pub(super) forward_refs: Vec<ForwardRefSpec>,
 }
 
 impl FlowBuilder {
@@ -32,6 +36,8 @@ impl FlowBuilder {
             on_target: None,
             counter: 0,
             err: None,
+            pending: HashMap::new(),
+            forward_refs: Vec::new(),
         };
 
         let node_ref = fb.add_module(module);
@@ -155,7 +161,21 @@ impl FlowBuilder {
             return self;
         }
 
-        self.taps.insert(name.to_string(), self.current[0].clone());
+        let cur = self.current[0].clone();
+        self.taps.insert(name.to_string(), cur.clone());
+
+        // Resolve any pending forward references to this tag
+        if let Some(pending_list) = self.pending.remove(name) {
+            for p in pending_list {
+                self.forward_refs.push(ForwardRefSpec {
+                    name: name.to_string(),
+                    reader_id: p.reader_id,
+                    writer_id: cur.node_id.clone(),
+                    writer_port: cur.port.clone(),
+                });
+            }
+        }
+
         self
     }
 
@@ -258,10 +278,44 @@ impl FlowBuilder {
         LoopBuilder::new(self, Box::new(body))
     }
 
+    /// Hard routing: router selects one branch, others are skipped.
+    /// Router must output a scalar 0-based branch index.
+    pub fn switch(
+        self,
+        router: impl Module + 'static,
+        branches: Vec<Box<dyn Module>>,
+    ) -> Self {
+        super::switch::wire_switch(self, Box::new(router), branches)
+    }
+
+    /// Soft routing (mixture of experts): all experts execute, outputs
+    /// combined via learned router weights. Router must output shape
+    /// `[..., n_experts]`.
+    pub fn gate(
+        self,
+        router: impl Module + 'static,
+        experts: Vec<Box<dyn Module>>,
+    ) -> Self {
+        super::gate::wire_gate(self, Box::new(router), experts)
+    }
+
+    /// Start a Map construct. Chain with `.each()` or `.batched().each()`.
+    pub fn map(self, body: impl Module + 'static) -> super::map::MapBuilder {
+        super::map::MapBuilder::new(self, Box::new(body))
+    }
+
     /// Finalize the flow into an executable Graph.
     pub fn build(self) -> crate::tensor::Result<super::Graph> {
         if let Some(err) = self.err {
             return Err(TensorError::new(&err));
+        }
+        // Check for unresolved forward refs
+        if !self.pending.is_empty() {
+            let names: Vec<&String> = self.pending.keys().collect();
+            return Err(TensorError::new(&format!(
+                "unresolved forward refs: {:?}",
+                names
+            )));
         }
         if self.current.len() != 1 {
             return Err(TensorError::new(
@@ -275,7 +329,14 @@ impl FlowBuilder {
             port: self.current[0].port.clone(),
         };
 
-        super::Graph::build(self.nodes, self.edges, self.inputs, vec![output], self.taps)
+        super::Graph::build(
+            self.nodes,
+            self.edges,
+            self.inputs,
+            vec![output],
+            self.taps,
+            self.forward_refs,
+        )
     }
 
     // --- Internal helpers ---
@@ -364,23 +425,38 @@ impl FlowBuilder {
         for ref_name in refs {
             let port_name = format!("ref_{}", ref_name);
 
-            let tap = self
-                .taps
-                .get(*ref_name)
-                .ok_or_else(|| {
-                    format!("unknown tag '{}' (forward refs not yet supported)", ref_name)
-                })?
-                .clone();
+            if let Some(tap) = self.taps.get(*ref_name).cloned() {
+                // Backward reference: tag already exists, wire directly
+                let node = self.nodes.get_mut(&target.node_id).unwrap();
+                node.input_ports.push(port_name.clone());
 
-            let node = self.nodes.get_mut(&target.node_id).unwrap();
-            node.input_ports.push(port_name.clone());
+                self.edges.push(Edge {
+                    from_node: tap.node_id.clone(),
+                    from_port: tap.port.clone(),
+                    to_node: target.node_id.clone(),
+                    to_port: port_name,
+                });
+            } else {
+                // Forward reference: tag not set yet, create state reader node
+                let reader_ref = self.add_state_read_node(ref_name);
 
-            self.edges.push(Edge {
-                from_node: tap.node_id.clone(),
-                from_port: tap.port.clone(),
-                to_node: target.node_id.clone(),
-                to_port: port_name,
-            });
+                let node = self.nodes.get_mut(&target.node_id).unwrap();
+                node.input_ports.push(port_name.clone());
+
+                self.edges.push(Edge {
+                    from_node: reader_ref.node_id.clone(),
+                    from_port: reader_ref.port.clone(),
+                    to_node: target.node_id.clone(),
+                    to_port: port_name,
+                });
+
+                self.pending
+                    .entry(ref_name.to_string())
+                    .or_default()
+                    .push(PendingUsing {
+                        reader_id: reader_ref.node_id,
+                    });
+            }
         }
 
         // Rebuild run function with updated ports
@@ -411,6 +487,32 @@ impl FlowBuilder {
                         result = result.add(&inputs[i])?;
                     }
                     Ok(vec![result])
+                }),
+                module: None,
+                ref_forward: None,
+            },
+        );
+
+        NodeRef {
+            node_id: id,
+            port: DEFAULT_OUTPUT.into(),
+        }
+    }
+
+    fn add_state_read_node(&mut self, ref_name: &str) -> NodeRef {
+        let id = self.next_id(&format!("state_read_{}", ref_name));
+
+        // Placeholder run — will be replaced by Graph::build with the actual state buffer
+        self.nodes.insert(
+            id.clone(),
+            Node {
+                id: id.clone(),
+                input_ports: vec![],
+                output_ports: vec![DEFAULT_OUTPUT.into()],
+                run: Box::new(|_| {
+                    Err(crate::tensor::TensorError::new(
+                        "state_read not wired (build bug)",
+                    ))
                 }),
                 module: None,
                 ref_forward: None,

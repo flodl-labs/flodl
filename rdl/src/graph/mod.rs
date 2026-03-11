@@ -1,22 +1,34 @@
 pub mod node;
 pub mod flow;
 pub mod loop_node;
+pub mod switch;
+pub mod gate;
+pub mod map;
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use node::*;
 use crate::autograd::Variable;
 use crate::nn::{Module, Parameter};
-use crate::tensor::{Result, TensorError};
+use crate::tensor::{Result, Tensor, TensorError};
 
 pub use flow::FlowBuilder;
 pub use loop_node::LoopBuilder;
+pub use map::MapBuilder;
 
 /// Merge operation for combining split branches.
 pub enum MergeOp {
     Add,
     Mean,
+}
+
+/// Forward-reference state buffer. Persists across Forward() calls.
+struct StateEntry {
+    writer_id: String,
+    writer_port: String,
+    value: Rc<RefCell<Option<Variable>>>,
 }
 
 /// An executable computation graph. Implements Module for composability.
@@ -29,16 +41,41 @@ pub struct Graph {
     inputs: Vec<ExposedPort>,
     outputs: Vec<ExposedPort>,
     order: Vec<usize>,
+    state: Vec<StateEntry>,
 }
 
 impl Graph {
     pub(crate) fn build(
-        node_map: HashMap<String, Node>,
+        mut node_map: HashMap<String, Node>,
         edges: Vec<Edge>,
         inputs: Vec<ExposedPort>,
         outputs: Vec<ExposedPort>,
         _tags: HashMap<String, NodeRef>,
+        forward_refs: Vec<ForwardRefSpec>,
     ) -> Result<Self> {
+        // Set up forward-reference state buffers and wire state read nodes
+        let mut state = Vec::with_capacity(forward_refs.len());
+        for fr in &forward_refs {
+            let value: Rc<RefCell<Option<Variable>>> = Rc::new(RefCell::new(None));
+            let reader_value = value.clone();
+
+            // Wire the state read node to return the buffer value
+            if let Some(node) = node_map.get_mut(&fr.reader_id) {
+                node.run = Box::new(move |_: &[Variable]| {
+                    match reader_value.borrow().as_ref() {
+                        Some(v) => Ok(vec![v.clone()]),
+                        None => Ok(vec![]), // empty = no state yet
+                    }
+                });
+            }
+
+            state.push(StateEntry {
+                writer_id: fr.writer_id.clone(),
+                writer_port: fr.writer_port.clone(),
+                value,
+            });
+        }
+
         // Convert to indexed storage
         let mut nodes = Vec::with_capacity(node_map.len());
         let mut node_index = HashMap::with_capacity(node_map.len());
@@ -85,6 +122,7 @@ impl Graph {
             inputs,
             outputs,
             order,
+            state,
         })
     }
 
@@ -98,14 +136,15 @@ impl Graph {
         }
 
         let n = self.nodes.len();
-        let mut input_slots: Vec<HashMap<String, Variable>> =
+        // Option<Variable>: None means state_read returned no value yet
+        let mut input_slots: Vec<HashMap<String, Option<Variable>>> =
             (0..n).map(|_| HashMap::new()).collect();
         let mut output_values: Vec<Option<Vec<Variable>>> = vec![None; n];
 
         // Route graph inputs to node input ports
         for (i, ep) in self.inputs.iter().enumerate() {
             let ni = self.node_index[&ep.node_id];
-            input_slots[ni].insert(ep.port.clone(), graph_inputs[i].clone());
+            input_slots[ni].insert(ep.port.clone(), Some(graph_inputs[i].clone()));
         }
 
         // Execute levels sequentially
@@ -113,14 +152,27 @@ impl Graph {
             for &ni in level {
                 let node = &self.nodes[ni];
 
-                // Collect inputs in port order
+                // Collect inputs in port order, zero-filling nil state refs
                 let inputs: Vec<Variable> = node
                     .input_ports
                     .iter()
-                    .map(|port| {
-                        input_slots[ni].get(port).cloned().unwrap_or_else(|| {
-                            panic!("missing input '{}' for node '{}'", port, node.id)
-                        })
+                    .enumerate()
+                    .map(|(i, port)| {
+                        match input_slots[ni].get(port).and_then(|v| v.as_ref()) {
+                            Some(v) => v.clone(),
+                            None if i > 0 => {
+                                // Zero fill: create zeros matching first input shape
+                                let first = input_slots[ni]
+                                    .get(&node.input_ports[0])
+                                    .and_then(|v| v.as_ref())
+                                    .expect("missing primary input");
+                                Variable::new(
+                                    Tensor::zeros_like(&first.data()).unwrap(),
+                                    false,
+                                )
+                            }
+                            _ => panic!("missing input '{}' for node '{}'", port, node.id),
+                        }
                     })
                     .collect();
 
@@ -138,9 +190,30 @@ impl Graph {
                             .position(|p| p == &edge.from_port)
                             .expect("bad output port");
                         let to_ni = self.node_index[&edge.to_node];
-                        let value =
-                            output_values[ni].as_ref().unwrap()[from_port_idx].clone();
+                        let outs = output_values[ni].as_ref().unwrap();
+                        // State read with no value returns empty vec → insert None
+                        let value = if from_port_idx < outs.len() {
+                            Some(outs[from_port_idx].clone())
+                        } else {
+                            None
+                        };
                         input_slots[to_ni].insert(edge.to_port.clone(), value);
+                    }
+                }
+
+                // Capture state: if this node is a state writer, store its output
+                for entry in &self.state {
+                    if entry.writer_id == node.id {
+                        let port_idx = node
+                            .output_ports
+                            .iter()
+                            .position(|p| p == &entry.writer_port)
+                            .unwrap_or(0);
+                        if let Some(ref outs) = output_values[ni] {
+                            if port_idx < outs.len() {
+                                *entry.value.borrow_mut() = Some(outs[port_idx].clone());
+                            }
+                        }
                     }
                 }
             }
@@ -159,6 +232,32 @@ impl Graph {
             .as_ref()
             .and_then(|o| o.get(out_port_idx).cloned())
             .ok_or_else(|| TensorError::new("graph produced no output"))
+    }
+}
+
+impl Graph {
+    /// Clear all forward-reference state buffers to None.
+    /// Call when starting inference on a new sequence.
+    pub fn reset_state(&self) {
+        for entry in &self.state {
+            *entry.value.borrow_mut() = None;
+        }
+    }
+
+    /// Break gradient chain on forward-reference state buffers.
+    /// Call between training steps to prevent unbounded graph growth.
+    pub fn detach_state(&self) {
+        for entry in &self.state {
+            let mut val = entry.value.borrow_mut();
+            if let Some(ref v) = *val {
+                *val = Some(Variable::new(v.data(), false));
+            }
+        }
+    }
+
+    /// Returns true if this graph has forward-reference state.
+    pub fn has_state(&self) -> bool {
+        !self.state.is_empty()
     }
 }
 
@@ -854,5 +953,410 @@ mod tests {
         let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), false);
         let y = graph.forward(&x).unwrap();
         assert_eq!(y.shape(), vec![1, 2]);
+    }
+
+    // --- Forward reference tests ---
+
+    /// Nil-safe add: skips nil inputs, adds rest. For forward ref state accumulation.
+    struct NilSafeAdd;
+    impl Module for NilSafeAdd {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            Ok(input.clone())
+        }
+        fn parameters(&self) -> Vec<Parameter> {
+            vec![]
+        }
+    }
+    impl NamedInputModule for NilSafeAdd {
+        fn forward_named(
+            &self,
+            input: &Variable,
+            refs: &HashMap<String, Variable>,
+        ) -> Result<Variable> {
+            if let Some(memory) = refs.get("memory") {
+                input.add(memory)
+            } else {
+                Ok(input.clone())
+            }
+        }
+    }
+
+    /// Identity pass-through for tagging.
+    struct Identity;
+    impl Module for Identity {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            Ok(input.clone())
+        }
+        fn parameters(&self) -> Vec<Parameter> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_forward_ref() {
+        // Forward reference: Using before Tag. State carries between Forward() calls.
+        // Graph: entry → NilSafeAdd.Using("memory") → Identity.Tag("memory")
+        // Pass 1: add gets [stream, zeros] (memory is nil/zeroed) → Identity → state captured
+        // Pass 2: add gets [stream, prev_output] → sum → Identity → state captured
+        let graph = FlowBuilder::from(Identity)
+            .through_ref(NilSafeAdd)
+            .using(&["memory"])
+            .through(Identity)
+            .tag("memory")
+            .build()
+            .unwrap();
+
+        assert!(graph.has_state());
+
+        // Pass 1: [1,2] + zeros → [1,2]
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let y1 = graph.forward(&x).unwrap();
+        let d1 = y1.data().to_f32_vec().unwrap();
+        assert!((d1[0] - 1.0).abs() < 1e-5, "pass1[0]: got {}", d1[0]);
+        assert!((d1[1] - 2.0).abs() < 1e-5, "pass1[1]: got {}", d1[1]);
+
+        // Pass 2: [1,2] + [1,2] → [2,4]
+        let y2 = graph.forward(&x).unwrap();
+        let d2 = y2.data().to_f32_vec().unwrap();
+        assert!((d2[0] - 2.0).abs() < 1e-5, "pass2[0]: got {}", d2[0]);
+        assert!((d2[1] - 4.0).abs() < 1e-5, "pass2[1]: got {}", d2[1]);
+
+        // Pass 3: [1,2] + [2,4] → [3,6]
+        let y3 = graph.forward(&x).unwrap();
+        let d3 = y3.data().to_f32_vec().unwrap();
+        assert!((d3[0] - 3.0).abs() < 1e-5, "pass3[0]: got {}", d3[0]);
+        assert!((d3[1] - 6.0).abs() < 1e-5, "pass3[1]: got {}", d3[1]);
+    }
+
+    #[test]
+    fn test_forward_ref_reset_state() {
+        let graph = FlowBuilder::from(Identity)
+            .through_ref(NilSafeAdd)
+            .using(&["memory"])
+            .through(Identity)
+            .tag("memory")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+
+        // Build up state
+        graph.forward(&x).unwrap();
+        graph.forward(&x).unwrap();
+        let y_before = graph.forward(&x).unwrap();
+        let d_before = y_before.data().to_f32_vec().unwrap();
+        assert!((d_before[0] - 3.0).abs() < 1e-5);
+
+        // Reset and verify state is cleared
+        graph.reset_state();
+        let y_after = graph.forward(&x).unwrap();
+        let d_after = y_after.data().to_f32_vec().unwrap();
+        assert!((d_after[0] - 1.0).abs() < 1e-5, "after reset: got {}", d_after[0]);
+    }
+
+    #[test]
+    fn test_forward_ref_detach_state() {
+        let graph = FlowBuilder::from(Identity)
+            .through_ref(NilSafeAdd)
+            .using(&["memory"])
+            .through(Identity)
+            .tag("memory")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), true);
+
+        // Run forward, accumulate state
+        let y1 = graph.forward(&x).unwrap();
+        let _ = y1.sum().unwrap();
+
+        // Detach state — values preserved but gradient chain broken
+        graph.detach_state();
+
+        // State should still have values (not reset)
+        let y2 = graph.forward(&x).unwrap();
+        let d2 = y2.data().to_f32_vec().unwrap();
+        assert!((d2[0] - 2.0).abs() < 1e-5, "detach preserves values: got {}", d2[0]);
+    }
+
+    #[test]
+    fn test_forward_ref_backward() {
+        // Gradients should flow through forward-ref connections
+        let graph = FlowBuilder::from(Linear::new(2, 2).unwrap())
+            .through_ref(NilSafeAdd)
+            .using(&["memory"])
+            .through(Identity)
+            .tag("memory")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), true);
+        let y = graph.forward(&x).unwrap();
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        assert!(x.grad().is_some(), "input should have gradient");
+        for p in graph.parameters() {
+            assert!(p.variable.grad().is_some(), "{} should have gradient", p.name);
+        }
+    }
+
+    #[test]
+    fn test_forward_ref_unresolved_error() {
+        // Using a tag that is never defined should error at build
+        let result = FlowBuilder::from(Identity)
+            .through_ref(NilSafeAdd)
+            .using(&["nonexistent"])
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_forward_ref_mixed_refs() {
+        // Mix backward ref (tag before using) and forward ref (using before tag)
+        // "ctx" is backward (AddRefModule expects "ctx"), "memory" is forward (NilSafeAdd expects "memory")
+        let graph = FlowBuilder::from(Identity)
+            .tag("ctx")
+            .through_ref(AddRefModule)
+            .using(&["ctx"])
+            .through_ref(NilSafeAdd)
+            .using(&["memory"])
+            .through(Identity)
+            .tag("memory")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+
+        // Pass 1: entry=[1,2], AddRef adds ctx=[1,2] → [2,4], NilSafeAdd +zeros → [2,4]
+        let y1 = graph.forward(&x).unwrap();
+        let d1 = y1.data().to_f32_vec().unwrap();
+        assert!((d1[0] - 2.0).abs() < 1e-5, "mixed pass1[0]: got {}", d1[0]);
+
+        // Pass 2: entry=[1,2], AddRef adds ctx=[1,2] → [2,4], NilSafeAdd +[2,4] → [4,8]
+        let y2 = graph.forward(&x).unwrap();
+        let d2 = y2.data().to_f32_vec().unwrap();
+        assert!((d2[0] - 4.0).abs() < 1e-5, "mixed pass2[0]: got {}", d2[0]);
+    }
+
+    // --- Switch tests ---
+
+    /// Always selects branch `idx`.
+    struct FixedSelector(usize);
+    impl Module for FixedSelector {
+        fn forward(&self, _input: &Variable) -> Result<Variable> {
+            Ok(Variable::new(
+                Tensor::from_f32(&[self.0 as f32], &[1], Device::CPU)?,
+                false,
+            ))
+        }
+        fn parameters(&self) -> Vec<Parameter> { vec![] }
+    }
+
+    /// Triples input.
+    struct Tripler;
+    impl Module for Tripler {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            input.add(&input.add(input)?)
+        }
+        fn parameters(&self) -> Vec<Parameter> { vec![] }
+    }
+
+    #[test]
+    fn test_switch_selects_branch() {
+        // Branch 0: double, Branch 1: triple. Router selects branch 1.
+        let graph = FlowBuilder::from(Identity)
+            .switch(FixedSelector(1), vec![Box::new(Doubler), Box::new(Tripler)])
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        assert!((data[0] - 3.0).abs() < 1e-5, "triple [1]=3, got {}", data[0]);
+        assert!((data[1] - 6.0).abs() < 1e-5, "triple [2]=6, got {}", data[1]);
+    }
+
+    #[test]
+    fn test_switch_branch0() {
+        let graph = FlowBuilder::from(Identity)
+            .switch(FixedSelector(0), vec![Box::new(Doubler), Box::new(Tripler)])
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        assert!((data[0] - 2.0).abs() < 1e-5, "double [1]=2, got {}", data[0]);
+        assert!((data[1] - 4.0).abs() < 1e-5, "double [2]=4, got {}", data[1]);
+    }
+
+    #[test]
+    fn test_switch_backward() {
+        let graph = FlowBuilder::from(Linear::new(2, 2).unwrap())
+            .switch(FixedSelector(0), vec![
+                Box::new(Linear::new(2, 2).unwrap()),
+                Box::new(Linear::new(2, 2).unwrap()),
+            ])
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), true);
+        let y = graph.forward(&x).unwrap();
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        assert!(x.grad().is_some());
+        // Only entry + selected branch params should have gradients
+        // (router has no params, unselected branch wasn't executed)
+    }
+
+    #[test]
+    fn test_switch_parameters() {
+        let graph = FlowBuilder::from(Identity)
+            .switch(
+                Linear::new(2, 1).unwrap(),
+                vec![
+                    Box::new(Linear::new(2, 2).unwrap()),
+                    Box::new(Linear::new(2, 2).unwrap()),
+                ],
+            )
+            .build()
+            .unwrap();
+
+        let params = graph.parameters();
+        // Router: 2, Branch0: 2, Branch1: 2 = 6
+        assert_eq!(params.len(), 6);
+    }
+
+    // --- Gate tests ---
+
+    /// Router that outputs equal weights for all experts.
+    struct EqualRouter(usize);
+    impl Module for EqualRouter {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            let batch = input.shape()[0];
+            let w = 1.0 / self.0 as f32;
+            let data = vec![w; batch as usize * self.0];
+            Ok(Variable::new(
+                Tensor::from_f32(&data, &[batch, self.0 as i64], Device::CPU)?,
+                false,
+            ))
+        }
+        fn parameters(&self) -> Vec<Parameter> { vec![] }
+    }
+
+    #[test]
+    fn test_gate_equal_weights() {
+        // Equal weights: output = mean of expert outputs
+        let graph = FlowBuilder::from(Identity)
+            .gate(EqualRouter(2), vec![Box::new(Doubler), Box::new(Tripler)])
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[2.0, 4.0], &[1, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        // double=[4,8], triple=[6,12], mean = [5, 10]
+        assert!((data[0] - 5.0).abs() < 1e-5, "gate[0]=5, got {}", data[0]);
+        assert!((data[1] - 10.0).abs() < 1e-5, "gate[1]=10, got {}", data[1]);
+    }
+
+    #[test]
+    fn test_gate_backward() {
+        let graph = FlowBuilder::from(Linear::new(2, 2).unwrap())
+            .gate(
+                Linear::new(2, 2).unwrap(),
+                vec![
+                    Box::new(Linear::new(2, 2).unwrap()),
+                    Box::new(Linear::new(2, 2).unwrap()),
+                ],
+            )
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), true);
+        let y = graph.forward(&x).unwrap();
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        assert!(x.grad().is_some());
+        for p in graph.parameters() {
+            assert!(p.variable.grad().is_some(), "{} should have gradient", p.name);
+        }
+    }
+
+    #[test]
+    fn test_gate_parameters() {
+        let graph = FlowBuilder::from(Identity)
+            .gate(
+                Linear::new(2, 2).unwrap(),
+                vec![
+                    Box::new(Linear::new(2, 2).unwrap()),
+                    Box::new(Linear::new(2, 2).unwrap()),
+                ],
+            )
+            .build()
+            .unwrap();
+
+        let params = graph.parameters();
+        // Router: 2, Expert0: 2, Expert1: 2 = 6
+        assert_eq!(params.len(), 6);
+    }
+
+    // --- Map tests ---
+
+    #[test]
+    fn test_map_each() {
+        // Map doubler over 3 elements along dim 0
+        let graph = FlowBuilder::from(Identity)
+            .map(Doubler)
+            .each()
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+
+        assert_eq!(y.shape(), vec![3, 2]);
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[5] - 12.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_map_batched() {
+        // Batched: pass full tensor, skip element-wise
+        let graph = FlowBuilder::from(Identity)
+            .map(Doubler)
+            .batched()
+            .each()
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+
+        assert_eq!(data, vec![2.0, 4.0, 6.0, 8.0]);
+    }
+
+    #[test]
+    fn test_map_backward() {
+        let graph = FlowBuilder::from(Linear::new(2, 2).unwrap())
+            .map(Linear::new(2, 2).unwrap())
+            .each()
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), true);
+        let y = graph.forward(&x).unwrap();
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        assert!(x.grad().is_some());
+        for p in graph.parameters() {
+            assert!(p.variable.grad().is_some(), "{} should have gradient", p.name);
+        }
     }
 }

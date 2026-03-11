@@ -463,6 +463,62 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    // --- Slicing and indexing ---
+
+    /// Narrow (slice) along a dimension: returns a view.
+    pub fn narrow(&self, dim: i32, start: i64, length: i64) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_narrow(self.handle, dim, start, length, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Scatter a narrow slice back into a tensor (for narrow backward).
+    pub fn narrow_scatter(&self, src: &Tensor, dim: i32, start: i64) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_narrow_scatter(self.handle, src.handle, dim, start, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Concatenate two tensors along a dimension.
+    pub fn cat(&self, other: &Tensor, dim: i32) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_cat2(self.handle, other.handle, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Softmax along a dimension.
+    pub fn softmax(&self, dim: i32) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_softmax(self.handle, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Select a single index along a dimension (reduces that dim).
+    pub fn select(&self, dim: i32, index: i64) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_select(self.handle, dim, index, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Mean along a dimension.
+    pub fn mean_dim(&self, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_mean_dim(self.handle, dim, keepdim as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Like constructors ---
 
     pub fn zeros_like(t: &Tensor) -> Result<Tensor> {

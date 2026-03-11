@@ -46,6 +46,21 @@ pub(crate) struct ExposedPort {
     pub port: String,
 }
 
+/// Build-time forward reference: Using before Tag.
+/// Resolved when Tag is called, converted to StateEntry at build.
+pub(crate) struct ForwardRefSpec {
+    #[allow(dead_code)]
+    pub name: String,
+    pub reader_id: String,
+    pub writer_id: String,
+    pub writer_port: String,
+}
+
+/// Pending forward reference awaiting Tag resolution.
+pub(crate) struct PendingUsing {
+    pub reader_id: String,
+}
+
 /// Extract ref_* ports into a name → Variable map.
 pub(crate) fn extract_refs(
     ports: &[String],

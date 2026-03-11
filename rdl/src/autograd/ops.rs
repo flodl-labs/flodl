@@ -422,6 +422,52 @@ impl Variable {
         Ok(Variable::from_op(result, grad_fn))
     }
 
+    /// Narrow (slice) along a dimension.
+    pub fn narrow(&self, dim: i32, start: i64, length: i64) -> Result<Variable> {
+        let result = self.inner.borrow().data.narrow(dim, start, length)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let full_shape = self.inner.borrow().data.shape();
+        let grad_fn = GradFn {
+            name: "NarrowBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                // Scatter narrow gradient back into full-sized zero tensor
+                let mut full_grad = Tensor::zeros(&full_shape, TensorOptions::default())?;
+                // narrow_scatter: places grad into full_grad at the correct position
+                full_grad = full_grad.narrow_scatter(grad, dim, start)?;
+                Ok(vec![full_grad])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Concatenate two variables along a dimension.
+    pub fn cat(&self, other: &Variable, dim: i32) -> Result<Variable> {
+        let result = self.inner.borrow().data.cat(&other.inner.borrow().data, dim)?;
+
+        if !needs_grad(&[self, other]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let a_size = self.inner.borrow().data.shape()[dim as usize];
+        let grad_fn = GradFn {
+            name: "CatBackward",
+            inputs: vec![self.clone(), other.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let ga = grad.narrow(dim, 0, a_size)?;
+                let gb = grad.narrow(dim, a_size, grad.shape()[dim as usize] - a_size)?;
+                Ok(vec![ga, gb])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
     // --- Backward entry point ---
 
     pub fn backward(&self) -> Result<()> {
