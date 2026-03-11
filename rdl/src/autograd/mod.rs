@@ -5,6 +5,7 @@ mod context;
 
 pub use variable::Variable;
 pub use context::{no_grad, is_grad_enabled};
+pub use ops::layer_norm;
 
 #[cfg(test)]
 mod tests {

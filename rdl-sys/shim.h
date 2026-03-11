@@ -71,6 +71,21 @@ char* rdl_relu(RdlTensor t, RdlTensor* result);
 char* rdl_sigmoid(RdlTensor t, RdlTensor* result);
 char* rdl_tanh_op(RdlTensor t, RdlTensor* result);
 char* rdl_softmax(RdlTensor t, int dim, RdlTensor* result);
+char* rdl_log_softmax(RdlTensor t, int dim, RdlTensor* result);
+char* rdl_gelu(RdlTensor t, RdlTensor* result);
+char* rdl_silu(RdlTensor t, RdlTensor* result);
+
+// --- Layer normalization ---
+
+char* rdl_native_layer_norm(RdlTensor input, RdlTensor weight, RdlTensor bias,
+                             int64_t normalized_size, double eps,
+                             RdlTensor* output, RdlTensor* mean, RdlTensor* rstd);
+char* rdl_native_layer_norm_backward(RdlTensor grad_output, RdlTensor input,
+                                      RdlTensor mean, RdlTensor rstd,
+                                      RdlTensor weight, RdlTensor bias,
+                                      int64_t normalized_size,
+                                      RdlTensor* grad_input, RdlTensor* grad_weight,
+                                      RdlTensor* grad_bias);
 
 // --- Element-wise math ---
 

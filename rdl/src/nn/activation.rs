@@ -74,13 +74,7 @@ impl GELU {
 
 impl Module for GELU {
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        // sqrt(2/pi) ≈ 0.7978845608
-        let x3 = input.mul(input)?.mul(input)?;
-        let inner = input.add(&x3.mul_scalar(0.044715)?)?
-            .mul_scalar(0.7978845608)?;
-        let tanh_inner = inner.tanh_act()?;
-        let one_plus = tanh_inner.add_scalar(1.0)?;
-        input.mul(&one_plus)?.mul_scalar(0.5)
+        input.gelu()
     }
 
     fn parameters(&self) -> Vec<Parameter> {
@@ -99,8 +93,7 @@ impl SiLU {
 
 impl Module for SiLU {
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        let s = input.sigmoid()?;
-        input.mul(&s)
+        input.silu()
     }
 
     fn parameters(&self) -> Vec<Parameter> {

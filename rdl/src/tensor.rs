@@ -519,6 +519,68 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Log-softmax along a dimension (numerically stable).
+    pub fn log_softmax(&self, dim: i32) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_log_softmax(self.handle, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// GELU activation (native libtorch).
+    pub fn gelu(&self) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_gelu(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// SiLU activation (native libtorch).
+    pub fn silu(&self) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_silu(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Native layer normalization. Returns (output, mean, rstd).
+    pub fn native_layer_norm(
+        &self, weight: &Tensor, bias: &Tensor, normalized_size: i64, eps: f64,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let mut out: RdlTensor = ptr::null_mut();
+        let mut mean: RdlTensor = ptr::null_mut();
+        let mut rstd: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_native_layer_norm(
+                self.handle, weight.handle, bias.handle,
+                normalized_size, eps,
+                &mut out, &mut mean, &mut rstd,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(out), Tensor::from_raw(mean), Tensor::from_raw(rstd)))
+    }
+
+    /// Native layer normalization backward. Returns (grad_input, grad_weight, grad_bias).
+    pub fn native_layer_norm_backward(
+        grad_output: &Tensor, input: &Tensor, mean: &Tensor, rstd: &Tensor,
+        weight: &Tensor, bias: &Tensor, normalized_size: i64,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let mut gi: RdlTensor = ptr::null_mut();
+        let mut gw: RdlTensor = ptr::null_mut();
+        let mut gb: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_native_layer_norm_backward(
+                grad_output.handle, input.handle,
+                mean.handle, rstd.handle,
+                weight.handle, bias.handle, normalized_size,
+                &mut gi, &mut gw, &mut gb,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(gi), Tensor::from_raw(gw), Tensor::from_raw(gb)))
+    }
+
     /// Select a single index along a dimension (reduces that dim).
     pub fn select(&self, dim: i32, index: i64) -> Result<Tensor> {
         let mut handle: RdlTensor = ptr::null_mut();

@@ -109,6 +109,26 @@ unsafe extern "C" {
     pub fn rdl_sigmoid(t: RdlTensor, result: *mut RdlTensor) -> *mut i8;
     pub fn rdl_tanh_op(t: RdlTensor, result: *mut RdlTensor) -> *mut i8;
     pub fn rdl_softmax(t: RdlTensor, dim: i32, result: *mut RdlTensor) -> *mut i8;
+    pub fn rdl_log_softmax(t: RdlTensor, dim: i32, result: *mut RdlTensor) -> *mut i8;
+    pub fn rdl_gelu(t: RdlTensor, result: *mut RdlTensor) -> *mut i8;
+    pub fn rdl_silu(t: RdlTensor, result: *mut RdlTensor) -> *mut i8;
+
+    // --- Layer normalization ---
+
+    pub fn rdl_native_layer_norm(
+        input: RdlTensor, weight: RdlTensor, bias: RdlTensor,
+        normalized_size: i64, eps: f64,
+        output: *mut RdlTensor, mean: *mut RdlTensor, rstd: *mut RdlTensor,
+    ) -> *mut i8;
+
+    pub fn rdl_native_layer_norm_backward(
+        grad_output: RdlTensor, input: RdlTensor,
+        mean: RdlTensor, rstd: RdlTensor,
+        weight: RdlTensor, bias: RdlTensor,
+        normalized_size: i64,
+        grad_input: *mut RdlTensor, grad_weight: *mut RdlTensor,
+        grad_bias: *mut RdlTensor,
+    ) -> *mut i8;
 
     // --- Element-wise math ---
 

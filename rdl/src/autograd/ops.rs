@@ -383,6 +383,118 @@ impl Variable {
         Ok(Variable::from_op(result, grad_fn))
     }
 
+    /// Square root with native libtorch forward.
+    pub fn sqrt(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.sqrt()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_output = result.clone();
+
+        // d(sqrt(x))/dx = 0.5 / sqrt(x)
+        let grad_fn = GradFn {
+            name: "SqrtBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                Ok(vec![grad.mul_scalar(0.5)?.div(&saved_output)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Log-softmax with native libtorch forward.
+    pub fn log_softmax(&self, dim: i32) -> Result<Variable> {
+        let result = self.inner.borrow().data.log_softmax(dim)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_output = result.clone();
+
+        // d(log_softmax)/dx = I - softmax(x)  applied as:
+        // grad_input = grad - exp(log_softmax) * sum(grad, dim, keepdim)
+        let grad_fn = GradFn {
+            name: "LogSoftmaxBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let softmax = saved_output.exp()?;
+                let sum_grad = grad.sum_dim(dim, true)?;
+                let correction = softmax.mul(&sum_grad)?;
+                Ok(vec![grad.sub(&correction)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// GELU activation with native libtorch forward.
+    pub fn gelu(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.gelu()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_input = self.inner.borrow().data.clone();
+
+        // Exact GELU backward (tanh approximation):
+        // a = sqrt(2/pi) * (x + 0.044715 * x^3)
+        // grad * (0.5 + 0.5 * tanh(a) + 0.5 * x * (1 - tanh(a)^2) * sqrt(2/pi) * (1 + 3*0.044715*x^2))
+        let grad_fn = GradFn {
+            name: "GeluBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let x = &saved_input;
+                let x_sq = x.mul(x)?;
+                let x_cu = x_sq.mul(x)?;
+                let inner = x.add(&x_cu.mul_scalar(0.044715)?)?.mul_scalar(0.7978845608)?;
+                let tanh_inner = inner.tanh_op()?;
+                let tanh_sq = tanh_inner.mul(&tanh_inner)?;
+                let one = Tensor::ones_like(&tanh_sq)?;
+                let sech_sq = one.sub(&tanh_sq)?;
+                let cubic_deriv = x_sq.mul_scalar(3.0 * 0.044715)?.add_scalar(1.0)?;
+                let right = x.mul(&sech_sq)?.mul(&cubic_deriv)?.mul_scalar(0.5 * 0.7978845608)?;
+                let left = tanh_inner.mul_scalar(0.5)?.add_scalar(0.5)?;
+                let deriv = left.add(&right)?;
+                Ok(vec![grad.mul(&deriv)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// SiLU activation with native libtorch forward.
+    pub fn silu(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.silu()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_input = self.inner.borrow().data.clone();
+
+        // d(x * sigmoid(x))/dx = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+        let grad_fn = GradFn {
+            name: "SiluBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let sig = saved_input.sigmoid()?;
+                let one = Tensor::ones_like(&sig)?;
+                let one_minus_sig = one.sub(&sig)?;
+                let x_term = saved_input.mul(&one_minus_sig)?;
+                let bracket = x_term.add_scalar(1.0)?;
+                let deriv = sig.mul(&bracket)?;
+                Ok(vec![grad.mul(&deriv)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
     pub fn exp(&self) -> Result<Variable> {
         let result = self.inner.borrow().data.exp()?;
 
@@ -552,4 +664,42 @@ impl Variable {
     pub fn backward(&self) -> Result<()> {
         super::engine::backward(self)
     }
+}
+
+/// Native layer normalization with differentiable backward for all three inputs.
+pub fn layer_norm(
+    input: &Variable, weight: &Variable, bias: &Variable,
+    normalized_size: i64, eps: f64,
+) -> Result<Variable> {
+    let input_data = input.inner.borrow().data.clone();
+    let weight_data = weight.inner.borrow().data.clone();
+    let bias_data = bias.inner.borrow().data.clone();
+
+    let (output, mean, rstd) = input_data.native_layer_norm(
+        &weight_data, &bias_data, normalized_size, eps,
+    )?;
+
+    if !needs_grad(&[input, weight, bias]) {
+        return Ok(Variable::leaf(output, false));
+    }
+
+    let saved_input = input_data;
+    let saved_mean = mean;
+    let saved_rstd = rstd;
+    let saved_weight = weight_data;
+    let saved_bias = bias_data;
+
+    let grad_fn = GradFn {
+        name: "LayerNormBackward",
+        inputs: vec![input.clone(), weight.clone(), bias.clone()],
+        apply: Box::new(move |grad: &Tensor| {
+            let (gi, gw, gb) = Tensor::native_layer_norm_backward(
+                grad, &saved_input, &saved_mean, &saved_rstd,
+                &saved_weight, &saved_bias, normalized_size,
+            )?;
+            Ok(vec![gi, gw, gb])
+        }),
+    };
+
+    Ok(Variable::from_op(output, grad_fn))
 }

@@ -23,12 +23,8 @@ pub fn cross_entropy_loss(pred: &Variable, target: &Variable) -> Result<Variable
     }
     let batch = shape[0];
 
-    // log-softmax: x - log(sum(exp(x), dim=1, keepdim=true))
-    // Note: no max subtraction (no max op yet). Safe for typical logit ranges.
-    let exp_pred = pred.exp()?;
-    let sum_exp = exp_pred.sum_dim(1, true)?; // [batch, 1]
-    let log_sum_exp = sum_exp.log()?; // [batch, 1]
-    let log_softmax = pred.sub(&log_sum_exp)?; // broadcasts: [batch, classes] - [batch, 1]
+    // Native log-softmax: numerically stable (handles max subtraction internally)
+    let log_softmax = pred.log_softmax(1)?;
 
     // -mean(sum(target * log_softmax, dim=1))
     let weighted = target.mul(&log_softmax)?;

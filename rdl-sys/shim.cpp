@@ -367,6 +367,81 @@ extern "C" char* rdl_softmax(RdlTensor t, int dim, RdlTensor* result) {
     }
 }
 
+extern "C" char* rdl_log_softmax(RdlTensor t, int dim, RdlTensor* result) {
+    try {
+        *result = wrap(torch::log_softmax(unwrap(t), dim));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* rdl_gelu(RdlTensor t, RdlTensor* result) {
+    try {
+        *result = wrap(torch::gelu(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* rdl_silu(RdlTensor t, RdlTensor* result) {
+    try {
+        *result = wrap(torch::silu(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Layer normalization ---
+
+extern "C" char* rdl_native_layer_norm(RdlTensor input, RdlTensor weight,
+                                         RdlTensor bias, int64_t normalized_size,
+                                         double eps,
+                                         RdlTensor* output, RdlTensor* mean,
+                                         RdlTensor* rstd) {
+    try {
+        auto result = at::native_layer_norm(
+            unwrap(input), {normalized_size},
+            weight ? c10::optional<torch::Tensor>(unwrap(weight)) : c10::nullopt,
+            bias ? c10::optional<torch::Tensor>(unwrap(bias)) : c10::nullopt,
+            eps);
+        *output = wrap(std::get<0>(result));
+        *mean = wrap(std::get<1>(result));
+        *rstd = wrap(std::get<2>(result));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* rdl_native_layer_norm_backward(RdlTensor grad_output,
+                                                  RdlTensor input,
+                                                  RdlTensor mean, RdlTensor rstd,
+                                                  RdlTensor weight, RdlTensor bias,
+                                                  int64_t normalized_size,
+                                                  RdlTensor* grad_input,
+                                                  RdlTensor* grad_weight,
+                                                  RdlTensor* grad_bias) {
+    try {
+        c10::optional<torch::Tensor> w_opt = weight ? c10::optional<torch::Tensor>(unwrap(weight)) : c10::nullopt;
+        c10::optional<torch::Tensor> b_opt = bias ? c10::optional<torch::Tensor>(unwrap(bias)) : c10::nullopt;
+        std::array<bool, 3> mask = {true, true, true};
+        auto result = at::native_layer_norm_backward(
+            unwrap(grad_output), unwrap(input),
+            {normalized_size},
+            unwrap(mean), unwrap(rstd),
+            w_opt, b_opt, mask);
+        *grad_input = wrap(std::get<0>(result));
+        *grad_weight = wrap(std::get<1>(result));
+        *grad_bias = wrap(std::get<2>(result));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Element-wise math ---
 
 extern "C" char* rdl_exp(RdlTensor t, RdlTensor* result) {
