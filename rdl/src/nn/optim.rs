@@ -7,6 +7,7 @@ use super::parameter::Parameter;
 pub trait Optimizer {
     fn step(&mut self) -> Result<()>;
     fn zero_grad(&self);
+    fn set_lr(&mut self, lr: f64);
 }
 
 /// SGD with optional momentum.
@@ -64,6 +65,10 @@ impl Optimizer for SGD {
         for param in &self.params {
             param.zero_grad();
         }
+    }
+
+    fn set_lr(&mut self, lr: f64) {
+        self.lr = lr;
     }
 }
 
@@ -149,5 +154,9 @@ impl Optimizer for Adam {
         for param in &self.params {
             param.zero_grad();
         }
+    }
+
+    fn set_lr(&mut self, lr: f64) {
+        self.lr = lr;
     }
 }

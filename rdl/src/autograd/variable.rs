@@ -84,6 +84,11 @@ impl Variable {
         self.inner.borrow().grad.as_ref().map(|g| g.clone())
     }
 
+    /// Replace the gradient tensor (for gradient clipping).
+    pub fn set_grad(&self, grad: Tensor) {
+        self.inner.borrow_mut().grad = Some(grad);
+    }
+
     pub fn requires_grad(&self) -> bool {
         self.inner.borrow().requires_grad
     }

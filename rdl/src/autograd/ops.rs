@@ -327,7 +327,61 @@ impl Variable {
         Ok(Variable::from_op(result, grad_fn))
     }
 
+    /// Sum along a dimension, optionally keeping the dimension.
+    pub fn sum_dim(&self, dim: i32, keepdim: bool) -> Result<Variable> {
+        let result = self.inner.borrow().data.sum_dim(dim, keepdim)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+
+        let grad_fn = GradFn {
+            name: "SumDimBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                // Expand grad back to input shape
+                let grad_for_expand = if keepdim {
+                    grad.clone()
+                } else {
+                    // Re-insert the summed dimension (size 1) via reshape
+                    let mut shape = input_shape.clone();
+                    shape[dim as usize] = 1;
+                    grad.reshape(&shape)?
+                };
+                Ok(vec![grad_for_expand.expand(&input_shape)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
     // --- Element-wise math ---
+
+    /// Absolute value with differentiable backward (sign function).
+    pub fn abs(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.abs()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_input = self.inner.borrow().data.clone();
+        let saved_abs = result.clone();
+
+        // d|x|/dx = sign(x) ≈ x / (|x| + eps) — smooth at zero
+        let grad_fn = GradFn {
+            name: "AbsBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let sign = saved_input.div(&saved_abs.add_scalar(1e-12)?)?;
+                Ok(vec![grad.mul(&sign)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
 
     pub fn exp(&self) -> Result<Variable> {
         let result = self.inner.borrow().data.exp()?;
