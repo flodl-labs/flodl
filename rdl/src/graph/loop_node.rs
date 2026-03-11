@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::autograd::Variable;
@@ -34,12 +35,13 @@ impl LoopBuilder {
         }
 
         let body: Rc<dyn Module> = Rc::from(self.body);
-        let run = make_for_loop_func(body.clone(), n);
+        let trace_buf: Rc<RefCell<Vec<Variable>>> = Rc::new(RefCell::new(Vec::new()));
+        let run = make_for_loop_func(body.clone(), n, trace_buf.clone());
         let composite: Rc<dyn Module> = Rc::new(LoopComposite {
             body,
             cond: None,
         });
-        wire_loop(fb, composite, run)
+        wire_loop(fb, composite, run, trace_buf)
     }
 
     /// Repeat while condition says "continue" (positive output = halt).
@@ -60,12 +62,13 @@ impl LoopBuilder {
 
         let body: Rc<dyn Module> = Rc::from(self.body);
         let cond: Rc<dyn Module> = Rc::new(cond);
-        let run = make_while_loop_func(body.clone(), cond.clone(), max_iter);
+        let trace_buf: Rc<RefCell<Vec<Variable>>> = Rc::new(RefCell::new(Vec::new()));
+        let run = make_while_loop_func(body.clone(), cond.clone(), max_iter, trace_buf.clone());
         let composite: Rc<dyn Module> = Rc::new(LoopComposite {
             body,
             cond: Some(cond),
         });
-        wire_loop(fb, composite, run)
+        wire_loop(fb, composite, run, trace_buf)
     }
 
     /// Repeat until condition signals halt (positive output = halt).
@@ -86,12 +89,13 @@ impl LoopBuilder {
 
         let body: Rc<dyn Module> = Rc::from(self.body);
         let cond: Rc<dyn Module> = Rc::new(cond);
-        let run = make_until_loop_func(body.clone(), cond.clone(), max_iter);
+        let trace_buf: Rc<RefCell<Vec<Variable>>> = Rc::new(RefCell::new(Vec::new()));
+        let run = make_until_loop_func(body.clone(), cond.clone(), max_iter, trace_buf.clone());
         let composite: Rc<dyn Module> = Rc::new(LoopComposite {
             body,
             cond: Some(cond),
         });
-        wire_loop(fb, composite, run)
+        wire_loop(fb, composite, run, trace_buf)
     }
 }
 
@@ -100,6 +104,7 @@ fn wire_loop(
     mut fb: FlowBuilder,
     composite: Rc<dyn Module>,
     run: NodeFn,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
 ) -> FlowBuilder {
     let cur = fb.current[0].clone();
     let id = fb.next_id("loop");
@@ -113,6 +118,7 @@ fn wire_loop(
             run,
             module: Some(composite),
             ref_forward: None,
+            trace_buf: Some(trace_buf),
         },
     );
 
@@ -132,13 +138,21 @@ fn wire_loop(
     fb
 }
 
-fn make_for_loop_func(body: Rc<dyn Module>, count: usize) -> NodeFn {
+fn make_for_loop_func(
+    body: Rc<dyn Module>,
+    count: usize,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
+) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let mut state = inputs[0].clone();
+        trace_buf.borrow_mut().clear();
         for i in 0..count {
             state = body.forward(&state).map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
             })?;
+            if let Some(t) = body.trace() {
+                trace_buf.borrow_mut().push(t);
+            }
         }
         Ok(vec![state])
     })
@@ -148,9 +162,11 @@ fn make_while_loop_func(
     body: Rc<dyn Module>,
     cond: Rc<dyn Module>,
     max_iter: usize,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
 ) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let mut state = inputs[0].clone();
+        trace_buf.borrow_mut().clear();
         for i in 0..max_iter {
             let halt = cond.forward(&state)?;
             let halt_val = halt.data().to_f32_vec().map_err(|e| {
@@ -165,6 +181,9 @@ fn make_while_loop_func(
             state = body.forward(&state).map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
             })?;
+            if let Some(t) = body.trace() {
+                trace_buf.borrow_mut().push(t);
+            }
         }
         Ok(vec![state])
     })
@@ -174,13 +193,18 @@ fn make_until_loop_func(
     body: Rc<dyn Module>,
     cond: Rc<dyn Module>,
     max_iter: usize,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
 ) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let mut state = inputs[0].clone();
+        trace_buf.borrow_mut().clear();
         for i in 0..max_iter {
             state = body.forward(&state).map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
             })?;
+            if let Some(t) = body.trace() {
+                trace_buf.borrow_mut().push(t);
+            }
             // Skip condition check on last iteration
             if i < max_iter - 1 {
                 let halt = cond.forward(&state)?;

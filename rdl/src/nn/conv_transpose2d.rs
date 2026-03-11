@@ -26,6 +26,7 @@ impl ConvTranspose2d {
         Self::build(in_channels, out_channels, kernel_size, true, [1, 1], [0, 0], [0, 0], [1, 1], 1, Device::CPU)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         in_channels: i64, out_channels: i64, kernel_size: i64,
         with_bias: bool,

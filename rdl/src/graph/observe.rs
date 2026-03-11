@@ -20,10 +20,10 @@ impl Graph {
         let tagged = self.tagged_outputs.borrow();
         let mut buffer = self.batch_buffer.borrow_mut();
         for &tag in tags {
-            if let Some(var) = tagged.get(tag) {
-                if let Ok(val) = var.item() {
-                    buffer.entry(tag.to_string()).or_default().push(val);
-                }
+            if let Some(var) = tagged.get(tag)
+                && let Ok(val) = var.item()
+            {
+                buffer.entry(tag.to_string()).or_default().push(val);
             }
         }
     }
@@ -54,18 +54,21 @@ impl Graph {
 
         let mut flushed_any = false;
         for key in &keys {
-            if let Some(values) = buffer.remove(key) {
-                if !values.is_empty() {
-                    let mean = values.iter().sum::<f64>() / values.len() as f64;
-                    history.entry(key.clone()).or_default().push(mean);
-                    flushed_any = true;
-                }
+            if let Some(values) = buffer.remove(key)
+                && !values.is_empty()
+            {
+                let mean = values.iter().sum::<f64>() / values.len() as f64;
+                history.entry(key.clone()).or_default().push(mean);
+                flushed_any = true;
             }
         }
 
         if flushed_any {
             let count = self.flush_count.get();
             self.flush_count.set(count + 1);
+            self.flush_times.borrow_mut().push(
+                super::instant_secs() - self.training_start.get(),
+            );
         }
     }
 
@@ -106,9 +109,51 @@ impl Graph {
         }
     }
 
+    /// Get per-iteration trace outputs from loop nodes.
+    /// Returns the trace buffer for the loop node associated with the given tag.
+    /// The tag should be set on a node after the loop (the loop output flows to it).
+    /// Returns None if no loop node with a trace buffer is found.
+    pub fn traces(&self, tag: &str) -> Option<Vec<Variable>> {
+        // Look for loop nodes by checking trace_buf
+        // If a tag is given, find the node it references and walk back to find the loop
+        if let Some(&(ni, _)) = self.tag_names.get(tag) {
+            // Check if this node has a trace_buf
+            if let Some(ref buf) = self.nodes[ni].trace_buf {
+                let traces = buf.borrow().clone();
+                if !traces.is_empty() {
+                    return Some(traces);
+                }
+            }
+        }
+        // Search all nodes for a matching tag in the node id
+        for node in &self.nodes {
+            if let Some(ref buf) = node.trace_buf {
+                let traces = buf.borrow().clone();
+                if !traces.is_empty() && node.id.contains("loop") {
+                    // If no tag match, return first loop with traces
+                    return Some(traces);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get trace buffer directly from a loop node by node ID.
+    pub fn traces_by_node(&self, node_id: &str) -> Option<Vec<Variable>> {
+        if let Some(&ni) = self.node_index.get(node_id)
+            && let Some(ref buf) = self.nodes[ni].trace_buf
+        {
+            let traces = buf.borrow().clone();
+            if !traces.is_empty() {
+                return Some(traces);
+            }
+        }
+        None
+    }
+
     /// Expand tag group names into their member tags.
     /// Non-group tags pass through unchanged.
-    fn expand_groups(&self, tags: &[&str]) -> Vec<String> {
+    pub(crate) fn expand_groups(&self, tags: &[&str]) -> Vec<String> {
         let mut expanded = Vec::new();
         for &tag in tags {
             if let Some(members) = self.tag_groups.get(tag) {

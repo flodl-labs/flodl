@@ -4,6 +4,9 @@ use std::rc::Rc;
 
 use crate::tensor::{DType, Device, Result, Tensor};
 
+/// Backward closure type: given upstream gradient, returns gradients for each input.
+pub(crate) type GradApplyFn = Box<dyn Fn(&Tensor) -> Result<Vec<Tensor>>>;
+
 /// The backward function for a graph node.
 ///
 /// When the node is processed during backward, `apply` is called with the
@@ -17,7 +20,7 @@ pub(crate) struct GradFn {
     #[allow(dead_code)]
     pub name: &'static str,
     pub inputs: Vec<Variable>,
-    pub apply: Box<dyn Fn(&Tensor) -> Result<Vec<Tensor>>>,
+    pub apply: GradApplyFn,
 }
 
 pub(crate) struct VariableInner {
@@ -81,7 +84,7 @@ impl Variable {
 
     /// Get the accumulated gradient, if any (shallow clone).
     pub fn grad(&self) -> Option<Tensor> {
-        self.inner.borrow().grad.as_ref().map(|g| g.clone())
+        self.inner.borrow().grad.clone()
     }
 
     /// Replace the gradient tensor (for gradient clipping).

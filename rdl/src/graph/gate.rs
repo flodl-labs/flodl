@@ -51,6 +51,7 @@ pub(super) fn wire_gate(
             run,
             module: Some(composite),
             ref_forward: None,
+            trace_buf: None,
         },
     );
 

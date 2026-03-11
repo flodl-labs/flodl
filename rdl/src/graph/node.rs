@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -22,6 +23,8 @@ pub(crate) struct Node {
     pub module: Option<Rc<dyn Module>>,
     /// If set, this module can handle Using refs via forward_named.
     pub ref_forward: Option<RefForwardFn>,
+    /// Trace buffer for loop nodes whose body implements Module::trace().
+    pub trace_buf: Option<Rc<RefCell<Vec<Variable>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,10 +71,10 @@ pub(crate) fn extract_refs(
 ) -> HashMap<String, Variable> {
     let mut refs = HashMap::new();
     for (i, port) in ports.iter().enumerate() {
-        if let Some(name) = port.strip_prefix("ref_") {
-            if i < inputs.len() {
-                refs.insert(name.to_string(), inputs[i].clone());
-            }
+        if let Some(name) = port.strip_prefix("ref_")
+            && i < inputs.len()
+        {
+            refs.insert(name.to_string(), inputs[i].clone());
         }
     }
     refs

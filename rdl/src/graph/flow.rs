@@ -464,6 +464,7 @@ impl FlowBuilder {
                 run,
                 module: Some(rc),
                 ref_forward: None,
+                trace_buf: None,
             },
         );
 
@@ -494,6 +495,7 @@ impl FlowBuilder {
                 run,
                 module: Some(module_dyn),
                 ref_forward: Some(ref_forward),
+                trace_buf: None,
             },
         );
 
@@ -583,13 +585,14 @@ impl FlowBuilder {
                 output_ports: vec![DEFAULT_OUTPUT.into()],
                 run: Box::new(move |inputs: &[Variable]| {
                     let mut result = inputs[0].clone();
-                    for i in 1..n {
-                        result = result.add(&inputs[i])?;
+                    for inp in &inputs[1..] {
+                        result = result.add(inp)?;
                     }
                     Ok(vec![result])
                 }),
                 module: None,
                 ref_forward: None,
+                trace_buf: None,
             },
         );
 
@@ -616,6 +619,7 @@ impl FlowBuilder {
                 }),
                 module: None,
                 ref_forward: None,
+                trace_buf: None,
             },
         );
 
@@ -636,6 +640,7 @@ impl FlowBuilder {
                 run: Box::new(|inputs: &[Variable]| Ok(inputs.to_vec())),
                 module: None,
                 ref_forward: None,
+                trace_buf: None,
             },
         );
         NodeRef {
@@ -651,15 +656,15 @@ impl FlowBuilder {
         let run: NodeFn = match op {
             MergeOp::Add => Box::new(move |inputs: &[Variable]| {
                 let mut result = inputs[0].clone();
-                for i in 1..n {
-                    result = result.add(&inputs[i])?;
+                for inp in &inputs[1..] {
+                    result = result.add(inp)?;
                 }
                 Ok(vec![result])
             }),
             MergeOp::Mean => Box::new(move |inputs: &[Variable]| {
                 let mut result = inputs[0].clone();
-                for i in 1..n {
-                    result = result.add(&inputs[i])?;
+                for inp in &inputs[1..] {
+                    result = result.add(inp)?;
                 }
                 result.mul_scalar(1.0 / n as f64).map(|v| vec![v])
             }),
@@ -674,6 +679,7 @@ impl FlowBuilder {
                 run,
                 module: None,
                 ref_forward: None,
+                trace_buf: None,
             },
         );
 

@@ -32,7 +32,7 @@ impl<'a> StepDecay<'a> {
 impl Scheduler for StepDecay<'_> {
     fn step(&mut self) {
         self.current_step += 1;
-        if self.current_step % self.step_size == 0 {
+        if self.current_step.is_multiple_of(self.step_size) {
             self.current_lr *= self.gamma;
             self.optimizer.set_lr(self.current_lr);
         }

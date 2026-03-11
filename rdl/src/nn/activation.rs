@@ -7,9 +7,15 @@ use super::Module;
 /// ReLU activation module.
 pub struct ReLU;
 
+impl Default for ReLU {
+    fn default() -> Self {
+        ReLU
+    }
+}
+
 impl ReLU {
     pub fn new() -> Self {
-        ReLU
+        Self
     }
 }
 
@@ -26,9 +32,15 @@ impl Module for ReLU {
 /// Sigmoid activation module.
 pub struct Sigmoid;
 
+impl Default for Sigmoid {
+    fn default() -> Self {
+        Sigmoid
+    }
+}
+
 impl Sigmoid {
     pub fn new() -> Self {
-        Sigmoid
+        Self
     }
 }
 
@@ -45,9 +57,15 @@ impl Module for Sigmoid {
 /// Tanh activation module.
 pub struct Tanh;
 
+impl Default for Tanh {
+    fn default() -> Self {
+        Tanh
+    }
+}
+
 impl Tanh {
     pub fn new() -> Self {
-        Tanh
+        Self
     }
 }
 
@@ -66,9 +84,15 @@ impl Module for Tanh {
 /// Approximation: `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`
 pub struct GELU;
 
+impl Default for GELU {
+    fn default() -> Self {
+        GELU
+    }
+}
+
 impl GELU {
     pub fn new() -> Self {
-        GELU
+        Self
     }
 }
 
@@ -85,9 +109,15 @@ impl Module for GELU {
 /// SiLU activation (Sigmoid Linear Unit / Swish): `x * sigmoid(x)`
 pub struct SiLU;
 
+impl Default for SiLU {
+    fn default() -> Self {
+        SiLU
+    }
+}
+
 impl SiLU {
     pub fn new() -> Self {
-        SiLU
+        Self
     }
 }
 

@@ -12,10 +12,10 @@ use super::parameter::Parameter;
 /// No-op for parameters already at the target dtype.
 pub fn cast_parameters(params: &[Parameter], dtype: DType) {
     for p in params {
-        if p.variable.data().dtype() != dtype {
-            if let Ok(t) = p.variable.data().to_dtype(dtype) {
-                p.variable.set_data(t);
-            }
+        if p.variable.data().dtype() != dtype
+            && let Ok(t) = p.variable.data().to_dtype(dtype)
+        {
+            p.variable.set_data(t);
         }
     }
 }
@@ -34,11 +34,8 @@ pub struct GradScaler {
     found_inf: bool,
 }
 
-impl GradScaler {
-    /// Create a new GradScaler with default settings.
-    ///
-    /// Initial scale: 2^16 = 65536, growth: 2.0, backoff: 0.5, interval: 2000.
-    pub fn new() -> Self {
+impl Default for GradScaler {
+    fn default() -> Self {
         GradScaler {
             scale: 65536.0,
             growth: 2.0,
@@ -47,6 +44,15 @@ impl GradScaler {
             steps_since_growth: 0,
             found_inf: false,
         }
+    }
+}
+
+impl GradScaler {
+    /// Create a new GradScaler with default settings.
+    ///
+    /// Initial scale: 2^16 = 65536, growth: 2.0, backoff: 0.5, interval: 2000.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Scale the loss before backward. Returns loss * scale.

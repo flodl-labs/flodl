@@ -683,9 +683,10 @@ impl Tensor {
         Ok(Self::from_raw(handle))
     }
 
-    // --- Convolution ---
+    // --- Convolution (many args unavoidable — maps 1:1 to libtorch C API) ---
 
     /// 2D convolution. bias may be a null-handle tensor for no bias.
+    #[allow(clippy::too_many_arguments)]
     pub fn conv2d(
         &self, weight: &Tensor, bias: Option<&Tensor>,
         stride: [i64; 2], padding: [i64; 2], dilation: [i64; 2], groups: i64,
@@ -707,6 +708,7 @@ impl Tensor {
     }
 
     /// 2D convolution backward. Returns (grad_input, grad_weight, Option<grad_bias>).
+    #[allow(clippy::too_many_arguments)]
     pub fn conv2d_backward(
         grad_output: &Tensor, input: &Tensor, weight: &Tensor,
         stride: [i64; 2], padding: [i64; 2], dilation: [i64; 2],
@@ -732,6 +734,7 @@ impl Tensor {
     }
 
     /// Transposed 2D convolution.
+    #[allow(clippy::too_many_arguments)]
     pub fn conv_transpose2d(
         &self, weight: &Tensor, bias: Option<&Tensor>,
         stride: [i64; 2], padding: [i64; 2], output_padding: [i64; 2],
@@ -756,6 +759,7 @@ impl Tensor {
     }
 
     /// Transposed 2D convolution backward.
+    #[allow(clippy::too_many_arguments)]
     pub fn conv_transpose2d_backward(
         grad_output: &Tensor, input: &Tensor, weight: &Tensor,
         stride: [i64; 2], padding: [i64; 2], output_padding: [i64; 2],

@@ -19,4 +19,7 @@ pub use nn::{
     xavier_uniform, xavier_normal,
     walk_modules, walk_modules_visited,
 };
-pub use graph::{FlowBuilder, MergeOp, Graph, MapBuilder, Trend, TrendGroup};
+pub use graph::{
+    FlowBuilder, MergeOp, Graph, MapBuilder, Trend, TrendGroup,
+    Profile, NodeTiming, LevelTiming, format_duration,
+};

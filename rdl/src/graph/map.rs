@@ -55,6 +55,7 @@ impl MapBuilder {
                 run,
                 module: Some(composite),
                 ref_forward: None,
+                trace_buf: None,
             },
         );
 

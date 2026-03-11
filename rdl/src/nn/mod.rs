@@ -58,6 +58,13 @@ pub trait Module {
     /// Toggle training/eval mode. Override in modules with mode-dependent
     /// behavior (BatchNorm, Dropout).
     fn set_training(&self, _training: bool) {}
+
+    /// Per-iteration side output for loop body tracing.
+    /// Override in loop body modules that capture trajectory data
+    /// (e.g., attention fixation points). Returns None by default.
+    /// When Some, the loop executor collects traces accessible via
+    /// [`Graph::traces`].
+    fn trace(&self) -> Option<Variable> { None }
 }
 
 /// Module that can receive additional named inputs via graph Using().

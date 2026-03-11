@@ -93,16 +93,16 @@ impl Module for BatchNorm {
 
     fn move_to_device(&self, device: crate::tensor::Device) {
         let mut rm = self.running_mean.borrow_mut();
-        if rm.device() != device {
-            if let Ok(t) = rm.to_device(device) {
-                *rm = t;
-            }
+        if rm.device() != device
+            && let Ok(t) = rm.to_device(device)
+        {
+            *rm = t;
         }
         let mut rv = self.running_var.borrow_mut();
-        if rv.device() != device {
-            if let Ok(t) = rv.to_device(device) {
-                *rv = t;
-            }
+        if rv.device() != device
+            && let Ok(t) = rv.to_device(device)
+        {
+            *rv = t;
         }
     }
 }

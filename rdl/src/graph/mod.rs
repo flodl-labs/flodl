@@ -6,10 +6,14 @@ pub mod gate;
 pub mod map;
 pub mod observe;
 pub mod trend;
+pub mod profile;
+pub mod dot;
+pub mod plot;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 use node::*;
 use crate::autograd::Variable;
@@ -20,6 +24,8 @@ pub use flow::FlowBuilder;
 pub use loop_node::LoopBuilder;
 pub use map::MapBuilder;
 pub use trend::{Trend, TrendGroup};
+pub use profile::{Profile, NodeTiming, LevelTiming};
+pub use plot::format_duration;
 
 /// Merge operation for combining split branches.
 pub enum MergeOp {
@@ -55,6 +61,14 @@ pub struct Graph {
     batch_buffer: RefCell<HashMap<String, Vec<f64>>>,
     epoch_history: RefCell<HashMap<String, Vec<f64>>>,
     flush_count: Cell<usize>,
+    // Profiling
+    profiling: Cell<bool>,
+    last_profile: RefCell<Option<profile::Profile>>,
+    timing_buffer: RefCell<HashMap<String, Vec<f64>>>,
+    timing_history: RefCell<HashMap<String, Vec<f64>>>,
+    // Flush timestamps (seconds since first forward — for ETA in write_log)
+    flush_times: RefCell<Vec<f64>>,
+    training_start: Cell<f64>,
 }
 
 impl Graph {
@@ -162,6 +176,12 @@ impl Graph {
             batch_buffer: RefCell::new(HashMap::new()),
             epoch_history: RefCell::new(HashMap::new()),
             flush_count: Cell::new(0),
+            profiling: Cell::new(false),
+            last_profile: RefCell::new(None),
+            timing_buffer: RefCell::new(HashMap::new()),
+            timing_history: RefCell::new(HashMap::new()),
+            flush_times: RefCell::new(Vec::new()),
+            training_start: Cell::new(0.0),
         })
     }
 
@@ -173,6 +193,27 @@ impl Graph {
                 graph_inputs.len()
             )));
         }
+
+        // Record training start on first forward (for ETA).
+        if self.training_start.get() == 0.0 {
+            self.training_start.set(instant_secs());
+        }
+
+        let is_profiling = self.profiling.get();
+        let forward_start = if is_profiling { Some(Instant::now()) } else { None };
+        let mut prof_nodes: Vec<profile::NodeTiming> = Vec::new();
+        let mut prof_levels: Vec<profile::LevelTiming> = Vec::new();
+
+        // Build reverse tag lookup for profiling: node_idx → first tag name
+        let tags_by_node: HashMap<usize, String> = if is_profiling {
+            let mut m = HashMap::new();
+            for (name, &(ni, _)) in &self.tag_names {
+                m.entry(ni).or_insert_with(|| name.clone());
+            }
+            m
+        } else {
+            HashMap::new()
+        };
 
         let n = self.nodes.len();
         let mut input_slots: Vec<HashMap<String, Option<Variable>>> =
@@ -192,7 +233,10 @@ impl Graph {
         }
 
         // Execute levels sequentially
-        for level in &self.levels {
+        for (level_idx, level) in self.levels.iter().enumerate() {
+            let level_start = if is_profiling { Some(Instant::now()) } else { None };
+            let mut level_sum_ns: u64 = 0;
+
             for &ni in level {
                 let node = &self.nodes[ni];
 
@@ -220,8 +264,19 @@ impl Graph {
                     })
                     .collect();
 
-                // Execute
+                // Execute (with optional per-node timing)
+                let node_start = if is_profiling { Some(Instant::now()) } else { None };
                 let outputs = (node.run)(&inputs)?;
+                if is_profiling {
+                    let elapsed = node_start.unwrap().elapsed();
+                    level_sum_ns += elapsed.as_nanos() as u64;
+                    prof_nodes.push(profile::NodeTiming {
+                        id: node.id.clone(),
+                        tag: tags_by_node.get(&ni).cloned().unwrap_or_default(),
+                        duration: elapsed,
+                        level: level_idx,
+                    });
+                }
                 output_values[ni] = Some(outputs);
 
                 // Route outputs to downstream nodes
@@ -253,32 +308,50 @@ impl Graph {
                             .iter()
                             .position(|p| p == &entry.writer_port)
                             .unwrap_or(0);
-                        if let Some(ref outs) = output_values[ni] {
-                            if port_idx < outs.len() {
-                                *entry.value.borrow_mut() = Some(outs[port_idx].clone());
-                            }
+                        if let Some(ref outs) = output_values[ni]
+                            && port_idx < outs.len()
+                        {
+                            *entry.value.borrow_mut() = Some(outs[port_idx].clone());
                         }
                     }
                 }
 
                 // Capture tagged outputs for observation
-                if let Some(ref mut tagged) = tagged_outputs {
-                    if let Some(captures) = self.tag_capture.get(&ni) {
-                        if let Some(ref outs) = output_values[ni] {
-                            for (tag_name, port_idx) in captures {
-                                if *port_idx < outs.len() {
-                                    tagged.insert(tag_name.clone(), outs[*port_idx].clone());
-                                }
-                            }
+                if let Some(ref mut tagged) = tagged_outputs
+                    && let Some(captures) = self.tag_capture.get(&ni)
+                    && let Some(ref outs) = output_values[ni]
+                {
+                    for (tag_name, port_idx) in captures {
+                        if *port_idx < outs.len() {
+                            tagged.insert(tag_name.clone(), outs[*port_idx].clone());
                         }
                     }
                 }
+            }
+
+            // Record level timing
+            if is_profiling {
+                prof_levels.push(profile::LevelTiming {
+                    index: level_idx,
+                    wall_clock: level_start.unwrap().elapsed(),
+                    sum_nodes: std::time::Duration::from_nanos(level_sum_ns),
+                    num_nodes: level.len(),
+                });
             }
         }
 
         // Store tagged outputs
         if let Some(tagged) = tagged_outputs {
             *self.tagged_outputs.borrow_mut() = tagged;
+        }
+
+        // Store profile
+        if is_profiling {
+            *self.last_profile.borrow_mut() = Some(profile::Profile {
+                total: forward_start.unwrap().elapsed(),
+                levels: prof_levels,
+                nodes: prof_nodes,
+            });
         }
 
         // Collect graph output
@@ -337,21 +410,20 @@ impl Graph {
     pub fn set_device(&self, device: crate::tensor::Device) {
         // Move parameters
         for p in self.parameters() {
-            if p.variable.data().device() != device {
-                if let Ok(t) = p.variable.data().to_device(device) {
-                    p.variable.set_data(t);
-                }
+            if p.variable.data().device() != device
+                && let Ok(t) = p.variable.data().to_device(device)
+            {
+                p.variable.set_data(t);
             }
         }
         // Move state buffers
         for entry in &self.state {
             let mut val = entry.value.borrow_mut();
-            if let Some(ref v) = *val {
-                if v.data().device() != device {
-                    if let Ok(t) = v.data().to_device(device) {
-                        *val = Some(Variable::new(t, false));
-                    }
-                }
+            if let Some(ref v) = *val
+                && v.data().device() != device
+                && let Ok(t) = v.data().to_device(device)
+            {
+                *val = Some(Variable::new(t, false));
             }
         }
         // Walk modules for move_to_device (BatchNorm running stats, etc.)
@@ -371,7 +443,7 @@ impl Graph {
 
 impl Module for Graph {
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        self.forward_impl(&[input.clone()])
+        self.forward_impl(std::slice::from_ref(input))
     }
 
     fn parameters(&self) -> Vec<Parameter> {
@@ -408,6 +480,15 @@ impl Module for Graph {
     fn move_to_device(&self, device: crate::tensor::Device) {
         self.set_device(device);
     }
+}
+
+/// Current time as seconds since epoch (monotonic approximation for ETA).
+fn instant_secs() -> f64 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 /// Kahn's algorithm with level grouping for parallel execution.
@@ -1841,5 +1922,214 @@ mod tests {
         let mut count = 0;
         walk_modules(&l1, &mut |_| count += 1);
         assert_eq!(count, 1); // leaf module, no children
+    }
+
+    // --- Profiling tests ---
+
+    #[test]
+    fn test_profiling_basic() {
+        let graph = FlowBuilder::from(Linear::new(3, 4).unwrap())
+            .tag("encoder")
+            .through(ReLU::new())
+            .through(Linear::new(4, 2).unwrap())
+            .tag("decoder")
+            .build()
+            .unwrap();
+
+        // No profiling by default
+        assert!(!graph.profiling());
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), false);
+        graph.forward(&x).unwrap();
+        assert!(graph.profile().is_none());
+
+        // Enable profiling
+        graph.enable_profiling();
+        assert!(graph.profiling());
+        graph.forward(&x).unwrap();
+
+        let p = graph.profile().unwrap();
+        assert!(p.total.as_nanos() > 0, "total should be nonzero");
+        assert!(!p.nodes.is_empty(), "should have node timings");
+        assert!(!p.levels.is_empty(), "should have level timings");
+
+        // Tagged node timing
+        let enc_dur = p.timing("encoder");
+        assert!(enc_dur.as_nanos() > 0, "encoder timing should be nonzero");
+        let dec_dur = p.timing("decoder");
+        assert!(dec_dur.as_nanos() > 0, "decoder timing should be nonzero");
+        assert!(p.timing("nonexistent").is_zero());
+
+        // Graph-level timing shortcut
+        assert!(graph.timing("encoder").as_nanos() > 0);
+
+        // Display
+        let s = p.to_string();
+        assert!(s.contains("Forward:"));
+        assert!(s.contains("Level"));
+
+        // Disable
+        graph.disable_profiling();
+        assert!(!graph.profiling());
+        graph.forward(&x).unwrap();
+        assert!(graph.profile().is_none());
+    }
+
+    #[test]
+    fn test_profiling_timing_trend() {
+        let graph = FlowBuilder::from(ScalarSum)
+            .tag("loss")
+            .build()
+            .unwrap();
+
+        graph.enable_profiling();
+
+        // Simulate 2 epochs, 3 batches each
+        for _ in 0..2 {
+            for val in &[1.0f32, 2.0, 3.0] {
+                let x = Variable::new(from_f32(&[*val], &[1, 1]), false);
+                graph.forward(&x).unwrap();
+                graph.collect_timings(&["loss"]);
+            }
+            graph.flush_timings(&[]);
+        }
+
+        let trend = graph.timing_trend("loss");
+        assert_eq!(trend.len(), 2, "2 epochs flushed");
+        assert!(trend.values()[0] > 0.0, "timing values should be positive");
+
+        // Reset
+        graph.reset_timing_trend(&["loss"]);
+        assert_eq!(graph.timing_trend("loss").len(), 0);
+    }
+
+    // --- DOT tests ---
+
+    #[test]
+    fn test_dot_basic() {
+        let graph = FlowBuilder::from(Linear::new(3, 4).unwrap())
+            .tag("enc")
+            .through(ReLU::new())
+            .through(Linear::new(4, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let dot = graph.dot();
+        assert!(dot.contains("digraph G"));
+        assert!(dot.contains("level 0"));
+        assert!(dot.contains("#enc"));
+        assert!(dot.contains("->"));
+    }
+
+    #[test]
+    fn test_dot_with_profile() {
+        let graph = FlowBuilder::from(Linear::new(3, 4).unwrap())
+            .tag("enc")
+            .through(Linear::new(4, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), false);
+
+        // Without profiling: dot_with_profile falls back to structural
+        let dot1 = graph.dot_with_profile();
+        assert!(dot1.contains("digraph G"));
+
+        // With profiling: includes timing annotations
+        graph.enable_profiling();
+        graph.forward(&x).unwrap();
+        let dot2 = graph.dot_with_profile();
+        assert!(dot2.contains("digraph G"));
+        assert!(dot2.contains("Forward:"));
+    }
+
+    // --- Traced tests ---
+
+    /// A loop body that implements trace() — captures per-iteration side data.
+    struct TracingDoubler {
+        last_output: RefCell<Option<Variable>>,
+    }
+    impl TracingDoubler {
+        fn new() -> Self {
+            TracingDoubler {
+                last_output: RefCell::new(None),
+            }
+        }
+    }
+    impl Module for TracingDoubler {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            let out = input.add(input)?;
+            *self.last_output.borrow_mut() = Some(out.clone());
+            Ok(out)
+        }
+        fn parameters(&self) -> Vec<Parameter> {
+            vec![]
+        }
+        fn trace(&self) -> Option<Variable> {
+            self.last_output.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn test_loop_traces() {
+        // Loop(TracingDoubler) × 3: [1,2] → [2,4] → [4,8] → [8,16]
+        // traces should capture [2,4], [4,8], [8,16]
+        let graph = FlowBuilder::from(Identity)
+            .loop_body(TracingDoubler::new())
+            .for_n(3)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        assert!((data[0] - 8.0).abs() < 1e-5);
+
+        // Get traces — should find them on the loop node
+        let traces = graph.traces("any").unwrap();
+        assert_eq!(traces.len(), 3, "3 iterations = 3 traces");
+
+        let t0 = traces[0].data().to_f32_vec().unwrap();
+        assert!((t0[0] - 2.0).abs() < 1e-5, "iter0: [2,4], got {}", t0[0]);
+
+        let t1 = traces[1].data().to_f32_vec().unwrap();
+        assert!((t1[0] - 4.0).abs() < 1e-5, "iter1: [4,8], got {}", t1[0]);
+
+        let t2 = traces[2].data().to_f32_vec().unwrap();
+        assert!((t2[0] - 8.0).abs() < 1e-5, "iter2: [8,16], got {}", t2[0]);
+    }
+
+    #[test]
+    fn test_loop_traces_cleared_each_forward() {
+        let graph = FlowBuilder::from(Identity)
+            .loop_body(TracingDoubler::new())
+            .for_n(2)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0], &[1, 1]), false);
+        graph.forward(&x).unwrap();
+        let traces1 = graph.traces("any").unwrap();
+        assert_eq!(traces1.len(), 2);
+
+        // Second forward should clear and re-populate
+        graph.forward(&x).unwrap();
+        let traces2 = graph.traces("any").unwrap();
+        assert_eq!(traces2.len(), 2);
+    }
+
+    #[test]
+    fn test_loop_no_traces_without_trace_impl() {
+        // Doubler doesn't implement trace() (returns None by default)
+        let graph = FlowBuilder::from(Identity)
+            .loop_body(Doubler)
+            .for_n(3)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0], &[1, 1]), false);
+        graph.forward(&x).unwrap();
+
+        // No traces since Doubler's trace() returns None
+        assert!(graph.traces("any").is_none());
     }
 }

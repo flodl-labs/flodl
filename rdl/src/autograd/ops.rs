@@ -775,18 +775,10 @@ impl Variable {
         let start = if start_dim < 0 { ndim + start_dim } else { start_dim } as usize;
         let end = if end_dim < 0 { ndim + end_dim } else { end_dim } as usize;
 
-        let mut new_shape = Vec::new();
-        for i in 0..start {
-            new_shape.push(shape[i]);
-        }
-        let mut flat_size: i64 = 1;
-        for i in start..=end {
-            flat_size *= shape[i];
-        }
+        let mut new_shape: Vec<i64> = shape[..start].to_vec();
+        let flat_size: i64 = shape[start..=end].iter().product();
         new_shape.push(flat_size);
-        for i in (end + 1)..shape.len() {
-            new_shape.push(shape[i]);
-        }
+        new_shape.extend_from_slice(&shape[(end + 1)..]);
 
         self.reshape(&new_shape)
     }
@@ -1046,6 +1038,7 @@ pub fn grid_sample(
 }
 
 /// Transposed 2D convolution with differentiable backward.
+#[allow(clippy::too_many_arguments)]
 pub fn conv_transpose2d(
     input: &Variable, weight: &Variable, bias: Option<&Variable>,
     stride: [i64; 2], padding: [i64; 2], output_padding: [i64; 2],
