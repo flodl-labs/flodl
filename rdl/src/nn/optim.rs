@@ -1,6 +1,12 @@
+use std::io::{Read, Write};
+
 use crate::autograd::Variable;
 use crate::tensor::Result;
 
+use super::checkpoint::{
+    write_tensor_state, read_tensor_state, write_f64_le, read_f64_le,
+    write_u32_le, read_u32_le, write_i64_le, read_i64_le,
+};
 use super::parameter::Parameter;
 
 /// Optimizer trait.
@@ -8,6 +14,12 @@ pub trait Optimizer {
     fn step(&mut self) -> Result<()>;
     fn zero_grad(&self);
     fn set_lr(&mut self, lr: f64);
+}
+
+/// Stateful trait for components that can save/load training state.
+pub trait Stateful {
+    fn save_state<W: Write>(&self, w: &mut W) -> Result<()>;
+    fn load_state<R: Read>(&mut self, r: &mut R) -> Result<()>;
 }
 
 /// SGD with optional momentum.
@@ -69,6 +81,32 @@ impl Optimizer for SGD {
 
     fn set_lr(&mut self, lr: f64) {
         self.lr = lr;
+    }
+}
+
+impl Stateful for SGD {
+    fn save_state<W: Write>(&self, w: &mut W) -> Result<()> {
+        write_u32_le(w, self.params.len() as u32)?;
+        write_f64_le(w, self.lr)?;
+        for v in &self.velocity {
+            write_tensor_state(w, v.as_ref())?;
+        }
+        Ok(())
+    }
+
+    fn load_state<R: Read>(&mut self, r: &mut R) -> Result<()> {
+        let count = read_u32_le(r)? as usize;
+        if count != self.params.len() {
+            return Err(crate::tensor::TensorError::new(&format!(
+                "SGD: param count mismatch: checkpoint={} optimizer={}", count, self.params.len()
+            )));
+        }
+        self.lr = read_f64_le(r)?;
+        for (i, param) in self.params.iter().enumerate() {
+            let dev = param.data().device();
+            self.velocity[i] = read_tensor_state(r, dev)?;
+        }
+        Ok(())
     }
 }
 
@@ -174,6 +212,36 @@ impl Adam {
     }
 }
 
+impl Stateful for Adam {
+    fn save_state<W: Write>(&self, w: &mut W) -> Result<()> {
+        write_u32_le(w, self.params.len() as u32)?;
+        write_f64_le(w, self.lr)?;
+        write_i64_le(w, self.t as i64)?;
+        for i in 0..self.params.len() {
+            write_tensor_state(w, self.m[i].as_ref())?;
+            write_tensor_state(w, self.v[i].as_ref())?;
+        }
+        Ok(())
+    }
+
+    fn load_state<R: Read>(&mut self, r: &mut R) -> Result<()> {
+        let count = read_u32_le(r)? as usize;
+        if count != self.params.len() {
+            return Err(crate::tensor::TensorError::new(&format!(
+                "Adam: param count mismatch: checkpoint={} optimizer={}", count, self.params.len()
+            )));
+        }
+        self.lr = read_f64_le(r)?;
+        self.t = read_i64_le(r)? as usize;
+        for i in 0..self.params.len() {
+            let dev = self.params[i].data().device();
+            self.m[i] = read_tensor_state(r, dev)?;
+            self.v[i] = read_tensor_state(r, dev)?;
+        }
+        Ok(())
+    }
+}
+
 /// AdamW optimizer (Adam with decoupled weight decay).
 ///
 /// Unlike L2 regularization, weight decay is applied directly to parameters,
@@ -207,5 +275,15 @@ impl Optimizer for AdamW {
 
     fn set_lr(&mut self, lr: f64) {
         self.adam.lr = lr;
+    }
+}
+
+impl Stateful for AdamW {
+    fn save_state<W: Write>(&self, w: &mut W) -> Result<()> {
+        self.adam.save_state(w)
+    }
+
+    fn load_state<R: Read>(&mut self, r: &mut R) -> Result<()> {
+        self.adam.load_state(r)
     }
 }

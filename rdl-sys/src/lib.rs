@@ -212,6 +212,14 @@ unsafe extern "C" {
         result: *mut RdlTensor,
     ) -> *mut i8;
 
+    pub fn rdl_squeeze(
+        t: RdlTensor, dim: i32, result: *mut RdlTensor,
+    ) -> *mut i8;
+
+    pub fn rdl_unsqueeze(
+        t: RdlTensor, dim: i32, result: *mut RdlTensor,
+    ) -> *mut i8;
+
     // --- Scatter ---
 
     pub fn rdl_select_scatter(

@@ -670,6 +670,24 @@ extern "C" char* rdl_narrow(RdlTensor t, int dim, int64_t start,
     }
 }
 
+extern "C" char* rdl_squeeze(RdlTensor t, int dim, RdlTensor* result) {
+    try {
+        *result = wrap(unwrap(t).squeeze(dim).contiguous());
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* rdl_unsqueeze(RdlTensor t, int dim, RdlTensor* result) {
+    try {
+        *result = wrap(unwrap(t).unsqueeze(dim).contiguous());
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Scatter ---
 
 extern "C" char* rdl_select_scatter(RdlTensor input, RdlTensor src,

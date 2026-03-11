@@ -588,6 +588,17 @@ impl Tensor {
         Ok((Tensor::from_raw(gi), Tensor::from_raw(gw), Tensor::from_raw(gb)))
     }
 
+    /// Permute dimensions.
+    pub fn permute(&self, dims: &[i64]) -> Result<Tensor> {
+        let mut dims = dims.to_vec();
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_permute(self.handle, dims.as_mut_ptr(), dims.len() as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Select a single index along a dimension (reduces that dim).
     pub fn select(&self, dim: i32, index: i64) -> Result<Tensor> {
         let mut handle: RdlTensor = ptr::null_mut();
@@ -769,6 +780,187 @@ impl Tensor {
         check_err(err)?;
         let grad_bias = if compute_bias { Some(Tensor::from_raw(gb)) } else { None };
         Ok((Tensor::from_raw(gi), Tensor::from_raw(gw), grad_bias))
+    }
+
+    // --- Missing wrappers for existing shims ---
+
+    /// Create evenly spaced values.
+    pub fn linspace(start: f64, end: f64, steps: i64, opts: TensorOptions) -> Result<Self> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_linspace(start, end, steps, opts.dtype as i32, opts.device as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
+    /// Create a range of values [start, end) with given step.
+    pub fn arange(start: f64, end: f64, step: f64, opts: TensorOptions) -> Result<Self> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_arange(start, end, step, opts.dtype as i32, opts.device as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
+    /// Scalar minimum.
+    pub fn min(&self) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_min(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Minimum along a dimension (values only).
+    pub fn min_dim(&self, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_min_dim(self.handle, dim, keepdim as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Maximum along a dimension (values only).
+    pub fn max_dim(&self, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_max_dim(self.handle, dim, keepdim as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Argmax along a dimension.
+    pub fn argmax(&self, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_argmax(self.handle, dim, keepdim as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    pub fn ge_scalar(&self, scalar: f64) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_ge_scalar(self.handle, scalar, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    pub fn le_scalar(&self, scalar: f64) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_le_scalar(self.handle, scalar, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    pub fn lt_scalar(&self, scalar: f64) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_lt_scalar(self.handle, scalar, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Scatter a selected index back into a tensor.
+    pub fn select_scatter(&self, src: &Tensor, dim: i32, index: i64) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_select_scatter(self.handle, src.handle, dim, index, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Conditional select: where(condition, self, other).
+    pub fn where_cond(condition: &Tensor, x: &Tensor, y: &Tensor) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_where(condition.handle, x.handle, y.handle, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Squeeze (remove) a dimension of size 1.
+    pub fn squeeze(&self, dim: i32) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_squeeze(self.handle, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Unsqueeze (insert) a dimension of size 1.
+    pub fn unsqueeze(&self, dim: i32) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_unsqueeze(self.handle, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Adaptive average pooling to target spatial size.
+    pub fn adaptive_avg_pool2d(&self, output_size: [i64; 2]) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let mut os = output_size;
+        let err = unsafe {
+            ffi::rdl_adaptive_avg_pool2d(self.handle, os.as_mut_ptr(), &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Adaptive average pooling backward.
+    pub fn adaptive_avg_pool2d_backward(grad_output: &Tensor, input: &Tensor) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_adaptive_avg_pool2d_backward(grad_output.handle, input.handle, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Grid sampling (bilinear/nearest interpolation).
+    pub fn grid_sample(
+        &self, grid: &Tensor, mode: i32, padding_mode: i32, align_corners: bool,
+    ) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_grid_sample(
+                self.handle, grid.handle, mode, padding_mode,
+                align_corners as i32, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Grid sampling backward.
+    pub fn grid_sample_backward(
+        grad_output: &Tensor, input: &Tensor, grid: &Tensor,
+        mode: i32, padding_mode: i32, align_corners: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let mut gi: RdlTensor = ptr::null_mut();
+        let mut gg: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_grid_sample_backward(
+                grad_output.handle, input.handle, grid.handle,
+                mode, padding_mode, align_corners as i32,
+                &mut gi, &mut gg,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(gi), Tensor::from_raw(gg)))
+    }
+
+    /// Cast to a different dtype.
+    pub fn to_dtype(&self, dtype: DType) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe { ffi::rdl_to_dtype(self.handle, dtype as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Check if all elements are finite (no inf/nan).
+    pub fn all_finite(&self) -> Result<bool> {
+        let mut result: i32 = 0;
+        let err = unsafe { ffi::rdl_all_finite(self.handle, &mut result) };
+        check_err(err)?;
+        Ok(result != 0)
     }
 
     // --- Device ---

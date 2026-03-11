@@ -741,6 +741,140 @@ impl Variable {
         Ok(Variable::from_op(result, grad_fn))
     }
 
+    /// Select a single index along a dimension (removes that dim).
+    pub fn select(&self, dim: i32, index: i64) -> Result<Variable> {
+        let result = self.inner.borrow().data.select(dim, index)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let full_shape = self.inner.borrow().data.shape();
+
+        let grad_fn = GradFn {
+            name: "SelectBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                // Unsqueeze grad to restore the selected dimension, then scatter
+                let mut expanded_shape = full_shape.clone();
+                expanded_shape[dim as usize] = 1;
+                let grad_unsqueezed = grad.reshape(&expanded_shape)?;
+                let mut zeros = Tensor::zeros(&full_shape, TensorOptions::default())?;
+                zeros = zeros.narrow_scatter(&grad_unsqueezed, dim, index)?;
+                Ok(vec![zeros])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Flatten dimensions from `start_dim` to `end_dim` (inclusive).
+    pub fn flatten(&self, start_dim: i32, end_dim: i32) -> Result<Variable> {
+        let shape = self.inner.borrow().data.shape();
+        let ndim = shape.len() as i32;
+        let start = if start_dim < 0 { ndim + start_dim } else { start_dim } as usize;
+        let end = if end_dim < 0 { ndim + end_dim } else { end_dim } as usize;
+
+        let mut new_shape = Vec::new();
+        for i in 0..start {
+            new_shape.push(shape[i]);
+        }
+        let mut flat_size: i64 = 1;
+        for i in start..=end {
+            flat_size *= shape[i];
+        }
+        new_shape.push(flat_size);
+        for i in (end + 1)..shape.len() {
+            new_shape.push(shape[i]);
+        }
+
+        self.reshape(&new_shape)
+    }
+
+    /// Expand (broadcast) to a larger shape.
+    pub fn expand(&self, shape: &[i64]) -> Result<Variable> {
+        let result = self.inner.borrow().data.expand(shape)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+
+        let grad_fn = GradFn {
+            name: "ExpandBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                Ok(vec![unbroadcast(grad, &input_shape)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Permute dimensions.
+    pub fn permute(&self, dims: &[i64]) -> Result<Variable> {
+        let result = self.inner.borrow().data.permute(dims)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        // Inverse permutation: if dims = [2, 0, 1], inverse = [1, 2, 0]
+        let mut inv = vec![0i64; dims.len()];
+        for (i, &d) in dims.iter().enumerate() {
+            inv[d as usize] = i as i64;
+        }
+
+        let grad_fn = GradFn {
+            name: "PermuteBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                Ok(vec![grad.permute(&inv)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Squeeze (remove) a dimension of size 1.
+    pub fn squeeze(&self, dim: i32) -> Result<Variable> {
+        let result = self.inner.borrow().data.squeeze(dim)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let grad_fn = GradFn {
+            name: "SqueezeBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                Ok(vec![grad.unsqueeze(dim)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Unsqueeze (insert) a dimension of size 1.
+    pub fn unsqueeze(&self, dim: i32) -> Result<Variable> {
+        let result = self.inner.borrow().data.unsqueeze(dim)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let grad_fn = GradFn {
+            name: "UnsqueezeBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                Ok(vec![grad.squeeze(dim)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
     /// Concatenate two variables along a dimension.
     pub fn cat(&self, other: &Variable, dim: i32) -> Result<Variable> {
         let result = self.inner.borrow().data.cat(&other.inner.borrow().data, dim)?;
@@ -850,6 +984,61 @@ pub fn conv2d(
             } else {
                 Ok(vec![gi, gw])
             }
+        }),
+    };
+
+    Ok(Variable::from_op(result, grad_fn))
+}
+
+/// Adaptive average pooling to a target spatial size.
+pub fn adaptive_avg_pool2d(
+    input: &Variable, output_size: [i64; 2],
+) -> Result<Variable> {
+    let input_data = input.inner.borrow().data.clone();
+    let result = input_data.adaptive_avg_pool2d(output_size)?;
+
+    if !needs_grad(&[input]) {
+        return Ok(Variable::leaf(result, false));
+    }
+
+    let saved_input = input_data;
+
+    let grad_fn = GradFn {
+        name: "AdaptiveAvgPool2dBackward",
+        inputs: vec![input.clone()],
+        apply: Box::new(move |grad: &Tensor| {
+            let gi = Tensor::adaptive_avg_pool2d_backward(grad, &saved_input)?;
+            Ok(vec![gi])
+        }),
+    };
+
+    Ok(Variable::from_op(result, grad_fn))
+}
+
+/// Grid sampling with differentiable backward for both input and grid.
+pub fn grid_sample(
+    input: &Variable, grid: &Variable,
+    mode: i32, padding_mode: i32, align_corners: bool,
+) -> Result<Variable> {
+    let input_data = input.inner.borrow().data.clone();
+    let grid_data = grid.inner.borrow().data.clone();
+    let result = input_data.grid_sample(&grid_data, mode, padding_mode, align_corners)?;
+
+    if !needs_grad(&[input, grid]) {
+        return Ok(Variable::leaf(result, false));
+    }
+
+    let saved_input = input_data;
+    let saved_grid = grid_data;
+
+    let grad_fn = GradFn {
+        name: "GridSampleBackward",
+        inputs: vec![input.clone(), grid.clone()],
+        apply: Box::new(move |grad: &Tensor| {
+            let (gi, gg) = Tensor::grid_sample_backward(
+                grad, &saved_input, &saved_grid, mode, padding_mode, align_corners,
+            )?;
+            Ok(vec![gi, gg])
         }),
     };
 

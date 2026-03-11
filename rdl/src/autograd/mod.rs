@@ -5,7 +5,7 @@ mod context;
 
 pub use variable::Variable;
 pub use context::{no_grad, is_grad_enabled};
-pub use ops::{layer_norm, conv2d, conv_transpose2d};
+pub use ops::{layer_norm, conv2d, conv_transpose2d, adaptive_avg_pool2d, grid_sample};
 
 #[cfg(test)]
 mod tests {

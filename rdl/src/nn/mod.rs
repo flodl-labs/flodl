@@ -14,12 +14,16 @@ pub mod lstmcell;
 pub mod conv2d;
 pub mod conv_transpose2d;
 pub mod batchnorm;
+pub mod checkpoint;
+pub mod amp;
 
 pub use parameter::Parameter;
 pub use linear::Linear;
 pub use activation::{ReLU, Sigmoid, Tanh, GELU, SiLU};
 pub use loss::{mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
-pub use optim::{Optimizer, SGD, Adam, AdamW};
+pub use optim::{Optimizer, Stateful, SGD, Adam, AdamW};
+pub use checkpoint::{save_parameters, load_parameters, save_parameters_file, load_parameters_file};
+pub use amp::{GradScaler, cast_parameters};
 pub use clip::{clip_grad_norm, clip_grad_value};
 pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler};
 pub use dropout::Dropout;
@@ -50,6 +54,21 @@ pub trait NamedInputModule: Module {
         input: &Variable,
         refs: &HashMap<String, Variable>,
     ) -> Result<Variable>;
+}
+
+/// Module with training/eval mode toggle (BatchNorm, Dropout).
+pub trait TrainToggler {
+    fn set_training(&self, training: bool);
+}
+
+/// Module with resettable per-forward state.
+pub trait Resettable {
+    fn reset(&self);
+}
+
+/// Module with detachable state (breaks gradient chains on retained state).
+pub trait Detachable {
+    fn detach_state(&self);
 }
 
 /// Recursively collect parameters from a module and its sub-modules.
@@ -854,5 +873,266 @@ mod tests {
 
         let t = init::xavier_normal(&[10, 20], 10, 20, Device::CPU).unwrap();
         assert_eq!(t.shape(), vec![10, 20]);
+    }
+
+    // --- New tensor ops tests ---
+
+    #[test]
+    fn test_linspace_arange() {
+        let t = Tensor::linspace(0.0, 1.0, 5, Default::default()).unwrap();
+        assert_eq!(t.shape(), vec![5]);
+        let data = t.to_f32_vec().unwrap();
+        assert!((data[0] - 0.0).abs() < 1e-5);
+        assert!((data[4] - 1.0).abs() < 1e-5);
+
+        let t = Tensor::arange(0.0, 5.0, 1.0, Default::default()).unwrap();
+        assert_eq!(t.shape(), vec![5]);
+        let data = t.to_f32_vec().unwrap();
+        assert_eq!(data, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_min_max_argmax() {
+        let t = from_f32(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0], &[2, 3]);
+        assert!((t.min().unwrap().item().unwrap() - 1.0).abs() < 1e-5);
+
+        let min_d1 = t.min_dim(1, false).unwrap();
+        assert_eq!(min_d1.shape(), vec![2]);
+        let data = min_d1.to_f32_vec().unwrap();
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[1] - 1.0).abs() < 1e-5);
+
+        let max_d1 = t.max_dim(1, false).unwrap();
+        let data = max_d1.to_f32_vec().unwrap();
+        assert!((data[0] - 4.0).abs() < 1e-5);
+        assert!((data[1] - 9.0).abs() < 1e-5);
+
+        let am = t.argmax(1, false).unwrap();
+        assert_eq!(am.shape(), vec![2]);
+    }
+
+    #[test]
+    fn test_comparisons() {
+        let t = from_f32(&[1.0, 2.0, 3.0, 4.0], &[4]);
+        let ge = t.ge_scalar(2.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(ge, vec![0.0, 1.0, 1.0, 1.0]);
+        let le = t.le_scalar(2.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(le, vec![1.0, 1.0, 0.0, 0.0]);
+        let lt = t.lt_scalar(2.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(lt, vec![1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_squeeze_unsqueeze() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), true);
+        let squeezed = x.squeeze(0).unwrap();
+        assert_eq!(squeezed.shape(), vec![3]);
+
+        let unsqueezed = squeezed.unsqueeze(1).unwrap();
+        assert_eq!(unsqueezed.shape(), vec![3, 1]);
+
+        // Backward
+        let loss = unsqueezed.sum().unwrap();
+        loss.backward().unwrap();
+        assert_eq!(x.grad().unwrap().shape(), vec![1, 3]);
+    }
+
+    #[test]
+    fn test_where_cond() {
+        let cond = from_f32(&[1.0, 0.0, 1.0, 0.0], &[4]);
+        let x = from_f32(&[10.0, 20.0, 30.0, 40.0], &[4]);
+        let y = from_f32(&[-1.0, -2.0, -3.0, -4.0], &[4]);
+        let result = Tensor::where_cond(&cond, &x, &y).unwrap().to_f32_vec().unwrap();
+        assert_eq!(result, vec![10.0, -2.0, 30.0, -4.0]);
+    }
+
+    #[test]
+    fn test_to_dtype() {
+        use crate::tensor::DType;
+        let t = from_f32(&[1.5, 2.7], &[2]);
+        let t64 = t.to_dtype(DType::Float64).unwrap();
+        assert_eq!(t64.dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn test_all_finite() {
+        let t = from_f32(&[1.0, 2.0, 3.0], &[3]);
+        assert!(t.all_finite().unwrap());
+    }
+
+    // --- Checkpoint tests ---
+
+    #[test]
+    fn test_save_load_parameters() {
+        let model = Linear::new(3, 2).unwrap();
+        let params = model.parameters();
+
+        // Set known weights
+        params[0].variable.set_data(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
+        params[1].variable.set_data(from_f32(&[0.1, 0.2], &[2]));
+
+        // Save to buffer
+        let mut buf = Vec::new();
+        checkpoint::save_parameters(&mut buf, &params).unwrap();
+
+        // Create new model, load
+        let model2 = Linear::new(3, 2).unwrap();
+        let params2 = model2.parameters();
+        let mut cursor = std::io::Cursor::new(&buf);
+        checkpoint::load_parameters(&mut cursor, &params2).unwrap();
+
+        // Verify loaded weights match
+        let w = params2[0].variable.data().to_f32_vec().unwrap();
+        assert_eq!(w, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let b = params2[1].variable.data().to_f32_vec().unwrap();
+        assert!((b[0] - 0.1).abs() < 1e-5 && (b[1] - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_save_load_sgd_state() {
+        use optim::Stateful;
+        let model = Linear::new(2, 1).unwrap();
+        let params = model.parameters();
+        let mut optim = SGD::new(&params, 0.1, 0.9);
+
+        // Do a step to populate velocity
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let target = Variable::new(from_f32(&[5.0], &[1, 1]), false);
+        let pred = model.forward(&x).unwrap();
+        let loss = mse_loss(&pred, &target).unwrap();
+        loss.backward().unwrap();
+        optim.step().unwrap();
+
+        // Save state
+        let mut buf = Vec::new();
+        optim.save_state(&mut buf).unwrap();
+
+        // Create new optimizer, load state
+        let mut optim2 = SGD::new(&params, 0.5, 0.9); // different lr
+        let mut cursor = std::io::Cursor::new(&buf);
+        optim2.load_state(&mut cursor).unwrap();
+
+        assert!((optim2.lr() - 0.1).abs() < 1e-10, "lr should be restored");
+    }
+
+    #[test]
+    fn test_save_load_adam_state() {
+        use optim::Stateful;
+        let model = Linear::new(2, 1).unwrap();
+        let params = model.parameters();
+        let mut optim = Adam::new(&params, 0.01);
+
+        // Do two steps
+        for _ in 0..2 {
+            optim.zero_grad();
+            let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+            let target = Variable::new(from_f32(&[5.0], &[1, 1]), false);
+            let pred = model.forward(&x).unwrap();
+            let loss = mse_loss(&pred, &target).unwrap();
+            loss.backward().unwrap();
+            optim.step().unwrap();
+        }
+
+        // Save
+        let mut buf = Vec::new();
+        optim.save_state(&mut buf).unwrap();
+
+        // Load into new optimizer
+        let mut optim2 = Adam::new(&params, 0.5);
+        let mut cursor = std::io::Cursor::new(&buf);
+        optim2.load_state(&mut cursor).unwrap();
+
+        assert!((optim2.lr() - 0.01).abs() < 1e-10, "lr should be restored");
+    }
+
+    // --- Mixed precision tests ---
+
+    #[test]
+    fn test_cast_parameters() {
+        use crate::tensor::DType;
+        let model = Linear::new(3, 2).unwrap();
+        let params = model.parameters();
+        assert_eq!(params[0].variable.data().dtype(), DType::Float32);
+
+        amp::cast_parameters(&params, DType::Float64);
+        assert_eq!(params[0].variable.data().dtype(), DType::Float64);
+        assert_eq!(params[1].variable.data().dtype(), DType::Float64);
+
+        // Round-trip back
+        amp::cast_parameters(&params, DType::Float32);
+        assert_eq!(params[0].variable.data().dtype(), DType::Float32);
+    }
+
+    #[test]
+    fn test_grad_scaler_finite() {
+        use optim::Stateful;
+        let model = Linear::new(2, 1).unwrap();
+        let params = model.parameters();
+        let mut optim = SGD::new(&params, 0.1, 0.0);
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let target = Variable::new(from_f32(&[5.0], &[1, 1]), false);
+
+        let mut scaler = amp::GradScaler::new();
+        let pred = model.forward(&x).unwrap();
+        let loss = mse_loss(&pred, &target).unwrap();
+        let scaled_loss = scaler.scale(&loss).unwrap();
+        scaled_loss.backward().unwrap();
+
+        let params_for_step = model.parameters();
+        let success = scaler.step(&params_for_step, &mut || optim.step()).unwrap();
+        assert!(success, "step should succeed with finite gradients");
+        scaler.update();
+
+        // Save/load state
+        let mut buf = Vec::new();
+        scaler.save_state(&mut buf).unwrap();
+        let mut scaler2 = amp::GradScaler::new();
+        // scaler2 has default scale (65536), will be overwritten by load
+        let mut cursor = std::io::Cursor::new(&buf);
+        scaler2.load_state(&mut cursor).unwrap();
+        assert!((scaler2.scale_factor() - scaler.scale_factor()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_adaptive_avg_pool2d() {
+        use crate::autograd::adaptive_avg_pool2d;
+        // Input: [batch=1, channels=1, h=4, w=4]
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4], Default::default()).unwrap(),
+            true,
+        );
+        let out = adaptive_avg_pool2d(&x, [2, 2]).unwrap();
+        assert_eq!(out.shape(), vec![1, 1, 2, 2]);
+
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert_eq!(x.grad().unwrap().shape(), vec![1, 1, 4, 4]);
+    }
+
+    #[test]
+    fn test_grid_sample() {
+        use crate::autograd::grid_sample;
+        // Input: [batch=1, channels=1, h=4, w=4]
+        let input = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4], Default::default()).unwrap(),
+            true,
+        );
+        // Grid: [batch=1, out_h=2, out_w=2, 2]
+        let grid = Variable::new(
+            Tensor::rand(&[1, 2, 2, 2], Default::default()).unwrap()
+                .mul_scalar(2.0).unwrap()
+                .add_scalar(-1.0).unwrap(), // map to [-1, 1]
+            true,
+        );
+        // mode=0 (bilinear), padding_mode=0 (zeros), align_corners=true
+        let out = grid_sample(&input, &grid, 0, 0, true).unwrap();
+        assert_eq!(out.shape(), vec![1, 1, 2, 2]);
+
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(input.grad().is_some());
+        assert!(grid.grad().is_some());
     }
 }

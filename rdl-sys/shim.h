@@ -122,6 +122,8 @@ char* rdl_permute(RdlTensor t, int64_t* dims, int ndim, RdlTensor* result);
 char* rdl_select(RdlTensor t, int dim, int64_t index, RdlTensor* result);
 char* rdl_narrow(RdlTensor t, int dim, int64_t start, int64_t length,
                  RdlTensor* result);
+char* rdl_squeeze(RdlTensor t, int dim, RdlTensor* result);
+char* rdl_unsqueeze(RdlTensor t, int dim, RdlTensor* result);
 
 // --- Scatter ---
 

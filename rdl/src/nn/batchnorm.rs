@@ -4,7 +4,7 @@ use crate::autograd::Variable;
 use crate::tensor::{Result, Tensor, TensorOptions};
 
 use super::parameter::Parameter;
-use super::Module;
+use super::{Module, TrainToggler};
 
 /// Batch normalization over the first (batch) dimension.
 ///
@@ -42,10 +42,6 @@ impl BatchNorm {
         })
     }
 
-    pub fn set_training(&self, training: bool) {
-        self.training.set(training);
-    }
-
     fn update_running_stats(&self, batch_mean: &Tensor, batch_var: &Tensor, batch_size: i64) -> Result<()> {
         let m = self.momentum;
         // Bessel's correction for unbiased variance estimate
@@ -58,6 +54,12 @@ impl BatchNorm {
         *rv = rv.mul_scalar(1.0 - m)?.add(&batch_var.mul_scalar(m * correction)?)?;
 
         Ok(())
+    }
+}
+
+impl TrainToggler for BatchNorm {
+    fn set_training(&self, training: bool) {
+        self.training.set(training);
     }
 }
 
