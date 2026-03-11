@@ -6,14 +6,24 @@ pub mod loss;
 pub mod optim;
 pub mod clip;
 pub mod scheduler;
+pub mod dropout;
+pub mod layernorm;
+pub mod embedding;
+pub mod grucell;
+pub mod lstmcell;
 
 pub use parameter::Parameter;
 pub use linear::Linear;
-pub use activation::{ReLU, Sigmoid, Tanh};
+pub use activation::{ReLU, Sigmoid, Tanh, GELU, SiLU};
 pub use loss::{mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
 pub use optim::{Optimizer, SGD, Adam};
 pub use clip::{clip_grad_norm, clip_grad_value};
 pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler};
+pub use dropout::Dropout;
+pub use layernorm::LayerNorm;
+pub use embedding::Embedding;
+pub use grucell::GRUCell;
+pub use lstmcell::LSTMCell;
 
 use std::collections::HashMap;
 
@@ -522,5 +532,174 @@ mod tests {
         sched.observe(0.82); // wait=2
         sched.observe(0.83); // wait=3 → decay
         assert!((sched.lr() - 0.05).abs() < 1e-10);
+    }
+
+    // --- GELU / SiLU tests ---
+
+    #[test]
+    fn test_gelu() {
+        let gelu = GELU::new();
+        let x = Variable::new(from_f32(&[0.0, 1.0, -1.0], &[3]), true);
+        let y = gelu.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        // GELU(0) ≈ 0, GELU(1) ≈ 0.841, GELU(-1) ≈ -0.159
+        assert!(data[0].abs() < 0.01, "GELU(0)={}", data[0]);
+        assert!((data[1] - 0.841).abs() < 0.01, "GELU(1)={}", data[1]);
+        assert!((data[2] - (-0.159)).abs() < 0.01, "GELU(-1)={}", data[2]);
+
+        // Backward
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_silu() {
+        let silu = SiLU::new();
+        let x = Variable::new(from_f32(&[0.0, 2.0, -2.0], &[3]), true);
+        let y = silu.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        // SiLU(0) = 0, SiLU(2) = 2*sigmoid(2) ≈ 1.762, SiLU(-2) = -2*sigmoid(-2) ≈ -0.238
+        assert!(data[0].abs() < 0.01);
+        assert!((data[1] - 1.762).abs() < 0.02, "SiLU(2)={}", data[1]);
+
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    // --- Dropout test ---
+
+    #[test]
+    fn test_dropout() {
+        let drop = Dropout::new(0.5);
+
+        // Training mode: some values should be zeroed
+        let x = Variable::new(from_f32(&[1.0; 100], &[10, 10]), false);
+        let y = drop.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        let zeros = data.iter().filter(|&&v| v == 0.0).count();
+        // With p=0.5, roughly half should be zero (very approximate)
+        assert!(zeros > 10 && zeros < 90, "zeros={} of 100", zeros);
+        // Non-zero values should be scaled by 1/(1-0.5) = 2
+        for &v in &data {
+            if v != 0.0 {
+                assert!((v - 2.0).abs() < 1e-5, "scaled value should be 2.0, got {}", v);
+            }
+        }
+
+        // Eval mode: identity
+        drop.set_training(false);
+        let y_eval = drop.forward(&x).unwrap();
+        let eval_data = y_eval.data().to_f32_vec().unwrap();
+        assert!(eval_data.iter().all(|&v| (v - 1.0).abs() < 1e-5));
+    }
+
+    // --- LayerNorm test ---
+
+    #[test]
+    fn test_layernorm() {
+        let ln = LayerNorm::new(4).unwrap();
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]), true);
+        let y = ln.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        assert_eq!(y.shape(), vec![1, 4]);
+
+        // After normalization, mean ≈ 0, std ≈ 1 (before gamma/beta)
+        // With gamma=1, beta=0 (defaults), output should be normalized
+        let mean: f32 = data.iter().sum::<f32>() / 4.0;
+        assert!(mean.abs() < 0.1, "mean should be ~0, got {}", mean);
+
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert_eq!(ln.parameters().len(), 2); // weight + bias
+    }
+
+    // --- Embedding test ---
+
+    #[test]
+    fn test_embedding() {
+        let emb = Embedding::new(5, 3).unwrap();
+
+        // Look up indices [0, 2, 4]
+        let indices = Variable::new(from_f32(&[0.0, 2.0, 4.0], &[3]), false);
+        let y = emb.forward(&indices).unwrap();
+        assert_eq!(y.shape(), vec![3, 3]); // 3 tokens × 3 dims
+
+        // Same index should give same embedding
+        let idx_same = Variable::new(from_f32(&[1.0, 1.0], &[2]), false);
+        let y2 = emb.forward(&idx_same).unwrap();
+        let data = y2.data().to_f32_vec().unwrap();
+        assert_eq!(&data[0..3], &data[3..6]);
+
+        assert_eq!(emb.parameters().len(), 1); // weight only
+    }
+
+    #[test]
+    fn test_embedding_backward() {
+        let emb = Embedding::new(5, 3).unwrap();
+        let indices = Variable::new(from_f32(&[0.0, 2.0], &[2]), false);
+        let y = emb.forward(&indices).unwrap();
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        let grad = emb.weight.variable.grad().unwrap();
+        let grad_data = grad.to_f32_vec().unwrap();
+        // Rows 0 and 2 should have gradient, others zero
+        assert!(grad_data[0..3].iter().all(|&v| (v - 1.0).abs() < 1e-5)); // row 0
+        assert!(grad_data[3..6].iter().all(|&v| v.abs() < 1e-5)); // row 1 (unused)
+        assert!(grad_data[6..9].iter().all(|&v| (v - 1.0).abs() < 1e-5)); // row 2
+    }
+
+    // --- GRUCell test ---
+
+    #[test]
+    fn test_grucell() {
+        let gru = GRUCell::new(4, 3).unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]), true);
+        let h1 = gru.forward_step(&x, None).unwrap();
+        assert_eq!(h1.shape(), vec![1, 3]);
+
+        // Second step with previous hidden state
+        let h2 = gru.forward_step(&x, Some(&h1)).unwrap();
+        assert_eq!(h2.shape(), vec![1, 3]);
+
+        // Backward
+        let loss = h2.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+
+        // Should have 6 Linear modules' params
+        // 3 input (w+b=2 each) + 3 hidden (w only=1 each) = 9
+        assert_eq!(gru.parameters().len(), 9);
+    }
+
+    // --- LSTMCell test ---
+
+    #[test]
+    fn test_lstmcell() {
+        let lstm = LSTMCell::new(4, 3).unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]), true);
+        let state1 = lstm.forward_step(&x, None).unwrap();
+        assert_eq!(state1.shape(), vec![1, 6]); // packed: [batch, 2*hidden]
+
+        // Unpack h
+        let h1 = state1.narrow(1, 0, 3).unwrap();
+        assert_eq!(h1.shape(), vec![1, 3]);
+
+        // Second step
+        let state2 = lstm.forward_step(&x, Some(&state1)).unwrap();
+        assert_eq!(state2.shape(), vec![1, 6]);
+
+        // Backward
+        let loss = state2.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+
+        // 4 input Linear (w+b=2 each) + 4 hidden Linear (w only=1 each) = 12
+        assert_eq!(lstm.parameters().len(), 12);
     }
 }

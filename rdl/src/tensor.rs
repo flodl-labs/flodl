@@ -233,6 +233,24 @@ impl Tensor {
         Ok(Self::from_raw(handle))
     }
 
+    /// Create a tensor from i64 data (for indices).
+    pub fn from_i64(data: &[i64], shape: &[i64]) -> Result<Self> {
+        let mut shape = shape.to_vec();
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_from_blob(
+                data.as_ptr() as *mut c_void,
+                shape.as_mut_ptr(),
+                shape.len() as i32,
+                DType::Int64 as i32,
+                Device::CPU as i32,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
     // --- Metadata ---
 
     /// Number of dimensions.
@@ -514,6 +532,26 @@ impl Tensor {
         let mut handle: RdlTensor = ptr::null_mut();
         let err = unsafe {
             ffi::rdl_mean_dim(self.handle, dim, keepdim as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Select rows/elements along a dimension using an index tensor.
+    pub fn index_select(&self, dim: i32, index: &Tensor) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_index_select(self.handle, dim, index.handle, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Scatter-add src into self along dim at positions given by index.
+    pub fn index_add(&self, dim: i32, index: &Tensor, src: &Tensor) -> Result<Tensor> {
+        let mut handle: RdlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::rdl_index_add(self.handle, dim, index.handle, src.handle, &mut handle)
         };
         check_err(err)?;
         Ok(Tensor::from_raw(handle))

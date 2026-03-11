@@ -500,6 +500,31 @@ impl Variable {
         Ok(Variable::from_op(result, grad_fn))
     }
 
+    /// Select rows along a dimension using an index tensor.
+    pub fn index_select(&self, dim: i32, index: &Tensor) -> Result<Variable> {
+        let result = self.inner.borrow().data.index_select(dim, index)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+        let saved_index = index.clone();
+
+        let grad_fn = GradFn {
+            name: "IndexSelectBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                // Scatter gradient back: zeros.index_add(dim, index, grad)
+                let zeros = Tensor::zeros(&input_shape, TensorOptions::default())?;
+                let result = zeros.index_add(dim, &saved_index, grad)?;
+                Ok(vec![result])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
     /// Concatenate two variables along a dimension.
     pub fn cat(&self, other: &Variable, dim: i32) -> Result<Variable> {
         let result = self.inner.borrow().data.cat(&other.inner.borrow().data, dim)?;
