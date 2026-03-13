@@ -32,6 +32,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
+use indexmap::IndexMap;
+
 use node::*;
 use crate::autograd::Variable;
 use crate::nn::{Module, Parameter};
@@ -59,8 +61,7 @@ pub enum MergeOp {
 
 /// Forward-reference state buffer. Persists across Forward() calls.
 struct StateEntry {
-    writer_id: String,
-    writer_port: String,
+    writer_ni: usize,
     value: Rc<RefCell<Option<Variable>>>,
 }
 
@@ -97,6 +98,8 @@ pub struct Graph {
     outputs: Vec<ExposedPort>,
     order: Vec<usize>,
     state: Vec<StateEntry>,
+    // State writer lookup: node_idx → [(state_entry_idx, output_port_idx)]
+    state_writers: HashMap<usize, Vec<(usize, usize)>>,
     // Tag groups: group name → suffixed tag names
     tag_groups: HashMap<String, Vec<String>>,
     // Observation: tag mapping (immutable after build)
@@ -122,7 +125,7 @@ pub struct Graph {
 
 impl Graph {
     pub(crate) fn build(
-        mut node_map: HashMap<String, Node>,
+        mut node_map: IndexMap<String, Node>,
         edges: Vec<Edge>,
         inputs: Vec<ExposedPort>,
         outputs: Vec<ExposedPort>,
@@ -147,8 +150,7 @@ impl Graph {
             }
 
             state.push(StateEntry {
-                writer_id: fr.writer_id.clone(),
-                writer_port: fr.writer_port.clone(),
+                writer_ni: 0, // resolved after node indexing
                 value,
             });
         }
@@ -208,6 +210,21 @@ impl Graph {
             }
         }
 
+        // Build state writer lookup: node_idx → [(state_entry_idx, port_idx)]
+        // Also resolve writer_ni on each state entry for DOT rendering.
+        let mut state_writers: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+        for (si, fr) in forward_refs.iter().enumerate() {
+            if let Some(&ni) = node_index.get(&fr.writer_id) {
+                state[si].writer_ni = ni;
+                let port_idx = nodes[ni]
+                    .output_ports
+                    .iter()
+                    .position(|p| p == &fr.writer_port)
+                    .unwrap_or(0);
+                state_writers.entry(ni).or_default().push((si, port_idx));
+            }
+        }
+
         Ok(Graph {
             nodes,
             node_index,
@@ -218,6 +235,7 @@ impl Graph {
             outputs,
             order,
             state,
+            state_writers,
             tag_groups,
             tag_names: tag_names_map,
             tag_capture,
@@ -352,17 +370,12 @@ impl Graph {
                 }
 
                 // Capture state: if this node is a state writer, store its output
-                for entry in &self.state {
-                    if entry.writer_id == node.id {
-                        let port_idx = node
-                            .output_ports
-                            .iter()
-                            .position(|p| p == &entry.writer_port)
-                            .unwrap_or(0);
-                        if let Some(ref outs) = output_values[ni]
-                            && port_idx < outs.len()
-                        {
-                            *entry.value.borrow_mut() = Some(outs[port_idx].clone());
+                if let Some(writers) = self.state_writers.get(&ni)
+                    && let Some(ref outs) = output_values[ni]
+                {
+                    for &(si, port_idx) in writers {
+                        if port_idx < outs.len() {
+                            *self.state[si].value.borrow_mut() = Some(outs[port_idx].clone());
                         }
                     }
                 }
@@ -446,15 +459,37 @@ impl Graph {
         !self.state.is_empty()
     }
 
-    /// End-of-step housekeeping: reset + detach state, collect timings,
+    /// End-of-step housekeeping: detach state (cut gradient chain but
+    /// preserve values for the next forward), collect timings,
     /// increment step counter.
+    ///
+    /// For recurrent models this implements truncated BPTT — state carries
+    /// over between steps but gradients don't flow across step boundaries.
+    /// Call [`end_sequence`](Self::end_sequence) to fully wipe state
+    /// when starting a new independent sequence.
+    ///
+    /// ```ignore
+    /// for token in sequence {
+    ///     let y = graph.forward(&token)?;
+    ///     // ... backward, optimize ...
+    ///     graph.end_step();       // keep state, cut gradients
+    /// }
+    /// graph.end_sequence();       // wipe state for next sequence
+    /// ```
     pub fn end_step(&self) {
-        self.reset_state();
         self.detach_state();
         if self.profiling.get() {
             self.collect_timings(&[]);
         }
         self.step_count.set(self.step_count.get() + 1);
+    }
+
+    /// End-of-sequence housekeeping: fully reset state buffers to None.
+    /// Call between independent sequences so the model starts fresh.
+    ///
+    /// For non-recurrent graphs (no forward refs) this is a no-op.
+    pub fn end_sequence(&self) {
+        self.reset_state();
     }
 
     /// End-of-epoch housekeeping: flush all observation and timing buffers,

@@ -7,12 +7,14 @@ use super::Module;
 /// Lookup table for token embeddings.
 ///
 /// Weight shape: `[num_embeddings, embedding_dim]`.
-/// Input: integer indices (as f32 tensor). Output: embedded vectors.
+/// Input: integer indices as an i64 or f32 tensor. Output: embedded vectors.
+/// Prefer i64 inputs for vocabularies larger than 16M tokens (f32 loses
+/// precision beyond 2^24).
 ///
 /// ```ignore
 /// let emb = Embedding::new(1000, 64)?;
 /// // Input: [seq_len] of token indices → Output: [seq_len, 64]
-/// let indices = Variable::new(Tensor::from_f32(&[0.0, 5.0, 42.0], &[3], Device::CPU)?, false);
+/// let indices = Variable::new(Tensor::from_i64(&[0, 5, 42], &[3])?, false);
 /// let vectors = emb.forward(&indices)?;
 /// assert_eq!(vectors.shape(), vec![3, 64]);
 /// ```
@@ -52,16 +54,16 @@ impl Module for Embedding {
         // Input shape: [*] (any shape of indices)
         // Output shape: [*, embedding_dim]
         let input_shape = input.shape();
-
-        // Flatten input to 1D for index_select
         let numel = input.numel();
-        let flat_data = input.data().to_f32_vec()?;
-        let indices: Vec<i64> = flat_data.iter().map(|&v| v as i64).collect();
 
-        // Create index tensor (i64 stored as f32 for our from_f32, but index_select needs i64)
-        // We need to create an i64 tensor. Let me use from_f32 and cast...
-        // Actually, the C++ index_select expects Long tensor. Let me create it via from_blob.
-        let index_tensor = Tensor::from_i64(&indices, &[numel])?;
+        // Build i64 index tensor: use native i64 when available, fall back to f32 conversion
+        let index_tensor = if input.data().dtype() == DType::Int64 {
+            input.data().reshape(&[numel])?
+        } else {
+            let flat_data = input.data().to_f32_vec()?;
+            let indices: Vec<i64> = flat_data.iter().map(|&v| v as i64).collect();
+            Tensor::from_i64(&indices, &[numel])?
+        };
 
         // index_select along dim 0
         let selected = self.weight.variable.index_select(0, &index_tensor)?;

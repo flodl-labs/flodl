@@ -318,10 +318,12 @@ impl Optimizer for AdamW {
 
 impl Stateful for AdamW {
     fn save_state<W: Write>(&self, w: &mut W) -> Result<()> {
+        write_f64_le(w, self.weight_decay)?;
         self.adam.save_state(w)
     }
 
     fn load_state<R: Read>(&mut self, r: &mut R) -> Result<()> {
+        self.weight_decay = read_f64_le(r)?;
         self.adam.load_state(r)
     }
 }

@@ -81,6 +81,12 @@ impl Module for BatchNorm {
 
         // Training mode: use batch statistics
         let batch_size = input.shape()[0];
+        if batch_size < 2 {
+            return Err(TensorError::new(
+                "BatchNorm requires batch_size >= 2 in training mode \
+                 (Bessel's correction divides by batch_size-1)"
+            ));
+        }
         let batch_mean = input.mean_dim(0, false)?;
         let centered = input.sub(&batch_mean)?;
         let batch_var = centered.mul(&centered)?.mean_dim(0, false)?;

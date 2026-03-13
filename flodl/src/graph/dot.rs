@@ -162,11 +162,12 @@ impl Graph {
 
         // Emit forward-ref state loops.
         for entry in &self.state {
+            let writer_id = &self.nodes[entry.writer_ni].id;
             let _ = writeln!(
                 b,
                 "  \"{}\" -> \"state_read_{}\" [style=dotted color=\"#e67e22\" label=\"state\" fontcolor=\"#e67e22\" constraint=false];",
-                entry.writer_id,
-                entry.writer_id
+                writer_id,
+                writer_id
             );
         }
 

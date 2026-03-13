@@ -41,7 +41,7 @@ macro_rules! modules {
 }
 
 pub use tensor::{cuda_available, cuda_device_count, Device, DType, Result, Tensor, TensorOptions};
-pub use autograd::{Variable, no_grad, is_grad_enabled, adaptive_avg_pool2d, grid_sample};
+pub use autograd::{Variable, no_grad, is_grad_enabled, NoGradGuard, adaptive_avg_pool2d, grid_sample};
 pub use nn::{
     Module, NamedInputModule, Resettable, Detachable,
     Parameter, Linear, Optimizer, Stateful, SGD, Adam, AdamW,

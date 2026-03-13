@@ -118,6 +118,62 @@ char* flodl_ge_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
 char* flodl_le_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
 char* flodl_lt_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
 
+// --- Comparison (tensor-tensor, return float masks: 0.0 or 1.0) ---
+
+char* flodl_gt_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_lt_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_ge_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_le_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_eq_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_ne_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+
+// --- Additional reductions ---
+
+char* flodl_argmin(FlodlTensor t, int dim, int keepdim, FlodlTensor* result);
+char* flodl_var(FlodlTensor t, FlodlTensor* result);
+char* flodl_std_op(FlodlTensor t, FlodlTensor* result);
+char* flodl_var_dim(FlodlTensor t, int dim, int keepdim, FlodlTensor* result);
+char* flodl_std_dim(FlodlTensor t, int dim, int keepdim, FlodlTensor* result);
+
+// --- Element-wise math (trig, rounding, sign) ---
+
+char* flodl_sin(FlodlTensor t, FlodlTensor* result);
+char* flodl_cos(FlodlTensor t, FlodlTensor* result);
+char* flodl_sign(FlodlTensor t, FlodlTensor* result);
+char* flodl_floor(FlodlTensor t, FlodlTensor* result);
+char* flodl_ceil(FlodlTensor t, FlodlTensor* result);
+char* flodl_round(FlodlTensor t, FlodlTensor* result);
+char* flodl_reciprocal(FlodlTensor t, FlodlTensor* result);
+
+// --- Advanced indexing ---
+
+char* flodl_gather(FlodlTensor t, int dim, FlodlTensor index,
+                  FlodlTensor* result);
+char* flodl_scatter_add(FlodlTensor t, int dim, FlodlTensor index,
+                       FlodlTensor src, FlodlTensor* result);
+
+// --- Sorting ---
+
+char* flodl_topk(FlodlTensor t, int64_t k, int dim, int largest, int sorted,
+                FlodlTensor* values, FlodlTensor* indices);
+char* flodl_sort(FlodlTensor t, int dim, int descending,
+                FlodlTensor* values, FlodlTensor* indices);
+
+// --- Tensor creation ---
+
+char* flodl_eye(int64_t n, int dtype, int device, FlodlTensor* result);
+char* flodl_full(int64_t* shape, int ndim, double value, int dtype, int device,
+                FlodlTensor* result);
+
+// --- Shape operations (additional) ---
+
+char* flodl_chunk(FlodlTensor t, int chunks, int dim,
+                 FlodlTensor** results, int* count);
+char* flodl_repeat(FlodlTensor t, int64_t* repeats, int ndim,
+                  FlodlTensor* result);
+char* flodl_pad(FlodlTensor t, int64_t* padding, int pad_len, double value,
+               FlodlTensor* result);
+
 // --- Shape operations ---
 
 char* flodl_reshape(FlodlTensor t, int64_t* shape, int ndim, FlodlTensor* result);

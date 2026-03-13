@@ -946,6 +946,314 @@ impl Variable {
         Ok(Variable::from_op(result, grad_fn))
     }
 
+    // --- Element-wise math (new) ---
+
+    /// Element-wise sine.
+    pub fn sin(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.sin()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_input = self.inner.borrow().data.clone();
+
+        // d(sin(x))/dx = cos(x)
+        let grad_fn = GradFn {
+            name: "SinBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                Ok(vec![grad.mul(&saved_input.cos()?)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Element-wise cosine.
+    pub fn cos(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.cos()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_input = self.inner.borrow().data.clone();
+
+        // d(cos(x))/dx = -sin(x)
+        let grad_fn = GradFn {
+            name: "CosBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                Ok(vec![grad.mul(&saved_input.sin()?.neg()?)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Element-wise reciprocal (1/x).
+    pub fn reciprocal(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.reciprocal()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_output = result.clone();
+
+        // d(1/x)/dx = -1/x² = -(1/x)²
+        let grad_fn = GradFn {
+            name: "ReciprocalBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let neg_sq = saved_output.mul(&saved_output)?.neg()?;
+                Ok(vec![grad.mul(&neg_sq)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    // --- Reductions (new) ---
+
+    /// Variance of all elements (Bessel-corrected, scalar output).
+    pub fn var(&self) -> Result<Variable> {
+        let result = self.inner.borrow().data.var()?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_input = self.inner.borrow().data.clone();
+        let n = saved_input.numel() as f64;
+
+        // d(var)/dx_i = 2*(x_i - mean) / (N-1)
+        let grad_fn = GradFn {
+            name: "VarBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let mean = saved_input.mean()?.expand(&saved_input.shape())?;
+                let diff = saved_input.sub(&mean)?;
+                Ok(vec![diff.mul_scalar(2.0 * grad.item()? / (n - 1.0))?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Standard deviation of all elements (Bessel-corrected, scalar output).
+    pub fn std(&self) -> Result<Variable> {
+        // Compose var + sqrt — backward chain is automatic.
+        self.var()?.sqrt()
+    }
+
+    /// Variance along a dimension (Bessel-corrected).
+    pub fn var_dim(&self, dim: i32, keepdim: bool) -> Result<Variable> {
+        let result = self.inner.borrow().data.var_dim(dim, keepdim)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let saved_input = self.inner.borrow().data.clone();
+        let input_shape = saved_input.shape();
+        let d = normalize_dim(dim, input_shape.len());
+        let dim_size = input_shape[d] as f64;
+
+        // d(var)/dx_i = 2*(x_i - mean) / (dim_size-1), broadcast by grad
+        let grad_fn = GradFn {
+            name: "VarDimBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let grad_expanded = if keepdim {
+                    grad.expand(&saved_input.shape())?
+                } else {
+                    let mut shape = saved_input.shape();
+                    shape[d] = 1;
+                    grad.reshape(&shape)?.expand(&saved_input.shape())?
+                };
+                let mean = saved_input.mean_dim(dim, true)?.expand(&saved_input.shape())?;
+                let diff = saved_input.sub(&mean)?;
+                Ok(vec![diff.mul_scalar(2.0 / (dim_size - 1.0))?.mul(&grad_expanded)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Standard deviation along a dimension (Bessel-corrected).
+    pub fn std_dim(&self, dim: i32, keepdim: bool) -> Result<Variable> {
+        // Compose var_dim + sqrt — backward chain is automatic.
+        self.var_dim(dim, keepdim)?.sqrt()
+    }
+
+    // --- Advanced indexing (new) ---
+
+    /// Gather values along a dimension using an index tensor.
+    pub fn gather(&self, dim: i32, index: &Tensor) -> Result<Variable> {
+        let result = self.inner.borrow().data.gather(dim, index)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+        let saved_index = index.clone();
+        let input_dtype = self.inner.borrow().data.dtype();
+        let input_device = self.inner.borrow().data.device();
+
+        let grad_fn = GradFn {
+            name: "GatherBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let opts = TensorOptions { dtype: input_dtype, device: input_device };
+                let zeros = Tensor::zeros(&input_shape, opts)?;
+                Ok(vec![zeros.scatter_add(dim, &saved_index, grad)?])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    // --- Sorting (new) ---
+
+    /// Top-k values and indices. Returns (Variable, Tensor) — only values are differentiable.
+    pub fn topk(&self, k: i64, dim: i32, largest: bool, sorted: bool) -> Result<(Variable, Tensor)> {
+        let (values, indices) = self.inner.borrow().data.topk(k, dim, largest, sorted)?;
+
+        if !needs_grad(&[self]) {
+            return Ok((Variable::leaf(values, false), indices));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+        let saved_indices = indices.clone();
+        let input_dtype = self.inner.borrow().data.dtype();
+        let input_device = self.inner.borrow().data.device();
+
+        let grad_fn = GradFn {
+            name: "TopkBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let opts = TensorOptions { dtype: input_dtype, device: input_device };
+                let zeros = Tensor::zeros(&input_shape, opts)?;
+                Ok(vec![zeros.scatter_add(dim, &saved_indices, grad)?])
+            }),
+        };
+
+        Ok((Variable::from_op(values, grad_fn), indices))
+    }
+
+    /// Sort along a dimension. Returns (Variable, Tensor) — only values are differentiable.
+    pub fn sort(&self, dim: i32, descending: bool) -> Result<(Variable, Tensor)> {
+        let (values, indices) = self.inner.borrow().data.sort(dim, descending)?;
+
+        if !needs_grad(&[self]) {
+            return Ok((Variable::leaf(values, false), indices));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+        let saved_indices = indices.clone();
+        let input_dtype = self.inner.borrow().data.dtype();
+        let input_device = self.inner.borrow().data.device();
+
+        let grad_fn = GradFn {
+            name: "SortBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let opts = TensorOptions { dtype: input_dtype, device: input_device };
+                let zeros = Tensor::zeros(&input_shape, opts)?;
+                Ok(vec![zeros.scatter_add(dim, &saved_indices, grad)?])
+            }),
+        };
+
+        Ok((Variable::from_op(values, grad_fn), indices))
+    }
+
+    // --- Shape operations (new) ---
+
+    /// Split into chunks along a dimension. Uses narrow() — each chunk is independently differentiable.
+    pub fn chunk(&self, chunks: i32, dim: i32) -> Result<Vec<Variable>> {
+        let shape = self.inner.borrow().data.shape();
+        let d = normalize_dim(dim, shape.len());
+        let dim_size = shape[d];
+        let chunk_size = (dim_size + chunks as i64 - 1) / chunks as i64;
+        let mut result = Vec::new();
+        let mut start = 0i64;
+        while start < dim_size {
+            let len = chunk_size.min(dim_size - start);
+            result.push(self.narrow(dim, start, len)?);
+            start += len;
+        }
+        Ok(result)
+    }
+
+    /// Repeat the tensor along each dimension.
+    pub fn repeat(&self, repeats: &[i64]) -> Result<Variable> {
+        let result = self.inner.borrow().data.repeat(repeats)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+        let repeats = repeats.to_vec();
+
+        // Backward: reshape to interleave [R0, S0, R1, S1, ...], sum over repeat dims.
+        let grad_fn = GradFn {
+            name: "RepeatBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let ndim = input_shape.len();
+                let mut new_shape = Vec::with_capacity(ndim * 2);
+                for i in 0..ndim {
+                    new_shape.push(repeats[i]);
+                    new_shape.push(input_shape[i]);
+                }
+                let mut r = grad.reshape(&new_shape)?;
+                // Sum over repeat dims (0, 2, 4, ...) from highest to lowest
+                for i in (0..ndim).rev() {
+                    r = r.sum_dim((i * 2) as i32, false)?;
+                }
+                Ok(vec![r])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
+    /// Constant-value padding with differentiable backward.
+    pub fn pad(&self, padding: &[i64], value: f64) -> Result<Variable> {
+        let result = self.inner.borrow().data.pad(padding, value)?;
+
+        if !needs_grad(&[self]) {
+            return Ok(Variable::leaf(result, false));
+        }
+
+        let input_shape = self.inner.borrow().data.shape();
+        let padding = padding.to_vec();
+
+        // Backward: crop the gradient back to original size.
+        let grad_fn = GradFn {
+            name: "PadBackward",
+            inputs: vec![self.clone()],
+            apply: Box::new(move |grad: &Tensor| {
+                let ndim = grad.ndim();
+                let mut r = grad.clone();
+                // Padding is innermost-first: [left, right, ...] pairs
+                for pair in 0..padding.len() / 2 {
+                    let left = padding[pair * 2];
+                    let dim = ndim as i32 - 1 - pair as i32;
+                    let orig_size = input_shape[dim as usize];
+                    r = r.narrow(dim, left, orig_size)?;
+                }
+                Ok(vec![r])
+            }),
+        };
+
+        Ok(Variable::from_op(result, grad_fn))
+    }
+
     // --- Backward entry point ---
 
     /// Run reverse-mode autodiff from this variable.

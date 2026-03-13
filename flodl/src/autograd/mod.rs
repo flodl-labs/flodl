@@ -22,7 +22,7 @@ mod ops;
 mod context;
 
 pub use variable::Variable;
-pub use context::{no_grad, is_grad_enabled};
+pub use context::{no_grad, is_grad_enabled, NoGradGuard};
 pub use ops::{layer_norm, conv2d, conv_transpose2d, adaptive_avg_pool2d, grid_sample};
 
 #[cfg(test)]
@@ -311,5 +311,515 @@ mod tests {
         }
         // x should have gradient
         assert_eq!(x.grad().unwrap().to_f32_vec().unwrap(), vec![2.0, 2.0]);
+    }
+
+    #[test]
+    fn test_sin_cos_gradient() {
+        // d(sin(x))/dx = cos(x), d(cos(x))/dx = -sin(x)
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        let y = x.sin().unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // cos(1) ≈ 0.5403, cos(2) ≈ -0.4161
+        assert!((grad[0] - 1.0_f32.cos()).abs() < 1e-5);
+        assert!((grad[1] - 2.0_f32.cos()).abs() < 1e-5);
+
+        x.zero_grad();
+        let y2 = x.cos().unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        let grad2 = x.grad().unwrap().to_f32_vec().unwrap();
+        // -sin(1) ≈ -0.8414, -sin(2) ≈ -0.9093
+        assert!((grad2[0] - (-1.0_f32.sin())).abs() < 1e-5);
+        assert!((grad2[1] - (-2.0_f32.sin())).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_reciprocal_gradient() {
+        // d(1/x)/dx = -1/x²
+        let x = Variable::new(from_f32(&[2.0, 4.0], &[2]), true);
+        let y = x.reciprocal().unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // -1/4 = -0.25, -1/16 = -0.0625
+        assert!((grad[0] - (-0.25)).abs() < 1e-5);
+        assert!((grad[1] - (-0.0625)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_var_std_gradient() {
+        // var([1,2,3]) = 1.0 (Bessel: sum((x-2)²)/2 = (1+0+1)/2 = 1)
+        // d(var)/dx_i = 2*(x_i - mean) / (N-1)
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), true);
+        let v = x.var().unwrap();
+        assert!((v.data().item().unwrap() - 1.0).abs() < 1e-5);
+        v.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // 2*(1-2)/2 = -1, 2*(2-2)/2 = 0, 2*(3-2)/2 = 1
+        assert!((grad[0] - (-1.0)).abs() < 1e-5);
+        assert!((grad[1] - 0.0).abs() < 1e-5);
+        assert!((grad[2] - 1.0).abs() < 1e-5);
+
+        // std = sqrt(var), backward through composition
+        x.zero_grad();
+        let s = x.std().unwrap();
+        assert!((s.data().item().unwrap() - 1.0).abs() < 1e-5);
+        s.backward().unwrap();
+        let grad2 = x.grad().unwrap().to_f32_vec().unwrap();
+        // d(std)/dx = d(sqrt(var))/dx = 1/(2*sqrt(var)) * d(var)/dx
+        // = 0.5 * [-1, 0, 1] = [-0.5, 0, 0.5]
+        assert!((grad2[0] - (-0.5)).abs() < 1e-4);
+        assert!((grad2[1] - 0.0).abs() < 1e-4);
+        assert!((grad2[2] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_var_dim_gradient() {
+        // [[1, 2], [3, 4]] — var along dim=1
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), true);
+        let v = x.var_dim(1, false).unwrap().sum().unwrap();
+        v.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Row 0: mean=1.5, d(var)/dx = 2*(x-1.5)/1 → [-1, 1]
+        // Row 1: mean=3.5, d(var)/dx = 2*(x-3.5)/1 → [-1, 1]
+        assert!((grad[0] - (-1.0)).abs() < 1e-5);
+        assert!((grad[1] - 1.0).abs() < 1e-5);
+        assert!((grad[2] - (-1.0)).abs() < 1e-5);
+        assert!((grad[3] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_gather_gradient() {
+        // gather scatters gradient back via scatter_add
+        // input = [[1, 2], [3, 4]], index = [[0, 0], [1, 0]], dim=1
+        // output = [[1, 1], [4, 3]]
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), true);
+        let idx = Tensor::from_i64(&[0, 0, 1, 0], &[2, 2]).unwrap();
+        let y = x.gather(1, &idx).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Row 0: idx=[0,0] → column 0 gets 2 grads, column 1 gets 0
+        // Row 1: idx=[1,0] → column 0 gets 1, column 1 gets 1
+        assert!((grad[0] - 2.0).abs() < 1e-5);
+        assert!((grad[1] - 0.0).abs() < 1e-5);
+        assert!((grad[2] - 1.0).abs() < 1e-5);
+        assert!((grad[3] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_topk_gradient() {
+        // topk selects top values, gradient goes back to original positions
+        let x = Variable::new(from_f32(&[3.0, 1.0, 4.0, 1.0, 5.0], &[5]), true);
+        let (values, _indices) = x.topk(2, 0, true, true).unwrap();
+        let y = values.sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Top 2 are indices 4 (5.0) and 2 (4.0) — those get gradient 1.0
+        assert!((grad[0] - 0.0).abs() < 1e-5); // 3.0 not in top 2
+        assert!((grad[1] - 0.0).abs() < 1e-5); // 1.0
+        assert!((grad[2] - 1.0).abs() < 1e-5); // 4.0 in top 2
+        assert!((grad[3] - 0.0).abs() < 1e-5); // 1.0
+        assert!((grad[4] - 1.0).abs() < 1e-5); // 5.0 in top 2
+    }
+
+    #[test]
+    fn test_repeat_gradient() {
+        // [1, 2].repeat([3]) = [1, 2, 1, 2, 1, 2]
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        let y = x.repeat(&[3]).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Each element appears 3 times, so grad = [3, 3]
+        assert!((grad[0] - 3.0).abs() < 1e-5);
+        assert!((grad[1] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_pad_gradient() {
+        // Pad [1, 2, 3] with 1 zero on each side → [0, 1, 2, 3, 0]
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), true);
+        let y = x.pad(&[1, 1], 0.0).unwrap();
+        assert_eq!(y.data().shape(), vec![5]);
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Gradient passes through non-padded positions: all 1.0
+        assert_eq!(grad, vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_chunk_gradient() {
+        // Chunk [1, 2, 3, 4, 5, 6] into 3 pieces, multiply each by different scalar
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6]), true);
+        let chunks = x.chunk(3, 0).unwrap();
+        assert_eq!(chunks.len(), 3);
+        // chunks: [1,2], [3,4], [5,6] — multiply first by 2, second by 3
+        let c0 = chunks[0].mul_scalar(2.0).unwrap();
+        let c1 = chunks[1].mul_scalar(3.0).unwrap();
+        let loss = c0.sum().unwrap().add(&c1.sum().unwrap()).unwrap().add(&chunks[2].sum().unwrap()).unwrap();
+        loss.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // [2, 2, 3, 3, 1, 1]
+        assert_eq!(grad, vec![2.0, 2.0, 3.0, 3.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_sort_gradient() {
+        let x = Variable::new(from_f32(&[3.0, 1.0, 2.0], &[3]), true);
+        let (sorted, _indices) = x.sort(0, false).unwrap();
+        // sorted = [1, 2, 3], multiply by [1, 2, 3]
+        let weights = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), false);
+        let loss = sorted.mul(&weights).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Original: [3, 1, 2] → sorted positions: 3→idx2, 1→idx0, 2→idx1
+        // Weights at sorted positions: 3.0 gets weight 3, 1.0 gets weight 1, 2.0 gets weight 2
+        assert!((grad[0] - 3.0).abs() < 1e-5); // x[0]=3.0 → largest → weight 3
+        assert!((grad[1] - 1.0).abs() < 1e-5); // x[1]=1.0 → smallest → weight 1
+        assert!((grad[2] - 2.0).abs() < 1e-5); // x[2]=2.0 → middle → weight 2
+    }
+
+    #[test]
+    fn test_div_gradient() {
+        // d(a/b)/da = 1/b, d(a/b)/db = -a/b²
+        let a = Variable::new(from_f32(&[6.0], &[1]), true);
+        let b = Variable::new(from_f32(&[3.0], &[1]), true);
+        let y = a.div(&b).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        // da = 1/3 ≈ 0.3333
+        assert!((a.grad().unwrap().item().unwrap() - 1.0 / 3.0).abs() < 1e-5);
+        // db = -6/9 ≈ -0.6667
+        assert!((b.grad().unwrap().item().unwrap() - (-6.0 / 9.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_add_scalar_div_scalar_gradient() {
+        let x = Variable::new(from_f32(&[2.0, 4.0], &[2]), true);
+        // add_scalar: gradient passes through unchanged
+        let y = x.add_scalar(10.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert_eq!(x.grad().unwrap().to_f32_vec().unwrap(), vec![1.0, 1.0]);
+
+        x.zero_grad();
+        // div_scalar: d(x/c)/dx = 1/c
+        let y2 = x.div_scalar(4.0).unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        let g = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((g[0] - 0.25).abs() < 1e-5);
+        assert!((g[1] - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_sqrt_gradient() {
+        // d(sqrt(x))/dx = 0.5/sqrt(x)
+        let x = Variable::new(from_f32(&[4.0, 9.0], &[2]), true);
+        let y = x.sqrt().unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((grad[0] - 0.25).abs() < 1e-5); // 0.5/2
+        assert!((grad[1] - 1.0 / 6.0).abs() < 1e-5); // 0.5/3
+    }
+
+    #[test]
+    fn test_abs_gradient() {
+        // d|x|/dx ≈ sign(x)
+        let x = Variable::new(from_f32(&[-3.0, 5.0], &[2]), true);
+        let y = x.abs().unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((grad[0] - (-1.0)).abs() < 1e-4);
+        assert!((grad[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_pow_scalar_gradient() {
+        // d(x^3)/dx = 3x²
+        let x = Variable::new(from_f32(&[2.0, 3.0], &[2]), true);
+        let y = x.pow_scalar(3.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((grad[0] - 12.0).abs() < 1e-4); // 3*4
+        assert!((grad[1] - 27.0).abs() < 1e-4); // 3*9
+    }
+
+    #[test]
+    fn test_clamp_gradient() {
+        // gradient passes through where input was not clamped
+        let x = Variable::new(from_f32(&[-1.0, 0.5, 2.0], &[3]), true);
+        let y = x.clamp(0.0, 1.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((grad[0] - 0.0).abs() < 1e-5); // clamped → 0
+        assert!((grad[1] - 1.0).abs() < 1e-5); // pass-through
+        assert!((grad[2] - 0.0).abs() < 1e-5); // clamped → 0
+    }
+
+    #[test]
+    fn test_mean_gradient() {
+        // d(mean)/dx_i = 1/N
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[4]), true);
+        let y = x.mean().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        for &g in &grad {
+            assert!((g - 0.25).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_sum_dim_gradient() {
+        // sum_dim: gradient expands back
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), true);
+        let y = x.sum_dim(1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        assert_eq!(x.grad().unwrap().to_f32_vec().unwrap(), vec![1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_mean_dim_gradient() {
+        // d(mean_dim)/dx = 1/dim_size, expanded
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), true);
+        let y = x.mean_dim(1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        for &g in &grad {
+            assert!((g - 0.5).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_softmax_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), true);
+        // Weighted sum after softmax
+        let w = Variable::new(from_f32(&[1.0, 0.0, 0.0], &[3]), false);
+        let y = x.softmax(0).unwrap().mul(&w).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        // Numerical check
+        let eps = 1e-4;
+        let x_data = vec![1.0_f32, 2.0, 3.0];
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        for i in 0..3 {
+            let mut xp = x_data.clone();
+            let mut xm = x_data.clone();
+            xp[i] += eps as f32;
+            xm[i] -= eps as f32;
+
+            let fp = from_f32(&xp, &[3]).softmax(0).unwrap().to_f32_vec().unwrap()[0] as f64;
+            let fm = from_f32(&xm, &[3]).softmax(0).unwrap().to_f32_vec().unwrap()[0] as f64;
+            let numerical = (fp - fm) / (2.0 * eps);
+            assert!(
+                (grad[i] as f64 - numerical).abs() < 0.01,
+                "softmax grad[{}]: analytical={}, numerical={}", i, grad[i], numerical
+            );
+        }
+    }
+
+    #[test]
+    fn test_log_softmax_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), true);
+        let w = Variable::new(from_f32(&[1.0, 0.0, 0.0], &[3]), false);
+        let y = x.log_softmax(0).unwrap().mul(&w).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let eps = 1e-4;
+        let x_data = vec![1.0_f32, 2.0, 3.0];
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        for i in 0..3 {
+            let mut xp = x_data.clone();
+            let mut xm = x_data.clone();
+            xp[i] += eps as f32;
+            xm[i] -= eps as f32;
+            let fp = from_f32(&xp, &[3]).log_softmax(0).unwrap().to_f32_vec().unwrap()[0] as f64;
+            let fm = from_f32(&xm, &[3]).log_softmax(0).unwrap().to_f32_vec().unwrap()[0] as f64;
+            let numerical = (fp - fm) / (2.0 * eps);
+            assert!(
+                (grad[i] as f64 - numerical).abs() < 0.01,
+                "log_softmax grad[{}]: analytical={}, numerical={}", i, grad[i], numerical
+            );
+        }
+    }
+
+    #[test]
+    fn test_gelu_silu_gradient() {
+        // Numerical gradient check for gelu
+        let x_data = vec![0.5_f32, -0.5, 1.0];
+        let x = Variable::new(from_f32(&x_data, &[3]), true);
+        let y = x.gelu().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+
+        let eps = 1e-4;
+        for i in 0..3 {
+            let mut xp = x_data.clone();
+            let mut xm = x_data.clone();
+            xp[i] += eps as f32;
+            xm[i] -= eps as f32;
+            let fp: f64 = from_f32(&xp, &[3]).gelu().unwrap().sum().unwrap().item().unwrap();
+            let fm: f64 = from_f32(&xm, &[3]).gelu().unwrap().sum().unwrap().item().unwrap();
+            assert!((grad[i] as f64 - (fp - fm) / (2.0 * eps)).abs() < 0.01);
+        }
+
+        // Same for silu
+        x.zero_grad();
+        let y2 = x.silu().unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        let grad2 = x.grad().unwrap().to_f32_vec().unwrap();
+        for i in 0..3 {
+            let mut xp = x_data.clone();
+            let mut xm = x_data.clone();
+            xp[i] += eps as f32;
+            xm[i] -= eps as f32;
+            let fp: f64 = from_f32(&xp, &[3]).silu().unwrap().sum().unwrap().item().unwrap();
+            let fm: f64 = from_f32(&xm, &[3]).silu().unwrap().sum().unwrap().item().unwrap();
+            assert!((grad2[i] as f64 - (fp - fm) / (2.0 * eps)).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_reshape_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), true);
+        let y = x.reshape(&[4]).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert_eq!(x.grad().unwrap().shape(), vec![2, 2]);
+        assert_eq!(x.grad().unwrap().to_f32_vec().unwrap(), vec![1.0; 4]);
+    }
+
+    #[test]
+    fn test_transpose_gradient() {
+        // Transpose backward should un-transpose the gradient
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]), true);
+        let w = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]), false);
+        let y = x.transpose(0, 1).unwrap().mul(&w).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert_eq!(x.grad().unwrap().shape(), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_narrow_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5]), true);
+        // Narrow: take elements [1..3] → [2, 3, 4]
+        let y = x.narrow(0, 1, 3).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(grad, vec![0.0, 1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_select_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]), true);
+        // Select row 1 → [4, 5, 6]
+        let y = x.select(0, 1).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(grad, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_expand_gradient() {
+        // Expand [1, 3] → [4, 3], backward sums over expanded dims
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), true);
+        let y = x.expand(&[4, 3]).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(grad, vec![4.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn test_permute_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]), true);
+        let w = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]), false);
+        let y = x.permute(&[1, 0]).unwrap().mul(&w).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert_eq!(x.grad().unwrap().shape(), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_squeeze_unsqueeze_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), true);
+        let y = x.squeeze(0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert_eq!(x.grad().unwrap().shape(), vec![1, 3]);
+
+        x.zero_grad();
+        let y2 = x.unsqueeze(2).unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        assert_eq!(x.grad().unwrap().shape(), vec![1, 3]);
+    }
+
+    #[test]
+    fn test_cat_gradient() {
+        let a = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        let b = Variable::new(from_f32(&[3.0, 4.0, 5.0], &[3]), true);
+        let y = a.cat(&b, 0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        assert_eq!(a.grad().unwrap().to_f32_vec().unwrap(), vec![1.0, 1.0]);
+        assert_eq!(b.grad().unwrap().to_f32_vec().unwrap(), vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_index_select_gradient() {
+        let x = Variable::new(from_f32(&[10.0, 20.0, 30.0, 40.0, 50.0], &[5]), true);
+        let idx = Tensor::from_f32(&[0.0, 2.0, 2.0], &[3], crate::tensor::Device::CPU).unwrap()
+            .to_dtype(crate::tensor::DType::Int64).unwrap();
+        let y = x.index_select(0, &idx).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // idx [0, 2, 2]: position 0 gets 1, position 2 gets 2, rest 0
+        assert!((grad[0] - 1.0).abs() < 1e-5);
+        assert!((grad[1] - 0.0).abs() < 1e-5);
+        assert!((grad[2] - 2.0).abs() < 1e-5);
+        assert!((grad[3] - 0.0).abs() < 1e-5);
+        assert!((grad[4] - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_std_dim_gradient() {
+        // std_dim composes var_dim + sqrt
+        let x = Variable::new(from_f32(&[1.0, 3.0, 5.0, 7.0], &[2, 2]), true);
+        let y = x.std_dim(1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        // Numerical check
+        let eps = 1e-4;
+        let x_data = vec![1.0_f32, 3.0, 5.0, 7.0];
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        for i in 0..4 {
+            let mut xp = x_data.clone();
+            let mut xm = x_data.clone();
+            xp[i] += eps as f32;
+            xm[i] -= eps as f32;
+            let fp: f64 = from_f32(&xp, &[2, 2]).std_dim(1, false).unwrap()
+                .sum().unwrap().item().unwrap();
+            let fm: f64 = from_f32(&xm, &[2, 2]).std_dim(1, false).unwrap()
+                .sum().unwrap().item().unwrap();
+            let numerical = (fp - fm) / (2.0 * eps);
+            assert!(
+                (grad[i] as f64 - numerical).abs() < 0.01,
+                "std_dim grad[{}]: analytical={}, numerical={}", i, grad[i], numerical
+            );
+        }
     }
 }

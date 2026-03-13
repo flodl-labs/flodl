@@ -104,7 +104,6 @@ impl GradScaler {
 
         // Step the optimizer
         step_fn()?;
-        self.found_inf = false;
         Ok(true)
     }
 

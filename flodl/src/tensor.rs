@@ -179,8 +179,15 @@ impl Tensor {
         Self { handle }
     }
 
+    /// Wrap a raw handle (crate-visible). The Tensor takes ownership.
+    ///
+    /// # Safety
+    /// Caller must ensure the handle is valid and not owned elsewhere.
+    pub(crate) unsafe fn from_raw_handle(handle: FlodlTensor) -> Self {
+        Self::from_raw(handle)
+    }
+
     /// Access the raw handle (for passing to FFI in sibling modules).
-    #[allow(dead_code)]
     pub(crate) fn raw(&self) -> FlodlTensor {
         self.handle
     }
@@ -241,6 +248,24 @@ impl Tensor {
                 shape.as_mut_ptr(),
                 shape.len() as i32,
                 DType::Float32 as i32,
+                device as i32,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
+    /// Create a tensor from f64 data.
+    pub fn from_f64(data: &[f64], shape: &[i64], device: Device) -> Result<Self> {
+        let mut shape = shape.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_from_blob(
+                data.as_ptr() as *mut c_void,
+                shape.as_mut_ptr(),
+                shape.len() as i32,
+                DType::Float64 as i32,
                 device as i32,
                 &mut handle,
             )
@@ -311,11 +336,23 @@ impl Tensor {
         Ok(buf)
     }
 
-    /// Copy tensor data to a `Vec<f64>` (via f32 conversion).
+    /// Copy tensor data to a `Vec<f64>`.
+    /// Float64 tensors are copied at full precision. All other dtypes
+    /// go through f32 (lossless for f16/bf16, and the best f32 can offer).
     pub fn to_f64_vec(&self) -> Result<Vec<f64>> {
-        // Copy as f32, convert to f64 (libtorch copy_data uses the tensor's dtype)
-        let f32s = self.to_f32_vec()?;
-        Ok(f32s.into_iter().map(|v| v as f64).collect())
+        if self.dtype() == DType::Float64 {
+            let n = self.numel() as usize;
+            let mut buf = vec![0.0f64; n];
+            let bytes = (n * 8) as i64;
+            let err = unsafe {
+                ffi::flodl_copy_data(self.handle, buf.as_mut_ptr() as *mut c_void, bytes)
+            };
+            check_err(err)?;
+            Ok(buf)
+        } else {
+            let f32s = self.to_f32_vec()?;
+            Ok(f32s.into_iter().map(|v| v as f64).collect())
+        }
     }
 
     /// Copy tensor data to a `Vec<i64>`. For integer-typed tensors.
@@ -332,13 +369,35 @@ impl Tensor {
 
     /// Extract a scalar value as f64 (for loss values, metrics, etc.).
     ///
+    /// Preserves full precision for Float64 tensors. Works on any
+    /// single-element tensor regardless of shape (like PyTorch's `.item()`).
+    ///
     /// ```ignore
     /// let loss_val = loss_tensor.item()?;
     /// println!("loss: {:.4}", loss_val);
     /// ```
     pub fn item(&self) -> Result<f64> {
-        let data = self.to_f32_vec()?;
-        Ok(data.first().copied().unwrap_or(0.0) as f64)
+        if self.numel() != 1 {
+            return Err(TensorError::new(&format!(
+                "item() requires exactly 1 element, got {} (shape {:?})",
+                self.numel(), self.shape()
+            )));
+        }
+        if self.dtype() == DType::Float64 {
+            let mut buf = [0.0f64; 1];
+            let err = unsafe {
+                ffi::flodl_copy_data(self.handle, buf.as_mut_ptr() as *mut c_void, 8)
+            };
+            check_err(err)?;
+            Ok(buf[0])
+        } else {
+            let mut buf = [0.0f32; 1];
+            let err = unsafe {
+                ffi::flodl_copy_data(self.handle, buf.as_mut_ptr() as *mut c_void, 4)
+            };
+            check_err(err)?;
+            Ok(buf[0] as f64)
+        }
     }
 
     // --- Arithmetic (chainable) ---
@@ -1111,6 +1170,280 @@ impl Tensor {
         Ok(result != 0)
     }
 
+    // --- Comparison (tensor-tensor) ---
+
+    /// Element-wise greater-than (returns float mask: 0.0 or 1.0).
+    pub fn gt(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_gt_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise less-than (returns float mask: 0.0 or 1.0).
+    pub fn lt(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_lt_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise greater-than-or-equal (returns float mask: 0.0 or 1.0).
+    pub fn ge(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_ge_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise less-than-or-equal (returns float mask: 0.0 or 1.0).
+    pub fn le(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_le_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise equality (returns float mask: 0.0 or 1.0).
+    pub fn eq_tensor(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_eq_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise not-equal (returns float mask: 0.0 or 1.0).
+    pub fn ne_tensor(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_ne_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    // --- Additional reductions ---
+
+    /// Argmin along a dimension.
+    pub fn argmin(&self, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_argmin(self.handle, dim, keepdim as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Variance of all elements (Bessel-corrected).
+    pub fn var(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_var(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Standard deviation of all elements (Bessel-corrected).
+    #[allow(clippy::should_implement_trait)]
+    pub fn std(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_std_op(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Variance along a dimension (Bessel-corrected).
+    pub fn var_dim(&self, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_var_dim(self.handle, dim, keepdim as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Standard deviation along a dimension (Bessel-corrected).
+    pub fn std_dim(&self, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_std_dim(self.handle, dim, keepdim as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    // --- Element-wise math (trig, rounding, sign) ---
+
+    /// Element-wise sine.
+    pub fn sin(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_sin(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise cosine.
+    pub fn cos(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_cos(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise sign (-1, 0, or +1).
+    pub fn sign(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_sign(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise floor.
+    pub fn floor(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_floor(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise ceiling.
+    pub fn ceil(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_ceil(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise rounding to nearest integer.
+    pub fn round(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_round(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise reciprocal (1/x).
+    pub fn reciprocal(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_reciprocal(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    // --- Advanced indexing ---
+
+    /// Gather values along a dimension using an index tensor.
+    pub fn gather(&self, dim: i32, index: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_gather(self.handle, dim, index.handle, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Scatter-add: accumulate src into self at index positions along dim.
+    pub fn scatter_add(&self, dim: i32, index: &Tensor, src: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_scatter_add(self.handle, dim, index.handle, src.handle, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    // --- Sorting ---
+
+    /// Top-k values and indices along a dimension. Returns (values, indices).
+    pub fn topk(&self, k: i64, dim: i32, largest: bool, sorted: bool) -> Result<(Tensor, Tensor)> {
+        let mut values: FlodlTensor = ptr::null_mut();
+        let mut indices: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_topk(
+                self.handle, k, dim, largest as i32, sorted as i32,
+                &mut values, &mut indices,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(values), Tensor::from_raw(indices)))
+    }
+
+    /// Sort along a dimension. Returns (sorted_values, indices).
+    pub fn sort(&self, dim: i32, descending: bool) -> Result<(Tensor, Tensor)> {
+        let mut values: FlodlTensor = ptr::null_mut();
+        let mut indices: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_sort(self.handle, dim, descending as i32, &mut values, &mut indices)
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(values), Tensor::from_raw(indices)))
+    }
+
+    // --- Tensor creation (additional) ---
+
+    /// Create an identity matrix of size n x n.
+    pub fn eye(n: i64, opts: TensorOptions) -> Result<Self> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_eye(n, opts.dtype as i32, opts.device as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
+    /// Create a tensor filled with a scalar value.
+    pub fn full(shape: &[i64], value: f64, opts: TensorOptions) -> Result<Self> {
+        let mut shape = shape.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_full(
+                shape.as_mut_ptr(), shape.len() as i32, value,
+                opts.dtype as i32, opts.device as i32, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
+    // --- Shape operations (additional) ---
+
+    /// Split tensor into chunks along a dimension.
+    pub fn chunk(&self, chunks: i32, dim: i32) -> Result<Vec<Tensor>> {
+        let mut results_ptr: *mut FlodlTensor = ptr::null_mut();
+        let mut count: i32 = 0;
+        let err = unsafe {
+            ffi::flodl_chunk(self.handle, chunks, dim, &mut results_ptr, &mut count)
+        };
+        check_err(err)?;
+        let mut tensors = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            let handle = unsafe { *results_ptr.add(i) };
+            tensors.push(Tensor::from_raw(handle));
+        }
+        if !results_ptr.is_null() {
+            // Free the C-allocated array (tensors are now owned by Rust).
+            // flodl_free_string is just free() — safe for any malloc'd pointer.
+            unsafe { ffi::flodl_free_string(results_ptr as *mut i8) };
+        }
+        Ok(tensors)
+    }
+
+    /// Repeat the tensor along each dimension.
+    pub fn repeat(&self, repeats: &[i64]) -> Result<Tensor> {
+        let mut repeats = repeats.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_repeat(self.handle, repeats.as_mut_ptr(), repeats.len() as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Constant-value padding. Padding format matches PyTorch: [left, right, top, bottom, ...].
+    pub fn pad(&self, padding: &[i64], value: f64) -> Result<Tensor> {
+        let mut padding = padding.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_pad(
+                self.handle, padding.as_mut_ptr(), padding.len() as i32,
+                value, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Device ---
 
     /// Move this tensor to a different device (CPU or CUDA).
@@ -1254,5 +1587,330 @@ mod tests {
         assert_eq!(s1.shape(), vec![2, 3]);
         let data1 = s1.to_f32_vec().unwrap();
         assert_eq!(data1, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_ones_from_f64_from_i64() {
+        let o = Tensor::ones(&[2, 3], TensorOptions::default()).unwrap();
+        assert_eq!(o.to_f32_vec().unwrap(), vec![1.0; 6]);
+
+        let f = Tensor::from_f64(&[1.0, 2.0, 3.0], &[3], Device::CPU).unwrap();
+        assert_eq!(f.dtype(), DType::Float64);
+        assert_eq!(f.to_f64_vec().unwrap(), vec![1.0, 2.0, 3.0]);
+
+        let i = Tensor::from_i64(&[10, 20, 30], &[3]).unwrap();
+        assert_eq!(i.dtype(), DType::Int64);
+        assert_eq!(i.to_i64_vec().unwrap(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_sub_mul_div() {
+        let a = Tensor::from_f32(&[6.0, 8.0], &[2], Device::CPU).unwrap();
+        let b = Tensor::from_f32(&[2.0, 3.0], &[2], Device::CPU).unwrap();
+        assert_eq!(a.sub(&b).unwrap().to_f32_vec().unwrap(), vec![4.0, 5.0]);
+        assert_eq!(a.mul(&b).unwrap().to_f32_vec().unwrap(), vec![12.0, 24.0]);
+        let d = a.div(&b).unwrap().to_f32_vec().unwrap();
+        assert!((d[0] - 3.0).abs() < 1e-5);
+        assert!((d[1] - 8.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_scalar_ops() {
+        let t = Tensor::from_f32(&[2.0, 4.0], &[2], Device::CPU).unwrap();
+        assert_eq!(t.add_scalar(1.0).unwrap().to_f32_vec().unwrap(), vec![3.0, 5.0]);
+        assert_eq!(t.mul_scalar(3.0).unwrap().to_f32_vec().unwrap(), vec![6.0, 12.0]);
+        assert_eq!(t.neg().unwrap().to_f32_vec().unwrap(), vec![-2.0, -4.0]);
+    }
+
+    #[test]
+    fn test_exp_log_sqrt_abs_pow() {
+        let t = Tensor::from_f32(&[1.0, 4.0], &[2], Device::CPU).unwrap();
+        let e = t.exp().unwrap().to_f32_vec().unwrap();
+        assert!((e[0] - 1.0_f32.exp()).abs() < 1e-5);
+
+        let l = t.log().unwrap().to_f32_vec().unwrap();
+        assert!((l[1] - 4.0_f32.ln()).abs() < 1e-5);
+
+        let s = t.sqrt().unwrap().to_f32_vec().unwrap();
+        assert!((s[1] - 2.0).abs() < 1e-5);
+
+        let a = Tensor::from_f32(&[-3.0, 5.0], &[2], Device::CPU).unwrap();
+        assert_eq!(a.abs().unwrap().to_f32_vec().unwrap(), vec![3.0, 5.0]);
+
+        let p = t.pow_scalar(2.0).unwrap().to_f32_vec().unwrap();
+        assert!((p[0] - 1.0).abs() < 1e-5);
+        assert!((p[1] - 16.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_clamp() {
+        let t = Tensor::from_f32(&[-1.0, 0.5, 2.0], &[3], Device::CPU).unwrap();
+        let c = t.clamp(0.0, 1.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(c, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn test_sum_dim_mean_dim() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], Device::CPU).unwrap();
+        let s = t.sum_dim(1, false).unwrap().to_f32_vec().unwrap();
+        assert_eq!(s, vec![3.0, 7.0]);
+
+        let m = t.mean_dim(0, false).unwrap().to_f32_vec().unwrap();
+        assert!((m[0] - 2.0).abs() < 1e-5);
+        assert!((m[1] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_norm() {
+        let t = Tensor::from_f32(&[3.0, 4.0], &[2], Device::CPU).unwrap();
+        let n = t.norm().unwrap().item().unwrap();
+        assert!((n - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_reshape_transpose_narrow_select() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], Device::CPU).unwrap();
+        let r = t.reshape(&[3, 2]).unwrap();
+        assert_eq!(r.shape(), vec![3, 2]);
+        assert_eq!(r.to_f32_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let tr = t.transpose(0, 1).unwrap();
+        assert_eq!(tr.shape(), vec![3, 2]);
+        assert_eq!(tr.to_f32_vec().unwrap(), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+
+        let n = t.narrow(1, 0, 2).unwrap();
+        assert_eq!(n.shape(), vec![2, 2]);
+        assert_eq!(n.to_f32_vec().unwrap(), vec![1.0, 2.0, 4.0, 5.0]);
+
+        let s = t.select(0, 1).unwrap();
+        assert_eq!(s.shape(), vec![3]);
+        assert_eq!(s.to_f32_vec().unwrap(), vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_permute_expand() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], Device::CPU).unwrap();
+        let p = t.permute(&[1, 0]).unwrap();
+        assert_eq!(p.shape(), vec![3, 2]);
+
+        let s = Tensor::from_f32(&[1.0, 2.0, 3.0], &[1, 3], Device::CPU).unwrap();
+        let e = s.expand(&[4, 3]).unwrap();
+        assert_eq!(e.shape(), vec![4, 3]);
+        let data = e.to_f32_vec().unwrap();
+        assert_eq!(data, vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_cat_index_select_index_add() {
+        let a = Tensor::from_f32(&[1.0, 2.0], &[2], Device::CPU).unwrap();
+        let b = Tensor::from_f32(&[3.0, 4.0, 5.0], &[3], Device::CPU).unwrap();
+        let c = a.cat(&b, 0).unwrap();
+        assert_eq!(c.to_f32_vec().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+
+        let t = Tensor::from_f32(&[10.0, 20.0, 30.0, 40.0, 50.0], &[5], Device::CPU).unwrap();
+        let idx = Tensor::from_i64(&[0, 2, 4], &[3]).unwrap();
+        let sel = t.index_select(0, &idx).unwrap();
+        assert_eq!(sel.to_f32_vec().unwrap(), vec![10.0, 30.0, 50.0]);
+
+        let base = Tensor::zeros(&[5], TensorOptions::default()).unwrap();
+        let src = Tensor::from_f32(&[1.0, 1.0, 1.0], &[3], Device::CPU).unwrap();
+        let r = base.index_add(0, &idx, &src).unwrap();
+        let data = r.to_f32_vec().unwrap();
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[2] - 1.0).abs() < 1e-5);
+        assert!((data[4] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_narrow_scatter_select_scatter() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[4], Device::CPU).unwrap();
+        let src = Tensor::from_f32(&[10.0, 20.0], &[2], Device::CPU).unwrap();
+        let ns = t.narrow_scatter(&src, 0, 1).unwrap();
+        assert_eq!(ns.to_f32_vec().unwrap(), vec![1.0, 10.0, 20.0, 4.0]);
+
+        let t2 = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], Device::CPU).unwrap();
+        let row = Tensor::from_f32(&[10.0, 20.0, 30.0], &[3], Device::CPU).unwrap();
+        let ss = t2.select_scatter(&row, 0, 0).unwrap();
+        assert_eq!(ss.to_f32_vec().unwrap(), vec![10.0, 20.0, 30.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_activations() {
+        let t = Tensor::from_f32(&[-1.0, 0.0, 1.0], &[3], Device::CPU).unwrap();
+        assert_eq!(t.relu().unwrap().to_f32_vec().unwrap(), vec![0.0, 0.0, 1.0]);
+
+        let sig = t.sigmoid().unwrap().to_f32_vec().unwrap();
+        assert!((sig[2] - 0.7310586).abs() < 1e-5);
+
+        let th = t.tanh_op().unwrap().to_f32_vec().unwrap();
+        assert!((th[2] - 1.0_f32.tanh()).abs() < 1e-5);
+
+        // gelu/silu just check they don't crash and return right shape
+        assert_eq!(t.gelu().unwrap().shape(), vec![3]);
+        assert_eq!(t.silu().unwrap().shape(), vec![3]);
+    }
+
+    #[test]
+    fn test_softmax_log_softmax() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], Device::CPU).unwrap();
+        let sm = t.softmax(0).unwrap().to_f32_vec().unwrap();
+        let total: f32 = sm.iter().sum();
+        assert!((total - 1.0).abs() < 1e-5);
+        assert!(sm[2] > sm[1] && sm[1] > sm[0]);
+
+        let lsm = t.log_softmax(0).unwrap().to_f32_vec().unwrap();
+        assert!(lsm[0] < 0.0 && lsm[1] < 0.0 && lsm[2] < 0.0);
+    }
+
+    #[test]
+    fn test_eq_ne_tensor() {
+        let a = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], Device::CPU).unwrap();
+        let b = Tensor::from_f32(&[1.0, 5.0, 3.0], &[3], Device::CPU).unwrap();
+
+        let eq = a.eq_tensor(&b).unwrap().to_f32_vec().unwrap();
+        assert_eq!(eq, vec![1.0, 0.0, 1.0]);
+
+        let ne = a.ne_tensor(&b).unwrap().to_f32_vec().unwrap();
+        assert_eq!(ne, vec![0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_gt_lt_ge_le_tensor() {
+        let a = Tensor::from_f32(&[1.0, 3.0, 2.0], &[3], Device::CPU).unwrap();
+        let b = Tensor::from_f32(&[2.0, 2.0, 2.0], &[3], Device::CPU).unwrap();
+
+        assert_eq!(a.gt(&b).unwrap().to_f32_vec().unwrap(), vec![0.0, 1.0, 0.0]);
+        assert_eq!(a.lt(&b).unwrap().to_f32_vec().unwrap(), vec![1.0, 0.0, 0.0]);
+        assert_eq!(a.ge(&b).unwrap().to_f32_vec().unwrap(), vec![0.0, 1.0, 1.0]);
+        assert_eq!(a.le(&b).unwrap().to_f32_vec().unwrap(), vec![1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_sign_floor_ceil_round() {
+        let t = Tensor::from_f32(&[-2.7, 0.0, 1.3], &[3], Device::CPU).unwrap();
+        assert_eq!(t.sign().unwrap().to_f32_vec().unwrap(), vec![-1.0, 0.0, 1.0]);
+        assert_eq!(t.floor().unwrap().to_f32_vec().unwrap(), vec![-3.0, 0.0, 1.0]);
+        assert_eq!(t.ceil().unwrap().to_f32_vec().unwrap(), vec![-2.0, 0.0, 2.0]);
+
+        let r = Tensor::from_f32(&[-0.6, 0.4, 1.5], &[3], Device::CPU).unwrap();
+        let rv = r.round().unwrap().to_f32_vec().unwrap();
+        assert!((rv[0] - (-1.0)).abs() < 1e-5);
+        assert!((rv[1] - 0.0).abs() < 1e-5);
+        assert!((rv[2] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_argmin() {
+        let t = Tensor::from_f32(&[3.0, 1.0, 2.0], &[3], Device::CPU).unwrap();
+        let idx = t.argmin(0, false).unwrap().to_i64_vec().unwrap();
+        assert_eq!(idx, vec![1]);
+    }
+
+    #[test]
+    fn test_var_std() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], Device::CPU).unwrap();
+        // Bessel: var = ((1-2)²+(2-2)²+(3-2)²)/2 = 1.0
+        assert!((t.var().unwrap().item().unwrap() - 1.0).abs() < 1e-5);
+        assert!((t.std().unwrap().item().unwrap() - 1.0).abs() < 1e-5);
+
+        // dim variant: [[1,2],[3,4]] var along dim=1 = [0.5, 0.5]
+        let t2 = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], Device::CPU).unwrap();
+        let vd = t2.var_dim(1, false).unwrap().to_f32_vec().unwrap();
+        assert!((vd[0] - 0.5).abs() < 1e-5);
+        assert!((vd[1] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_sin_cos_reciprocal() {
+        let t = Tensor::from_f32(&[0.0, 1.0], &[2], Device::CPU).unwrap();
+        let s = t.sin().unwrap().to_f32_vec().unwrap();
+        assert!((s[0] - 0.0).abs() < 1e-5);
+        assert!((s[1] - 1.0_f32.sin()).abs() < 1e-5);
+
+        let c = t.cos().unwrap().to_f32_vec().unwrap();
+        assert!((c[0] - 1.0).abs() < 1e-5);
+        assert!((c[1] - 1.0_f32.cos()).abs() < 1e-5);
+
+        let r = Tensor::from_f32(&[2.0, 5.0], &[2], Device::CPU).unwrap();
+        let rec = r.reciprocal().unwrap().to_f32_vec().unwrap();
+        assert!((rec[0] - 0.5).abs() < 1e-5);
+        assert!((rec[1] - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_eye_full() {
+        let eye = Tensor::eye(3, TensorOptions::default()).unwrap();
+        assert_eq!(eye.shape(), vec![3, 3]);
+        let data = eye.to_f32_vec().unwrap();
+        assert_eq!(data, vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+
+        let f = Tensor::full(&[2, 3], 7.0, TensorOptions::default()).unwrap();
+        assert_eq!(f.shape(), vec![2, 3]);
+        assert_eq!(f.to_f32_vec().unwrap(), vec![7.0; 6]);
+    }
+
+    #[test]
+    fn test_gather_scatter_add() {
+        // gather: pick elements by index
+        let t = Tensor::from_f32(&[10.0, 20.0, 30.0, 40.0], &[2, 2], Device::CPU).unwrap();
+        let idx = Tensor::from_i64(&[1, 0, 0, 1], &[2, 2]).unwrap();
+        let g = t.gather(1, &idx).unwrap().to_f32_vec().unwrap();
+        assert_eq!(g, vec![20.0, 10.0, 30.0, 40.0]);
+
+        // scatter_add: accumulate into base at positions
+        let base = Tensor::zeros(&[2, 3], TensorOptions::default()).unwrap();
+        let src = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], Device::CPU).unwrap();
+        let idx2 = Tensor::from_i64(&[0, 2, 1, 0], &[2, 2]).unwrap();
+        let sa = base.scatter_add(1, &idx2, &src).unwrap();
+        let data = sa.to_f32_vec().unwrap();
+        // Row 0: pos 0 += 1.0, pos 2 += 2.0 → [1, 0, 2]
+        // Row 1: pos 1 += 3.0, pos 0 += 4.0 → [4, 3, 0]
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[2] - 2.0).abs() < 1e-5);
+        assert!((data[3] - 4.0).abs() < 1e-5);
+        assert!((data[4] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_topk_sort() {
+        let t = Tensor::from_f32(&[3.0, 1.0, 4.0, 1.0, 5.0], &[5], Device::CPU).unwrap();
+        let (vals, idxs) = t.topk(3, 0, true, true).unwrap();
+        assert_eq!(vals.to_f32_vec().unwrap(), vec![5.0, 4.0, 3.0]);
+        let idx_data = idxs.to_i64_vec().unwrap();
+        assert_eq!(idx_data, vec![4, 2, 0]);
+
+        let (svals, sidxs) = t.sort(0, false).unwrap();
+        assert_eq!(svals.to_f32_vec().unwrap(), vec![1.0, 1.0, 3.0, 4.0, 5.0]);
+        let si = sidxs.to_i64_vec().unwrap();
+        assert_eq!(si[4], 4); // 5.0 was at index 4
+    }
+
+    #[test]
+    fn test_chunk_repeat_pad() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6], Device::CPU).unwrap();
+        let chunks = t.chunk(3, 0).unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].to_f32_vec().unwrap(), vec![1.0, 2.0]);
+        assert_eq!(chunks[1].to_f32_vec().unwrap(), vec![3.0, 4.0]);
+        assert_eq!(chunks[2].to_f32_vec().unwrap(), vec![5.0, 6.0]);
+
+        let s = Tensor::from_f32(&[1.0, 2.0], &[2], Device::CPU).unwrap();
+        let rep = s.repeat(&[3]).unwrap();
+        assert_eq!(rep.to_f32_vec().unwrap(), vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
+
+        let pad = s.pad(&[1, 2], 0.0).unwrap();
+        assert_eq!(pad.shape(), vec![5]);
+        assert_eq!(pad.to_f32_vec().unwrap(), vec![0.0, 1.0, 2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_zeros_like_ones_like() {
+        let t = Tensor::from_f32(&[1.0, 2.0], &[2], Device::CPU).unwrap();
+        let zl = Tensor::zeros_like(&t).unwrap();
+        assert_eq!(zl.to_f32_vec().unwrap(), vec![0.0, 0.0]);
+        assert_eq!(zl.dtype(), DType::Float32);
+
+        let ol = Tensor::ones_like(&t).unwrap();
+        assert_eq!(ol.to_f32_vec().unwrap(), vec![1.0, 1.0]);
     }
 }

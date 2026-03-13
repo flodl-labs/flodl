@@ -354,6 +354,111 @@ unsafe extern "C" {
 
     pub fn flodl_all_finite(t: FlodlTensor, result: *mut i32) -> *mut i8;
 
+    // --- Comparison (tensor-tensor, return float masks: 0.0 or 1.0) ---
+
+    pub fn flodl_gt_tensor(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_lt_tensor(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_ge_tensor(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_le_tensor(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_eq_tensor(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_ne_tensor(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Additional reductions ---
+
+    pub fn flodl_argmin(
+        t: FlodlTensor, dim: i32, keepdim: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_var(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_std_op(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+
+    pub fn flodl_var_dim(
+        t: FlodlTensor, dim: i32, keepdim: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_std_dim(
+        t: FlodlTensor, dim: i32, keepdim: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Element-wise math (trig, rounding, sign) ---
+
+    pub fn flodl_sin(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_cos(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_sign(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_floor(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_ceil(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_round(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_reciprocal(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+
+    // --- Advanced indexing ---
+
+    pub fn flodl_gather(
+        t: FlodlTensor, dim: i32, index: FlodlTensor,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_scatter_add(
+        t: FlodlTensor, dim: i32, index: FlodlTensor, src: FlodlTensor,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Sorting ---
+
+    pub fn flodl_topk(
+        t: FlodlTensor, k: i64, dim: i32, largest: i32, sorted: i32,
+        values: *mut FlodlTensor, indices: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_sort(
+        t: FlodlTensor, dim: i32, descending: i32,
+        values: *mut FlodlTensor, indices: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Tensor creation (additional) ---
+
+    pub fn flodl_eye(
+        n: i64, dtype: i32, device: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_full(
+        shape: *mut i64, ndim: i32, value: f64, dtype: i32, device: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Shape operations (additional) ---
+
+    pub fn flodl_chunk(
+        t: FlodlTensor, chunks: i32, dim: i32,
+        results: *mut *mut FlodlTensor, count: *mut i32,
+    ) -> *mut i8;
+
+    pub fn flodl_repeat(
+        t: FlodlTensor, repeats: *mut i64, ndim: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_pad(
+        t: FlodlTensor, padding: *mut i64, pad_len: i32, value: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Utility ---
 
     pub fn flodl_free_string(s: *mut i8);

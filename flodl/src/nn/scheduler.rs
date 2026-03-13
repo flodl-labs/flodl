@@ -100,7 +100,21 @@ impl<S: Scheduler> Scheduler for WarmupScheduler<S> {
 
 /// Reduce learning rate when a metric plateaus.
 /// Call `observe(metric)` each epoch (lower is better).
-/// Unlike step-based schedulers, PlateauScheduler is stateful and reactive.
+///
+/// Unlike step-based schedulers (`StepDecay`, `CosineScheduler`, etc.),
+/// PlateauScheduler is reactive — it does not implement the [`Scheduler`]
+/// trait because its LR depends on observed metrics, not step count.
+/// This matches PyTorch's `ReduceLROnPlateau` which also has a different
+/// interface from other schedulers.
+///
+/// ```ignore
+/// let mut sched = PlateauScheduler::new(0.01, 5, 0.5, 1e-6);
+/// for epoch in 0..100 {
+///     let loss = train_epoch(&model, &data)?;
+///     let lr = sched.observe(loss);
+///     optimizer.set_lr(lr);
+/// }
+/// ```
 pub struct PlateauScheduler {
     patience: usize,
     factor: f64,

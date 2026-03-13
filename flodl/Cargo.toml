@@ -16,6 +16,7 @@ cuda = ["flodl-sys/cuda"]
 
 [dependencies]
 flodl-sys = { path = "../flodl-sys" }
+indexmap = "2"
 
 [package.metadata.docs.rs]
 # docs.rs has no libtorch — build with this cfg so the -sys build.rs can skip compilation.

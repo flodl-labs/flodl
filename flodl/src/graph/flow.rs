@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
+
 use crate::autograd::Variable;
 use crate::nn::Module;
 use crate::tensor::TensorError;
@@ -46,7 +48,7 @@ use super::MergeOp;
 ///     .build()?;
 /// ```
 pub struct FlowBuilder {
-    pub(super) nodes: HashMap<String, Node>,
+    pub(super) nodes: IndexMap<String, Node>,
     pub(super) edges: Vec<Edge>,
     pub(super) inputs: Vec<ExposedPort>,
     pub(super) current: Vec<NodeRef>,
@@ -69,7 +71,7 @@ impl FlowBuilder {
     /// The module's input becomes the graph's input.
     pub fn from(module: impl Module + 'static) -> Self {
         let mut fb = FlowBuilder {
-            nodes: HashMap::new(),
+            nodes: IndexMap::new(),
             edges: Vec::new(),
             inputs: Vec::new(),
             current: Vec::new(),
