@@ -174,6 +174,11 @@ impl Variable {
         Ok(Variable::wrap(result))
     }
 
+    pub fn triu(&self, diagonal: i64) -> Result<Variable> {
+        let result = self.data().triu(diagonal)?;
+        Ok(Variable::wrap(result))
+    }
+
     pub fn sin(&self) -> Result<Variable> {
         let result = self.data().sin()?;
         Ok(Variable::wrap(result))
@@ -275,6 +280,13 @@ impl Variable {
 
     pub fn cat(&self, other: &Variable, dim: i32) -> Result<Variable> {
         let result = self.data().cat(&other.data(), dim)?;
+        Ok(Variable::wrap(result))
+    }
+
+    pub fn stack(vars: &[Variable], dim: i32) -> Result<Variable> {
+        let tensors: Vec<Tensor> = vars.iter().map(|v| v.data()).collect();
+        let refs: Vec<&Tensor> = tensors.iter().collect();
+        let result = Tensor::stack(&refs, dim)?;
         Ok(Variable::wrap(result))
     }
 

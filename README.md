@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/floDl.png" alt="goDl" width="640">
+  <img src="docs/floDl.png" alt="floDl" width="640">
 </p>
 
 <h1 align="center">floDl</h1>
@@ -10,7 +10,15 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
 </p>
 
 <p align="center">
+  <a href="https://github.com/fab2s/floDl/actions"><img src="https://github.com/fab2s/floDl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/flodl"><img src="https://img.shields.io/crates/v/flodl.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/flodl"><img src="https://docs.rs/flodl/badge.svg" alt="docs.rs"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+</p>
+
+<p align="center">
   <a href="#the-graph-builder">Graph Builder</a> &bull;
+  <a href="#training-monitor">Training Monitor</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#features">Features</a> &bull;
   <a href="docs/tutorials/01-tensors.md">Tutorials</a> &bull;
@@ -60,6 +68,82 @@ See the **[Graph Builder Tutorial](docs/tutorials/05-graph-builder.md)** and
 the [full showcase](flodl/examples/showcase.rs) that exercises every builder
 method.
 
+## Training Monitor
+
+Drop-in training monitor with adaptive ETA, system resource tracking, and a
+live web dashboard — no external dependencies, no separate process.
+
+```rust
+use flodl::monitor::Monitor;
+
+let mut monitor = Monitor::new(num_epochs);
+monitor.serve(3000)?;  // optional: live dashboard at http://localhost:3000
+
+for epoch in 0..num_epochs {
+    let t = std::time::Instant::now();
+    // ... training ...
+
+    monitor.log(epoch, t.elapsed(), &[("loss", loss_val), ("lr", lr)]);
+}
+monitor.finish();
+```
+
+Terminal output adapts automatically — duration and ETA switch between hours,
+minutes, seconds, and milliseconds as needed:
+
+```
+  epoch   1/100  loss=1.5264  [49ms  ETA 4.8s]
+  epoch  10/100  loss=0.3817  [25ms  ETA 2.2s]  VRAM: 2.1/6.0 GB (82%)
+  epoch  50/100  loss=0.0023  [24ms  ETA 1.2s]  VRAM: 2.1/6.0 GB (82%)
+  epoch 100/100  loss=0.0012  [23ms]             VRAM: 2.1/6.0 GB (82%)
+  training complete in 2.8s  | loss: 0.0012
+```
+
+### Live dashboard
+
+Call `monitor.serve(port)` and open the URL in a browser. The page updates
+in real time via Server-Sent Events — no polling, no WebSocket, no npm.
+
+The dashboard includes:
+
+| Panel | What it shows |
+|-------|--------------|
+| **Header** | Epoch counter, progress bar, ETA, elapsed time |
+| **Metrics chart** | All logged metrics (loss, lr, ...) as live canvas chart |
+| **Resource chart** | CPU%, GPU%, RAM%, VRAM% over time |
+| **Resource bars** | Current usage with values (e.g., `VRAM: 2.1/6.0 GB`) |
+| **Epoch log** | Every epoch, newest first, with duration and resources |
+| **Graph SVG** | Collapsible architecture diagram (via `monitor.watch(&model)`) |
+
+Late join works — open the dashboard mid-training and it backfills all
+past epochs instantly.
+
+### Resource tracking
+
+| Metric | Source | Availability |
+|--------|--------|-------------|
+| CPU % | `/proc/stat` delta | Linux |
+| RAM | `/proc/meminfo` | Linux |
+| GPU utilization % | NVML (dynamic `dlopen`) | NVIDIA GPU + driver |
+| VRAM used/total | `cudaMemGetInfo` via FFI | CUDA builds |
+
+Resources that aren't available are silently omitted. CPU-only builds show
+CPU and RAM; CUDA builds add GPU and VRAM automatically.
+
+### Export
+
+```rust
+monitor.save_html("training_report.html");  // self-contained dashboard archive
+monitor.write_log("training.log")?;          // human-readable log
+monitor.export_csv("training.csv")?;         // metrics + resources as CSV
+```
+
+`save_html` writes a complete dashboard at `finish()` — all metrics, resource
+charts, and graph SVG baked into a single HTML file. Open it in any browser,
+no server needed. Set it once before training and forget about it.
+
+See the full **[Training Monitor Tutorial](docs/tutorials/09-monitor.md)**.
+
 ## Quick Start
 
 Requirements: Docker (with NVIDIA Container Toolkit for GPU support).
@@ -88,7 +172,7 @@ let model = FlowBuilder::from(Linear::new(2, 16)?)
 
 // Set up training.
 let params = model.parameters();
-let optimizer = Adam::new(&params, 0.01);
+let mut optimizer = Adam::new(&params, 0.01);
 model.set_training(true);
 
 // Training loop.
@@ -101,8 +185,8 @@ for (input_t, target_t) in &batches {
 
     optimizer.zero_grad();
     loss.backward()?;
-    clip_grad_norm(&params, 1.0);
-    optimizer.step(&params);
+    clip_grad_norm(&params, 1.0)?;
+    optimizer.step()?;
 }
 ```
 
@@ -120,14 +204,16 @@ for (input_t, target_t) in &batches {
 | **Optimizers** | `SGD` (with momentum), `Adam`, `AdamW` |
 | **LR Scheduling** | `StepDecay`, `CosineScheduler`, `WarmupScheduler` (composable), `PlateauScheduler` |
 | **Mixed Precision** | `Float16`/`BFloat16` dtype casting, `GradScaler` for loss scaling |
+| **Monitor** | Human-readable ETA, CPU/GPU/RAM/VRAM tracking, live web dashboard |
 
 ### Graph Builder
 
 | Method | What it does |
 |--------|-------------|
 | `from(m).through(m)` | Linear chain |
+| `fork(m)` | Side branch: runs module, captures output as tag, stream continues unchanged |
 | `input(names)` | Auxiliary graph inputs, accessible via `using(name)` — multi-input graphs |
-| `split(modules![...]).merge(op)` | Parallel branches, merged by `Add`, `Mean`, or `Cat(dim)` |
+| `split(modules![...]).merge(op)` | Parallel branches, merged by `Add` or `Mean` |
 | `also(m)` | Residual connection: `input + m(input)` |
 | `tag(name)` / `using(refs)` | Named references — backward (same pass) or forward (across calls) |
 | `loop_body(body).for_n(n)` | Fixed iteration with BPTT |
@@ -147,25 +233,27 @@ for (input_t, target_t) in &batches {
 |------|-------------|
 | `clip_grad_norm` | L2 norm gradient clipping |
 | `clip_grad_value` | Element-wise gradient clamping |
-| `save_parameters` / `load_parameters` | Binary checkpoint format (file path or `Write`/`Read`) |
-| `kaiming_uniform/normal`, `xavier_uniform/normal` | Weight initialization |
+| `save_parameters` / `load_parameters` | `.fdl` checkpoint format (file path or `Write`/`Read`) |
+| `xavier_uniform/normal` | Weight initialization (also `kaiming_*` via `nn::init`) |
 | LR schedulers | `StepDecay`, `CosineScheduler`, `WarmupScheduler`, `PlateauScheduler` (composable) |
 | `GradScaler` | Dynamic loss scaling for mixed precision (float16) training |
 | `cast_parameters` | Cast model parameters to any dtype |
 
 ### Module Traits
 
-Beyond `Module`, modules can implement optional traits that the graph
-recognizes automatically:
+Beyond the core `forward`/`parameters` methods, `Module` provides optional
+methods that the graph recognizes automatically:
 
-| Trait | Method | What happens |
-|-------|--------|-------------|
-| `NamedInputModule` | `forward_named(input, refs)` | Loop and node Using refs arrive as a named map |
-| `Resettable` | `reset(batch_size, device)` | Graph auto-calls before each forward — per-forward state resets |
-| `Detachable` | `detach()` | Breaks gradient chains on retained state |
+| Method | Default | What happens |
+|--------|---------|-------------|
+| `as_named_input()` | `None` | Returns `&dyn NamedInputModule` — loop and node `using()` refs arrive as a named map |
+| `reset()` | no-op | Loops auto-call before iterating — clears per-forward state |
+| `detach_state()` | no-op | `graph.detach_state()` propagates — breaks gradient chains on retained state |
 
-Modules that own child modules implement `sub_modules()` on the Module trait
-for recursive device placement, training mode, and parameter collection.
+Stateful modules just override `reset()` and/or `detach_state()` directly —
+no separate trait impls needed. Modules that own child modules implement
+`sub_modules()` for recursive device placement, training mode, and parameter
+collection.
 
 ### Observation & Trends
 
@@ -179,7 +267,7 @@ for epoch in 0..num_epochs {
         graph.collect(&["hidden"])?;                 // from graph tag
 
         let loss = mse_loss(&pred, &target)?;
-        graph.record("loss", loss.item()?);          // external metric
+        graph.record_scalar("loss", loss.item()?);   // external metric
     }
     graph.flush(&["hidden", "loss"]);
 
@@ -193,7 +281,7 @@ for epoch in 0..num_epochs {
 |--------|-------------|
 | `g.tagged(tag)` | Access a tagged node's output after forward |
 | `g.collect(tags)` / `g.flush(tags)` | Batch -> epoch metric collection |
-| `g.record(tag, value)` | Inject external metrics |
+| `g.record_scalar(tag, value)` | Inject external metrics |
 | `g.trend(tag)` | Epoch-level trend: `slope`, `stalled`, `improving`, `converged` |
 | `g.trends(tags)` | Group trends: `all_improving`, `any_stalled`, `mean_slope` |
 | `g.end_step()` / `g.end_epoch()` | Training housekeeping |
@@ -201,13 +289,13 @@ for epoch in 0..num_epochs {
 ### Visualization
 
 ```rust
-println!("{}", g.dot());              // Graphviz DOT with parameter counts
-let svg = g.svg("model.svg")?;       // render to SVG
+println!("{}", g.dot());                       // Graphviz DOT with parameter counts
+let svg = g.svg(Some("model.svg"))?;          // render to SVG
 
 // Timing-annotated: nodes colored green->yellow->red by execution time.
-g.enable_profiling(true);
+g.enable_profiling();
 g.forward(&input)?;
-g.svg_with_profile("profile.svg")?;
+g.svg_with_profile(Some("profile.svg"))?;
 
 // Training curves as self-contained HTML.
 g.plot_html("training.html", &["loss", "head"])?;
@@ -220,7 +308,7 @@ Every differentiable path is verified against finite-difference gradients:
 - 37 autograd op-level checks (every op + compositions)
 - Module-level checks (every NN module, input + parameter gradients)
 - Exact optimizer step verifications (SGD, Adam, AdamW)
-- 166+ library tests + 14 showcase tests, zero clippy warnings
+- 236 library tests + 15 showcase tests, zero clippy warnings
 
 ## Why Rust for Deep Learning?
 
@@ -260,11 +348,42 @@ GPU math (CUDA kernels, cuBLAS, cuDNN) is identical. floDl replaces everything
 above: the dispatch path, autograd tracking, module composition, and graph
 execution.
 
+## Performance
+
+Add this to your project's `Cargo.toml` to get optimized floDl with fast
+recompilation of your own code:
+
+```toml
+# Optimize floDl in dev builds — your code stays fast to compile.
+# After the first build, only your graph code recompiles.
+[profile.dev.package.flodl]
+opt-level = 3
+
+[profile.dev.package.flodl-sys]
+opt-level = 3
+
+# Release: cross-crate optimization for maximum throughput.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+```
+
+| Profile | flodl | Your code | Typical rebuild |
+|---------|-------|-----------|-----------------|
+| `cargo build` | `-O3` (cached) | `-O0` (fast) | < 2s |
+| `cargo build --release` | `-O3` + LTO | `-O3` + LTO | full link |
+
+The GPU kernels (cuBLAS, cuDNN) run at the same speed regardless of Rust
+optimization level — the profile settings affect graph dispatch, autograd
+bookkeeping, and module overhead.
+
 ## Architecture
 
 ```
 +-----------------------------------------------------------+
 |  User Code / Model Definitions                            |
++-----------------------------------------------------------+
+|  monitor/  ETA, resource tracking, live web dashboard     |
 +-----------------------------------------------------------+
 |  graph/    Fluent builder, execution, DOT/SVG             |
 +-----------------------------------------------------------+
@@ -298,6 +417,7 @@ Step-by-step guides from basics to advanced, each with code examples:
 6. **[Advanced Graphs](docs/tutorials/06-advanced-graphs.md)** — forward refs, loops, gates, switches
 7. **[Visualization](docs/tutorials/07-visualization.md)** — DOT/SVG output, reading diagrams
 8. **[Utilities](docs/tutorials/08-utilities.md)** — checkpoints, clipping, freezing, initialization
+9. **[Training Monitor](docs/tutorials/09-monitor.md)** — ETA, resource tracking, live web dashboard
 
 ### Design
 
@@ -306,6 +426,7 @@ Step-by-step guides from basics to advanced, each with code examples:
 
 ### Examples
 
+- [`flodl/examples/quickstart.rs`](flodl/examples/quickstart.rs) — train a model in 30 lines
 - [`flodl/examples/showcase.rs`](flodl/examples/showcase.rs) — every graph builder method in one graph
 
 ## Lineage

@@ -23,7 +23,7 @@ let g = FlowBuilder::from(Linear::new(4, 8)?)
 println!("{}", g.dot());
 
 // SVG file — requires the `dot` binary from Graphviz.
-let svg = g.svg("model.svg")?;
+let svg = g.svg(Some("model.svg"))?;
 ```
 
 `dot()` always works. `svg()` shells out to the Graphviz `dot` command,
@@ -102,12 +102,12 @@ Nodes in the same level have no data dependencies on each other.
 Enable profiling to see per-node execution times:
 
 ```rust
-g.enable_profiling(true);
+g.enable_profiling();
 g.forward(&input)?;
 
 let profile = g.profile().unwrap();
 for node in &profile.nodes {
-    println!("{}: {}", node.node_id, format_duration(node.duration));
+    println!("{}: {}", node.id, format_duration(node.duration.as_secs_f64()));
 }
 ```
 
@@ -115,7 +115,7 @@ Profiled SVG output colors nodes green->yellow->red by relative execution
 time:
 
 ```rust
-g.svg_with_profile("profile.svg")?;
+g.svg_with_profile(Some("profile.svg"))?;
 ```
 
 ### Timing trends
@@ -123,13 +123,14 @@ g.svg_with_profile("profile.svg")?;
 Track timing across epochs to detect performance regression:
 
 ```rust
-g.enable_profiling(true);
+g.enable_profiling();
 
 for epoch in 0..num_epochs {
     for batch in &batches {
         g.forward(&input)?;
-        g.flush_timings(&["encoder", "decoder"]);
+        g.collect_timings(&["encoder", "decoder"]);
     }
+    g.flush_timings(&["encoder", "decoder"]);
 
     let encoder_trend = g.timing_trend("encoder");
     println!("encoder avg: {}", format_duration(encoder_trend.latest()));

@@ -13,6 +13,28 @@ services:
     stdin_open: true
     tty: true
 
+  cuda:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: flodl-cuda
+    volumes:
+      - .:/workspace
+      - cargo-registry-cuda:/root/.cargo/registry
+      - cargo-git-cuda:/root/.cargo/git
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
 volumes:
   cargo-registry:
   cargo-git:
+  cargo-registry-cuda:
+  cargo-git-cuda:

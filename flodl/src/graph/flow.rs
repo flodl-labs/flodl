@@ -523,7 +523,7 @@ impl FlowBuilder {
         let rc: Rc<dyn Module> = Rc::from(module);
         let run = wrap_module(rc.clone());
 
-        // Auto-detect NamedInputModule capability for Using() support
+        // Auto-detect NamedInputModule capability for using() support
         let ref_forward = if rc.as_named_input().is_some() {
             let rc_clone = rc.clone();
             let rf: RefForwardFn = Rc::new(move |input, refs| {

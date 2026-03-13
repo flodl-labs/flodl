@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>floDl Training Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e4e6eb;--dim:#8b8fa3;
+--accent:#6c8cff;--green:#34d399;--red:#f87171;--yellow:#fbbf24;--purple:#a78bfa}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:var(--bg);color:var(--text);padding:0;min-height:100vh}
+
+/* Header */
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;
+display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+.header h1{font-size:18px;font-weight:600;color:var(--accent);letter-spacing:-0.5px}
+.header h1 span{color:var(--dim);font-weight:400}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat-label{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--dim)}
+.stat-value{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.progress-bar{flex:1;min-width:120px;max-width:300px;height:6px;background:var(--border);
+border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:var(--accent);border-radius:3px;transition:width 0.3s}
+
+/* Layout */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;overflow:hidden}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:var(--dim);margin-bottom:12px}
+.full-width{grid-column:1/-1}
+
+/* Charts */
+canvas{width:100%;height:260px;cursor:crosshair}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);cursor:pointer;
+user-select:none;padding:2px 6px;border-radius:4px;transition:opacity 0.2s,background 0.15s}
+.legend-item:hover{background:rgba(108,140,255,0.1)}
+.legend-item.dimmed{opacity:0.3}
+.legend-item.solo{background:rgba(108,140,255,0.15)}
+.legend-dot{width:8px;height:8px;border-radius:50%}
+
+/* Resource bars */
+.res-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.res-item{display:flex;flex-direction:column;gap:4px}
+.res-label{display:flex;justify-content:space-between;font-size:11px;color:var(--dim)}
+.res-bar{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+.res-fill{height:100%;border-radius:4px;transition:width 0.5s}
+.res-fill.cpu{background:var(--accent)}
+.res-fill.ram{background:var(--purple)}
+.res-fill.gpu{background:var(--green)}
+.res-fill.vram{background:var(--yellow)}
+
+/* Log table */
+.log-wrap{max-height:300px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.log-wrap::-webkit-scrollbar{width:6px}
+.log-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th{text-align:left;color:var(--dim);font-weight:500;padding:6px 8px;
+border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card)}
+td{padding:5px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(108,140,255,0.05)}
+
+/* SVG toggle */
+.svg-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px}
+.svg-toggle .arrow{transition:transform 0.2s;font-size:10px}
+.svg-toggle.open .arrow{transform:rotate(90deg)}
+.svg-container{max-height:0;overflow:hidden;transition:max-height 0.3s;background:#fff;border-radius:6px;margin-top:8px}
+.svg-container.open{max-height:2000px}
+.svg-container svg{width:100%;height:auto}
+
+/* Tooltip */
+.tooltip{position:fixed;background:rgba(26,29,39,0.95);color:var(--text);padding:8px 12px;
+border-radius:6px;font-size:11px;pointer-events:none;display:none;z-index:100;
+border:1px solid var(--border);white-space:nowrap;backdrop-filter:blur(8px)}
+
+/* Status */
+.status{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+animation:pulse 2s ease-in-out infinite}
+.status-dot.done{background:var(--dim);animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>floDl <span>Training Dashboard</span></h1>
+  <div class="status" id="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Waiting...</span>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Epoch</div>
+    <div class="stat-value" id="epochNum">—</div>
+  </div>
+  <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+  <div class="stat">
+    <div class="stat-label">ETA</div>
+    <div class="stat-value" id="etaDisplay">—</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Elapsed</div>
+    <div class="stat-value" id="elapsedDisplay">—</div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Training Metrics</h2>
+    <canvas id="metricsChart"></canvas>
+    <div class="legend" id="metricsLegend"></div>
+  </div>
+
+  <div class="card">
+    <h2>Resources</h2>
+    <canvas id="resourceChart"></canvas>
+    <div class="legend" id="resourceLegend"></div>
+    <div class="res-grid" id="resGrid">
+      <div class="res-item"><div class="res-label"><span>CPU</span><span id="cpuVal">—</span></div>
+        <div class="res-bar"><div class="res-fill cpu" id="cpuBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>RAM</span><span id="ramVal">—</span></div>
+        <div class="res-bar"><div class="res-fill ram" id="ramBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>GPU</span><span id="gpuVal">—</span></div>
+        <div class="res-bar"><div class="res-fill gpu" id="gpuBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>VRAM</span><span id="vramVal">—</span></div>
+        <div class="res-bar"><div class="res-fill vram" id="vramBar" style="width:0"></div></div></div>
+    </div>
+  </div>
+
+  <div class="card full-width">
+    <h2>Epoch Log</h2>
+    <div class="log-wrap" id="logWrap">
+      <table>
+        <thead><tr id="logHeader"><th>Epoch</th><th>Duration</th></tr></thead>
+        <tbody id="logBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card full-width" id="svgCard" style="display:none">
+    <div class="svg-toggle" id="svgToggle" onclick="toggleSvg()">
+      <span class="arrow">&#9654;</span>
+      <h2 style="margin:0">Graph Architecture</h2>
+    </div>
+    <div class="svg-container" id="svgContainer"></div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// State
+const epochs=[];
+const metricSeries={};  // name -> [values]
+const resourceSeries={cpu:[],gpu:[],ram:[],vram:[]};
+// Raw byte values for RAM/VRAM (for absolute-scale display when solo'd)
+const resourceRaw={ram_used:[],ram_total:[],vram_used:[],vram_total:[]};
+const COLORS=['#6c8cff','#f87171','#34d399','#fbbf24','#a78bfa','#fb923c','#67e8f9','#f472b6','#86efac','#fcd34d','#c4b5fd','#fdba74'];
+const RES_COLORS={cpu:'#6c8cff',ram:'#a78bfa',gpu:'#34d399',vram:'#fbbf24'};
+let metricNames=[];
+let startTime=null;
+let elapsedTimer=null;
+// Solo filter: {chartId: seriesName|null}. null = show all.
+const soloState={metricsChart:null,resourceChart:null};
+
+// --- Epoch processing (shared by live SSE and archive replay) ---
+function processEpoch(d){
+  epochs.push(d);
+  if(!startTime)startTime=Date.now()-(d.epoch*d.duration*1000);
+  const names=Object.keys(d.metrics||{});
+  names.forEach(n=>{
+    if(!metricSeries[n]){metricSeries[n]=[];metricNames.push(n)}
+    metricSeries[n].push(d.metrics[n]);
+  });
+  const r=d.resources||{};
+  resourceSeries.cpu.push(r.cpu!=null?r.cpu:null);
+  resourceSeries.gpu.push(r.gpu!=null?r.gpu:null);
+  resourceSeries.ram.push(r.ram_used!=null&&r.ram_total?r.ram_used/r.ram_total*100:null);
+  resourceSeries.vram.push(r.vram_used!=null&&r.vram_total?r.vram_used/r.vram_total*100:null);
+  resourceRaw.ram_used.push(r.ram_used||null);
+  resourceRaw.ram_total.push(r.ram_total||null);
+  resourceRaw.vram_used.push(r.vram_used||null);
+  resourceRaw.vram_total.push(r.vram_total||null);
+  updateHeader(d);
+  updateResources(r);
+  updateLog(d);
+  drawMetrics();
+  drawResources();
+  ensureLogHeaders();
+}
+function markComplete(msg){
+  document.getElementById('statusDot').classList.add('done');
+  document.getElementById('statusText').textContent=msg||'Complete';
+  if(elapsedTimer){clearInterval(elapsedTimer);elapsedTimer=null}
+}
+function showSvg(svg){
+  document.getElementById('svgCard').style.display='block';
+  document.getElementById('svgContainer').innerHTML=svg;
+}
+
+// --- Data source: live SSE or archive replay ---
+// ARCHIVE_DATA is injected by monitor.save_html(); if absent, connect live.
+if(typeof ARCHIVE_DATA!=='undefined'){
+  ARCHIVE_DATA.forEach(processEpoch);
+  markComplete(ARCHIVE_COMPLETE||'Complete');
+  if(typeof ARCHIVE_SVG==='string')showSvg(ARCHIVE_SVG);
+}else{
+  const es=new EventSource('/events');
+  es.addEventListener('epoch',e=>processEpoch(JSON.parse(e.data)));
+  es.addEventListener('complete',()=>markComplete());
+  if(!elapsedTimer)elapsedTimer=setInterval(updateElapsed,1000);
+  fetch('/graph.svg').then(r=>{if(r.ok)return r.text();throw 0}).then(showSvg).catch(()=>{});
+}
+
+// --- Header ---
+function updateHeader(d){
+  document.getElementById('epochNum').textContent=d.epoch+'/'+d.total;
+  document.getElementById('progressFill').style.width=(d.epoch/d.total*100)+'%';
+  document.getElementById('statusDot').classList.remove('done');
+  document.getElementById('statusText').textContent='Training';
+  if(d.eta!=null)document.getElementById('etaDisplay').textContent=fmtDur(d.eta);
+  updateElapsed();
+}
+
+function updateElapsed(){
+  if(!startTime)return;
+  const s=(Date.now()-startTime)/1000;
+  document.getElementById('elapsedDisplay').textContent=fmtDur(s);
+}
+
+// --- Resources ---
+function updateResources(r){
+  setBar('cpu',r.cpu);
+  setBar('gpu',r.gpu);
+  if(r.ram_used!=null&&r.ram_total){
+    const pct=r.ram_used/r.ram_total*100;
+    document.getElementById('ramBar').style.width=pct+'%';
+    document.getElementById('ramVal').textContent=fmtBytes(r.ram_used)+'/'+fmtBytes(r.ram_total);
+  }
+  if(r.vram_used!=null&&r.vram_total){
+    const pct=r.vram_used/r.vram_total*100;
+    document.getElementById('vramBar').style.width=pct+'%';
+    document.getElementById('vramVal').textContent=fmtBytes(r.vram_used)+'/'+fmtBytes(r.vram_total);
+  }
+}
+function setBar(id,val){
+  if(val==null)return;
+  document.getElementById(id+'Bar').style.width=val+'%';
+  document.getElementById(id+'Val').textContent=val.toFixed(0)+'%';
+}
+
+// --- Log table ---
+let logHeadersSet=false;
+function ensureLogHeaders(){
+  if(logHeadersSet||metricNames.length===0)return;
+  logHeadersSet=true;
+  const hdr=document.getElementById('logHeader');
+  metricNames.forEach(n=>{const th=document.createElement('th');th.textContent=n;hdr.appendChild(th)});
+  const thRes=document.createElement('th');thRes.textContent='Resources';hdr.appendChild(thRes);
+}
+function updateLog(d){
+  const body=document.getElementById('logBody');
+  const tr=document.createElement('tr');
+  let html='<td>'+d.epoch+'/'+d.total+'</td><td>'+fmtDur(d.duration)+'</td>';
+  metricNames.forEach(n=>{
+    const v=d.metrics&&d.metrics[n]!=null?fmtVal(d.metrics[n]):'—';
+    html+='<td>'+v+'</td>';
+  });
+  const r=d.resources||{};
+  let res=[];
+  if(r.cpu!=null)res.push('CPU:'+r.cpu.toFixed(0)+'%');
+  if(r.gpu!=null)res.push('GPU:'+r.gpu.toFixed(0)+'%');
+  if(r.vram_used!=null&&r.vram_total)res.push('VRAM:'+fmtBytes(r.vram_used)+'/'+fmtBytes(r.vram_total));
+  html+='<td style="color:var(--dim);font-size:11px">'+res.join(' ')+'</td>';
+  tr.innerHTML=html;
+  body.insertBefore(tr,body.firstChild);
+}
+
+// --- Charts ---
+function drawChart(canvasId,series,colors,labels,isPercent,yFmt){
+  const canvas=document.getElementById(canvasId);
+  const ctx=canvas.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const rect=canvas.getBoundingClientRect();
+  canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;
+  ctx.scale(dpr,dpr);
+  const W=rect.width,H=rect.height;
+  const M={top:10,right:12,bottom:24,left:yFmt?70:48};
+  const pw=W-M.left-M.right,ph=H-M.top-M.bottom;
+  ctx.clearRect(0,0,W,H);
+
+  const allNames=Object.keys(series);
+  if(allNames.length===0)return;
+  const solo=soloState[canvasId]||null;
+  const names=solo?allNames.filter(n=>n===solo):allNames;
+  let maxEp=0,minV=Infinity,maxV=-Infinity;
+  // Scale axes to visible series only
+  names.forEach(n=>{
+    const vals=series[n];
+    maxEp=Math.max(maxEp,vals.length);
+    vals.forEach(v=>{if(v!=null){minV=Math.min(minV,v);maxV=Math.max(maxV,v)}});
+  });
+  // maxEp from all series (so X axis stays stable)
+  allNames.forEach(n=>{maxEp=Math.max(maxEp,series[n].length)});
+  if(!isFinite(minV)){minV=0;maxV=1}
+  if(minV===maxV){minV-=1;maxV+=1}
+  if(isPercent){minV=Math.min(0,minV);maxV=Math.max(100,maxV)}
+  const pad=(maxV-minV)*0.05;minV-=pad;maxV+=pad;
+  const xScale=i=>M.left+(i/Math.max(1,maxEp-1))*pw;
+  const yScale=v=>M.top+ph-(v-minV)/(maxV-minV)*ph;
+
+  // Grid
+  const yLabel=yFmt||fmtVal;
+  ctx.strokeStyle='rgba(42,45,58,0.8)';ctx.lineWidth=1;
+  const yTicks=4;
+  for(let i=0;i<=yTicks;i++){
+    const v=minV+(maxV-minV)*i/yTicks;
+    const y=yScale(v);
+    ctx.beginPath();ctx.moveTo(M.left,y);ctx.lineTo(W-M.right,y);ctx.stroke();
+    ctx.fillStyle='#8b8fa3';ctx.font='10px -apple-system,sans-serif';ctx.textAlign='right';
+    ctx.fillText(yLabel(v),M.left-6,y+3);
+  }
+  // X labels
+  const xStep=Math.max(1,Math.floor(maxEp/8));
+  ctx.textAlign='center';
+  for(let i=0;i<maxEp;i+=xStep){
+    ctx.fillStyle='#8b8fa3';ctx.font='10px -apple-system,sans-serif';
+    ctx.fillText(''+(i+1),xScale(i),H-M.bottom+14);
+  }
+
+  // Lines (filtered by solo state — names already filtered above)
+  allNames.forEach((n,si)=>{
+    if(solo&&solo!==n)return;
+    const vals=series[n];
+    const color=colors[si%colors.length];
+    ctx.strokeStyle=color;ctx.lineWidth=solo?3:2;ctx.beginPath();
+    let started=false;
+    vals.forEach((v,i)=>{
+      if(v==null)return;
+      const x=xScale(i),y=yScale(v);
+      if(!started){ctx.moveTo(x,y);started=true}else{ctx.lineTo(x,y)}
+    });
+    ctx.stroke();
+    // Dots for last point
+    if(vals.length>0){
+      const last=vals[vals.length-1];
+      if(last!=null){
+        ctx.fillStyle=color;ctx.beginPath();
+        ctx.arc(xScale(vals.length-1),yScale(last),3,0,Math.PI*2);ctx.fill();
+      }
+    }
+  });
+
+  // Store layout for tooltip
+  canvas._layout={xScale,yScale,maxEp,minV,maxV,series,names:allNames,colors,solo,yFmt:yLabel};
+}
+
+function drawMetrics(){
+  drawChart('metricsChart',metricSeries,COLORS,metricNames,false);
+  updateLegend('metricsLegend',metricNames,COLORS,'metricsChart',drawMetrics);
+}
+function drawResources(){
+  const resNames=['cpu','gpu','ram','vram'];
+  const resLabels={cpu:'CPU',gpu:'GPU',ram:'RAM',vram:'VRAM'};
+  const resColors=[RES_COLORS.cpu,RES_COLORS.gpu,RES_COLORS.ram,RES_COLORS.vram];
+  const solo=soloState['resourceChart'];
+  // When solo'd on RAM or VRAM, show raw bytes with proper scale
+  if(solo==='ram'||solo==='vram'){
+    const rawKey=solo+'_used';
+    const byteSeries={};
+    byteSeries[solo]=resourceRaw[rawKey];
+    drawChart('resourceChart',byteSeries,
+      [solo==='ram'?RES_COLORS.ram:RES_COLORS.vram],
+      [solo],false,fmtBytes);
+  }else if(solo==='cpu'||solo==='gpu'){
+    // Solo percentage metric with % suffix on axis
+    const pctSeries={};
+    pctSeries[solo]=resourceSeries[solo];
+    drawChart('resourceChart',pctSeries,
+      [solo==='cpu'?RES_COLORS.cpu:RES_COLORS.gpu],
+      [solo],true,v=>v.toFixed(0)+'%');
+  }else{
+    drawChart('resourceChart',resourceSeries,resColors,resNames,true);
+  }
+  updateLegend('resourceLegend',resNames,resColors,'resourceChart',drawResources,resLabels);
+}
+
+function updateLegend(id,names,colors,chartId,redrawFn,labels){
+  const el=document.getElementById(id);
+  // Rebuild if count changed
+  if(el.children.length!==names.length){
+    el.innerHTML='';
+    names.forEach((n,i)=>{
+      const item=document.createElement('div');item.className='legend-item';
+      item.dataset.name=n;
+      const dot=document.createElement('div');dot.className='legend-dot';
+      dot.style.background=colors[i%colors.length];
+      const label=(labels&&labels[n])||n;
+      item.appendChild(dot);item.appendChild(document.createTextNode(label));
+      item.addEventListener('click',()=>{
+        const cur=soloState[chartId];
+        soloState[chartId]=(cur===n)?null:n;
+        redrawFn();
+      });
+      el.appendChild(item);
+    });
+  }
+  // Update visual state
+  const solo=soloState[chartId];
+  Array.from(el.children).forEach(item=>{
+    const n=item.dataset.name;
+    item.classList.toggle('solo',solo===n);
+    item.classList.toggle('dimmed',solo!==null&&solo!==n);
+  });
+}
+
+// --- Tooltip ---
+['metricsChart','resourceChart'].forEach(id=>{
+  const canvas=document.getElementById(id);
+  canvas.addEventListener('mousemove',e=>{
+    const L=canvas._layout;if(!L)return;
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left;
+    let best=Infinity,bestI=-1;
+    for(let i=0;i<L.maxEp;i++){
+      const d=Math.abs(L.xScale(i)-mx);
+      if(d<best){best=d;bestI=i}
+    }
+    if(best>30){tooltip.style.display='none';return}
+    let html='<b>Epoch '+(bestI+1)+'</b>';
+    const tipFmt=L.yFmt||fmtVal;
+    L.names.forEach((n,si)=>{
+      if(L.solo&&L.solo!==n)return;
+      const v=L.series[n][bestI];
+      if(v!=null){
+        const c=L.colors[si%L.colors.length];
+        html+='<br><span style="color:'+c+'">&#9632;</span> '+n+': '+tipFmt(v);
+      }
+    });
+    const tip=document.getElementById('tooltip');
+    tip.innerHTML=html;tip.style.display='block';
+    tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-10)+'px';
+  });
+  canvas.addEventListener('mouseleave',()=>{document.getElementById('tooltip').style.display='none'});
+});
+
+// --- SVG toggle ---
+function toggleSvg(){
+  const t=document.getElementById('svgToggle');
+  const c=document.getElementById('svgContainer');
+  t.classList.toggle('open');c.classList.toggle('open');
+}
+
+// --- Formatters ---
+function fmtDur(s){
+  if(s<1)return Math.round(s*1000)+'ms';
+  if(s<60){const w=Math.floor(s);const f=Math.floor((s-w)*10);return f>0?w+'.'+f+'s':w+'s'}
+  const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);
+  if(h>0)return h+'h '+String(m).padStart(2,'0')+'m';
+  return m+'m '+String(sec).padStart(2,'0')+'s';
+}
+function fmtBytes(b){
+  const GB=1073741824,MB=1048576;
+  if(b>=GB)return(b/GB).toFixed(1)+' GB';
+  if(b>=MB)return Math.round(b/MB)+' MB';
+  return Math.round(b/1024)+' KB';
+}
+function fmtVal(v){
+  if(Math.abs(v)<0.001&&v!==0)return v.toExponential(2);
+  if(Math.abs(v)>=1000)return v.toFixed(1);
+  if(Math.abs(v)>=1)return v.toFixed(4);
+  return v.toFixed(4);
+}
+
+// --- Resize ---
+window.addEventListener('resize',()=>{drawMetrics();drawResources()});
+</script>
+</body>
+</html>

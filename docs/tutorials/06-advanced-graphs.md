@@ -81,7 +81,7 @@ for (input, target) in &batches {
     let loss = mse_loss(&output, &Variable::new(target.clone(), false))?;
     loss.backward()?;
     g.detach_state(); // cut gradients, keep values
-    optimizer.step(&params);
+    optimizer.step()?;
     optimizer.zero_grad();
 }
 ```
@@ -155,30 +155,32 @@ let g = FlowBuilder::from(identity).tag("image")
 The loop body receives the tagged ref at every iteration via
 `forward_named(state, refs)`.
 
-### Resettable — auto-reset before forward
+### Auto-reset before loop iteration
 
-Loop bodies with internal mutable state implement `Resettable`:
+Loop bodies with internal mutable state override `reset()` on Module:
 
 ```rust
-impl Resettable for AttentionStep {
-    fn reset(&self, batch_size: i64, device: Device) {
-        // reinitialize location to zeros on the correct device
+impl Module for AttentionStep {
+    fn reset(&self) {
+        self.location.set(None); // clear stale state
     }
+    // ...
 }
 ```
 
-The graph calls `reset(batch_size, device)` on every `Resettable` module
-before execution begins.
+Loops call `reset()` on the body before iterating, preventing stale
+tensors whose grad_fns reference freed saved tensors from crashing
+backward.
 
 ### Composing loop interfaces
 
-A loop body can implement any combination:
+A loop body can override any combination:
 
-| Trait | Effect |
-|-------|--------|
-| `Resettable` | Auto-reset before each forward |
-| `NamedInputModule` | Named ref forwarding from using |
-| `Detachable` | Gradient chain breaking via detach_state |
+| Method | Effect |
+|--------|--------|
+| `reset()` | Auto-reset before each forward |
+| `as_named_input()` | Named ref forwarding from `using()` |
+| `detach_state()` | Gradient chain breaking between training steps |
 
 ## Gate — soft routing
 
@@ -301,7 +303,7 @@ for step in 0..num_steps {
     let loss = mse_loss(&output, &target)?;
     loss.backward()?;
     model.detach_state();
-    optimizer.step(&params);
+    optimizer.step()?;
     optimizer.zero_grad();
 }
 
@@ -322,7 +324,7 @@ let output = model.forward(&test_input)?;
 | While loop | `loop_body(body).while_cond(cond, max)` | 0..max, check before body |
 | Until loop | `loop_body(body).until_cond(cond, max)` | 1..max, check after body |
 | Loop + ref | `loop_body(body).for_n(n).using(&["x"])` | External ref at each iteration |
-| Auto-reset | implement `Resettable` | Graph resets before forward |
+| Auto-reset | override `reset()` on Module | Loop resets body before iterating |
 | Soft routing | `gate(router, modules![...])` | All execute, weighted sum |
 | Hard routing | `switch(router, modules![...])` | One executes, index select |
 | Device placement | `g.set_device(Device::CUDA)` | Move params + state |

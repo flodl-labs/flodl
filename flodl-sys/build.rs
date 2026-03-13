@@ -46,6 +46,9 @@ fn main() {
             .unwrap_or_else(|_| "/usr/local/cuda".to_string());
         println!("cargo:rustc-link-search=native={}/lib64", cuda_home);
         println!("cargo:rustc-link-lib=dylib=cudart");
+
+        // dlopen for NVML GPU utilization queries
+        println!("cargo:rustc-link-lib=dylib=dl");
     }
 
     // Rerun if sources change

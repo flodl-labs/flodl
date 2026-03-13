@@ -37,8 +37,9 @@ All optimizers implement the `Optimizer` trait:
 
 ```rust
 pub trait Optimizer {
-    fn step(&self, params: &[Parameter]);
+    fn step(&mut self) -> Result<()>;
     fn zero_grad(&self);
+    fn set_lr(&mut self, lr: f64);
 }
 ```
 
@@ -71,10 +72,10 @@ optimizer step:
 
 ```rust
 // Scale gradients so total L2 norm <= max_norm
-clip_grad_norm(&params, 1.0);
+clip_grad_norm(&params, 1.0)?;
 
 // Clamp each gradient element to [-max_val, max_val]
-clip_grad_value(&params, 0.5);
+clip_grad_value(&params, 0.5)?;
 ```
 
 ## Device Placement
@@ -120,10 +121,10 @@ for (input_t, target_t) in &batches {
     loss.backward()?;
 
     // 5. Clip gradients
-    clip_grad_norm(&params, 1.0);
+    clip_grad_norm(&params, 1.0)?;
 
     // 6. Update parameters
-    optimizer.step(&params);
+    optimizer.step()?;
 }
 ```
 
@@ -151,10 +152,10 @@ for epoch in 0..num_epochs {
 
         optimizer.zero_grad();
         loss.backward()?;
-        optimizer.step(&params);
+        optimizer.step()?;
 
         model.collect(&["output"])?;            // from graph tag
-        model.record("loss", loss.item()?);     // external metric
+        model.record_scalar("loss", loss.item()?);  // external metric
     }
     model.flush(&["output", "loss"]);           // batch mean -> epoch history
     model.end_epoch();
@@ -183,10 +184,10 @@ for (input_t, target_t) in &batches {
 
     optimizer.zero_grad();
     loss.backward()?;
-    clip_grad_norm(&params, 1.0);
+    clip_grad_norm(&params, 1.0)?;
 
     model.detach_state();  // break gradient chains on state buffers
-    optimizer.step(&params);
+    optimizer.step()?;
 }
 ```
 
@@ -199,10 +200,10 @@ Save and restore model parameters:
 
 ```rust
 // Save
-save_parameters_file("/tmp/model.bin", &params)?;
+save_parameters_file("/tmp/model.fdl", &params)?;
 
 // Load
-load_parameters_file("/tmp/model.bin", &params)?;
+load_parameters_file("/tmp/model.fdl", &params)?;
 ```
 
 Parameters are always serialized as float32, making checkpoints portable
@@ -220,20 +221,19 @@ Schedulers compute learning rates without owning the optimizer — they are
 pure calculators:
 
 ```rust
-let scheduler = CosineScheduler::new(0.001, 100);  // initial_lr, total_steps
+let scheduler = CosineScheduler::new(0.001, 1e-6, 100);  // base_lr, min_lr, total_steps
 
 for step in 0..100 {
-    let lr = scheduler.get_lr();
-    // Apply lr to optimizer manually or via optimizer.set_lr()
-    scheduler.tick();
+    let lr = scheduler.lr(step);
+    optimizer.set_lr(lr);
 }
 ```
 
 Compose with warmup:
 
 ```rust
-let inner = CosineScheduler::new(0.001, 100);
-let scheduler = WarmupScheduler::new(inner, 10);  // 10 warmup steps
+let inner = CosineScheduler::new(0.001, 1e-6, 100);
+let scheduler = WarmupScheduler::new(inner, 0.001, 10);  // inner, target_lr, warmup_steps
 ```
 
 ## Eval Mode
@@ -290,8 +290,8 @@ fn main() -> Result<()> {
 
         optimizer.zero_grad();
         loss.backward()?;
-        clip_grad_norm(&params, 1.0);
-        optimizer.step(&params);
+        clip_grad_norm(&params, 1.0)?;
+        optimizer.step()?;
 
         if epoch % 10 == 0 {
             println!("epoch {}  loss={:.6}", epoch, loss.item()?);

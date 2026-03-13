@@ -86,12 +86,12 @@ C++ handle cleanup.
 
 ## Phase 3: Autograd Engine — DONE
 
-`autograd/` — Rust-native reverse-mode automatic differentiation.
+`autograd/` — Reverse-mode automatic differentiation backed by libtorch.
 
 - `Variable`: `Rc<RefCell<VariableInner>>` — cheap Clone, interior mutability
-- 37 differentiable operations with backward functions
-- `no_grad` closure for inference
-- `backward()` engine with topological sort
+- 50+ differentiable operations delegating to libtorch's native autograd
+- `no_grad` closure and `NoGradGuard` for inference
+- `backward()` delegates to libtorch's C++ backward engine
 - Gradient accumulation for shared parameters
 
 ---
@@ -214,7 +214,7 @@ Deliverables:
 
 ## Test Coverage
 
-166 library tests + 14 showcase tests. Zero clippy warnings.
+228 library tests + 15 showcase tests. Zero clippy warnings.
 All passing in Docker (CPU, libtorch 2.10.0).
 
 ---

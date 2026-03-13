@@ -1,0 +1,37 @@
+# flodl CUDA image — for GPU builds, testing, and CI.
+#
+# Uses NVIDIA's CUDA base image with libtorch CUDA variant.
+# For runtime GPU access, use: docker run --gpus all ...
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    curl \
+    unzip \
+    ca-certificates \
+    git \
+    gcc \
+    g++ \
+    pkg-config \
+    graphviz \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Rust ---
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# --- libtorch (CUDA 12.4) ---
+ARG LIBTORCH_VERSION=2.10.0
+RUN wget -q "https://download.pytorch.org/libtorch/cu124/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu124.zip" \
+    && unzip -q "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu124.zip" -d /usr/local \
+    && rm "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu124.zip"
+
+ENV LIBTORCH_PATH="/usr/local/libtorch"
+ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
+ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
+ENV CUDA_HOME="/usr/local/cuda"
+
+WORKDIR /workspace

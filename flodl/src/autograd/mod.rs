@@ -701,6 +701,65 @@ mod tests {
     }
 
     #[test]
+    fn test_stack_gradient() {
+        let a = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        let b = Variable::new(from_f32(&[3.0, 4.0], &[2]), true);
+        let c = Variable::new(from_f32(&[5.0, 6.0], &[2]), true);
+        let stacked = Variable::stack(&[a.clone(), b.clone(), c.clone()], 0).unwrap();
+        assert_eq!(stacked.data().shape(), vec![3, 2]);
+
+        let w = Variable::new(from_f32(&[1.0, 0.0, 0.0, 1.0, 2.0, 0.0], &[3, 2]), false);
+        let loss = stacked.mul(&w).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+
+        assert_eq!(a.grad().unwrap().to_f32_vec().unwrap(), vec![1.0, 0.0]);
+        assert_eq!(b.grad().unwrap().to_f32_vec().unwrap(), vec![0.0, 1.0]);
+        assert_eq!(c.grad().unwrap().to_f32_vec().unwrap(), vec![2.0, 0.0]);
+    }
+
+    #[test]
+    fn test_triu_gradient() {
+        // 2x2 matrix, triu with diagonal=1 keeps only upper triangle (above main diag)
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), true);
+        let y = x.triu(1).unwrap();
+        let vals = y.data().to_f32_vec().unwrap();
+        assert_eq!(vals, vec![0.0, 2.0, 0.0, 0.0]); // only (0,1) survives
+
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // gradient flows only through upper triangle
+        assert_eq!(grad, vec![0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_triu_batch_gradient() {
+        // [2, 3, 3] batch — triu applied per-matrix
+        let x = Variable::new(from_f32(&[
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+            10.0, 11.0, 12.0,
+            13.0, 14.0, 15.0,
+            16.0, 17.0, 18.0,
+        ], &[2, 3, 3]), true);
+        let y = x.triu(0).unwrap();
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        let expected = vec![
+            1.0, 1.0, 1.0,
+            0.0, 1.0, 1.0,
+            0.0, 0.0, 1.0,
+            1.0, 1.0, 1.0,
+            0.0, 1.0, 1.0,
+            0.0, 0.0, 1.0,
+        ];
+        assert_eq!(grad, expected);
+    }
+
+    #[test]
     fn test_shared_variable_multiple_adds() {
         let state0 = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
         let bias = Variable::new(from_f32(&[0.0, 0.0], &[2]), true);

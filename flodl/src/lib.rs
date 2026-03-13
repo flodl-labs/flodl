@@ -25,6 +25,7 @@ pub mod tensor;
 pub mod autograd;
 pub mod nn;
 pub mod graph;
+pub mod monitor;
 
 /// Shorthand for building `Vec<Box<dyn Module>>` from a list of modules.
 /// Use with `split`, `gate`, and `switch` to avoid manual `Box::new()` wrapping.
@@ -40,10 +41,10 @@ macro_rules! modules {
     };
 }
 
-pub use tensor::{cuda_available, cuda_device_count, Device, DType, Result, Tensor, TensorOptions};
+pub use tensor::{cuda_available, cuda_device_count, cuda_memory_info, cuda_utilization, Device, DType, Result, Tensor, TensorOptions};
 pub use autograd::{Variable, no_grad, is_grad_enabled, NoGradGuard, adaptive_avg_pool2d, grid_sample};
 pub use nn::{
-    Module, NamedInputModule, Resettable, Detachable,
+    Module, NamedInputModule,
     Parameter, Linear, Optimizer, Stateful, SGD, Adam, AdamW,
     save_parameters, load_parameters, save_parameters_file, load_parameters_file,
     GradScaler, cast_parameters,

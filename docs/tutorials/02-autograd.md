@@ -46,9 +46,14 @@ let y = x.mul(&w)?.sum()?;
 
 The full set of differentiable operations includes: `add`, `sub`, `mul`,
 `div`, `matmul`, `relu`, `sigmoid`, `tanh_act`, `gelu`, `silu`, `exp`,
-`log`, `neg`, `sqrt`, `sum`, `sum_dim`, `mean_dim`, `mul_scalar`,
-`add_scalar`, `softmax`, `transpose`, `reshape`, `narrow`, `cat`, `select`,
-`index_select`, `conv2d`, `layer_norm`, and more.
+`log`, `neg`, `sqrt`, `abs`, `pow_scalar`, `sin`, `cos`, `sign`, `floor`,
+`ceil`, `round`, `reciprocal`, `clamp`, `sum`, `sum_dim`, `mean`, `mean_dim`,
+`var`, `std`, `var_dim`, `std_dim`, `mul_scalar`, `add_scalar`, `div_scalar`,
+`softmax`, `log_softmax`, `transpose`, `permute`, `reshape`, `flatten`,
+`squeeze`, `unsqueeze`, `expand`, `narrow`, `select`, `cat`, `chunk`,
+`repeat`, `pad`, `index_select`, `gather`, `topk`, `sort`,
+`conv2d`, `conv_transpose2d`, `adaptive_avg_pool2d`, `grid_sample`,
+`layer_norm`, and more.
 
 ## Backward Pass: Computing Gradients
 

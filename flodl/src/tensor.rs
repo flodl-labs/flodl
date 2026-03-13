@@ -573,6 +573,16 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Upper triangle of a matrix (or batch of matrices).
+    /// Elements below the `diagonal`-th diagonal are zeroed.
+    /// `diagonal=0` keeps the main diagonal; `diagonal=1` excludes it.
+    pub fn triu(&self, diagonal: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_triu(self.handle, diagonal, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Raise every element to a scalar exponent.
     pub fn pow_scalar(&self, exponent: f64) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
@@ -1489,6 +1499,22 @@ pub fn cuda_available() -> bool {
 /// Returns the number of CUDA devices.
 pub fn cuda_device_count() -> i32 {
     unsafe { ffi::flodl_cuda_device_count() }
+}
+
+/// Query CUDA memory usage for the current device.
+/// Returns `(used_bytes, total_bytes)` or an error if CUDA is not available.
+pub fn cuda_memory_info() -> Result<(u64, u64)> {
+    let mut used: u64 = 0;
+    let mut total: u64 = 0;
+    check_err(unsafe { ffi::flodl_cuda_mem_info(&mut used, &mut total) })?;
+    Ok((used, total))
+}
+
+/// Query GPU utilization percentage (0-100) via NVML.
+/// Returns `None` if NVML is not available or the query fails.
+pub fn cuda_utilization() -> Option<u32> {
+    let val = unsafe { ffi::flodl_cuda_utilization(0) };
+    if val >= 0 { Some(val as u32) } else { None }
 }
 
 #[cfg(test)]

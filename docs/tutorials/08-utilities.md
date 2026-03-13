@@ -21,8 +21,8 @@ exceed `max_norm`. Returns the original norm before clipping.
 
 ```rust
 loss.backward()?;
-let orig_norm = clip_grad_norm(&params, 1.0);
-optimizer.step(&params);
+let orig_norm = clip_grad_norm(&params, 1.0)?;
+optimizer.step()?;
 ```
 
 ### clip_grad_value
@@ -31,8 +31,8 @@ Clamps each individual gradient element to `[-max_val, max_val]`.
 
 ```rust
 loss.backward()?;
-clip_grad_value(&params, 0.5);
-optimizer.step(&params);
+clip_grad_value(&params, 0.5)?;
+optimizer.step()?;
 ```
 
 Use `clip_grad_norm` as the default — it preserves gradient direction.
@@ -47,10 +47,10 @@ Save and restore model parameters with a compact binary format.
 use flodl::{save_parameters_file, load_parameters_file};
 
 // Save
-save_parameters_file("/tmp/model.bin", &model.parameters())?;
+save_parameters_file("/tmp/model.fdl", &model.parameters())?;
 
 // Load
-load_parameters_file("/tmp/model.bin", &model.parameters())?;
+load_parameters_file("/tmp/model.fdl", &model.parameters())?;
 ```
 
 `load_parameters` validates that the parameter count, names, and shapes
@@ -72,7 +72,7 @@ for epoch in 0..num_epochs {
     // ... training loop ...
 
     if (epoch + 1) % 10 == 0 {
-        let path = format!("/tmp/checkpoint_epoch_{}.bin", epoch + 1);
+        let path = format!("/tmp/checkpoint_epoch_{}.fdl", epoch + 1);
         save_parameters_file(&path, &params)?;
     }
 }
@@ -88,10 +88,13 @@ override this when needed.
 
 | Function | Distribution | Best for |
 |----------|-------------|----------|
-| `kaiming_uniform(shape, fan_in)` | U(-bound, bound) | ReLU activations |
-| `kaiming_normal(shape, fan_in)` | N(0, std) | ReLU activations |
-| `xavier_uniform(shape, fan_in, fan_out)` | U(-bound, bound) | Sigmoid / Tanh |
-| `xavier_normal(shape, fan_in, fan_out)` | N(0, std) | Sigmoid / Tanh |
+| `kaiming_uniform(shape, fan_in, device)` | U(-bound, bound) | ReLU activations |
+| `kaiming_normal(shape, fan_in, device)` | N(0, std) | ReLU activations |
+| `xavier_uniform(shape, fan_in, fan_out, device)` | U(-bound, bound) | Sigmoid / Tanh |
+| `xavier_normal(shape, fan_in, fan_out, device)` | N(0, std) | Sigmoid / Tanh |
+
+Note: `kaiming_uniform` and `kaiming_normal` are available in the `nn::init` module
+but are not re-exported at the crate root. Use `flodl::nn::init::kaiming_uniform(...)`.
 
 ### Custom initialization
 
@@ -101,7 +104,7 @@ Replace parameter data after constructing the module:
 let layer = Linear::new(128, 64)?;
 
 // Re-initialize weight with Xavier normal.
-let w = xavier_normal(&[64, 128], 128, 64)?;
+let w = xavier_normal(&[64, 128], 128, 64, Device::CPU)?;
 layer.parameters()[0].set_data(&w);
 ```
 
@@ -112,27 +115,30 @@ Schedulers are pure LR calculators, decoupled from the optimizer:
 ```rust
 use flodl::*;
 
-// Step decay: multiply by factor every N steps
-let scheduler = StepDecay::new(0.01, 0.1, 30);  // lr=0.01, factor=0.1, every 30 steps
+// Step decay: multiply by gamma every step_size steps
+let scheduler = StepDecay::new(0.01, 30, 0.1);  // base_lr, step_size, gamma
 
 // Cosine annealing
-let scheduler = CosineScheduler::new(0.001, 100);  // lr=0.001, total_steps=100
+let scheduler = CosineScheduler::new(0.001, 1e-6, 100);  // base_lr, min_lr, total_steps
 
 // Warmup wrapper (composes with any scheduler)
-let inner = CosineScheduler::new(0.001, 100);
-let scheduler = WarmupScheduler::new(inner, 10);  // 10 warmup steps
+let inner = CosineScheduler::new(0.001, 1e-6, 100);
+let scheduler = WarmupScheduler::new(inner, 0.001, 10);  // inner, target_lr, warmup_steps
 
 // Reduce on plateau
-let scheduler = PlateauScheduler::new(0.001, 0.1, 5);  // lr, factor, patience
+let mut scheduler = PlateauScheduler::new(0.001, 5, 0.1, 1e-6);  // base_lr, patience, factor, min_lr
 ```
 
-All implement the `Scheduler` trait:
+Step-based schedulers implement the `Scheduler` trait:
 
 ```rust
 pub trait Scheduler {
-    fn get_lr(&self) -> f64;
+    fn lr(&self, step: usize) -> f64;
 }
 ```
+
+`PlateauScheduler` is reactive (driven by metrics, not step count) and uses
+`observe(metric)` / `lr()` instead.
 
 ## Trend-based training control
 
@@ -182,7 +188,7 @@ for epoch in 0..num_epochs {
         let loss = cross_entropy_loss(&pred, &target)?;
 
         g.collect(&["hidden"])?;              // from graph tag
-        g.record("loss", loss.item()?);       // external scalar
+        g.record_scalar("loss", loss.item()?);  // external scalar
     }
     g.flush(&["hidden", "loss"]);
 }
@@ -250,7 +256,7 @@ let g = FlowBuilder::from(Linear::new(4, 64)?).tag("encoder")
 // Set up training.
 let params = g.parameters();
 let optimizer = Adam::new(&params, 0.001);
-let scheduler = CosineScheduler::new(0.001, 100);
+let scheduler = CosineScheduler::new(0.001, 1e-6, 100);
 g.set_training(true);
 
 for epoch in 0..100 {
@@ -263,15 +269,15 @@ for epoch in 0..100 {
         let loss = mse_loss(&output, &target)?;
         loss.backward()?;
 
-        clip_grad_norm(&params, 1.0);
-        optimizer.step(&params);
+        clip_grad_norm(&params, 1.0)?;
+        optimizer.step()?;
 
         g.collect(&["head"])?;
-        g.record("loss", loss.item()?);
+        g.record_scalar("loss", loss.item()?);
     }
     g.flush(&["head", "loss"]);
     g.end_epoch();
-    scheduler.tick();
+    optimizer.set_lr(scheduler.lr(epoch));
 
     // Early stop when converged.
     if g.trend("loss").converged(5, 1e-5) {
@@ -281,10 +287,12 @@ for epoch in 0..100 {
 
 // Save.
 g.set_training(false);
-save_parameters_file("/tmp/model.bin", &params)?;
+save_parameters_file("/tmp/model.fdl", &params)?;
 ```
 
 ---
+
+Next: [Tutorial 9: Training Monitor](09-monitor.md)
 
 Previous tutorials: [07-Visualization](07-visualization.md) |
 [06-Advanced Graphs](06-advanced-graphs.md) |

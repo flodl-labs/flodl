@@ -468,6 +468,16 @@ extern "C" char* flodl_abs(FlodlTensor t, FlodlTensor* result) {
     }
 }
 
+extern "C" char* flodl_triu(FlodlTensor t, int64_t diagonal,
+                            FlodlTensor* result) {
+    try {
+        *result = wrap(torch::triu(unwrap(t), diagonal));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 extern "C" char* flodl_pow_scalar(FlodlTensor t, double exponent,
                                  FlodlTensor* result) {
     try {
@@ -943,16 +953,98 @@ extern "C" int flodl_cuda_device_count(void) {
     return (int)torch::cuda::device_count();
 }
 
-// Force a real symbol reference to c10_cuda.so so that --as-needed
-// doesn't drop CUDA libraries from the link. Without this, no Rust
-// code directly references symbols in libtorch_cuda.so / c10_cuda.so,
-// so the linker silently drops them and torch::cuda::is_available()
-// returns false even with a GPU present.
+// Force real symbol references to BOTH c10_cuda.so and libtorch_cuda.so
+// so that --as-needed doesn't drop them from the link. Without this,
+// no Rust code directly references symbols in these libraries, so the
+// linker silently drops them and torch::cuda::is_available() returns
+// false even with a GPU present.
+//
+// c10_cuda.so      -> c10::cuda::device_count()
+// libtorch_cuda.so -> torch::CudaIPCCollect() (static initializers in
+//                     this library register the CUDA backend)
+#ifdef FLODL_BUILD_CUDA
+#include <cuda_runtime.h>
+#include <dlfcn.h>
+namespace torch { void CudaIPCCollect(); }
+#endif
+
 extern "C" int flodl_force_cuda_link(void) {
 #ifdef FLODL_BUILD_CUDA
-    return (int)c10::cuda::device_count();
+    // c10_cuda.so dependency
+    volatile int n = (int)c10::cuda::device_count();
+    // libtorch_cuda.so dependency -- take address, don't call
+    volatile auto p = &torch::CudaIPCCollect;
+    (void)p;
+    return n;
 #else
     return 0;
+#endif
+}
+
+// --- CUDA memory info via cudaMemGetInfo ---
+
+extern "C" char* flodl_cuda_mem_info(uint64_t* used_bytes, uint64_t* total_bytes) {
+#ifdef FLODL_BUILD_CUDA
+    if (!torch::cuda::is_available()) {
+        return make_error("CUDA not available");
+    }
+    size_t free_b = 0, total_b = 0;
+    auto err = cudaMemGetInfo(&free_b, &total_b);
+    if (err != cudaSuccess) {
+        return make_error(cudaGetErrorString(err));
+    }
+    *total_bytes = (uint64_t)total_b;
+    *used_bytes  = (uint64_t)(total_b - free_b);
+    return nullptr;
+#else
+    (void)used_bytes; (void)total_bytes;
+    return make_error("CUDA not available (built without cuda feature)");
+#endif
+}
+
+// --- GPU utilization via NVML (dynamically loaded) ---
+
+#ifdef FLODL_BUILD_CUDA
+namespace {
+    typedef int nvml_ret_t;
+    typedef void* nvml_device_t;
+    struct NvmlUtil { unsigned int gpu; unsigned int memory; };
+
+    struct NvmlState {
+        bool tried = false;
+        bool ok = false;
+        nvml_ret_t (*init)(void) = nullptr;
+        nvml_ret_t (*getHandle)(unsigned int, nvml_device_t*) = nullptr;
+        nvml_ret_t (*getUtil)(nvml_device_t, NvmlUtil*) = nullptr;
+    };
+    static NvmlState nvml;
+
+    static void nvml_try_load() {
+        if (nvml.tried) return;
+        nvml.tried = true;
+        void* lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+        if (!lib) return;
+        nvml.init      = (decltype(nvml.init))dlsym(lib, "nvmlInit_v2");
+        nvml.getHandle = (decltype(nvml.getHandle))dlsym(lib, "nvmlDeviceGetHandleByIndex_v2");
+        nvml.getUtil   = (decltype(nvml.getUtil))dlsym(lib, "nvmlDeviceGetUtilizationRates");
+        if (!nvml.init || !nvml.getHandle || !nvml.getUtil) return;
+        nvml.ok = (nvml.init() == 0);
+    }
+} // anonymous namespace
+#endif
+
+extern "C" int flodl_cuda_utilization(int device_index) {
+#ifdef FLODL_BUILD_CUDA
+    nvml_try_load();
+    if (!nvml.ok) return -1;
+    nvml_device_t dev;
+    if (nvml.getHandle((unsigned int)device_index, &dev) != 0) return -1;
+    NvmlUtil util;
+    if (nvml.getUtil(dev, &util) != 0) return -1;
+    return (int)util.gpu;
+#else
+    (void)device_index;
+    return -1;
 #endif
 }
 

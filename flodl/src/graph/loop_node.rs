@@ -183,6 +183,7 @@ fn make_for_loop_func(
         let mut state = inputs[0].clone();
         let refs = extract_refs(&ports.borrow(), inputs);
         trace_buf.borrow_mut().clear();
+        body.reset();
         for i in 0..count {
             state = body_step(&body, &state, &refs).map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
@@ -206,6 +207,7 @@ fn make_while_loop_func(
         let mut state = inputs[0].clone();
         let refs = extract_refs(&ports.borrow(), inputs);
         trace_buf.borrow_mut().clear();
+        body.reset();
         for i in 0..max_iter {
             let halt = cond.forward(&state)?;
             let halt_val = halt.data().to_f32_vec().map_err(|e| {
@@ -239,6 +241,7 @@ fn make_until_loop_func(
         let mut state = inputs[0].clone();
         let refs = extract_refs(&ports.borrow(), inputs);
         trace_buf.borrow_mut().clear();
+        body.reset();
         for i in 0..max_iter {
             state = body_step(&body, &state, &refs).map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
@@ -303,5 +306,13 @@ impl Module for LoopComposite {
         if let Some(ref cond) = self.cond {
             cond.set_training(training);
         }
+    }
+
+    fn reset(&self) {
+        self.body.reset();
+    }
+
+    fn detach_state(&self) {
+        self.body.detach_state();
     }
 }

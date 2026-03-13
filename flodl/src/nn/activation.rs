@@ -77,7 +77,7 @@ impl Module for Tanh {
 
 /// GELU activation (Gaussian Error Linear Unit).
 ///
-/// Approximation: `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`
+/// Uses the exact form: `0.5 * x * (1 + erf(x / sqrt(2)))`
 pub struct GELU;
 
 impl Default for GELU {

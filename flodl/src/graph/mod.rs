@@ -59,7 +59,7 @@ pub enum MergeOp {
     Mean,
 }
 
-/// Forward-reference state buffer. Persists across Forward() calls.
+/// Forward-reference state buffer. Persists across `forward()` calls.
 struct StateEntry {
     writer_ni: usize,
     value: Rc<RefCell<Option<Variable>>>,
@@ -443,13 +443,20 @@ impl Graph {
         }
     }
 
-    /// Break gradient chain on forward-reference state buffers.
+    /// Break gradient chain on forward-reference state buffers and module state.
     /// Call between training steps to prevent unbounded graph growth.
     pub fn detach_state(&self) {
+        // Detach graph-level state buffers (forward references).
         for entry in &self.state {
             let mut val = entry.value.borrow_mut();
             if let Some(ref v) = *val {
-                *val = Some(Variable::new(v.data(), false));
+                *val = Some(v.detach());
+            }
+        }
+        // Propagate detach to modules that hold internal state.
+        for node in &self.nodes {
+            if let Some(ref module) = node.module {
+                module.detach_state();
             }
         }
     }
@@ -525,10 +532,12 @@ impl Graph {
 
     /// Move all parameters, state buffers, and module buffers to a device.
     pub fn set_device(&self, device: crate::tensor::Device) {
-        // Move parameters
+        // Move parameters — detach first so the moved tensor is a fresh leaf,
+        // not a non-leaf with CopyBackward from native autograd.
         for p in self.parameters() {
             if p.variable.data().device() != device
-                && let Ok(t) = p.variable.data().to_device(device)
+                && let Ok(t) = p.variable.data().detach()
+                    .and_then(|d| d.to_device(device))
             {
                 p.variable.set_data(t);
             }
@@ -1422,7 +1431,7 @@ mod tests {
 
     #[test]
     fn test_forward_ref() {
-        // Forward reference: Using before Tag. State carries between Forward() calls.
+        // Forward reference: using() before tag(). State carries between forward() calls.
         // Graph: entry → NilSafeAdd.Using("memory") → Identity.Tag("memory")
         // Pass 1: add gets [stream, zeros] (memory is nil/zeroed) → Identity → state captured
         // Pass 2: add gets [stream, prev_output] → sum → Identity → state captured

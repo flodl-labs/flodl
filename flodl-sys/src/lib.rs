@@ -131,6 +131,7 @@ unsafe extern "C" {
     pub fn flodl_log(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_sqrt(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_abs(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_triu(t: FlodlTensor, diagonal: i64, result: *mut FlodlTensor) -> *mut i8;
 
     pub fn flodl_pow_scalar(
         t: FlodlTensor, exponent: f64, result: *mut FlodlTensor,
@@ -309,6 +310,14 @@ unsafe extern "C" {
     pub fn flodl_cuda_is_available() -> i32;
     pub fn flodl_cuda_device_count() -> i32;
     pub fn flodl_force_cuda_link() -> i32;
+
+    // --- CUDA memory/utilization (monitor support) ---
+
+    pub fn flodl_cuda_mem_info(
+        used_bytes: *mut u64, total_bytes: *mut u64,
+    ) -> *mut i8;
+
+    pub fn flodl_cuda_utilization(device_index: i32) -> i32;
 
     // --- Dtype casting ---
 

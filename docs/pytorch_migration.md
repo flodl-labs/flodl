@@ -400,9 +400,9 @@ cell = nn.LSTMCell(128, 256)
 // flodl
 let layer = Linear::new(784, 128)?;
 let layer = Linear::no_bias(784, 128)?;
-let layer = Conv2d::new(3, 64, 3)?;       // defaults: stride=1, padding=0
-let layer = Conv2d::build(3, 64, 3, true, [1,1], [1,1], [1,1], 1, Device::CPU)?;
-let layer = ConvTranspose2d::new(64, 3, 4)?;
+let layer = Conv2d::new(3, 64, 3)?;                                         // defaults: stride=1, padding=0
+let layer = Conv2d::build(3, 64, 3, true, [1,1], [1,1], [1,1], 1, Device::CPU)?;  // full control
+let layer = ConvTranspose2d::new(64, 3, 4)?;                                // defaults: stride=1, padding=0
 let layer = LayerNorm::new(128)?;
 let layer = BatchNorm::new(128)?;
 let layer = Dropout::new(0.5);
@@ -527,14 +527,14 @@ opt.step()
 ```
 
 ```rust
-// flodl
-let mut opt = SGD::new(&params, 0.01, 0.9);
-let mut opt = Adam::new(&params, 0.001);
-let mut opt = AdamW::new(&params, 0.001, 0.01);
+// flodl — optimizers own a clone of the param list
+let mut opt = SGD::new(&params, 0.01, 0.9);     // lr, momentum
+let mut opt = Adam::new(&params, 0.001);         // lr
+let mut opt = AdamW::new(&params, 0.001, 0.01);  // lr, weight_decay
 
 opt.zero_grad();
 loss.backward()?;
-opt.step()?;
+opt.step()?;  // returns Result<()>
 ```
 
 ## Learning Rate Scheduling
@@ -588,9 +588,9 @@ model.load_state_dict(torch.load("model.pt"))
 ```
 
 ```rust
-// flodl — binary format (v2, dtype-aware)
-save_parameters_file("model.bin", &params)?;
-load_parameters_file("model.bin", &params)?;
+// flodl — .fdl checkpoint format (dtype-aware)
+save_parameters_file("model.fdl", &params)?;
+load_parameters_file("model.fdl", &params)?;
 
 // Or with any io::Write / io::Read:
 save_parameters(&mut writer, &params)?;
@@ -603,13 +603,13 @@ Optimizers implement the `Stateful` trait for save/load:
 
 ```rust
 // Save
-save_parameters_file("model.bin", &params)?;
-let mut f = File::create("optimizer.bin")?;
+save_parameters_file("model.fdl", &params)?;
+let mut f = File::create("optimizer.fdl")?;
 optimizer.save_state(&mut f)?;
 
 // Load
-load_parameters_file("model.bin", &params)?;
-let mut f = File::open("optimizer.bin")?;
+load_parameters_file("model.fdl", &params)?;
+let mut f = File::open("optimizer.fdl")?;
 optimizer.load_state(&mut f)?;
 ```
 
@@ -657,8 +657,8 @@ nn.init.xavier_normal_(layer.weight)
 
 ```rust
 // flodl — returns a new Tensor (immutable design)
-let w = xavier_uniform(&[out_features, in_features])?;
-let w = xavier_normal(&[out_features, in_features])?;
+let w = xavier_uniform(&[out_features, in_features], in_features, out_features, Device::CPU)?;
+let w = xavier_normal(&[out_features, in_features], in_features, out_features, Device::CPU)?;
 ```
 
 ## Mixed Precision Training
@@ -723,9 +723,8 @@ for epoch in 0..num_epochs {
     clip_grad_norm(&params, 1.0)?;
     opt.step()?;
 
-    let lr = sched.lr(epoch);
-    opt.set_lr(lr);
-    println!("Epoch {}: loss={:.4f}", epoch, loss.item()?);
+    opt.set_lr(sched.lr(epoch));
+    println!("Epoch {}: loss={:.4}", epoch, loss.item()?);
 }
 ```
 
@@ -736,12 +735,12 @@ Use Rust's `?` operator for clean propagation:
 
 ```rust
 fn train_step(model: &Graph, input: &Variable, target: &Variable,
-              opt: &mut Adam) -> Result<f64> {
-    opt.zero_grad();
+              optimizer: &mut Adam) -> Result<f64> {
+    optimizer.zero_grad();
     let output = model.forward(input)?;
     let loss = mse_loss(&output, target)?;
     loss.backward()?;
-    opt.step()?;
+    optimizer.step()?;
     loss.item()
 }
 ```
@@ -876,20 +875,20 @@ model.end_epoch();
 
 // Query metrics
 let trend = model.trend("loss");
-println!("mean: {}, std: {}", trend.mean(), trend.std());
+println!("mean: {}", trend.mean());
 
 // Profiling
-model.set_profiling(true);
+model.enable_profiling();
 // ... run forward passes ...
 if let Some(profile) = model.profile() {
-    for t in profile.node_timings() {
-        println!("{}: {}", t.node, format_duration(t.duration_secs));
+    for t in &profile.nodes {
+        println!("{}: {}", t.id, format_duration(t.duration.as_secs_f64()));
     }
 }
 
 // Visualization
-model.dot();               // GraphViz DOT string
-model.svg(Some("model.svg"))?;  // render to SVG
+model.dot();                         // GraphViz DOT string
+model.svg(Some("model.svg"))?;      // render to SVG
 ```
 
 The graph implements `Module`, so it works with optimizers, checkpointing, and everything else.

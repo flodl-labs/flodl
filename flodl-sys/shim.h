@@ -88,6 +88,7 @@ char* flodl_log(FlodlTensor t, FlodlTensor* result);
 char* flodl_sqrt(FlodlTensor t, FlodlTensor* result);
 char* flodl_abs(FlodlTensor t, FlodlTensor* result);
 char* flodl_pow_scalar(FlodlTensor t, double exponent, FlodlTensor* result);
+char* flodl_triu(FlodlTensor t, int64_t diagonal, FlodlTensor* result);
 char* flodl_clamp(FlodlTensor t, double min_val, double max_val,
                 FlodlTensor* result);
 
@@ -234,6 +235,16 @@ char* flodl_to_device(FlodlTensor t, int device, FlodlTensor* result);
 int flodl_cuda_is_available(void);
 int flodl_cuda_device_count(void);
 int flodl_force_cuda_link(void);
+
+// --- CUDA memory/utilization (monitor support) ---
+
+// Query CUDA memory: writes used and total bytes for the current device.
+// Returns error string on failure (caller must free), NULL on success.
+char* flodl_cuda_mem_info(uint64_t* used_bytes, uint64_t* total_bytes);
+
+// Query GPU utilization percentage (0-100) via NVML.
+// Returns -1 if NVML is not available or query fails.
+int flodl_cuda_utilization(int device_index);
 
 // --- Dtype casting ---
 

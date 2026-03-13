@@ -90,25 +90,26 @@ pub trait Module {
     /// Downcast to NamedInputModule if this module supports named refs.
     /// Override in types that implement NamedInputModule.
     fn as_named_input(&self) -> Option<&dyn NamedInputModule> { None }
+
+    /// Reset per-forward state. Called by loops before iterating to clear
+    /// stale tensors whose grad_fns may reference freed saved tensors.
+    /// Override in stateful modules (e.g., attention with location state).
+    fn reset(&self) {}
+
+    /// Detach retained state from the computation graph.
+    /// Called between training steps to break gradient chains on state
+    /// carried across forward passes (e.g., recurrent hidden state).
+    /// Override in stateful modules.
+    fn detach_state(&self) {}
 }
 
-/// Module that can receive additional named inputs via graph Using().
+/// Module that can receive additional named inputs via graph `using()`.
 pub trait NamedInputModule: Module {
     fn forward_named(
         &self,
         input: &Variable,
         refs: &HashMap<String, Variable>,
     ) -> Result<Variable>;
-}
-
-/// Module with resettable per-forward state.
-pub trait Resettable {
-    fn reset(&self);
-}
-
-/// Module with detachable state (breaks gradient chains on retained state).
-pub trait Detachable {
-    fn detach_state(&self);
 }
 
 /// Recursively walk a module tree, calling f on each module exactly once.

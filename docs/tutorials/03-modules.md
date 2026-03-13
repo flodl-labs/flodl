@@ -15,7 +15,8 @@ pub trait Module {
     fn forward(&self, input: &Variable) -> Result<Variable>;
 
     fn parameters(&self) -> Vec<Parameter> { vec![] }
-    fn sub_modules(&self) -> Vec<&dyn Module> { vec![] }
+    fn name(&self) -> &str { "module" }
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> { vec![] }
     fn move_to_device(&self, _device: Device) {}
     fn set_training(&self, _training: bool) {}
     fn as_named_input(&self) -> Option<&dyn NamedInputModule> { None }
@@ -56,7 +57,9 @@ let linear = Linear::on_device(784, 128, Device::CUDA)?;
 2D convolution over `[N, C, H, W]` inputs.
 
 ```rust
-let conv = Conv2d::new(3, 64, 3, 1, 1)?;  // in=3, out=64, kernel=3, stride=1, padding=1
+let conv = Conv2d::new(3, 64, 3)?;  // in=3, out=64, kernel=3 (stride=1, padding=0)
+// For custom stride/padding:
+let conv = Conv2d::build(3, 64, 3, true, [1,1], [1,1], [1,1], 1, Device::CPU)?;
 ```
 
 ## ConvTranspose2d
@@ -64,7 +67,7 @@ let conv = Conv2d::new(3, 64, 3, 1, 1)?;  // in=3, out=64, kernel=3, stride=1, p
 Transpose convolution (upsampling).
 
 ```rust
-let deconv = ConvTranspose2d::new(64, 3, 3, 1, 1)?;
+let deconv = ConvTranspose2d::new(64, 3, 3)?;  // in=64, out=3, kernel=3
 ```
 
 ## Normalization
@@ -129,8 +132,8 @@ Single GRU timestep:
 ```rust
 let gru = GRUCell::new(128, 256)?;
 
-let h = gru.forward(&x)?;          // first step: h initialized to zeros
-let h = gru.forward_with_state(&x2, &h)?;  // subsequent steps
+let h = gru.forward_step(&x, None)?;      // first step: h initialized to zeros
+let h = gru.forward_step(&x2, Some(&h))?; // subsequent steps
 ```
 
 ### LSTMCell
@@ -140,8 +143,8 @@ Single LSTM timestep. State packs hidden and cell states into one tensor:
 ```rust
 let lstm = LSTMCell::new(128, 256)?;
 
-let state = lstm.forward(&x)?;             // first step
-let state = lstm.forward_with_state(&x2, &state)?;  // subsequent steps
+let state = lstm.forward_step(&x, None)?;             // first step
+let state = lstm.forward_step(&x2, Some(&state))?;    // subsequent steps
 ```
 
 ## Activations
@@ -189,25 +192,30 @@ pub trait NamedInputModule: Module {
 }
 ```
 
-### Resettable
+### Stateful Module Methods
 
-For modules with per-forward mutable state (attention location, counter).
-The graph calls `reset` before each forward:
+For modules with per-forward mutable state (attention location, counter),
+override `reset()` on Module. Loops auto-call it before iterating:
 
 ```rust
-pub trait Resettable {
-    fn reset(&self, batch_size: i64, device: Device);
+impl Module for AttentionStep {
+    fn reset(&self) {
+        self.location.set(None); // clear stale state
+    }
+    // ...
 }
 ```
 
-### Detachable
-
-For modules holding Variables across forward calls (recurrent state).
-`graph.detach_state()` calls `detach()` recursively:
+For modules holding Variables across forward calls (recurrent state),
+override `detach_state()` on Module. `graph.detach_state()` propagates
+to all modules:
 
 ```rust
-pub trait Detachable {
-    fn detach(&self);
+impl Module for RecurrentModule {
+    fn detach_state(&self) {
+        // break gradient chain on retained hidden state
+    }
+    // ...
 }
 ```
 
@@ -245,8 +253,8 @@ impl Module for MLP {
         params
     }
 
-    fn sub_modules(&self) -> Vec<&dyn Module> {
-        vec![&self.fc1, &self.fc2]
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
+        vec![Rc::new(self.fc1.clone()), Rc::new(self.fc2.clone())]
     }
 }
 ```

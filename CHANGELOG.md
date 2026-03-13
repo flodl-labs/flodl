@@ -5,21 +5,13 @@ All notable changes to floDl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-- **Project rename**: rdl -> floDl (flow Deep Learning). Crate names `flodl` + `flodl-sys`. FFI prefix `flodl_`, C type `FlodlTensor`, constants `FLODL_*`.
-- **API cleanup**: 11 items completed — schedulers decoupled, default parameters, modules! macro, Result re-export, collect() returns Result, Reduce with native FFI ops, BatchNorm eval safety, build-time NamedInputModule validation.
-- **NamedInputModule on routers**: SoftmaxRouter and SigmoidRouter implement NamedInputModule — sum refs into input before projection.
-- **Native FFI ops**: `flodl_max` and `flodl_norm` added to shim for Reduce::Max and Reduce::Norm.
-
-## [v0.1.0] - 2026-03-12
+## [0.1.0] - 2026-03-13
 
 Initial release. Rust port of [goDl](https://github.com/fab2s/goDl).
 
 ### Core Stack
 - **Tensor**: Owned RAII tensors with Drop, ~72 operations. CPU and CUDA (feature-gated).
-- **Autograd**: Reverse-mode AD with 37 differentiable operations.
+- **Autograd**: Reverse-mode AD backed by libtorch's native autograd engine. 37 differentiable operations with numerical gradient verification.
 - **NN Modules**: Linear, Conv2d, ConvTranspose2d, LayerNorm, BatchNorm, Dropout, Embedding, GRUCell, LSTMCell.
 - **Activations**: ReLU, Sigmoid, Tanh, GELU, SiLU.
 - **Losses**: mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss.
@@ -39,6 +31,13 @@ Initial release. Rust port of [goDl](https://github.com/fab2s/goDl).
 - Checkpointing: save_parameters/load_parameters (binary format, file or io::Write).
 - Weight initialization: kaiming_uniform/normal, xavier_uniform/normal.
 
+### Training Monitor
+- Human-readable ETA with adaptive formatting (hours/minutes/seconds/milliseconds).
+- System resource tracking: CPU, RAM, GPU utilization (NVML), VRAM usage.
+- Live web dashboard via embedded HTTP server with Server-Sent Events.
+- Dashboard features: real-time training curves, resource usage charts, epoch log, graph SVG.
+- CSV and log file export.
+
 ### Observation & Visualization
 - Tag-based metric collection: collect/flush/trend.
 - Trend analysis: slope, stalled, improving, converged.
@@ -47,8 +46,13 @@ Initial release. Rust port of [goDl](https://github.com/fab2s/goDl).
 - Profiling: enable_profiling, profile, timing trends.
 - Training curves: plot_html, export_trends, write_log.
 
+### Infrastructure
+- **CI**: GitHub Actions with CPU test matrix and CUDA build verification.
+- **Docker**: CPU and CUDA Dockerfiles, docker-compose with GPU support.
+- **Build**: Makefile with cpu/cuda targets (build, test, clippy, shell).
+
 ### Testing
-- 166 library tests + 14 showcase tests.
+- 228 library tests + 15 showcase tests.
 - Zero clippy warnings.
 - Autograd numerical gradient checks.
 - Module-level gradient checks.
@@ -59,3 +63,5 @@ Initial release. Rust port of [goDl](https://github.com/fab2s/goDl).
 - **Variable**: `Rc<RefCell<VariableInner>>` for cheap Clone with interior mutability.
 - **Module trait**: single-input forward + optional NamedInputModule for multi-input.
 - **Graph-as-Module**: Graph implements Module for hierarchical composition.
+- **NamedInputModule on routers**: SoftmaxRouter and SigmoidRouter sum refs into input before projection.
+- **Native FFI ops**: flodl_max, flodl_norm, flodl_cuda_mem_info, flodl_cuda_utilization.

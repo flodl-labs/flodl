@@ -74,7 +74,6 @@ let g = FlowBuilder::from(Linear::new(4, 8)?)
 Each branch has independent parameters. Built-in merge operations:
 - `MergeOp::Add` — element-wise sum
 - `MergeOp::Mean` — element-wise average
-- `MergeOp::Cat(dim)` — concatenate along a dimension
 
 ## Naming points with tag
 

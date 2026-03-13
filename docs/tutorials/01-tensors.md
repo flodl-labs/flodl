@@ -10,15 +10,16 @@ All creation functions return `Result<Tensor>`.
 use flodl::{Tensor, TensorOptions, Device, DType};
 
 // From Rust data — data is copied into libtorch
-let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
+let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], Device::CPU)?;
 
 // Filled tensors
-let zeros = Tensor::zeros(&[3, 4], &TensorOptions::default())?;
-let ones = Tensor::ones(&[3, 4], &TensorOptions::default())?;
+let opts = TensorOptions::default();  // Float32, CPU
+let zeros = Tensor::zeros(&[3, 4], opts)?;
+let ones = Tensor::ones(&[3, 4], opts)?;
 
 // Random tensors
-let uniform = Tensor::rand(&[2, 3], &TensorOptions::default())?;   // values in [0, 1)
-let normal = Tensor::randn(&[2, 3], &TensorOptions::default())?;   // standard normal
+let uniform = Tensor::rand(&[2, 3], opts)?;   // values in [0, 1)
+let normal = Tensor::randn(&[2, 3], opts)?;   // standard normal
 
 // Integer tensor (for indices, e.g. Embedding lookups)
 let idx = Tensor::from_i64(&[0, 3, 7], &[3])?;
@@ -26,14 +27,14 @@ let idx = Tensor::from_i64(&[0, 3, 7], &[3])?;
 
 ### Options
 
-Pass options to control dtype and device:
+`TensorOptions` is a plain struct with `dtype` and `device` fields:
 
 ```rust
-let opts = TensorOptions::default().with_dtype(DType::Float64);
-let t = Tensor::ones(&[4], &opts)?;
+let opts = TensorOptions { dtype: DType::Float64, ..Default::default() };
+let t = Tensor::ones(&[4], opts)?;
 
-let gpu_opts = TensorOptions::default().with_device(Device::CUDA);
-let t = Tensor::zeros(&[3, 3], &gpu_opts)?;
+let gpu_opts = TensorOptions { device: Device::CUDA, ..Default::default() };
+let t = Tensor::zeros(&[3, 3], gpu_opts)?;
 ```
 
 ## Shape Inspection
@@ -114,7 +115,7 @@ t.permute(&[1, 0])?          // arbitrary axis reorder
 ```rust
 t.narrow(0, 1, 2)?           // extract a contiguous slice along dim
 t.select(0, 1)?              // pick one index along dim, removing that dim
-Tensor::cat(&[&a, &b], 0)?   // concatenate tensors along dim
+a.cat(&b, 0)?                // concatenate two tensors along dim
 t.index_select(0, &indices)? // gather slices at given indices
 ```
 
@@ -139,7 +140,7 @@ tensors manually.
 
 ```rust
 {
-    let t = Tensor::zeros(&[1000, 1000], &TensorOptions::default())?;
+    let t = Tensor::zeros(&[1000, 1000], TensorOptions::default())?;
     // ... use t ...
 } // t is dropped here — C++ memory freed immediately
 ```

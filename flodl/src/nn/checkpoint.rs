@@ -4,12 +4,13 @@ use crate::tensor::{Device, DType, Result, Tensor, TensorError};
 
 use super::parameter::Parameter;
 
-const MAGIC: [u8; 4] = [b'G', b'O', b'D', b'L'];
+/// Magic bytes for `.fdl` checkpoint files.
+const MAGIC: [u8; 4] = *b"FDLC";
 const VERSION: u32 = 2;
 
-/// Save parameters to a binary checkpoint.
+/// Save parameters to a binary checkpoint (`.fdl` format).
 ///
-/// Format v2: GODL magic (4 bytes) + version (u32) + count (u32) + per-param data.
+/// Format: `FDLC` magic (4 bytes) + version (u32) + count (u32) + per-param data.
 /// Each parameter stores its name, shape, dtype, and data in native precision.
 /// Float16 params stay f16 on disk (half the size of f32).
 pub fn save_parameters<W: Write>(w: &mut W, params: &[Parameter]) -> Result<()> {
@@ -23,15 +24,18 @@ pub fn save_parameters<W: Write>(w: &mut W, params: &[Parameter]) -> Result<()> 
     Ok(())
 }
 
-/// Load parameters from a binary checkpoint.
+/// Load parameters from a binary checkpoint (`.fdl` or legacy `.bin`).
 ///
 /// Validates magic, version, parameter count, names, and shapes.
+/// Accepts both `FDLC` (current) and `GODL` (legacy) magic bytes.
 /// Loaded tensors are cast to the model parameter's current dtype and device.
 pub fn load_parameters<R: Read>(r: &mut R, params: &[Parameter]) -> Result<()> {
     let mut magic = [0u8; 4];
     r.read_exact(&mut magic).map_err(io_err)?;
     if magic != MAGIC {
-        return Err(TensorError::new("invalid checkpoint: bad magic"));
+        return Err(TensorError::new(
+            "invalid checkpoint: bad magic (expected .fdl checkpoint)"
+        ));
     }
 
     let version = read_u32(r)?;

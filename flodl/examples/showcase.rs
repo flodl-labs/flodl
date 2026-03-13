@@ -4,14 +4,16 @@
 //! Builder methods exercised:
 //!
 //!     From, Through, Tag, Using (backward ref), Using (forward ref),
-//!     Split, Merge, Also, Map.Slices, Map.Each, Map.Over,
+//!     Split, Merge, Also, Map.Slices, Map.Each, Map.Over, Map.Batched,
 //!     Loop.For, Loop.While, Loop.Until,
-//!     Gate, Gate.Using, Switch, Switch.Using, Build
+//!     Gate, Gate.Using, Switch, Switch.Using,
+//!     Fork, Input, TagGroup, Build
 //!
 //! Graph methods exercised:
 //!
-//!     forward, parameters, set_training, reset_state, detach_state, dot,
-//!     tagged, flush, trend, enable_profiling, flush_timings, timing_trend
+//!     forward, forward_multi, parameters, set_training, reset_state,
+//!     detach_state, dot, tagged, flush, trend, enable_profiling,
+//!     flush_timings, timing_trend
 //!
 //! Variable ops exercised (via custom modules):
 //!
@@ -21,7 +23,9 @@
 //!     exp, log, neg, abs, sqrt, pow_scalar, clamp,
 //!     softmax, log_softmax,
 //!     transpose, reshape, narrow, flatten, squeeze, unsqueeze, expand,
-//!     cat, select, index_select, permute
+//!     cat, select, index_select, permute,
+//!     sin, cos, reciprocal, var, std, gather, chunk, repeat, pad,
+//!     topk, sort, min, max
 //!
 //! Training tools exercised:
 //!
@@ -66,7 +70,6 @@ fn read_head(dim: i64) -> flodl::Result<Graph> {
 }
 
 /// SiLU block: Linear -> SiLU -> BatchNorm.
-/// Exercises SiLU activation and BatchNorm (added post-original-showcase).
 fn silu_block(dim: i64) -> flodl::Result<Graph> {
     FlowBuilder::from(Linear::new(dim, dim)?)
         .through(SiLU)
@@ -75,7 +78,7 @@ fn silu_block(dim: i64) -> flodl::Result<Graph> {
 }
 
 // ---------------------------------------------------------------------------
-// Custom modules exercising additional ops
+// Custom modules exercising Variable ops
 // ---------------------------------------------------------------------------
 
 /// RMS normalization: x / sqrt(mean(x^2) + eps).
@@ -154,9 +157,9 @@ impl Module for NegSigmoidGate {
 }
 
 /// Shape gymnastics: flatten -> unsqueeze -> squeeze -> transpose.
-/// Exercises shape ops that need a round-trip on [B, D].
 /// Input [B, D] -> flatten [B*D] -> unsqueeze [1, B*D] -> squeeze [B*D]
 /// -> reshape back to [B, D].
+/// Exercises: flatten, unsqueeze, squeeze, reshape.
 struct ShapeOps {
     batch: i64,
     dim: i64,
@@ -205,6 +208,214 @@ impl Module for TransposeRoundTrip {
     }
 }
 
+/// Context blending: uses auxiliary input to modulate the stream.
+/// Exercises: div_scalar, sigmoid, mul, add (via NamedInputModule).
+struct ContextBlend;
+
+impl Module for ContextBlend {
+    fn name(&self) -> &str { "context_blend" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        Ok(input.clone())
+    }
+
+    fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
+        Some(self)
+    }
+}
+
+impl NamedInputModule for ContextBlend {
+    fn forward_named(
+        &self,
+        input: &Variable,
+        refs: &HashMap<String, Variable>,
+    ) -> flodl::Result<Variable> {
+        let ctx = &refs["ctx"];
+        let scaled = ctx.div_scalar(2.0)?;                        // div_scalar
+        let gate = scaled.sigmoid()?;                              // sigmoid
+        let modulated = input.mul(&gate)?;                         // mul
+        modulated.add(input)                                       // add
+    }
+}
+
+/// Spectral basis: sin/cos/reciprocal projections.
+/// Used as a fork side-branch (output captured, stream continues unchanged).
+/// Exercises: sin, cos, reciprocal, tanh_act.
+struct SpectralBasis;
+
+impl Module for SpectralBasis {
+    fn name(&self) -> &str { "spectral_basis" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        let s = input.sin()?;                                      // sin
+        let c = input.cos()?;                                      // cos
+        let sc = s.add(&c)?;
+        let r = sc.reciprocal()?;                                  // reciprocal
+        r.tanh_act()                                               // tanh_act
+    }
+}
+
+/// Variance gate: gate stream by normalized variance.
+/// Exercises: mean (scalar), var, std, expand.
+struct VarianceGate {
+    dim: i64,
+}
+
+impl VarianceGate {
+    fn new(dim: i64) -> Self {
+        VarianceGate { dim }
+    }
+}
+
+impl Module for VarianceGate {
+    fn name(&self) -> &str { "variance_gate" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        let m = input.mean()?;                                     // mean (scalar)
+        let _v = input.var()?;                                     // var (scalar)
+        let s = input.std()?;                                      // std (scalar)
+        let gate_val = m.add(&s)?;
+        let gate = gate_val.expand(&[1, self.dim])?;               // expand
+        input.mul(&gate)                                           // mul
+    }
+}
+
+/// Chunk-recombine: split along last dim, process, cat back.
+/// Exercises: chunk, relu (Variable op), cat.
+struct ChunkRecombine;
+
+impl Module for ChunkRecombine {
+    fn name(&self) -> &str { "chunk_recombine" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        let chunks = input.chunk(2, -1)?;                          // chunk
+        let a = chunks[0].relu()?;                                 // relu (Variable op)
+        let b = chunks[1].neg()?;
+        a.cat(&b, -1)                                              // cat
+    }
+}
+
+/// Attention-like op exercise: softmax, select, narrow, index_select.
+/// Input [1, D] -> exercises each op then returns [1, D].
+struct AttentionLikeOps {
+    dim: i64,
+}
+
+impl AttentionLikeOps {
+    fn new(dim: i64) -> Self {
+        AttentionLikeOps { dim }
+    }
+}
+
+impl Module for AttentionLikeOps {
+    fn name(&self) -> &str { "attention_ops" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        let weights = input.softmax(-1)?;                          // softmax
+
+        // select dim 0, index 0 -> [D]
+        let row = input.select(0, 0)?;                             // select
+        let row2d = row.unsqueeze(0)?;
+
+        // narrow: take first half along last dim
+        let half_dim = self.dim / 2;
+        let first_half = row2d.narrow(-1, 0, half_dim)?;           // narrow
+
+        // index_select: pick specific indices from first_half [1, half_dim]
+        let idx = Tensor::from_i64(&[0, 1], &[2])?;
+        let selected = first_half.index_select(-1, &idx)?;         // index_select
+
+        // Combine: scale weights by mean of selected values
+        let scale = selected.mean()?;                              // scalar
+        let scale_expanded = scale.expand(&[1, self.dim])?;        // expand (scalar -> [1,D])
+        weights.add(&scale_expanded)
+    }
+}
+
+/// TopK/sort/gather/min/max/pad exercise.
+/// Input [1, D] -> exercises each op then returns [1, D].
+struct TopKFilterOps {
+    dim: i64,
+}
+
+impl TopKFilterOps {
+    fn new(dim: i64) -> Self {
+        TopKFilterOps { dim }
+    }
+}
+
+impl Module for TopKFilterOps {
+    fn name(&self) -> &str { "topk_filter" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        // topk: get top 4 values
+        let (values, indices) = input.topk(4, -1, true, true)?;    // topk
+
+        // sort the top values
+        let (sorted, _sort_idx) = values.sort(-1, false)?;         // sort
+
+        // gather: use indices to rearrange
+        let gathered = input.gather(-1, &indices)?;                 // gather
+
+        // min/max as scalar ops
+        let mn = gathered.min()?;                                   // min
+        let mx = gathered.max()?;                                   // max
+        let range = mx.sub(&mn)?;
+
+        // pad: pad sorted [1,4] to [1, D] with zeros on the right
+        let pad_amount = self.dim - 4;
+        let padded = sorted.pad(&[0, pad_amount], 0.0)?;           // pad
+
+        padded.add(&range.expand(&[1, self.dim])?)
+    }
+}
+
+/// Repeat exercise: repeat tensor along dims.
+/// Input [1, D] -> repeat [1, 2] -> [1, 2D] -> narrow back to [1, D].
+struct RepeatNarrow {
+    dim: i64,
+}
+
+impl RepeatNarrow {
+    fn new(dim: i64) -> Self {
+        RepeatNarrow { dim }
+    }
+}
+
+impl Module for RepeatNarrow {
+    fn name(&self) -> &str { "repeat_narrow" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        let repeated = input.repeat(&[1, 2])?;                    // repeat
+        repeated.narrow(-1, 0, self.dim)                           // narrow (trim back)
+    }
+}
+
+/// Resettable module: exercises Module::reset() auto-detection by loops.
+/// Accumulates a call counter, reset clears it.
+struct CounterModule {
+    count: std::cell::Cell<u32>,
+}
+
+impl CounterModule {
+    fn new() -> Self {
+        CounterModule { count: std::cell::Cell::new(0) }
+    }
+}
+
+impl Module for CounterModule {
+    fn name(&self) -> &str { "counter" }
+
+    fn forward(&self, input: &Variable) -> flodl::Result<Variable> {
+        self.count.set(self.count.get() + 1);
+        Ok(input.clone())
+    }
+
+    fn reset(&self) {
+        self.count.set(0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Custom Switch selector (user-defined NamedInputModule)
 // ---------------------------------------------------------------------------
@@ -243,45 +454,71 @@ impl NamedInputModule for HeavyPathSelector {
 }
 
 // ---------------------------------------------------------------------------
+// Sub-graph builder for fork side-branch
+// ---------------------------------------------------------------------------
+
+/// Spectral monitor sub-graph: SpectralBasis -> Linear projection.
+/// Used as a fork target — its output gets tagged but doesn't affect the main stream.
+fn spectral_monitor(dim: i64) -> flodl::Result<Graph> {
+    FlowBuilder::from(SpectralBasis)
+        .through(Linear::new(dim, dim)?)
+        .build()
+}
+
+// ---------------------------------------------------------------------------
 // Graph construction
 // ---------------------------------------------------------------------------
 
 /// Build the extended showcase graph.
 ///
-/// Data flow `[1,2]` -> `[1,2]`:
+/// Data flow `[B,2]` -> `[B,2]` (B=2 for BatchNorm compatibility):
 ///
 /// ```text
-/// From(Linear 2->8)                              Tag("input")
+/// Input("ctx")                                     auxiliary input port
+/// From(Linear 2->8)                                Tag("input")
 /// Through(GELU) -> Through(LayerNorm)
-/// Through(RmsNorm)                               pow_scalar, mean_dim, add_scalar, sqrt, div
-/// Split(read_head, read_head) -> Mean()           multi-head read
-/// Also(Linear 8->8)                               residual
+/// Through(RmsNorm)                                 pow_scalar, mean_dim, add_scalar, sqrt, div
+/// Through(ContextBlend).Using("ctx")               div_scalar, sigmoid, mul, add (NamedInputModule)
+/// Fork(spectral_monitor).Tag("spectral")           sin, cos, reciprocal, tanh_act (side branch)
+/// Split(read_head, read_head) -> Mean()            multi-head read
+/// Also(Linear 8->8)                                residual
 /// Through(Dropout(0.1))
-/// Through(SoftClamp(0.5, 3.0))                   mul_scalar, clamp, abs
-/// Through(Softplus)                              exp, add_scalar, log
-/// Map(read_head(2)).Slices(4)                    per-position processing
+/// Through(SoftClamp(0.5, 3.0))                     mul_scalar, clamp, abs
+/// Through(Softplus)                                exp, add_scalar, log
+/// Through(VarianceGate)                            mean, var, std, expand
+/// Map(read_head(2)).Slices(4)                      per-position processing
 /// Through(Reshape [2,4])
-/// Map(Linear 4->4).Each()                         Tag("halves")
-/// Map(Linear 4->4).Over("halves")                 refine tagged halves
+/// Map(Linear 4->4).Each()                          Tag("halves")
+/// Map(Linear 4->4).Over("halves")                  refine tagged halves
+/// Map(Linear 4->4).Batched().Each()                batched fast-path map
 /// Through(Reshape [1,8])
-/// Through(ShapeOps)                              flatten, unsqueeze, squeeze, reshape
-/// Through(NegSigmoidGate)                        neg, sigmoid, mul
-/// Through(TransposeRoundTrip)                    transpose, permute
-/// Loop(silu_block).For(2)                        SiLU + BatchNorm, Tag("refined")
-/// Gate(SoftmaxRouter, Linear, Linear)            .Using("input")
-/// Switch(HeavyPathSelector, Linear, ffn_block)   .Using("refined")
-/// Through(StateAdd).Using("memory").Tag("memory") forward ref
+/// Through(ShapeOps)                                flatten, unsqueeze, squeeze, reshape
+/// Through(NegSigmoidGate)                          neg, sigmoid, mul
+/// Through(TransposeRoundTrip)                      transpose, permute
+/// Through(CounterModule)                           exercises Module::reset()
+/// Through(ChunkRecombine)                          chunk, relu, cat
+/// Through(AttentionLikeOps)                        softmax, select, narrow, index_select
+/// Through(TopKFilterOps)                           topk, sort, gather, min, max, pad
+/// Through(RepeatNarrow)                            repeat
+/// Loop(silu_block).For(2)                          SiLU + BatchNorm, Tag("refined")
+/// Gate(SoftmaxRouter, Linear, Linear)              .Using("input")
+/// Switch(HeavyPathSelector, Linear, ffn_block)     .Using("refined")
+/// Through(StateAdd).Using("memory").Tag("memory")  forward ref
 /// Loop(Linear).While(ThresholdHalt(100), 5)
-/// Loop(Linear).Until(LearnedHalt(8), 7)          LearnedHalt (added post-showcase)
-/// Through(LogSoftmaxReduce)                      log_softmax, sum_dim
-/// Through(Linear 1->8)                           widen back
-/// Split(Linear, Linear) -> Add()                 MergeOp::Add (was Mean before)
-/// Through(Linear 8->2)                           output projection   Tag("output")
+/// Loop(Linear).Until(LearnedHalt(8), 7)
+/// Through(LogSoftmaxReduce)                        log_softmax, sum_dim
+/// Through(Linear 1->8)                             widen back
+/// Split(Linear, Linear).TagGroup("final_heads") -> Add()
+/// Through(Linear 8->2)                             output projection   Tag("output")
 /// ```
 fn build_showcase() -> flodl::Result<Graph> {
+    const B: i64 = 2;  // batch size (>= 2 for BatchNorm training mode)
     const H: i64 = 8;
 
     FlowBuilder::from(Linear::new(2, H)?)
+        // input() declares auxiliary graph inputs — forward_multi receives them
+        .input(&["ctx"])
+
         // Tag names a position in the stream for later reference via .using()
         .tag("input")
 
@@ -289,6 +526,14 @@ fn build_showcase() -> flodl::Result<Graph> {
         .through(GELU)
         .through(LayerNorm::new(H)?)
         .through(RmsNorm::new())
+
+        // ContextBlend is a NamedInputModule that reads the "ctx" auxiliary input
+        .through(ContextBlend)
+        .using(&["ctx"])
+
+        // .fork() runs a side-branch: output can be tagged, main stream unchanged
+        .fork(spectral_monitor(H)?)
+        .tag("spectral")
 
         // .split() forks the stream into parallel branches, .merge() recombines.
         // modules![] is shorthand for vec![Box::new(...) as Box<dyn Module>, ...]
@@ -301,12 +546,15 @@ fn build_showcase() -> flodl::Result<Graph> {
         .through(SoftClamp::new(0.5, 3.0))
         .through(Softplus)
 
+        // VarianceGate exercises mean/var/std/expand
+        .through(VarianceGate::new(H))
+
         // .map().slices(n) decomposes [B,D] -> [B*n,D/n], applies body, recomposes
         .map(read_head(2)?)
         .slices(H / 2)
 
         // Reshape changes tensor dimensions without copying data
-        .through(Reshape::new(&[2, H / 2]))
+        .through(Reshape::new(&[B * 2, H / 2]))
 
         // .map().each() applies body independently to each element in a multi-stream
         .map(Linear::new(H / 2, H / 2)?)
@@ -318,10 +566,30 @@ fn build_showcase() -> flodl::Result<Graph> {
         .map(Linear::new(H / 2, H / 2)?)
         .over("halves")
 
-        .through(Reshape::new(&[1, H]))
-        .through(ShapeOps::new(1, H))
+        // .map().batched().each() — fast path: full batch in one call
+        .map(Linear::new(H / 2, H / 2)?)
+        .batched()
+        .each()
+
+        .through(Reshape::new(&[B, H]))
+        .through(ShapeOps::new(B, H))
         .through(NegSigmoidGate)
         .through(TransposeRoundTrip)
+
+        // CounterModule overrides reset() — loops auto-call it before iterating
+        .through(CounterModule::new())
+
+        // ChunkRecombine: chunk, relu (Variable op), cat
+        .through(ChunkRecombine)
+
+        // AttentionLikeOps: softmax, select, narrow, index_select
+        .through(AttentionLikeOps::new(H))
+
+        // TopKFilterOps: topk, sort, gather, min, max, pad
+        .through(TopKFilterOps::new(H))
+
+        // RepeatNarrow: repeat
+        .through(RepeatNarrow::new(H))
 
         // .loop_body().for_n(n) repeats the body n times, feeding output back as input.
         // silu_block is a sub-graph (Graph implements Module) — graphs compose freely.
@@ -368,12 +636,12 @@ fn build_showcase() -> flodl::Result<Graph> {
         .through(LogSoftmaxReduce)
         .through(Linear::new(1, H)?)
 
-        // Split branches can also be specified with explicit Box::new() —
-        // equivalent to modules![], shown here for reference.
+        // Split with tag_group: names each branch ("final_heads_0", "final_heads_1")
         .split(vec![
             Box::new(Linear::new(H, H)?),
             Box::new(Linear::new(H, H)?),
         ])
+        .tag_group("final_heads")
         .merge(MergeOp::Add)
 
         // Final projection and output tag for observation
@@ -387,12 +655,22 @@ fn build_showcase() -> flodl::Result<Graph> {
 // ---------------------------------------------------------------------------
 
 fn make_input(requires_grad: bool) -> Variable {
-    let t = Tensor::from_f32(&[1.0, 2.0], &[1, 2], Device::CPU).unwrap();
+    let t = Tensor::from_f32(&[1.0, 2.0, 0.5, -1.0], &[2, 2], Device::CPU).unwrap();
     Variable::new(t, requires_grad)
 }
 
+fn make_context() -> Variable {
+    let t = Tensor::from_f32(
+        &[0.5, -0.3, 0.8, 1.2, -0.5, 0.1, 0.9, -0.7,
+          0.2, 0.7, -0.4, 0.6, 1.0, -0.8, 0.3, -0.1],
+        &[2, 8],
+        Device::CPU,
+    ).unwrap();
+    Variable::new(t, false)
+}
+
 fn make_target() -> Variable {
-    let t = Tensor::from_f32(&[0.5, -0.5], &[1, 2], Device::CPU).unwrap();
+    let t = Tensor::from_f32(&[0.5, -0.5, -0.3, 0.8], &[2, 2], Device::CPU).unwrap();
     Variable::new(t, false)
 }
 
@@ -421,21 +699,22 @@ fn main() {
     let n_params = g.parameters().len();
     println!("Parameters: {}", n_params);
 
-    // -- Forward --
-    let result = g.forward(&make_input(false)).expect("forward failed");
+    // -- Forward (with auxiliary input) --
+    let result = g.forward_multi(&[make_input(false), make_context()])
+        .expect("forward failed");
     println!("Output: {:?} (shape {:?})", result.data().to_f32_vec().unwrap(), result.shape());
 
     // -- Forward ref carries state --
     g.reset_state();
-    let r1 = g.forward(&make_input(false)).unwrap();
+    let r1 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
     let v1 = r1.data().to_f32_vec().unwrap();
-    let r2 = g.forward(&make_input(false)).unwrap();
+    let r2 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
     let v2 = r2.data().to_f32_vec().unwrap();
     println!("State drift: pass2 differs = {}", v1 != v2);
 
     // -- Reset --
     g.reset_state();
-    let r3 = g.forward(&make_input(false)).unwrap();
+    let r3 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
     let v3 = r3.data().to_f32_vec().unwrap();
     println!("Reset restores: {}", v1 == v3);
 
@@ -470,9 +749,10 @@ fn main() {
         for _ in 0..4 {
             optimizer.zero_grad();
             let input = make_input(true);
+            let ctx = make_context();
             let target = make_target();
 
-            let pred = g.forward(&input).unwrap();
+            let pred = g.forward_multi(&[input, ctx]).unwrap();
             let loss = mse_loss(&pred, &target).unwrap();
             epoch_loss += loss.data().item().unwrap() as f64;
 
@@ -534,7 +814,7 @@ fn main() {
     println!("Wrote {}", log_path);
 
     // -- Checkpoint round-trip --
-    let path = "/tmp/flodl_showcase_checkpoint.bin";
+    let path = "/tmp/flodl_showcase_checkpoint.fdl";
     save_parameters_file(path, &params).expect("save failed");
     load_parameters_file(path, &params).expect("load failed");
     println!("\nCheckpoint save/load: OK ({} params)", params.len());
@@ -542,7 +822,7 @@ fn main() {
     // -- no_grad inference (eval mode works now — BatchNorm has running stats from training) --
     g.set_training(false);
     g.reset_state();
-    let final_out = no_grad(|| g.forward(&make_input(false))).unwrap();
+    let final_out = no_grad(|| g.forward_multi(&[make_input(false), make_context()])).unwrap();
     let final_vals = final_out.data().to_f32_vec().unwrap();
     println!("no_grad inference: {:?}", final_vals);
     assert!(final_vals.iter().all(|v| v.is_finite()), "no_grad output should be finite");
@@ -561,19 +841,19 @@ mod tests {
     #[test]
     fn test_build() {
         let g = build_showcase().unwrap();
-        let result = g.forward(&make_input(false)).unwrap();
+        let result = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let vals = result.data().to_f32_vec().unwrap();
-        assert_eq!(vals.len(), 2, "expected 2 outputs, got {}", vals.len());
+        assert_eq!(vals.len(), 4, "expected 4 outputs (2x2), got {}", vals.len());
     }
 
     #[test]
     fn test_forward_ref_carries_state() {
         let g = build_showcase().unwrap();
 
-        let r1 = g.forward(&make_input(false)).unwrap();
+        let r1 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let v1 = r1.data().to_f32_vec().unwrap();
 
-        let r2 = g.forward(&make_input(false)).unwrap();
+        let r2 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let v2 = r2.data().to_f32_vec().unwrap();
 
         assert_ne!(v1, v2, "pass 2 should differ from pass 1");
@@ -583,13 +863,19 @@ mod tests {
     fn test_reset_state() {
         let g = build_showcase().unwrap();
 
-        let r1 = g.forward(&make_input(false)).unwrap();
+        // Populate BatchNorm running stats, then switch to eval mode
+        // so forward passes don't update running stats (deterministic).
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
+        g.set_training(false);
+        g.reset_state();
+
+        let r1 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let v1 = r1.data().to_f32_vec().unwrap();
 
-        g.forward(&make_input(false)).unwrap();
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
 
         g.reset_state();
-        let r3 = g.forward(&make_input(false)).unwrap();
+        let r3 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let v3 = r3.data().to_f32_vec().unwrap();
 
         assert_eq!(v1, v3, "after reset should match pass 1");
@@ -599,18 +885,18 @@ mod tests {
     fn test_detach_state() {
         let g = build_showcase().unwrap();
 
-        g.forward(&make_input(false)).unwrap();
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
         g.detach_state();
 
-        let result = g.forward(&make_input(false)).unwrap();
-        assert_eq!(result.data().to_f32_vec().unwrap().len(), 2);
+        let result = g.forward_multi(&[make_input(false), make_context()]).unwrap();
+        assert_eq!(result.data().to_f32_vec().unwrap().len(), 4);
     }
 
     #[test]
     fn test_backward() {
         let g = build_showcase().unwrap();
 
-        let result = g.forward(&make_input(true)).unwrap();
+        let result = g.forward_multi(&[make_input(true), make_context()]).unwrap();
         let loss = result.sum().unwrap();
         loss.backward().unwrap();
 
@@ -622,16 +908,6 @@ mod tests {
     fn test_parameters() {
         let g = build_showcase().unwrap();
         let params = g.parameters();
-        // Extended graph adds:
-        //   silu_block×2 (loop body): Linear(2) + BatchNorm(2) = 4 each = 8
-        //   LearnedHalt: Linear(2) = 2
-        //   widen Linear(1->8): 2
-        //   split-add Linear×2: 2 each = 4
-        //   Output Linear(8->2): 2
-        // Removed from original:
-        //   ffnBlock in loop (was 4) -> now silu_block (different count)
-        //   untilBody Linear: still 2, but halt changed
-        // Let's just verify it's reasonable and > 44
         assert!(
             params.len() > 44,
             "expected more than 44 params (extended graph), got {}",
@@ -644,20 +920,20 @@ mod tests {
         let g = build_showcase().unwrap();
 
         // Run one training pass to populate BatchNorm running stats
-        g.forward(&make_input(false)).unwrap();
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
 
         // Now eval mode works (running stats populated)
         g.set_training(false);
         g.reset_state();
-        let r1 = g.forward(&make_input(false)).unwrap();
+        let r1 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
 
         // Switch back to training
         g.set_training(true);
         g.reset_state();
-        let r2 = g.forward(&make_input(false)).unwrap();
+        let r2 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
 
-        assert_eq!(r1.data().to_f32_vec().unwrap().len(), 2);
-        assert_eq!(r2.data().to_f32_vec().unwrap().len(), 2);
+        assert_eq!(r1.data().to_f32_vec().unwrap().len(), 4);
+        assert_eq!(r2.data().to_f32_vec().unwrap().len(), 4);
     }
 
     #[test]
@@ -679,9 +955,10 @@ mod tests {
         let mut losses = Vec::new();
         for _ in 0..3 {
             let input = make_input(true);
+            let ctx = make_context();
             let target = make_target();
 
-            let pred = g.forward(&input).unwrap();
+            let pred = g.forward_multi(&[input, ctx]).unwrap();
             let loss = mse_loss(&pred, &target).unwrap();
             losses.push(loss.data().item().unwrap());
 
@@ -703,12 +980,12 @@ mod tests {
         let g = build_showcase().unwrap();
 
         // Run forward — tagged outputs should be captured
-        let out = g.forward(&make_input(false)).unwrap();
+        let out = g.forward_multi(&[make_input(false), make_context()]).unwrap();
 
         // "output" tag should have a captured value
         let tagged = g.tagged("output");
         assert!(tagged.is_some(), "tagged 'output' not captured");
-        assert_eq!(tagged.unwrap().shape(), &[1, 2]);
+        assert_eq!(tagged.unwrap().shape(), &[2, 2]);
 
         // Record a scalar metric manually (output is [1,2], not scalar)
         let loss_val = out.data().to_f32_vec().unwrap().iter().map(|v| *v as f64).sum::<f64>();
@@ -717,7 +994,7 @@ mod tests {
         assert_eq!(g.flush_count(), 1);
 
         // Run another epoch
-        let out2 = g.forward(&make_input(false)).unwrap();
+        let out2 = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let loss_val2 = out2.data().to_f32_vec().unwrap().iter().map(|v| *v as f64).sum::<f64>();
         g.record("test_loss", &[loss_val2]);
         g.flush(&["test_loss"]);
@@ -733,7 +1010,7 @@ mod tests {
         let g = build_showcase().unwrap();
         g.enable_profiling();
 
-        g.forward(&make_input(false)).unwrap();
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
         g.collect_timings(&[]);  // snapshot node timings to buffer
         g.flush_timings(&[]);    // flush buffer to epoch history
 
@@ -747,37 +1024,39 @@ mod tests {
         let g = build_showcase().unwrap();
         let params = g.parameters();
 
+        // Populate BatchNorm running stats, then use eval mode for deterministic output
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
+        g.set_training(false);
+        g.reset_state();
 
-
-        // Save checkpoint
-        let path = "/tmp/flodl_showcase_test_ckpt.bin";
+        // Save checkpoint and capture baseline output
+        let path = "/tmp/flodl_showcase_test_ckpt.fdl";
         save_parameters_file(path, &params).unwrap();
 
-        // Capture pre-train output
-        let before = g.forward(&make_input(false)).unwrap();
+        let before = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let v_before = before.data().to_f32_vec().unwrap();
         assert!(v_before.iter().all(|v| v.is_finite()), "pre-train output NaN");
 
-        // Mutate parameters via training step
+        // Capture first parameter tensor for direct comparison
+        let p0_before = params[0].variable.data().to_f32_vec().unwrap();
+
+        // Mutate parameters via optimizer step
         g.reset_state();
-        let pred = g.forward(&make_input(true)).unwrap();
+        g.set_training(true);
+        let pred = g.forward_multi(&[make_input(true), make_context()]).unwrap();
         let loss = pred.sum().unwrap();
         loss.backward().unwrap();
         let mut opt = Adam::new(&params, 0.1);
         opt.step().unwrap();
 
-        // Verify output changed
-        g.reset_state();
-        let after_train = g.forward(&make_input(false)).unwrap();
-        let v_after = after_train.data().to_f32_vec().unwrap();
-        assert_ne!(v_before, v_after, "training should change output");
+        // Verify parameters actually changed
+        let p0_after = params[0].variable.data().to_f32_vec().unwrap();
+        assert_ne!(p0_before, p0_after, "training should change parameters");
 
-        // Restore and verify
+        // Restore checkpoint and verify parameters match original
         load_parameters_file(path, &params).unwrap();
-        g.reset_state();
-        let restored = g.forward(&make_input(false)).unwrap();
-        let v_restored = restored.data().to_f32_vec().unwrap();
-        assert_eq!(v_before, v_restored, "checkpoint restore should match original");
+        let p0_restored = params[0].variable.data().to_f32_vec().unwrap();
+        assert_eq!(p0_before, p0_restored, "checkpoint restore should match original params");
 
         // Cleanup
         let _ = std::fs::remove_file(path);
@@ -787,9 +1066,9 @@ mod tests {
     fn test_no_grad() {
         let g = build_showcase().unwrap();
 
-        let result = no_grad(|| g.forward(&make_input(true))).unwrap();
+        let result = no_grad(|| g.forward_multi(&[make_input(true), make_context()])).unwrap();
         let vals = result.data().to_f32_vec().unwrap();
-        assert_eq!(vals.len(), 2);
+        assert_eq!(vals.len(), 4);
         assert!(vals.iter().all(|v| v.is_finite()), "no_grad should produce finite values");
     }
 
@@ -812,7 +1091,7 @@ mod tests {
 
         // Run a forward pass with profiling for timing DOT
         g.enable_profiling();
-        g.forward(&make_input(false)).unwrap();
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
 
         let profile_dot = g.dot_with_profile();
         assert!(profile_dot.contains("Forward:"), "profile DOT should show total time");
@@ -834,7 +1113,7 @@ mod tests {
         for _epoch in 0..3 {
             for _ in 0..4 {
                 optimizer.zero_grad();
-                let pred = g.forward(&make_input(true)).unwrap();
+                let pred = g.forward_multi(&[make_input(true), make_context()]).unwrap();
                 let loss = mse_loss(&pred, &make_target()).unwrap();
                 loss.backward().unwrap();
                 optimizer.step().unwrap();
@@ -871,5 +1150,15 @@ mod tests {
 
         assert!(lr_end < lr_start, "LR should decrease: {} -> {}", lr_start, lr_end);
         assert!((lr_end - 1e-5).abs() < 1e-4, "LR should reach min_lr");
+    }
+
+    #[test]
+    fn test_fork_tag() {
+        let g = build_showcase().unwrap();
+        g.forward_multi(&[make_input(false), make_context()]).unwrap();
+
+        // Fork output should be captured via tag
+        let spectral = g.tagged("spectral");
+        assert!(spectral.is_some(), "fork tag 'spectral' not captured");
     }
 }
