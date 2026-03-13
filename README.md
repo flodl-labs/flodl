@@ -104,6 +104,10 @@ minutes, seconds, and milliseconds as needed:
 Call `monitor.serve(port)` and open the URL in a browser. The page updates
 in real time via Server-Sent Events — no polling, no WebSocket, no npm.
 
+<p align="center">
+  <img src="docs/dashboard.gif" alt="floDl live training dashboard" width="800">
+</p>
+
 The dashboard includes:
 
 | Panel | What it shows |
