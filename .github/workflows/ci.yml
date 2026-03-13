@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  LIBTORCH_VERSION: "2.10.0"
+
+jobs:
+  cpu:
+    name: CPU (test + clippy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            wget unzip g++ pkg-config graphviz
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cpu-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: cpu-
+
+      - name: Cache libtorch download
+        id: cache-libtorch
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/libtorch
+          key: libtorch-cpu-${{ env.LIBTORCH_VERSION }}
+
+      - name: Download libtorch (CPU)
+        if: steps.cache-libtorch.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip"
+          unzip -q "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip" -d /usr/local
+          rm "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip"
+
+      - name: Build
+        env:
+          LIBTORCH_PATH: /usr/local/libtorch
+          LD_LIBRARY_PATH: /usr/local/libtorch/lib
+          LIBRARY_PATH: /usr/local/libtorch/lib
+        run: cargo build
+
+      - name: Test
+        env:
+          LIBTORCH_PATH: /usr/local/libtorch
+          LD_LIBRARY_PATH: /usr/local/libtorch/lib
+          LIBRARY_PATH: /usr/local/libtorch/lib
+        run: cargo test -- --nocapture
+
+      - name: Clippy
+        env:
+          LIBTORCH_PATH: /usr/local/libtorch
+          LD_LIBRARY_PATH: /usr/local/libtorch/lib
+          LIBRARY_PATH: /usr/local/libtorch/lib
+        run: cargo clippy -- -W clippy::all
+
+  cuda-build:
+    name: CUDA (build + clippy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: buildx-cuda-${{ hashFiles('Dockerfile.cuda') }}
+          restore-keys: buildx-cuda-
+
+      - name: Build CUDA Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cuda
+          load: true
+          tags: flodl-cuda-ci
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      # Rotate cache to prevent unbounded growth
+      - name: Rotate buildx cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Build with CUDA feature
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            flodl-cuda-ci \
+            cargo build --features cuda
+
+      - name: Clippy with CUDA feature
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            flodl-cuda-ci \
+            cargo clippy --features cuda -- -W clippy::all
