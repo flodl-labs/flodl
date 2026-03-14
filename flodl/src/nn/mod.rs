@@ -30,7 +30,6 @@ pub use activation::{Identity, ReLU, Sigmoid, Tanh, GELU, SiLU};
 pub use loss::{mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
 pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder};
 pub use checkpoint::{
-    save_parameters, load_parameters, save_parameters_file, load_parameters_file,
     save_named_parameters, load_named_parameters, save_named_parameters_file, load_named_parameters_file,
     LoadReport,
 };
@@ -1038,7 +1037,7 @@ mod tests {
     // --- Checkpoint tests ---
 
     #[test]
-    fn test_save_load_parameters() {
+    fn test_save_load_named_parameters() {
         let model = Linear::new(3, 2).unwrap();
         let params = model.parameters();
 
@@ -1046,20 +1045,28 @@ mod tests {
         params[0].variable.set_data(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
         params[1].variable.set_data(from_f32(&[0.1, 0.2], &[2]));
 
-        // Save to buffer
+        // Save as named params
+        let named: Vec<(String, Parameter)> = params.into_iter()
+            .map(|p| (format!("linear/{}", p.name), p))
+            .collect();
         let mut buf = Vec::new();
-        checkpoint::save_parameters(&mut buf, &params).unwrap();
+        checkpoint::save_named_parameters(&mut buf, &named).unwrap();
 
-        // Create new model, load
+        // Create new model, load by name
         let model2 = Linear::new(3, 2).unwrap();
-        let params2 = model2.parameters();
+        let named2: Vec<(String, Parameter)> = model2.parameters().into_iter()
+            .map(|p| (format!("linear/{}", p.name), p))
+            .collect();
         let mut cursor = std::io::Cursor::new(&buf);
-        checkpoint::load_parameters(&mut cursor, &params2).unwrap();
+        let report = checkpoint::load_named_parameters(&mut cursor, &named2).unwrap();
+
+        assert_eq!(report.loaded.len(), 2);
+        assert!(report.missing.is_empty());
 
         // Verify loaded weights match
-        let w = params2[0].variable.data().to_f32_vec().unwrap();
+        let w = named2[0].1.variable.data().to_f32_vec().unwrap();
         assert_eq!(w, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let b = params2[1].variable.data().to_f32_vec().unwrap();
+        let b = named2[1].1.variable.data().to_f32_vec().unwrap();
         assert!((b[0] - 0.1).abs() < 1e-5 && (b[1] - 0.2).abs() < 1e-5);
     }
 

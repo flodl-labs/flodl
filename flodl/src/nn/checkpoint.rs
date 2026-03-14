@@ -8,81 +8,6 @@ use super::parameter::Parameter;
 const MAGIC: [u8; 4] = *b"FDLC";
 const VERSION: u32 = 2;
 
-/// Save parameters to a binary checkpoint (`.fdl` format).
-///
-/// Format: `FDLC` magic (4 bytes) + version (u32) + count (u32) + per-param data.
-/// Each parameter stores its name, shape, dtype, and data in native precision.
-/// Float16 params stay f16 on disk (half the size of f32).
-pub fn save_parameters<W: Write>(w: &mut W, params: &[Parameter]) -> Result<()> {
-    w.write_all(&MAGIC).map_err(io_err)?;
-    w.write_all(&VERSION.to_le_bytes()).map_err(io_err)?;
-    w.write_all(&(params.len() as u32).to_le_bytes()).map_err(io_err)?;
-
-    for p in params {
-        write_param(w, p)?;
-    }
-    Ok(())
-}
-
-/// Load parameters from a `.fdl` checkpoint.
-///
-/// Validates `FDLC` magic, version, parameter count, names, and shapes.
-/// Loaded tensors are cast to the model parameter's current dtype and device.
-pub fn load_parameters<R: Read>(r: &mut R, params: &[Parameter]) -> Result<()> {
-    let mut magic = [0u8; 4];
-    r.read_exact(&mut magic).map_err(io_err)?;
-    if magic != MAGIC {
-        return Err(TensorError::new(
-            "invalid checkpoint: bad magic (expected .fdl checkpoint)"
-        ));
-    }
-
-    let version = read_u32(r)?;
-    if version != 1 && version != 2 {
-        return Err(TensorError::new(&format!(
-            "unsupported checkpoint version {} (want 1 or 2)", version
-        )));
-    }
-
-    let count = read_u32(r)? as usize;
-    if count != params.len() {
-        return Err(TensorError::new(&format!(
-            "parameter count mismatch: checkpoint={} model={}", count, params.len()
-        )));
-    }
-
-    for (i, p) in params.iter().enumerate() {
-        read_param(r, p, i, version)?;
-    }
-    Ok(())
-}
-
-/// Save parameters to a file path. Uses gzip compression if path ends with `.gz`.
-pub fn save_parameters_file(path: &str, params: &[Parameter]) -> Result<()> {
-    let f = std::fs::File::create(path).map_err(io_err)?;
-    if path.ends_with(".gz") {
-        let mut w = flate2::write::GzEncoder::new(f, flate2::Compression::default());
-        save_parameters(&mut w, params)?;
-        w.finish().map_err(io_err)?;
-        Ok(())
-    } else {
-        let mut w = std::io::BufWriter::new(f);
-        save_parameters(&mut w, params)
-    }
-}
-
-/// Load parameters from a file path. Detects gzip from `.gz` extension.
-pub fn load_parameters_file(path: &str, params: &[Parameter]) -> Result<()> {
-    let f = std::fs::File::open(path).map_err(io_err)?;
-    if path.ends_with(".gz") {
-        let mut r = flate2::read::GzDecoder::new(f);
-        load_parameters(&mut r, params)
-    } else {
-        let mut r = std::io::BufReader::new(f);
-        load_parameters(&mut r, params)
-    }
-}
-
 /// Report from a named parameter load: what was loaded, skipped, or missing.
 #[derive(Debug, Clone)]
 pub struct LoadReport {
@@ -125,9 +50,9 @@ pub fn load_named_parameters<R: Read>(r: &mut R, params: &[(String, Parameter)])
     }
 
     let version = read_u32(r)?;
-    if version != 1 && version != 2 {
+    if version != 2 {
         return Err(TensorError::new(&format!(
-            "unsupported checkpoint version {} (want 1 or 2)", version
+            "unsupported checkpoint version {} (want 2)", version
         )));
     }
 
@@ -143,28 +68,16 @@ pub fn load_named_parameters<R: Read>(r: &mut R, params: &[(String, Parameter)])
         r.read_exact(&mut name_bytes).map_err(io_err)?;
         let name = String::from_utf8_lossy(&name_bytes).into_owned();
 
-        if version == 1 {
-            // V1: shape + f32 data
-            let ndim = read_u32(r)? as usize;
-            let mut shape = vec![0i64; ndim];
-            for s in &mut shape { *s = read_i64(r)?; }
-            let numel = read_u64(r)? as usize;
-            let mut raw = vec![0u8; numel * 4];
-            r.read_exact(&mut raw).map_err(io_err)?;
-            ckpt.insert(name, (shape, DType::Float32, raw));
-        } else {
-            // V2: shape + dtype tag + raw bytes
-            let ndim = read_u32(r)? as usize;
-            let mut shape = vec![0i64; ndim];
-            for s in &mut shape { *s = read_i64(r)?; }
-            let mut tag = [0u8; 1];
-            r.read_exact(&mut tag).map_err(io_err)?;
-            let dtype = dtype_from_tag(tag[0])?;
-            let byte_count = read_u64(r)? as usize;
-            let mut raw = vec![0u8; byte_count];
-            r.read_exact(&mut raw).map_err(io_err)?;
-            ckpt.insert(name, (shape, dtype, raw));
-        }
+        let ndim = read_u32(r)? as usize;
+        let mut shape = vec![0i64; ndim];
+        for s in &mut shape { *s = read_i64(r)?; }
+        let mut tag = [0u8; 1];
+        r.read_exact(&mut tag).map_err(io_err)?;
+        let dtype = dtype_from_tag(tag[0])?;
+        let byte_count = read_u64(r)? as usize;
+        let mut raw = vec![0u8; byte_count];
+        r.read_exact(&mut raw).map_err(io_err)?;
+        ckpt.insert(name, (shape, dtype, raw));
     }
 
     let mut loaded = Vec::new();
@@ -387,96 +300,6 @@ fn tensor_from_raw_bytes(raw: &[u8], shape: &[i64], dtype: DType) -> Result<Tens
     }
 }
 
-// --- V1 legacy reader (f32-only format) ---
-
-fn read_param_v1<R: Read>(r: &mut R, p: &Parameter, index: usize) -> Result<()> {
-    let name_len = read_u32(r)? as usize;
-    let mut name_bytes = vec![0u8; name_len];
-    r.read_exact(&mut name_bytes).map_err(io_err)?;
-    let name = String::from_utf8_lossy(&name_bytes);
-    if name != p.name {
-        return Err(TensorError::new(&format!(
-            "parameter {}: name mismatch: checkpoint={:?} model={:?}", index, name, p.name
-        )));
-    }
-
-    let ndim = read_u32(r)? as usize;
-    let mut shape = vec![0i64; ndim];
-    for s in &mut shape {
-        *s = read_i64(r)?;
-    }
-
-    let model_shape = p.variable.shape();
-    if shape != model_shape {
-        return Err(TensorError::new(&format!(
-            "parameter {:?}: shape mismatch: checkpoint={:?} model={:?}", p.name, shape, model_shape
-        )));
-    }
-
-    let count = read_u64(r)? as usize;
-    let data = read_f32_vec(r, count)?;
-    let t = Tensor::from_f32(&data, &shape, Device::CPU)?;
-
-    // Cast to model dtype if needed, then move to device
-    let model_dtype = p.variable.data().dtype();
-    let t = if t.dtype() != model_dtype { t.to_dtype(model_dtype)? } else { t };
-    let dev = p.variable.data().device();
-    if dev != Device::CPU {
-        p.variable.set_data(t.to_device(dev)?);
-    } else {
-        p.variable.set_data(t);
-    }
-    Ok(())
-}
-
-// --- V2 param write/read ---
-
-fn write_param<W: Write>(w: &mut W, p: &Parameter) -> Result<()> {
-    let name = p.name.as_bytes();
-    w.write_all(&(name.len() as u32).to_le_bytes()).map_err(io_err)?;
-    w.write_all(name).map_err(io_err)?;
-
-    write_tensor_data(w, &p.variable.data())?;
-
-    Ok(())
-}
-
-fn read_param<R: Read>(r: &mut R, p: &Parameter, index: usize, version: u32) -> Result<()> {
-    if version == 1 {
-        return read_param_v1(r, p, index);
-    }
-
-    let name_len = read_u32(r)? as usize;
-    let mut name_bytes = vec![0u8; name_len];
-    r.read_exact(&mut name_bytes).map_err(io_err)?;
-    let name = String::from_utf8_lossy(&name_bytes);
-    if name != p.name {
-        return Err(TensorError::new(&format!(
-            "parameter {}: name mismatch: checkpoint={:?} model={:?}", index, name, p.name
-        )));
-    }
-
-    let t = read_tensor_data(r)?;
-
-    let model_shape = p.variable.shape();
-    if t.shape() != model_shape {
-        return Err(TensorError::new(&format!(
-            "parameter {:?}: shape mismatch: checkpoint={:?} model={:?}", p.name, t.shape(), model_shape
-        )));
-    }
-
-    // Cast to model dtype if checkpoint dtype differs, then move to device
-    let model_dtype = p.variable.data().dtype();
-    let t = if t.dtype() != model_dtype { t.to_dtype(model_dtype)? } else { t };
-    let dev = p.variable.data().device();
-    if dev != Device::CPU {
-        p.variable.set_data(t.to_device(dev)?);
-    } else {
-        p.variable.set_data(t);
-    }
-    Ok(())
-}
-
 // --- Shared helpers ---
 
 fn io_err(e: impl std::fmt::Display) -> TensorError {
@@ -511,12 +334,6 @@ fn read_i64<R: Read>(r: &mut R) -> Result<i64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf).map_err(io_err)?;
     Ok(i64::from_le_bytes(buf))
-}
-
-fn read_f32_vec<R: Read>(r: &mut R, count: usize) -> Result<Vec<f32>> {
-    let mut bytes = vec![0u8; count * 4];
-    r.read_exact(&mut bytes).map_err(io_err)?;
-    Ok(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
 // Pub(crate) helpers for optimizer state serialization

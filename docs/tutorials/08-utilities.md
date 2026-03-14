@@ -44,29 +44,31 @@ Save and restore model parameters with a compact binary format.
 ### Saving and loading
 
 ```rust
-use flodl::{save_parameters_file, load_parameters_file};
+use flodl::{save_named_parameters_file, load_named_parameters_file};
 
 // Save
-save_parameters_file("/tmp/model.fdl", &model.parameters())?;
+let named = model.named_parameters();
+save_named_parameters_file("/tmp/model.fdl", &named)?;
 
 // Load
-load_parameters_file("/tmp/model.fdl", &model.parameters())?;
+let named = model.named_parameters();
+let report = load_named_parameters_file("/tmp/model.fdl", &named)?;
 ```
 
-`load_parameters` validates that the parameter count, names, and shapes
-match exactly. If the model architecture has changed since the checkpoint
-was written, loading fails with a descriptive error.
+`load_named_parameters_file` validates parameter names and shapes.
+The returned `LoadReport` tells you exactly which parameters were loaded,
+skipped, or missing.
 
 ### Details
 
 - Parameters store their native dtype — float16 params stay f16 on disk.
-- Positional checkpoints match parameters by count, name, and shape.
-- The `io::Write` / `io::Read` variants (`save_parameters`, `load_parameters`)
+- Named checkpoints match parameters by qualified name and validate shapes.
+- The `io::Write` / `io::Read` variants (`save_named_parameters`, `load_named_parameters`)
   work with any destination: files, buffers, network connections.
 
-### Named checkpoints (partial loading)
+### Partial loading (transfer learning)
 
-For transfer learning, named checkpoints match by qualified name instead
+Named checkpoints match by qualified name, which allows loading a subset
 of position. This allows loading a subset of parameters from a different
 model:
 
@@ -118,7 +120,8 @@ for epoch in 0..num_epochs {
 
     if (epoch + 1) % 10 == 0 {
         let path = format!("/tmp/checkpoint_epoch_{}.fdl", epoch + 1);
-        save_parameters_file(&path, &params)?;
+        let named = model.named_parameters();
+        save_named_parameters_file(&path, &named)?;
     }
 }
 ```
@@ -332,7 +335,8 @@ for epoch in 0..100 {
 
 // Save.
 g.set_training(false);
-save_parameters_file("/tmp/model.fdl", &params)?;
+let named = model.named_parameters();
+save_named_parameters_file("/tmp/model.fdl", &named)?;
 ```
 
 ---

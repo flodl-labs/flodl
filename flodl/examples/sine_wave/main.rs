@@ -13,7 +13,8 @@ fn main() -> Result<()> {
     // --- Data: sin(x) on [-2pi, 2pi] ---
     let opts = TensorOptions::default();
     let n_samples = 200i64;
-    let x_all = Tensor::linspace(-6.2832, 6.2832, n_samples, opts)?; // [-2pi, 2pi]
+    let tau = std::f64::consts::TAU;
+    let x_all = Tensor::linspace(-tau, tau, n_samples, opts)?; // [-2pi, 2pi]
     let y_all = x_all.sin()?;
 
     // Reshape to [n, 1] for the network.
@@ -82,7 +83,7 @@ fn main() -> Result<()> {
     println!("{}", "-".repeat(42));
 
     // Test on 10 evenly spaced points.
-    let test_x = Tensor::linspace(-6.2832, 6.2832, 10, opts)?;
+    let test_x = Tensor::linspace(-tau, tau, 10, opts)?;
     let test_y = test_x.sin()?;
     let test_input = test_x.reshape(&[10, 1])?;
 
@@ -110,7 +111,8 @@ fn main() -> Result<()> {
 
     // --- Checkpoint round-trip ---
     let path = "sine_model.fdl";
-    save_parameters_file(path, &params)?;
+    let named = model.named_parameters();
+    save_named_parameters_file(path, &named)?;
     println!("Checkpoint saved to {}", path);
 
     // Rebuild architecture and load weights.
@@ -121,8 +123,8 @@ fn main() -> Result<()> {
         .through(Linear::new(32, 1)?)
         .build()?;
 
-    let params2 = model2.parameters();
-    load_parameters_file(path, &params2)?;
+    let named2 = model2.named_parameters();
+    load_named_parameters_file(path, &named2)?;
     model2.set_training(false);
 
     // Verify loaded model produces the same output.
@@ -160,7 +162,8 @@ mod tests {
     fn sine_wave_converges() -> Result<()> {
         let opts = TensorOptions::default();
         let n = 100i64;
-        let x = Tensor::linspace(-6.2832, 6.2832, n, opts)?;
+        let tau = std::f64::consts::TAU;
+        let x = Tensor::linspace(-tau, tau, n, opts)?;
         let y = x.sin()?;
         let x_data = x.reshape(&[n, 1])?;
         let y_data = y.reshape(&[n, 1])?;

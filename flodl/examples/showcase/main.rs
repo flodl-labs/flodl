@@ -45,7 +45,7 @@ use flodl::{
     SoftmaxRouter, ThresholdHalt, LearnedHalt,
     Reshape, StateAdd,
     Adam, Optimizer, mse_loss, clip_grad_norm,
-    save_parameters_file, load_parameters_file,
+    save_named_parameters_file, load_named_parameters_file,
     CosineScheduler,
     no_grad,
 };
@@ -812,9 +812,10 @@ fn main() {
 
     // -- Checkpoint round-trip --
     let path = "/tmp/flodl_showcase_checkpoint.fdl";
-    save_parameters_file(path, &params).expect("save failed");
-    load_parameters_file(path, &params).expect("load failed");
-    println!("\nCheckpoint save/load: OK ({} params)", params.len());
+    let named = g.named_parameters();
+    save_named_parameters_file(path, &named).expect("save failed");
+    let report = load_named_parameters_file(path, &named).expect("load failed");
+    println!("\nCheckpoint save/load: OK ({} loaded)", report.loaded.len());
 
     // -- no_grad inference (eval mode works now — BatchNorm has running stats from training) --
     g.set_training(false);
@@ -1020,6 +1021,7 @@ mod tests {
     fn test_checkpoint_roundtrip() {
         let g = build_showcase().unwrap();
         let params = g.parameters();
+        let named = g.named_parameters();
 
         // Populate BatchNorm running stats, then use eval mode for deterministic output
         g.forward_multi(&[make_input(false), make_context()]).unwrap();
@@ -1028,7 +1030,7 @@ mod tests {
 
         // Save checkpoint and capture baseline output
         let path = "/tmp/flodl_showcase_test_ckpt.fdl";
-        save_parameters_file(path, &params).unwrap();
+        save_named_parameters_file(path, &named).unwrap();
 
         let before = g.forward_multi(&[make_input(false), make_context()]).unwrap();
         let v_before = before.data().to_f32_vec().unwrap();
@@ -1051,7 +1053,8 @@ mod tests {
         assert_ne!(p0_before, p0_after, "training should change parameters");
 
         // Restore checkpoint and verify parameters match original
-        load_parameters_file(path, &params).unwrap();
+        let report = load_named_parameters_file(path, &named).unwrap();
+        assert_eq!(report.loaded.len(), named.len());
         let p0_restored = params[0].variable.data().to_f32_vec().unwrap();
         assert_eq!(p0_before, p0_restored, "checkpoint restore should match original params");
 

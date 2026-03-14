@@ -40,7 +40,7 @@ Initial release. Rust port of [goDl](https://github.com/fab2s/goDl).
 - LR scheduling: StepDecay, CosineScheduler, WarmupScheduler (composable), PlateauScheduler.
 - Mixed precision: Float16/BFloat16 dtype casting, GradScaler for loss scaling.
 - Gradient clipping: clip_grad_norm, clip_grad_value.
-- Checkpointing: save_parameters/load_parameters (binary format, file or io::Write).
+- Checkpointing: save_named_parameters/load_named_parameters (named binary format with LoadReport, file or io::Write).
 - Weight initialization: kaiming_uniform/normal, xavier_uniform/normal.
 
 ### Training Monitor

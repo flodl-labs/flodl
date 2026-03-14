@@ -247,26 +247,28 @@ everywhere the parameter is referenced.
 
 ## Checkpoints
 
-Save and restore model parameters:
+Save and restore model parameters using named checkpoints:
 
 ```rust
 // Save
-save_parameters_file("/tmp/model.fdl", &params)?;
+let named = model.named_parameters();
+save_named_parameters_file("/tmp/model.fdl", &named)?;
 
 // Load
-load_parameters_file("/tmp/model.fdl", &params)?;
+let named = model.named_parameters();
+let report = load_named_parameters_file("/tmp/model.fdl", &named)?;
 ```
 
 The `io::Write` / `io::Read` variants are also available:
 
 ```rust
-save_parameters(&mut writer, &params)?;
-load_parameters(&mut reader, &params)?;
+save_named_parameters(&mut writer, &named)?;
+let report = load_named_parameters(&mut reader, &named)?;
 ```
 
-### Named checkpoints (partial loading)
+### Partial loading (transfer learning)
 
-For transfer learning, use named checkpoints with `Graph::named_parameters()`:
+Named checkpoints match by qualified name, so you can load a subset of parameters from a different model using `Graph::named_parameters()`:
 
 ```rust
 // Save with qualified names

@@ -46,7 +46,6 @@ pub use autograd::{Variable, no_grad, is_grad_enabled, NoGradGuard, adaptive_avg
 pub use nn::{
     Module, NamedInputModule,
     Parameter, Linear, Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder,
-    save_parameters, load_parameters, save_parameters_file, load_parameters_file,
     save_named_parameters, load_named_parameters, save_named_parameters_file, load_named_parameters_file,
     LoadReport,
     GradScaler, cast_parameters,
