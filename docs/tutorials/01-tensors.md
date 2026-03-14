@@ -153,6 +153,21 @@ at the end of the owning scope.
 `Clone` on a `Tensor` shares the underlying data (like PyTorch's shallow
 copy). The C++ `TensorImpl` is reference-counted internally by libtorch.
 
+### Diagnostics
+
+Two utilities are available for debugging memory issues:
+
+```rust
+use flodl::{live_tensor_count, rss_kb};
+
+// Number of live C++ Tensor handles (created but not yet dropped).
+// If this grows over time, there is a tensor handle leak.
+println!("live handles: {}", live_tensor_count());
+
+// Current process RSS in kilobytes (Linux only).
+println!("RSS: {}MB", rss_kb() / 1024);
+```
+
 ## Device Transfer
 
 ```rust

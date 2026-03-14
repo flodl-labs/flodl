@@ -71,9 +71,9 @@ g.reset_state();
 let out = g.forward(&first_input)?; // state starts fresh
 ```
 
-**detach_state** breaks the gradient chain on all state buffers without
-clearing the values. Call this between training steps to prevent the
-autograd graph from growing without bound:
+**detach_state** breaks the gradient chain on state buffers, tagged outputs,
+and module internal state without clearing values. Call this between
+training steps to prevent the autograd graph from growing without bound:
 
 ```rust
 for (input, target) in &batches {

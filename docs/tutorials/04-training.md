@@ -170,9 +170,12 @@ the mean, stores it in epoch history, and clears the buffer.
 
 ## Stateful Graphs — detach_state
 
-If your model uses forward references (recurrent state carried between
-forward calls), you **must** call `detach_state()` between training steps.
-Without it, the autograd computation graph grows without bound.
+Call `detach_state()` between training steps to sever autograd references
+held by the graph. It detaches:
+
+- **Forward-reference state buffers** (recurrent state carried between calls)
+- **Tagged outputs** (Variables captured by `tag()` for observation)
+- **Module internal state** (e.g., recurrent hidden state in custom modules)
 
 ```rust
 model.set_training(true);
@@ -188,13 +191,15 @@ for (input_t, target_t) in &batches {
     loss.backward()?;
     clip_grad_norm(&params, 1.0)?;
 
-    model.detach_state();  // break gradient chains on state buffers
+    model.detach_state();  // break gradient chains on state buffers + tagged outputs
     optimizer.step()?;
 }
 ```
 
-**When is it needed?** Only for graphs with forward references — where
-`using("x")` appears before `tag("x")` in the builder chain.
+**When is it needed?** For any graph with forward references (`using("x")`
+before `tag("x")`) it is mandatory. For graphs that use `tag()` for
+observation, it prevents tagged output Variables from holding stale
+autograd graph references between batches.
 
 ## Parameter Groups
 

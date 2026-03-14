@@ -797,8 +797,9 @@ fn train_step(model: &Graph, input: &Variable, target: &Variable,
 |--------|---------|-------|
 | Model memory | Python GC + reference counting | Rust `Drop` trait — deterministic deallocation |
 | GPU memory | GC-delayed; `torch.cuda.empty_cache()` | Freed immediately when last reference drops |
-| Gradient graph | Freed after `.backward()` | Same — freed after `.backward()` |
+| Gradient graph | Freed after `.backward()` | `backward()` also calls `detach_()` — grad_fn chain freed synchronously |
 | No-grad inference | `with torch.no_grad():` | `no_grad(\|\| { ... })` |
+| Handle diagnostics | N/A | `live_tensor_count()`, `rss_kb()` |
 
 No manual memory management needed. Rust's ownership system handles it.
 

@@ -71,6 +71,10 @@ jobs:
       - name: Copy cargo docs into site source
         run: cp -r target/doc site/api
 
+      # ── Generate guide pages from docs/ + stubs ──
+      - name: Build guide pages
+        run: python3 site/build_guide.py
+
       # ── Jekyll site ─────────────────────────────
       - name: Setup Pages
         uses: actions/configure-pages@v5

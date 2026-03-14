@@ -832,4 +832,209 @@ mod tests {
             "RSS grew by {growth_mb:.1}MB over 2000 training steps — possible grad_fn leak"
         );
     }
+
+    /// Phased leak isolation: measures handle count and RSS growth for
+    /// each training phase independently. Run with --nocapture to see output.
+    #[test]
+    fn test_leak_isolation_phases() {
+        use crate::nn::{Module, Linear, clip_grad_norm, cross_entropy_loss};
+        use crate::nn::optim::{Adam, Optimizer};
+        use crate::nn::parameter::Parameter;
+        use crate::tensor::{TensorOptions, live_tensor_count, rss_kb, malloc_trim};
+
+        let opts = TensorOptions { dtype: crate::tensor::DType::Float32, device: Device::CPU };
+        let iters = 1000;
+        let batch = 32;
+        let dim = 128;
+        let classes: i64 = 26;
+
+        // Build a model similar to FBRL: two linears + loss
+        let linear1 = Linear::new(dim, dim).unwrap();
+        let linear2 = Linear::new(dim, classes).unwrap();
+        let params: Vec<Parameter> = linear1.parameters().into_iter()
+            .chain(linear2.parameters()).collect();
+        let mut opt = Adam::new(&params, 0.001);
+
+        // Warm up
+        for _ in 0..50 {
+            let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
+            let h = linear1.forward(&x).unwrap().relu().unwrap();
+            let logits = linear2.forward(&h).unwrap();
+            let target = Variable::new(
+                Tensor::zeros(&[batch], TensorOptions { dtype: crate::tensor::DType::Int64, ..opts }).unwrap(), false);
+            let loss = cross_entropy_loss(&logits, &target).unwrap();
+            opt.zero_grad();
+            loss.backward().unwrap();
+            clip_grad_norm(&params, 1.0).unwrap();
+            opt.step().unwrap();
+        }
+
+        // --- Phase 1: Forward only ---
+        malloc_trim();
+        let h0 = live_tensor_count();
+        let r0 = rss_kb();
+        for _ in 0..iters {
+            let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
+            let h = linear1.forward(&x).unwrap().relu().unwrap();
+            let _logits = linear2.forward(&h).unwrap();
+        }
+        malloc_trim();
+        let h1 = live_tensor_count();
+        let r1 = rss_kb();
+        eprintln!(
+            "Phase 1 (forward only):  handles {:+}  RSS {:+.1}MB",
+            h1 as i64 - h0 as i64,
+            (r1 as f64 - r0 as f64) / 1024.0
+        );
+
+        // --- Phase 2: Forward + backward ---
+        malloc_trim();
+        let h0 = live_tensor_count();
+        let r0 = rss_kb();
+        for _ in 0..iters {
+            let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
+            let h = linear1.forward(&x).unwrap().relu().unwrap();
+            let logits = linear2.forward(&h).unwrap();
+            let target = Variable::new(
+                Tensor::zeros(&[batch], TensorOptions { dtype: crate::tensor::DType::Int64, ..opts }).unwrap(), false);
+            let loss = cross_entropy_loss(&logits, &target).unwrap();
+            loss.backward().unwrap();
+        }
+        malloc_trim();
+        let h1 = live_tensor_count();
+        let r1 = rss_kb();
+        eprintln!(
+            "Phase 2 (fwd+bwd):      handles {:+}  RSS {:+.1}MB",
+            h1 as i64 - h0 as i64,
+            (r1 as f64 - r0 as f64) / 1024.0
+        );
+
+        // --- Phase 3: Full training step ---
+        malloc_trim();
+        let h0 = live_tensor_count();
+        let r0 = rss_kb();
+        for _ in 0..iters {
+            let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
+            let h = linear1.forward(&x).unwrap().relu().unwrap();
+            let logits = linear2.forward(&h).unwrap();
+            let target = Variable::new(
+                Tensor::zeros(&[batch], TensorOptions { dtype: crate::tensor::DType::Int64, ..opts }).unwrap(), false);
+            let l1 = cross_entropy_loss(&logits, &target).unwrap();
+            let l2 = logits.mean().unwrap();
+            let total = l1.add(&l2).unwrap();
+            opt.zero_grad();
+            total.backward().unwrap();
+            clip_grad_norm(&params, 1.0).unwrap();
+            opt.step().unwrap();
+        }
+        malloc_trim();
+        let h1 = live_tensor_count();
+        let r1 = rss_kb();
+        eprintln!(
+            "Phase 3 (full step):    handles {:+}  RSS {:+.1}MB",
+            h1 as i64 - h0 as i64,
+            (r1 as f64 - r0 as f64) / 1024.0
+        );
+
+        // The handle count should not grow between phases
+        // (small fluctuations OK, but not proportional to iters)
+        assert!(
+            (h1 as i64 - h0 as i64).unsigned_abs() < 50,
+            "handle count drifted by {} over {iters} steps — tensor handle leak!",
+            h1 as i64 - h0 as i64
+        );
+    }
+
+    /// Graph-with-loop leak test: simulates FBRL pattern (graph loops, tags,
+    /// multiple loss terms, optimizer). Run with --nocapture to see diagnostics.
+    #[test]
+    fn test_graph_loop_leak() {
+        use crate::nn::{Module, Linear, cross_entropy_loss, clip_grad_norm};
+        use crate::nn::optim::{Adam, Optimizer};
+        use crate::nn::parameter::Parameter;
+        use crate::graph::FlowBuilder;
+        use crate::tensor::{TensorOptions, live_tensor_count, rss_kb, malloc_trim};
+
+        let opts = TensorOptions { dtype: crate::tensor::DType::Float32, device: Device::CPU };
+        let batch: i64 = 16;
+        let dim = 64;
+        let classes: i64 = 26;
+        let loop_iters = 4;
+
+        // Build a graph: Linear → loop(Linear+ReLU, 4 iters) → tag("out") → Linear
+        let graph = FlowBuilder::from(Linear::new(dim, dim).unwrap())
+            .loop_body(Linear::new(dim, dim).unwrap()).for_n(loop_iters)
+            .tag("loop_out")
+            .through(Linear::new(dim, classes).unwrap())
+            .tag("logits")
+            .build()
+            .unwrap();
+
+        let params: Vec<Parameter> = graph.named_parameters()
+            .into_iter().map(|(_name, p)| p).collect();
+        let mut opt = Adam::new(&params, 0.001);
+
+        let iters = 500;
+
+        // Warm up
+        for _ in 0..30 {
+            let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
+            let y = graph.forward(&x).unwrap();
+            let target = Variable::new(
+                Tensor::zeros(&[batch], TensorOptions { dtype: crate::tensor::DType::Int64, ..opts }).unwrap(), false);
+            let loss = cross_entropy_loss(&y, &target).unwrap();
+            opt.zero_grad();
+            loss.backward().unwrap();
+            clip_grad_norm(&params, 1.0).unwrap();
+            opt.step().unwrap();
+            graph.detach_state();
+        }
+
+        // Sample handle count at 25% and 75% of the loop to avoid noise
+        // from other tests running in parallel (shared global counter).
+        let mut h_at_25 = 0u64;
+        let mut h_at_75 = 0u64;
+        malloc_trim();
+        let rss_before = rss_kb();
+
+        for i in 0..iters {
+            let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
+            let y = graph.forward(&x).unwrap();
+            let target = Variable::new(
+                Tensor::zeros(&[batch], TensorOptions { dtype: crate::tensor::DType::Int64, ..opts }).unwrap(), false);
+            // Multiple loss terms (like FBRL)
+            let l1 = cross_entropy_loss(&y, &target).unwrap();
+            let l2 = y.mean().unwrap();
+            let total = l1.add(&l2).unwrap();
+            opt.zero_grad();
+            total.backward().unwrap();
+            clip_grad_norm(&params, 1.0).unwrap();
+            opt.step().unwrap();
+            graph.detach_state();
+            // Also record metrics (like FBRL does)
+            graph.record_scalar("loss", total.item().unwrap());
+            if i == iters / 4 { h_at_25 = live_tensor_count(); }
+            if i == iters * 3 / 4 { h_at_75 = live_tensor_count(); }
+        }
+        graph.flush(&[]);
+
+        malloc_trim();
+        let rss_after = rss_kb();
+        let handle_drift = h_at_75 as i64 - h_at_25 as i64;
+        let rss_growth_mb = (rss_after as f64 - rss_before as f64) / 1024.0;
+
+        eprintln!(
+            "Graph+loop ({iters} steps, {loop_iters} loop iters): handles {:+} (25%-75%)  RSS {:+.1}MB",
+            handle_drift, rss_growth_mb
+        );
+
+        assert!(
+            handle_drift.unsigned_abs() < 50,
+            "handle count drifted by {handle_drift} between 25% and 75% — tensor handle leak!"
+        );
+        assert!(
+            rss_growth_mb < 30.0,
+            "RSS grew by {rss_growth_mb:.1}MB over {iters} graph+loop steps"
+        );
+    }
 }

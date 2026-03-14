@@ -63,12 +63,13 @@ adaptive computation, hypothesis-test loops).
 C++ shim (`shim.h`, `shim.cpp`) wrapping libtorch as C functions.
 `build.rs` compiles via the `cc` crate, links libtorch.
 
-~91 C functions covering:
+~92 C functions covering:
 - Tensor creation, arithmetic, activations, reductions
 - Shape manipulation, slicing, joining
 - Convolution, pooling, normalization
 - Device management, dtype casting
 - Grid sampling, layer norm
+- Autograd (backward, detach, detach_, grad, set_requires_grad)
 
 ---
 

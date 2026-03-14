@@ -12,8 +12,15 @@
 use std::ffi::{c_void, CStr};
 use std::fmt;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use flodl_sys::{self as ffi, FlodlTensor};
+
+/// Global counter of live C++ Tensor handles. Incremented on creation,
+/// decremented on Drop. If this grows over time during training, there
+/// is a Tensor handle leak. If it stays stable but RSS grows, the leak
+/// is inside libtorch internals (not a handle leak).
+static LIVE_TENSOR_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// DType represents the data type of tensor elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +156,7 @@ unsafe impl Sync for Tensor {}
 impl Drop for Tensor {
     fn drop(&mut self) {
         if !self.handle.is_null() {
+            LIVE_TENSOR_COUNT.fetch_sub(1, Ordering::Relaxed);
             unsafe { ffi::flodl_free_tensor(self.handle) };
         }
     }
@@ -176,6 +184,7 @@ impl Tensor {
     /// Wrap a raw handle. The Tensor takes ownership.
     fn from_raw(handle: FlodlTensor) -> Self {
         debug_assert!(!handle.is_null());
+        LIVE_TENSOR_COUNT.fetch_add(1, Ordering::Relaxed);
         Self { handle }
     }
 
@@ -1584,6 +1593,23 @@ pub fn cuda_utilization() -> Option<u32> {
 /// if RSS drops after calling this, the growth was fragmentation.
 pub fn malloc_trim() -> bool {
     unsafe { ffi::flodl_malloc_trim() != 0 }
+}
+
+/// Number of live C++ Tensor handles (created but not yet dropped).
+/// If this grows over time during training, there is a handle leak.
+/// If it stays stable but RSS grows, the leak is inside libtorch.
+pub fn live_tensor_count() -> u64 {
+    LIVE_TENSOR_COUNT.load(Ordering::Relaxed)
+}
+
+/// Read current process RSS in kilobytes (Linux only).
+/// Returns 0 on non-Linux or if /proc/self/statm is unreadable.
+pub fn rss_kb() -> usize {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
+        .map(|pages| pages * 4)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

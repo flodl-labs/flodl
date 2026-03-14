@@ -64,8 +64,11 @@ variables that contributed to it:
 y.backward()?;
 ```
 
-`backward()` requires a scalar (single-element) output. After backward,
-leaf variables hold their accumulated gradients:
+`backward()` requires a scalar (single-element) output. After the backward
+pass, the calling variable's grad_fn chain is severed in-place (via
+`detach_()`) — this immediately frees the C++ autograd Node objects rather
+than waiting for the variable to be dropped. Leaf variables hold their
+accumulated gradients:
 
 ```rust
 println!("{:?}", w.grad());  // dy/dw — the gradient tensor
@@ -113,6 +116,10 @@ sharing the same tensor data but with no gradient tracking:
 let detached = v.detach();
 // Operations on detached do not build a graph
 ```
+
+The underlying `Tensor` also has an in-place variant, `detach_()`, which
+severs the grad_fn chain without allocating a new handle. This is used
+internally by `backward()` to release the autograd graph immediately.
 
 ## no_grad: Disabling Tracking for Inference
 

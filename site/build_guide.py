@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Generate site/guide/*.md from site/_stubs/ frontmatter + docs/ content.
+
+Each stub in site/_stubs/ contains Jekyll frontmatter with a `source:` key
+pointing to the docs/ file that holds the actual content. This script:
+
+1. Reads the stub's frontmatter
+2. Reads the source markdown
+3. Rewrites internal links (NN-file.md -> /guide/slug)
+4. Strips trailing navigation sections
+5. Writes the combined result to site/guide/
+
+Run before Jekyll: python3 site/build_guide.py
+"""
+
+import os
+import re
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STUBS_DIR = os.path.join(REPO_ROOT, "site", "_stubs")
+GUIDE_DIR = os.path.join(REPO_ROOT, "site", "guide")
+
+# Link rewrites: (pattern, replacement)
+# Order matters — anchored variants before bare filenames.
+LINK_REWRITES = [
+    (r"\(00-rust-primer\.md\)", "(/guide/rust-primer)"),
+    (r"\(01-tensors\.md\)", "(/guide/tensors)"),
+    (r"\(02-autograd\.md\)", "(/guide/autograd)"),
+    (r"\(03-modules\.md\)", "(/guide/modules)"),
+    (r"\(04-training\.md(#[^)]+)\)", r"(/guide/training\1)"),
+    (r"\(04-training\.md\)", "(/guide/training)"),
+    (r"\(05-graph-builder\.md\)", "(/guide/graph-builder)"),
+    (r"\(06-advanced-graphs\.md\)", "(/guide/advanced-graphs)"),
+    (r"\(07-visualization\.md\)", "(/guide/visualization)"),
+    (r"\(08-utilities\.md\)", "(/guide/utilities)"),
+    (r"\(09-monitor\.md\)", "(/guide/monitor)"),
+    (r"\(\.\./pytorch_migration\.md\)", "(/guide/migration)"),
+    (r"\(\.\./troubleshooting\.md\)", "(/guide/troubleshooting)"),
+    # From docs/ root level (troubleshooting.md, pytorch_migration.md)
+    (r"\(tutorials/00-rust-primer\.md\)", "(/guide/rust-primer)"),
+    (r"\(tutorials/01-tensors\.md\)", "(/guide/tensors)"),
+]
+
+NAV_LINE_RE = re.compile(
+    r"^(Next:|Previous[ a-z]*:|\[.*?\]\(.*?\)[ |]*$)"
+)
+
+
+def parse_stub(path):
+    """Return (frontmatter_text, source_path) from a stub file."""
+    with open(path) as f:
+        text = f.read()
+
+    # Split on --- delimiters
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None, None
+
+    yaml_block = parts[1]
+    frontmatter = f"---{yaml_block}---\n"
+
+    # Extract source: field
+    for line in yaml_block.strip().splitlines():
+        line = line.strip()
+        if line.startswith("source:"):
+            source = line.split(":", 1)[1].strip().strip('"').strip("'")
+            return frontmatter, source
+
+    return frontmatter, None
+
+
+def rewrite_links(text):
+    """Rewrite docs/ relative links to /guide/ absolute links."""
+    for pattern, replacement in LINK_REWRITES:
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
+def strip_trailing_nav(text):
+    """Remove trailing navigation from docs/ files.
+
+    Works backwards from end of file, stripping lines that are navigation
+    (Next:/Previous:/link lines or blank). If a --- divider is reached
+    and only nav follows it, the --- is stripped too.
+    """
+    lines = text.rstrip().split("\n")
+
+    # Walk backwards, skip nav and blank lines
+    cut = len(lines)
+    while cut > 0:
+        stripped = lines[cut - 1].strip()
+        if stripped == "":
+            cut -= 1
+        elif NAV_LINE_RE.match(stripped):
+            cut -= 1
+        elif stripped == "---":
+            cut -= 1  # also strip the --- if only nav follows
+            break
+        else:
+            break
+
+    if cut == len(lines):
+        return text  # nothing to strip
+
+    return "\n".join(lines[:cut]).rstrip() + "\n"
+
+
+def strip_source_from_frontmatter(frontmatter):
+    """Remove the source: line from frontmatter (not needed in output)."""
+    lines = frontmatter.splitlines(keepends=True)
+    return "".join(l for l in lines if not l.strip().startswith("source:"))
+
+
+def main():
+    if not os.path.isdir(STUBS_DIR):
+        print(f"error: {STUBS_DIR} not found", file=sys.stderr)
+        sys.exit(1)
+
+    os.makedirs(GUIDE_DIR, exist_ok=True)
+    count = 0
+
+    for filename in sorted(os.listdir(STUBS_DIR)):
+        if not filename.endswith(".md"):
+            continue
+
+        stub_path = os.path.join(STUBS_DIR, filename)
+        frontmatter, source_rel = parse_stub(stub_path)
+
+        if not frontmatter or not source_rel:
+            print(f"skip: {filename} (no source: in frontmatter)", file=sys.stderr)
+            continue
+
+        source_path = os.path.join(REPO_ROOT, source_rel)
+        if not os.path.isfile(source_path):
+            print(f"error: source not found: {source_path}", file=sys.stderr)
+            sys.exit(1)
+
+        with open(source_path) as f:
+            content = f.read()
+
+        content = rewrite_links(content)
+        content = strip_trailing_nav(content)
+        clean_frontmatter = strip_source_from_frontmatter(frontmatter)
+
+        output_path = os.path.join(GUIDE_DIR, filename)
+        with open(output_path, "w") as f:
+            f.write(clean_frontmatter)
+            f.write("\n")
+            f.write(content)
+
+        count += 1
+
+    print(f"generated {count} guide pages in site/guide/")
+
+
+if __name__ == "__main__":
+    main()
