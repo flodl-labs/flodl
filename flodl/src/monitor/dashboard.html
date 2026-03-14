@@ -203,13 +203,23 @@ function showSvg(svg){
 // ARCHIVE_DATA is injected by monitor.save_html(); if absent, connect live.
 if(typeof ARCHIVE_DATA!=='undefined'){
   _skipDraw=true;
-  ARCHIVE_DATA.forEach(processEpoch);
+  let archiveErr=null;
+  for(let i=0;i<ARCHIVE_DATA.length;i++){
+    try{processEpoch(ARCHIVE_DATA[i])}
+    catch(e){archiveErr=e;console.error('processEpoch failed at index '+i+':',e);break}
+  }
   _skipDraw=false;
-  drawMetrics();drawResources();
-  markComplete(ARCHIVE_COMPLETE||'Complete');
-  if(typeof ARCHIVE_SVG==='string')showSvg(ARCHIVE_SVG);
+  try{drawMetrics();drawResources()}catch(e){console.error('drawMetrics/drawResources:',e);archiveErr=archiveErr||e}
+  markComplete(archiveErr?'Archive error — see console':(ARCHIVE_COMPLETE||'Complete'));
+  if(typeof ARCHIVE_SVG==='string'){try{showSvg(ARCHIVE_SVG)}catch(e){console.error('showSvg:',e)}}
   // Re-render after layout to ensure correct canvas dimensions
-  requestAnimationFrame(()=>{drawMetrics();drawResources()});
+  requestAnimationFrame(()=>{try{drawMetrics();drawResources()}catch(e){console.error('rAF redraw:',e)}});
+  if(archiveErr){
+    const d=document.createElement('div');
+    d.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1d27;color:#f87171;padding:24px;border-radius:8px;border:1px solid #f87171;z-index:999;font-family:monospace;max-width:80%;white-space:pre-wrap';
+    d.textContent='Archive replay error at epoch '+(epochs.length+1)+':\n'+archiveErr.message+'\n\nCheck browser console (F12) for details.\nProcessed '+epochs.length+'/'+ARCHIVE_DATA.length+' epochs.';
+    document.body.appendChild(d);
+  }
 }else{
   const es=new EventSource('/events');
   es.addEventListener('epoch',e=>processEpoch(JSON.parse(e.data)));
@@ -256,7 +266,7 @@ function setBar(id,val){
 }
 
 // --- Log table ---
-let logHeadersSet=false;
+var logHeadersSet=false;
 function ensureLogHeaders(){
   if(logHeadersSet||metricNames.length===0)return;
   logHeadersSet=true;

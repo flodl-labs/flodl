@@ -5,6 +5,7 @@
 //! Both compose naturally with the graph builder in [`crate::graph`].
 
 pub mod parameter;
+pub mod buffer;
 pub mod init;
 pub mod linear;
 pub mod activation;
@@ -25,12 +26,13 @@ pub mod amp;
 pub mod functional;
 
 pub use parameter::Parameter;
+pub use buffer::Buffer;
 pub use linear::Linear;
 pub use activation::{Identity, ReLU, Sigmoid, Tanh, GELU, SiLU};
 pub use loss::{mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
 pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder};
 pub use checkpoint::{
-    save_named_parameters, load_named_parameters, save_named_parameters_file, load_named_parameters_file,
+    save_checkpoint, load_checkpoint, save_checkpoint_file, load_checkpoint_file,
     LoadReport,
 };
 pub use amp::{GradScaler, cast_parameters};
@@ -88,6 +90,30 @@ pub trait Module {
             });
         }
         params
+    }
+
+    /// Return this module's non-learnable persistent buffers (e.g., running stats).
+    /// Default: recursively collects from `sub_modules()` with pointer dedup.
+    /// Leaf modules should override to return their own buffers.
+    fn buffers(&self) -> Vec<Buffer> {
+        let subs = self.sub_modules();
+        if subs.is_empty() {
+            return vec![];
+        }
+        let mut bufs = Vec::new();
+        let mut seen = HashSet::new();
+        let mut visited = HashSet::new();
+        for child in &subs {
+            walk_modules_visited(child.as_ref(), &mut visited, &mut |m| {
+                for b in m.buffers() {
+                    let ptr = Rc::as_ptr(&b.inner) as usize;
+                    if seen.insert(ptr) {
+                        bufs.push(b);
+                    }
+                }
+            });
+        }
+        bufs
     }
 
     /// Human-readable type name used as node ID prefix in graph visualization.
@@ -1037,7 +1063,7 @@ mod tests {
     // --- Checkpoint tests ---
 
     #[test]
-    fn test_save_load_named_parameters() {
+    fn test_save_load_checkpoint() {
         let model = Linear::new(3, 2).unwrap();
         let params = model.parameters();
 
@@ -1050,7 +1076,7 @@ mod tests {
             .map(|p| (format!("linear/{}", p.name), p))
             .collect();
         let mut buf = Vec::new();
-        checkpoint::save_named_parameters(&mut buf, &named).unwrap();
+        checkpoint::save_checkpoint(&mut buf, &named, &[]).unwrap();
 
         // Create new model, load by name
         let model2 = Linear::new(3, 2).unwrap();
@@ -1058,7 +1084,7 @@ mod tests {
             .map(|p| (format!("linear/{}", p.name), p))
             .collect();
         let mut cursor = std::io::Cursor::new(&buf);
-        let report = checkpoint::load_named_parameters(&mut cursor, &named2).unwrap();
+        let report = checkpoint::load_checkpoint(&mut cursor, &named2, &[]).unwrap();
 
         assert_eq!(report.loaded.len(), 2);
         assert!(report.missing.is_empty());

@@ -28,7 +28,7 @@ pub mod reshape;
 pub mod state;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -36,7 +36,7 @@ use indexmap::IndexMap;
 
 use node::*;
 use crate::autograd::Variable;
-use crate::nn::{Module, Parameter};
+use crate::nn::{Buffer, Module, Parameter};
 use crate::tensor::{Result, Tensor, TensorError};
 
 pub use flow::FlowBuilder;
@@ -627,6 +627,53 @@ impl Graph {
 
         result
     }
+
+    /// Return buffers with qualified names, using the same prefix logic
+    /// as `named_parameters()`.
+    pub fn named_buffers(&self) -> Vec<(String, Buffer)> {
+        let mut idx_to_tag: HashMap<usize, String> = HashMap::new();
+        for (tag, &(ni, _)) in &self.tag_names {
+            idx_to_tag.entry(ni).or_insert_with(|| tag.clone());
+        }
+
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+
+        for &ni in &self.order {
+            if let Some(ref module) = self.nodes[ni].module {
+                let prefix = idx_to_tag.get(&ni)
+                    .cloned()
+                    .unwrap_or_else(|| self.nodes[ni].id.clone());
+
+                let bufs = module.buffers();
+                let mut name_counts: HashMap<String, usize> = HashMap::new();
+                for b in &bufs {
+                    *name_counts.entry(b.name.clone()).or_insert(0) += 1;
+                }
+
+                let mut name_idx: HashMap<String, usize> = HashMap::new();
+                for b in bufs {
+                    let ptr = Rc::as_ptr(&b.inner) as usize;
+                    if !seen.insert(ptr) {
+                        continue;
+                    }
+
+                    let qualified = if name_counts[&b.name] > 1 {
+                        let idx = name_idx.entry(b.name.clone()).or_insert(0);
+                        let q = format!("{}/{}_{}", prefix, b.name, idx);
+                        *idx += 1;
+                        q
+                    } else {
+                        format!("{}/{}", prefix, b.name)
+                    };
+
+                    result.push((qualified, b));
+                }
+            }
+        }
+
+        result
+    }
 }
 
 impl Module for Graph {
@@ -689,9 +736,11 @@ fn topological_levels(
 ) -> Result<Vec<Vec<usize>>> {
     let n = nodes.len();
 
-    // Build unique dependency sets (node-level, not edge-level)
+    // Build unique dependency sets (node-level, not edge-level).
+    // dependents uses BTreeSet so iteration follows node index order,
+    // making the topological sort deterministic across runs.
     let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
-    let mut dependents: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut dependents: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
 
     for edge in edges {
         let from_ni = node_index[&edge.from_node];

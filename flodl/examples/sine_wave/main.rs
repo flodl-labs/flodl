@@ -112,7 +112,8 @@ fn main() -> Result<()> {
     // --- Checkpoint round-trip ---
     let path = "sine_model.fdl";
     let named = model.named_parameters();
-    save_named_parameters_file(path, &named)?;
+    let named_bufs = model.named_buffers();
+    save_checkpoint_file(path, &named, &named_bufs)?;
     println!("Checkpoint saved to {}", path);
 
     // Rebuild architecture and load weights.
@@ -124,7 +125,8 @@ fn main() -> Result<()> {
         .build()?;
 
     let named2 = model2.named_parameters();
-    load_named_parameters_file(path, &named2)?;
+    let named_bufs2 = model2.named_buffers();
+    load_checkpoint_file(path, &named2, &named_bufs2)?;
     model2.set_training(false);
 
     // Verify loaded model produces the same output.

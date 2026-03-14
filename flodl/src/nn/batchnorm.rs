@@ -1,23 +1,23 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 use crate::autograd::Variable;
 use crate::tensor::{Result, Tensor, TensorError, TensorOptions};
 
+use super::buffer::Buffer;
 use super::parameter::Parameter;
 use super::Module;
 
 /// Batch normalization over the first (batch) dimension.
 ///
 /// Training mode: uses batch statistics, updates running stats.
-/// Eval mode: uses running statistics.
+/// Eval mode: uses running statistics (persisted via `buffers()`).
 pub struct BatchNorm {
     pub weight: Parameter,   // gamma
     pub bias: Parameter,     // beta
-    running_mean: RefCell<Tensor>,
-    running_var: RefCell<Tensor>,
+    running_mean: Buffer,
+    running_var: Buffer,
     #[allow(dead_code)]
     num_features: i64,
-    num_batches_tracked: Cell<usize>,
     eps: f64,
     momentum: f64,
     training: Cell<bool>,
@@ -29,16 +29,13 @@ impl BatchNorm {
         let opts = TensorOptions::default();
         let weight = Variable::new(Tensor::ones(&[num_features], opts)?, true);
         let bias = Variable::new(Tensor::zeros(&[num_features], opts)?, true);
-        let running_mean = Tensor::zeros(&[num_features], opts)?;
-        let running_var = Tensor::ones(&[num_features], opts)?;
 
         Ok(BatchNorm {
             weight: Parameter { variable: weight, name: "weight".into() },
             bias: Parameter { variable: bias, name: "bias".into() },
-            running_mean: RefCell::new(running_mean),
-            running_var: RefCell::new(running_var),
+            running_mean: Buffer::new(Tensor::zeros(&[num_features], opts)?, "running_mean"),
+            running_var: Buffer::new(Tensor::ones(&[num_features], opts)?, "running_var"),
             num_features,
-            num_batches_tracked: Cell::new(0),
             eps: 1e-5,
             momentum: 0.1,
             training: Cell::new(true),
@@ -50,11 +47,11 @@ impl BatchNorm {
         // Bessel's correction for unbiased variance estimate
         let correction = batch_size as f64 / (batch_size as f64 - 1.0);
 
-        let mut rm = self.running_mean.borrow_mut();
-        *rm = rm.mul_scalar(1.0 - m)?.add(&batch_mean.mul_scalar(m)?)?;
+        let rm = self.running_mean.get();
+        self.running_mean.set(rm.mul_scalar(1.0 - m)?.add(&batch_mean.mul_scalar(m)?)?);
 
-        let mut rv = self.running_var.borrow_mut();
-        *rv = rv.mul_scalar(1.0 - m)?.add(&batch_var.mul_scalar(m * correction)?)?;
+        let rv = self.running_var.get();
+        self.running_var.set(rv.mul_scalar(1.0 - m)?.add(&batch_var.mul_scalar(m * correction)?)?);
 
         Ok(())
     }
@@ -110,6 +107,10 @@ impl Module for BatchNorm2d {
         self.inner.parameters()
     }
 
+    fn buffers(&self) -> Vec<Buffer> {
+        self.inner.buffers()
+    }
+
     fn set_training(&self, training: bool) {
         self.inner.set_training(training);
     }
@@ -125,14 +126,8 @@ impl Module for BatchNorm {
     fn forward(&self, input: &Variable) -> Result<Variable> {
         if !self.training.get() {
             // Eval mode: use running statistics
-            if self.num_batches_tracked.get() == 0 {
-                return Err(TensorError::new(
-                    "BatchNorm has no running statistics — run at least one training batch \
-                     or use set_training(true) before forward"
-                ));
-            }
-            let mean = Variable::new(self.running_mean.borrow().clone(), false);
-            let var = Variable::new(self.running_var.borrow().clone(), false);
+            let mean = Variable::new(self.running_mean.get(), false);
+            let var = Variable::new(self.running_var.get(), false);
             let std = var.add_scalar(self.eps)?.sqrt()?;
             let normalized = input.sub(&mean)?.div(&std)?;
             return normalized.mul(&self.weight.variable)?.add(&self.bias.variable);
@@ -155,7 +150,6 @@ impl Module for BatchNorm {
 
         // Update running stats (detached from graph)
         self.update_running_stats(&batch_mean.data(), &batch_var.data(), batch_size)?;
-        self.num_batches_tracked.set(self.num_batches_tracked.get() + 1);
 
         Ok(output)
     }
@@ -164,22 +158,16 @@ impl Module for BatchNorm {
         vec![self.weight.clone(), self.bias.clone()]
     }
 
+    fn buffers(&self) -> Vec<Buffer> {
+        vec![self.running_mean.clone(), self.running_var.clone()]
+    }
+
     fn set_training(&self, training: bool) {
         self.training.set(training);
     }
 
     fn move_to_device(&self, device: crate::tensor::Device) {
-        let mut rm = self.running_mean.borrow_mut();
-        if rm.device() != device
-            && let Ok(t) = rm.to_device(device)
-        {
-            *rm = t;
-        }
-        let mut rv = self.running_var.borrow_mut();
-        if rv.device() != device
-            && let Ok(t) = rv.to_device(device)
-        {
-            *rv = t;
-        }
+        let _ = self.running_mean.to_device(device);
+        let _ = self.running_var.to_device(device);
     }
 }
