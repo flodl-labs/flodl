@@ -450,6 +450,8 @@ unsafe extern "C" {
 
     pub fn flodl_detach(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
 
+    pub fn flodl_detach_(t: FlodlTensor) -> *mut i8;
+
     pub fn flodl_is_leaf(t: FlodlTensor) -> i32;
 
     // --- Autograd context ---

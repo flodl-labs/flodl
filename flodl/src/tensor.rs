@@ -1488,6 +1488,15 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// In-place detach: sever the grad_fn chain on this tensor without
+    /// allocating a new handle. After this call the tensor's autograd_meta
+    /// no longer references any C++ Node objects, allowing the autograd
+    /// graph to be freed immediately rather than when the tensor is dropped.
+    pub fn detach_(&self) -> Result<()> {
+        let err = unsafe { ffi::flodl_detach_(self.handle) };
+        check_err(err)
+    }
+
     // --- In-place operations ---
 
     /// In-place add: self += other

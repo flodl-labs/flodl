@@ -1418,6 +1418,15 @@ extern "C" char* flodl_detach(FlodlTensor t, FlodlTensor* result) {
     }
 }
 
+extern "C" char* flodl_detach_(FlodlTensor t) {
+    try {
+        unwrap(t).detach_();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 extern "C" int flodl_is_leaf(FlodlTensor t) {
     return unwrap(t).is_leaf() ? 1 : 0;
 }

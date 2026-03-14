@@ -260,6 +260,7 @@ char* flodl_grad(FlodlTensor t, FlodlTensor* result);
 char* flodl_set_grad(FlodlTensor t, FlodlTensor grad);
 char* flodl_zero_grad(FlodlTensor t);
 char* flodl_detach(FlodlTensor t, FlodlTensor* result);
+char* flodl_detach_(FlodlTensor t);
 int flodl_is_leaf(FlodlTensor t);
 
 // --- Autograd context ---

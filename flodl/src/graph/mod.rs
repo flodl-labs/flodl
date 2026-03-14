@@ -453,6 +453,16 @@ impl Graph {
                 *val = Some(v.detach());
             }
         }
+        // Detach tagged outputs — these hold Variables from the forward
+        // pass whose grad_fn chains reference the C++ autograd graph.
+        // Without this, the Node objects persist until the next forward
+        // pass replaces tagged_outputs.
+        {
+            let mut tagged = self.tagged_outputs.borrow_mut();
+            for var in tagged.values_mut() {
+                *var = var.detach();
+            }
+        }
         // Propagate detach to modules that hold internal state.
         for node in &self.nodes {
             if let Some(ref module) = node.module {

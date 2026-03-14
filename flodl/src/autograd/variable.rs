@@ -152,8 +152,15 @@ impl Variable {
 
     /// Run backward pass from this scalar variable.
     /// Populates .grad() on all leaf variables in the computation graph.
+    ///
+    /// After backward completes, the tensor is detached in-place to
+    /// immediately release the C++ grad_fn chain. Without this, the
+    /// autograd Node objects stay alive until the Variable is dropped.
     pub fn backward(&self) -> Result<()> {
-        self.inner.borrow().data.backward()
+        let inner = self.inner.borrow();
+        inner.data.backward()?;
+        inner.data.detach_()?;
+        Ok(())
     }
 }
 

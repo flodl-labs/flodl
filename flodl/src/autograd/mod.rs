@@ -777,4 +777,59 @@ mod tests {
             grad
         );
     }
+
+    #[test]
+    fn test_backward_frees_grad_fn_chain() {
+        // Verify that backward() + detach_() doesn't leak C++ autograd Nodes.
+        // Simulates a training loop: multiple loss terms per step, many steps.
+        use crate::nn::{Module, Linear};
+        use crate::nn::optim::{Adam, Optimizer};
+        use crate::tensor::TensorOptions;
+
+        fn get_rss_kb() -> usize {
+            std::fs::read_to_string("/proc/self/statm")
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
+                .map(|pages| pages * 4)
+                .unwrap_or(0)
+        }
+
+        let linear = Linear::new(256, 256).unwrap();
+        let params = linear.parameters();
+        let mut opt = Adam::new(&params, 0.001);
+        let opts = TensorOptions { dtype: crate::tensor::DType::Float32, device: Device::CPU };
+
+        // Warm up — let allocators settle
+        for _ in 0..50 {
+            let x = Variable::new(Tensor::randn(&[32, 256], opts).unwrap(), false);
+            let y = linear.forward(&x).unwrap();
+            let loss = y.sum().unwrap();
+            opt.zero_grad();
+            loss.backward().unwrap();
+            opt.step().unwrap();
+        }
+
+        crate::tensor::malloc_trim();
+        let rss_before = get_rss_kb();
+
+        for _ in 0..2000 {
+            let x = Variable::new(Tensor::randn(&[32, 256], opts).unwrap(), false);
+            let y = linear.forward(&x).unwrap();
+            // Multiple loss terms (like FBRL training)
+            let l1 = y.sum().unwrap();
+            let l2 = y.mean().unwrap();
+            let total = l1.add(&l2).unwrap();
+            opt.zero_grad();
+            total.backward().unwrap();
+            opt.step().unwrap();
+        }
+
+        crate::tensor::malloc_trim();
+        let rss_after = get_rss_kb();
+        let growth_mb = (rss_after as f64 - rss_before as f64) / 1024.0;
+        assert!(
+            growth_mb < 50.0,
+            "RSS grew by {growth_mb:.1}MB over 2000 training steps — possible grad_fn leak"
+        );
+    }
 }
