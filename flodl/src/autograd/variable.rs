@@ -75,6 +75,16 @@ impl Variable {
         self.inner.borrow().data.requires_grad()
     }
 
+    /// Change whether this variable tracks gradients.
+    /// Replaces the inner data handle (the FFI returns a new handle sharing storage).
+    /// All clones of this Variable share the same `Rc<RefCell>`, so the change
+    /// is visible everywhere (module, optimizer, etc.).
+    pub fn set_requires_grad(&self, requires_grad: bool) -> Result<()> {
+        let data = self.inner.borrow().data.set_requires_grad(requires_grad)?;
+        self.inner.borrow_mut().data = data;
+        Ok(())
+    }
+
     /// Whether this is a leaf variable (no grad_fn in libtorch).
     /// A leaf tensor is one created by the user, not by an operation.
     pub fn is_leaf(&self) -> bool {

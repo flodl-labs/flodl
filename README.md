@@ -230,7 +230,7 @@ for (input_t, target_t) in &batches {
 | **NN Modules** | `Linear`, `Conv2d`, `ConvTranspose2d`, `LayerNorm`, `BatchNorm`/`BatchNorm2d`, `Dropout`, `Embedding`, `GRUCell`, `LSTMCell` |
 | **Activations** | `Identity`, `ReLU`, `Sigmoid`, `Tanh`, `GELU`, `SiLU` |
 | **Losses** | `mse_loss`, `cross_entropy_loss`, `bce_with_logits_loss`, `l1_loss`, `smooth_l1_loss`, `kl_div_loss` |
-| **Optimizers** | `SGD` (with momentum), `Adam`, `AdamW` |
+| **Optimizers** | `SGD` (with momentum), `Adam`, `AdamW` — all support parameter groups for per-group LR |
 | **LR Scheduling** | `StepDecay`, `CosineScheduler`, `WarmupScheduler` (composable), `PlateauScheduler` |
 | **Mixed Precision** | `Float16`/`BFloat16` dtype casting, `GradScaler` for loss scaling |
 | **Monitor** | Human-readable ETA, CPU/GPU/RAM/VRAM tracking, live web dashboard |
@@ -262,7 +262,9 @@ for (input_t, target_t) in &batches {
 |------|-------------|
 | `clip_grad_norm` | L2 norm gradient clipping |
 | `clip_grad_value` | Element-wise gradient clamping |
-| `save_parameters` / `load_parameters` | `.fdl` checkpoint format (file path or `Write`/`Read`) |
+| `save_parameters` / `load_parameters` | Positional `.fdl` checkpoint (file path or `Write`/`Read`) |
+| `save_named_parameters` / `load_named_parameters` | Named checkpoint with partial loading and `LoadReport` |
+| `Parameter::freeze` / `unfreeze` | Disable/enable gradient tracking per parameter |
 | `xavier_uniform/normal` | Weight initialization (also `kaiming_*` via `nn::init`) |
 | LR schedulers | `StepDecay`, `CosineScheduler`, `WarmupScheduler`, `PlateauScheduler` (composable) |
 | `GradScaler` | Dynamic loss scaling for mixed precision (float16) training |
@@ -337,7 +339,7 @@ Every differentiable path is verified against finite-difference gradients:
 - 37 autograd op-level checks (every op + compositions)
 - Module-level checks (every NN module, input + parameter gradients)
 - Exact optimizer step verifications (SGD, Adam, AdamW)
-- 236 library tests + 15 showcase tests, zero clippy warnings
+- 258 library tests + 15 showcase tests, zero clippy warnings
 
 ## Why Rust for Deep Learning?
 

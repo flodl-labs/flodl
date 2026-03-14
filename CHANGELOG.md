@@ -5,6 +5,18 @@ All notable changes to floDl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Parameter freezing**: `Parameter::freeze()`, `unfreeze()`, `is_frozen()` — disable/enable gradient tracking per parameter. Optimizers automatically skip frozen params (no grad). `Parameter::to_device()` now preserves frozen state.
+- **Named checkpoints**: `Graph::named_parameters()` returns qualified names (`"tag/weight"` or `"node_id/weight"`). `save_named_parameters` / `load_named_parameters` match by name for partial loading. `LoadReport` reports what was loaded, skipped, and missing.
+- **Optimizer parameter groups**: `Adam::with_groups()`, `SGD::with_groups()`, `AdamW::with_groups()` — builder API for per-group learning rates. `Optimizer::set_group_lr()` adjusts a single group; `set_lr()` updates all groups. Groups are persisted through `Stateful` save/load.
+
+### Changed
+- `Variable::set_requires_grad()` added — replaces inner data handle while preserving shared `Rc<RefCell>` visibility.
+- `Optimizer` trait now includes `set_group_lr()` with a default fallback to `set_lr()`.
+- Optimizer `Stateful` format extended with group metadata (backward-compatible: old checkpoints load with zero groups).
+
 ## [0.1.0] - 2026-03-13
 
 Initial release. Rust port of [goDl](https://github.com/fab2s/goDl).
@@ -52,7 +64,7 @@ Initial release. Rust port of [goDl](https://github.com/fab2s/goDl).
 - **Build**: Makefile with cpu/cuda targets (build, test, clippy, shell).
 
 ### Testing
-- 228 library tests + 15 showcase tests.
+- 243 library tests + 15 showcase tests.
 - Zero clippy warnings.
 - Autograd numerical gradient checks.
 - Module-level gradient checks.

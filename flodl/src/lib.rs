@@ -45,8 +45,10 @@ pub use tensor::{cuda_available, cuda_device_count, cuda_memory_info, cuda_utili
 pub use autograd::{Variable, no_grad, is_grad_enabled, NoGradGuard, adaptive_avg_pool2d, grid_sample};
 pub use nn::{
     Module, NamedInputModule,
-    Parameter, Linear, Optimizer, Stateful, SGD, Adam, AdamW,
+    Parameter, Linear, Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder,
     save_parameters, load_parameters, save_parameters_file, load_parameters_file,
+    save_named_parameters, load_named_parameters, save_named_parameters_file, load_named_parameters_file,
+    LoadReport,
     GradScaler, cast_parameters,
     Identity, ReLU, Sigmoid, Tanh, GELU, SiLU,
     Dropout, LayerNorm, Embedding, GRUCell, LSTMCell,

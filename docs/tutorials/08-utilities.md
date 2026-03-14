@@ -59,11 +59,56 @@ was written, loading fails with a descriptive error.
 
 ### Details
 
-- Parameters are always serialized as float32, regardless of runtime
-  dtype. Checkpoints are portable across CPU and CUDA.
-- Parameters are matched positionally.
+- Parameters store their native dtype — float16 params stay f16 on disk.
+- Positional checkpoints match parameters by count, name, and shape.
 - The `io::Write` / `io::Read` variants (`save_parameters`, `load_parameters`)
   work with any destination: files, buffers, network connections.
+
+### Named checkpoints (partial loading)
+
+For transfer learning, named checkpoints match by qualified name instead
+of position. This allows loading a subset of parameters from a different
+model:
+
+```rust
+use flodl::*;
+
+// Save with qualified names from a Graph
+let named = model.named_parameters();
+save_named_parameters_file("/tmp/model.fdl", &named)?;
+
+// Load into a different model — only matching names transfer
+let new_named = new_model.named_parameters();
+let report = load_named_parameters_file("/tmp/model.fdl", &new_named)?;
+
+println!("loaded:  {:?}", report.loaded);   // matched and loaded
+println!("skipped: {:?}", report.skipped);  // in checkpoint, not in model
+println!("missing: {:?}", report.missing);  // in model, not in checkpoint
+```
+
+Names are `"prefix/param_name"` where the prefix is the tag name if
+tagged (`"encoder/weight"`) or the node ID if not (`"linear_1/weight"`).
+Shape mismatches on a matched name produce an error (not a silent skip).
+
+### Freezing transferred parameters
+
+After partial loading, freeze the transferred params and train only the
+new ones:
+
+```rust
+for (name, param) in &new_named {
+    if report.loaded.contains(name) {
+        param.freeze()?;
+    }
+}
+
+// Only unfrozen params get gradients — optimizer skips the rest
+let fresh: Vec<Parameter> = new_named.iter()
+    .filter(|(_, p)| !p.is_frozen())
+    .map(|(_, p)| p.clone())
+    .collect();
+let mut opt = Adam::new(&fresh, 1e-3);
+```
 
 ### Periodic checkpoints during training
 

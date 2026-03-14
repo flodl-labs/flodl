@@ -539,6 +539,44 @@ loss.backward()?;
 opt.step()?;  // returns Result<()>
 ```
 
+### Parameter groups
+
+```python
+# PyTorch
+opt = torch.optim.Adam([
+    {"params": encoder.parameters(), "lr": 1e-5},
+    {"params": decoder.parameters(), "lr": 1e-3},
+])
+```
+
+```rust
+// flodl — builder API
+let mut opt = Adam::with_groups()
+    .group(&encoder_params, 1e-5)
+    .group(&decoder_params, 1e-3)
+    .build();
+
+opt.set_group_lr(0, 1e-6);  // adjust one group
+opt.set_lr(1e-4);           // adjust all groups
+```
+
+### Freezing parameters
+
+```python
+# PyTorch
+for param in model.encoder.parameters():
+    param.requires_grad = False
+```
+
+```rust
+// flodl
+for param in &encoder_params {
+    param.freeze()?;
+}
+// Later: param.unfreeze()?;
+// Check: param.is_frozen()
+```
+
 ## Learning Rate Scheduling
 
 ```python
@@ -590,9 +628,15 @@ model.load_state_dict(torch.load("model.pt"))
 ```
 
 ```rust
-// flodl — .fdl checkpoint format (dtype-aware)
+// flodl — positional checkpoint (strict match)
 save_parameters_file("model.fdl", &params)?;
 load_parameters_file("model.fdl", &params)?;
+
+// Named checkpoint (partial loading for transfer learning)
+let named = model.named_parameters();
+save_named_parameters_file("model.fdl", &named)?;
+let report = load_named_parameters_file("model.fdl", &named)?;
+// report.loaded, report.skipped, report.missing
 
 // Or with any io::Write / io::Read:
 save_parameters(&mut writer, &params)?;
@@ -990,6 +1034,9 @@ to query them manually during training.
 | `with torch.no_grad():` | `no_grad(\|\| { })` | Closure-based |
 | `nn.Sequential(...)` | `FlowBuilder::from(...).through(...).build()?` | Fluent builder |
 | `model.train()` | `module.set_training(true)` | |
-| `torch.save(...)` | `save_parameters_file("m.fdl", ...)?` | `.fdl` format |
+| `torch.save(...)` | `save_parameters_file("m.fdl", ...)?` | Positional `.fdl` format |
+| `model.load_state_dict(..., strict=False)` | `load_named_parameters_file("m.fdl", ...)?` | Named, partial loading with `LoadReport` |
+| `param.requires_grad = False` | `param.freeze()?` | Also: `unfreeze()`, `is_frozen()` |
+| `Adam([{"params":..., "lr":...}])` | `Adam::with_groups().group(&p, lr).build()` | Per-group LR |
 | `torch.cuda.memory_allocated()` | `cuda_memory_info()?` | `(used, total)` bytes |
 | `SummaryWriter` + TensorBoard | `Monitor::new(n).serve(3000)?` | Built-in live dashboard |

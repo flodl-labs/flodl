@@ -565,6 +565,58 @@ impl Graph {
         }
     }
 
+    /// Return parameters with qualified names: `"prefix/param_name"`.
+    ///
+    /// The prefix is the tag name if the node is tagged, otherwise the node ID
+    /// (e.g. `"linear_1"`). When a node has multiple parameters with the same
+    /// name, suffixes `_0`, `_1`, ... are appended to disambiguate.
+    pub fn named_parameters(&self) -> Vec<(String, Parameter)> {
+        // Build reverse map: node_idx → tag name
+        let mut idx_to_tag: HashMap<usize, String> = HashMap::new();
+        for (tag, &(ni, _)) in &self.tag_names {
+            // First tag wins (deterministic because we only need one prefix)
+            idx_to_tag.entry(ni).or_insert_with(|| tag.clone());
+        }
+
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+
+        for &ni in &self.order {
+            if let Some(ref module) = self.nodes[ni].module {
+                let prefix = idx_to_tag.get(&ni)
+                    .cloned()
+                    .unwrap_or_else(|| self.nodes[ni].id.clone());
+
+                let params = module.parameters();
+                // Check for duplicate param names within this node
+                let mut name_counts: HashMap<String, usize> = HashMap::new();
+                for p in &params {
+                    *name_counts.entry(p.name.clone()).or_insert(0) += 1;
+                }
+
+                let mut name_idx: HashMap<String, usize> = HashMap::new();
+                for p in params {
+                    let ptr = Rc::as_ptr(&p.variable.inner) as usize;
+                    if !seen.insert(ptr) {
+                        continue;
+                    }
+
+                    let qualified = if name_counts[&p.name] > 1 {
+                        let idx = name_idx.entry(p.name.clone()).or_insert(0);
+                        let q = format!("{}/{}_{}", prefix, p.name, idx);
+                        *idx += 1;
+                        q
+                    } else {
+                        format!("{}/{}", prefix, p.name)
+                    };
+
+                    result.push((qualified, p));
+                }
+            }
+        }
+
+        result
+    }
 }
 
 impl Module for Graph {
@@ -2516,5 +2568,48 @@ mod tests {
         // Body Linear: 2 params, LearnedHalt Linear(2→1): 2 params = 4
         let params = graph.parameters();
         assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn test_named_parameters_unique() {
+        let graph = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .through(ReLU::new())
+            .through(Linear::new(8, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let named = graph.named_parameters();
+        // Two Linear layers: 2 params each (weight + bias) = 4
+        assert_eq!(named.len(), 4);
+
+        // All names should be unique
+        let names: Vec<&str> = named.iter().map(|(n, _)| n.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "duplicate names: {:?}", names);
+    }
+
+    #[test]
+    fn test_named_parameters_tagged_prefix() {
+        let graph = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .tag("encoder")
+            .through(Linear::new(8, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let named = graph.named_parameters();
+        // First Linear is tagged "encoder", second is untagged
+        let encoder_params: Vec<&str> = named.iter()
+            .filter(|(n, _)| n.starts_with("encoder/"))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(encoder_params.len(), 2, "tagged node should have 2 params with 'encoder/' prefix");
+
+        // Untagged node uses its node_id (like "linear_2")
+        let untagged: Vec<&str> = named.iter()
+            .filter(|(n, _)| !n.starts_with("encoder/"))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(untagged.len(), 2, "untagged node should have 2 params");
+        assert!(untagged[0].contains('/'), "should have prefix/name format: {}", untagged[0]);
     }
 }

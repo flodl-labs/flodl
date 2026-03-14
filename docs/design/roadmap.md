@@ -115,8 +115,10 @@ smooth_l1_loss, kl_div_loss
 
 **Schedulers**: StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler
 
-**Training tools**: clip_grad_norm, clip_grad_value, save/load parameters,
-kaiming/xavier initialization, GradScaler, cast_parameters
+**Training tools**: clip_grad_norm, clip_grad_value, save/load parameters
+(positional and named/partial), parameter freezing (freeze/unfreeze),
+kaiming/xavier initialization, GradScaler, cast_parameters, optimizer
+parameter groups (per-group LR)
 
 ---
 
@@ -214,7 +216,7 @@ Deliverables:
 
 ## Test Coverage
 
-228 library tests + 15 showcase tests. Zero clippy warnings.
+258 library tests + 15 showcase tests. Zero clippy warnings.
 All passing in Docker (CPU, libtorch 2.10.0).
 
 ---

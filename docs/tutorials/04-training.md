@@ -41,6 +41,7 @@ pub trait Optimizer {
     fn step(&mut self) -> Result<()>;
     fn zero_grad(&self);
     fn set_lr(&mut self, lr: f64);
+    fn set_group_lr(&mut self, group: usize, lr: f64);  // per-group LR
 }
 ```
 
@@ -195,6 +196,50 @@ for (input_t, target_t) in &batches {
 **When is it needed?** Only for graphs with forward references — where
 `using("x")` appears before `tag("x")` in the builder chain.
 
+## Parameter Groups
+
+All optimizers support per-group learning rates via a builder API:
+
+```rust
+let mut opt = Adam::with_groups()
+    .group(&scan_params, 1e-3)     // group 0: high LR
+    .group(&read_params, 1e-5)     // group 1: low LR
+    .build();
+
+// Adjust one group
+opt.set_group_lr(1, 1e-4);
+
+// Adjust all groups at once
+opt.set_lr(1e-3);
+```
+
+`Adam::new(&params, lr)` still works for single-group usage. `SGD` and
+`AdamW` have the same builder pattern (`SGD::with_groups(momentum)`,
+`AdamW::with_groups(weight_decay)`).
+
+## Parameter Freezing
+
+Freeze parameters to disable gradient tracking — useful for transfer
+learning:
+
+```rust
+for param in &encoder_params {
+    param.freeze()?;   // no gradients will accumulate
+}
+
+// Later, unfreeze for fine-tuning:
+for param in &encoder_params {
+    param.unfreeze()?;
+}
+
+// Check status:
+if param.is_frozen() { /* ... */ }
+```
+
+Frozen parameters are automatically skipped by optimizers (they produce
+no gradient). Freezing works through `Rc<RefCell>` — a freeze is visible
+everywhere the parameter is referenced.
+
 ## Checkpoints
 
 Save and restore model parameters:
@@ -207,14 +252,41 @@ save_parameters_file("/tmp/model.fdl", &params)?;
 load_parameters_file("/tmp/model.fdl", &params)?;
 ```
 
-Parameters are always serialized as float32, making checkpoints portable
-across CPU and CUDA. The `io::Write` / `io::Read` variants are also
-available for custom destinations:
+The `io::Write` / `io::Read` variants are also available:
 
 ```rust
 save_parameters(&mut writer, &params)?;
 load_parameters(&mut reader, &params)?;
 ```
+
+### Named checkpoints (partial loading)
+
+For transfer learning, use named checkpoints with `Graph::named_parameters()`:
+
+```rust
+// Save with qualified names
+let named = model.named_parameters();
+save_named_parameters_file("/tmp/model.fdl", &named)?;
+
+// Load into a different model — matches by name
+let new_named = new_model.named_parameters();
+let report = load_named_parameters_file("/tmp/model.fdl", &new_named)?;
+
+println!("loaded: {:?}", report.loaded);   // matched and loaded
+println!("skipped: {:?}", report.skipped); // in checkpoint, not in model
+println!("missing: {:?}", report.missing); // in model, not in checkpoint
+
+// Freeze transferred params, train the rest
+for (name, param) in &new_named {
+    if report.loaded.contains(name) {
+        param.freeze()?;
+    }
+}
+```
+
+Named parameters use the tag name as prefix when available (`"encoder/weight"`),
+otherwise the node ID (`"linear_1/weight"`). Shape mismatches on matched names
+are errors.
 
 ## LR Scheduling
 

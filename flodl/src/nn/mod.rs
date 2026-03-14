@@ -27,8 +27,12 @@ pub use parameter::Parameter;
 pub use linear::Linear;
 pub use activation::{Identity, ReLU, Sigmoid, Tanh, GELU, SiLU};
 pub use loss::{mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
-pub use optim::{Optimizer, Stateful, SGD, Adam, AdamW};
-pub use checkpoint::{save_parameters, load_parameters, save_parameters_file, load_parameters_file};
+pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder};
+pub use checkpoint::{
+    save_parameters, load_parameters, save_parameters_file, load_parameters_file,
+    save_named_parameters, load_named_parameters, save_named_parameters_file, load_named_parameters_file,
+    LoadReport,
+};
 pub use amp::{GradScaler, cast_parameters};
 pub use clip::{clip_grad_norm, clip_grad_value};
 pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler};
