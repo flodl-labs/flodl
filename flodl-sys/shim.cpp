@@ -598,12 +598,16 @@ extern "C" char* flodl_argmax(FlodlTensor t, int dim, int keepdim,
 }
 
 // --- Comparison (return float masks: 0.0 or 1.0) ---
+// Float inputs: mask uses input's dtype. Non-float (Int64, Bool): mask is Float32.
+static inline torch::ScalarType mask_dtype(const torch::Tensor& t) {
+    return t.is_floating_point() ? t.scalar_type() : torch::kFloat32;
+}
 
 extern "C" char* flodl_gt_scalar(FlodlTensor t, double scalar,
                                 FlodlTensor* result) {
     try {
         auto mask = torch::gt(unwrap(t), scalar);
-        *result = wrap(mask.to(unwrap(t).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -614,7 +618,7 @@ extern "C" char* flodl_ge_scalar(FlodlTensor t, double scalar,
                                 FlodlTensor* result) {
     try {
         auto mask = torch::ge(unwrap(t), scalar);
-        *result = wrap(mask.to(unwrap(t).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -625,7 +629,7 @@ extern "C" char* flodl_le_scalar(FlodlTensor t, double scalar,
                                 FlodlTensor* result) {
     try {
         auto mask = torch::le(unwrap(t), scalar);
-        *result = wrap(mask.to(unwrap(t).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -636,7 +640,7 @@ extern "C" char* flodl_lt_scalar(FlodlTensor t, double scalar,
                                 FlodlTensor* result) {
     try {
         auto mask = torch::lt(unwrap(t), scalar);
-        *result = wrap(mask.to(unwrap(t).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -1053,7 +1057,7 @@ extern "C" int flodl_cuda_utilization(int device_index) {
 extern "C" char* flodl_gt_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
     try {
         auto mask = torch::gt(unwrap(a), unwrap(b));
-        *result = wrap(mask.to(unwrap(a).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -1063,7 +1067,7 @@ extern "C" char* flodl_gt_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* resu
 extern "C" char* flodl_lt_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
     try {
         auto mask = torch::lt(unwrap(a), unwrap(b));
-        *result = wrap(mask.to(unwrap(a).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -1073,7 +1077,7 @@ extern "C" char* flodl_lt_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* resu
 extern "C" char* flodl_ge_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
     try {
         auto mask = torch::ge(unwrap(a), unwrap(b));
-        *result = wrap(mask.to(unwrap(a).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -1083,7 +1087,7 @@ extern "C" char* flodl_ge_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* resu
 extern "C" char* flodl_le_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
     try {
         auto mask = torch::le(unwrap(a), unwrap(b));
-        *result = wrap(mask.to(unwrap(a).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -1093,7 +1097,7 @@ extern "C" char* flodl_le_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* resu
 extern "C" char* flodl_eq_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
     try {
         auto mask = torch::eq(unwrap(a), unwrap(b));
-        *result = wrap(mask.to(unwrap(a).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -1103,7 +1107,7 @@ extern "C" char* flodl_eq_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* resu
 extern "C" char* flodl_ne_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
     try {
         auto mask = torch::ne(unwrap(a), unwrap(b));
-        *result = wrap(mask.to(unwrap(a).scalar_type()));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());

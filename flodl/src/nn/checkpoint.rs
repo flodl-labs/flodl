@@ -24,10 +24,9 @@ pub fn save_parameters<W: Write>(w: &mut W, params: &[Parameter]) -> Result<()> 
     Ok(())
 }
 
-/// Load parameters from a binary checkpoint (`.fdl` or legacy `.bin`).
+/// Load parameters from a `.fdl` checkpoint.
 ///
-/// Validates magic, version, parameter count, names, and shapes.
-/// Accepts both `FDLC` (current) and `GODL` (legacy) magic bytes.
+/// Validates `FDLC` magic, version, parameter count, names, and shapes.
 /// Loaded tensors are cast to the model parameter's current dtype and device.
 pub fn load_parameters<R: Read>(r: &mut R, params: &[Parameter]) -> Result<()> {
     let mut magic = [0u8; 4];

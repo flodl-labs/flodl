@@ -86,12 +86,18 @@ let output = ln.forward(&input)?;  // [batch, 512] -> [batch, 512]
 Normalizes over the batch dimension. Uses running statistics at inference.
 
 ```rust
+// For fully-connected layers: input [batch, features]
 let bn = BatchNorm::new(128)?;
 let output = bn.forward(&input)?;  // [batch, 128] -> [batch, 128]
+
+// For conv layers: input [batch, channels, height, width]
+let bn2d = BatchNorm2d::new(64)?;
+let output = bn2d.forward(&input)?;  // [B, 64, H, W] -> [B, 64, H, W]
 ```
 
-BatchNorm behaves differently during training (batch statistics) vs. inference
-(running statistics). It tracks `num_batches_tracked` and will error in eval
+Use `BatchNorm` after Linear layers and `BatchNorm2d` after Conv2d layers.
+Both behave differently during training (batch statistics) vs. inference
+(running statistics). They track `num_batches_tracked` and will error in eval
 mode if no training has occurred — this catches a common silent bug.
 
 See [Train/Eval Mode](#traineval-mode) below.

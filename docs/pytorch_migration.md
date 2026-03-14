@@ -390,6 +390,7 @@ layer = nn.Conv2d(3, 64, kernel_size=3, padding=1)
 layer = nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1)
 layer = nn.LayerNorm(128)
 layer = nn.BatchNorm1d(128)
+layer = nn.BatchNorm2d(64)
 layer = nn.Dropout(p=0.5)
 layer = nn.Embedding(1000, 128)
 cell = nn.GRUCell(128, 256)
@@ -404,7 +405,8 @@ let layer = Conv2d::new(3, 64, 3)?;                                         // d
 let layer = Conv2d::build(3, 64, 3, true, [1,1], [1,1], [1,1], 1, Device::CPU)?;  // full control
 let layer = ConvTranspose2d::new(64, 3, 4)?;                                // defaults: stride=1, padding=0
 let layer = LayerNorm::new(128)?;
-let layer = BatchNorm::new(128)?;
+let layer = BatchNorm::new(128)?;                                         // for [B, features] after Linear
+let layer = BatchNorm2d::new(64)?;                                        // for [B, C, H, W] after Conv2d
 let layer = Dropout::new(0.5);
 let layer = Embedding::new(1000, 128)?;
 let cell = GRUCell::new(128, 256)?;
@@ -506,7 +508,7 @@ loss = F.kl_div(log_probs, targets, reduction='batchmean')
 ```rust
 // flodl — free functions, return Variable (differentiable)
 let loss = mse_loss(&pred, &target)?;
-let loss = cross_entropy_loss(&logits, &labels)?;
+let loss = cross_entropy_loss(&logits, &labels)?;  // labels: [B] indices or [B,C] one-hot
 let loss = bce_with_logits_loss(&pred, &target)?;
 let loss = l1_loss(&pred, &target)?;
 let loss = smooth_l1_loss(&pred, &target, 1.0)?;
@@ -893,6 +895,84 @@ model.svg(Some("model.svg"))?;      // render to SVG
 
 The graph implements `Module`, so it works with optimizers, checkpointing, and everything else.
 
+## Training Monitor (replaces TensorBoard)
+
+PyTorch researchers typically use TensorBoard, Weights & Biases, or MLflow for
+training visibility. In floDl, the training monitor is built in — no external
+process, no pip install, no separate UI.
+
+```python
+# PyTorch + TensorBoard
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter("runs/experiment_1")
+
+for epoch in range(num_epochs):
+    # ... training ...
+    writer.add_scalar("loss", loss.item(), epoch)
+    writer.add_scalar("lr", scheduler.get_last_lr()[0], epoch)
+
+# Then: tensorboard --logdir runs/
+```
+
+```rust
+// flodl — built-in monitor with live dashboard
+use flodl::monitor::Monitor;
+
+let mut monitor = Monitor::new(num_epochs);
+monitor.serve(3000)?;                        // live dashboard at http://localhost:3000
+monitor.watch(&model);                       // graph SVG in dashboard
+monitor.save_html("training_report.html");   // archive at finish
+
+for epoch in 0..num_epochs {
+    let t = std::time::Instant::now();
+    // ... training ...
+
+    monitor.log(epoch, t.elapsed(), &[("loss", loss_val), ("lr", lr)]);
+    // epoch  42/100  loss=0.0023  lr=0.001  [1.2s  ETA 1m 10s]  VRAM: 2.1/6.0 GB (82%)
+}
+
+monitor.finish_with(&model);  // profiled SVG + archive saved
+```
+
+| Feature | TensorBoard | flodl Monitor |
+|---------|-------------|---------------|
+| Setup | `pip install tensorboard` + `SummaryWriter` + `tensorboard --logdir` | `monitor.serve(3000)` |
+| Terminal output | None (web only) | One-line per epoch with ETA |
+| Resource tracking | Manual (no GPU metrics built in) | CPU/RAM/GPU/VRAM automatic |
+| Live charts | Yes (web) | Yes (SSE, no polling) |
+| Architecture viz | `add_graph()` (limited) | `monitor.watch(&model)` — full DOT/SVG with profiling heat map |
+| Offline archive | Log files (need TensorBoard to view) | Self-contained HTML |
+| Dependencies | protobuf, gRPC, webpack frontend | Zero — 16KB inline HTML/JS |
+
+## GPU Memory Queries
+
+```python
+# PyTorch
+torch.cuda.memory_allocated()     # bytes allocated by tensors
+torch.cuda.memory_reserved()      # bytes reserved by caching allocator
+torch.cuda.max_memory_allocated()  # peak allocated
+```
+
+```rust
+// flodl — hardware-level via cudaMemGetInfo
+let (used, total) = cuda_memory_info()?;   // (bytes_used, bytes_total)
+let util = cuda_utilization();              // Option<u32> — GPU % via NVML
+
+println!("VRAM: {}/{}", used, total);       // e.g., 2254857830/6442450944
+if let Some(pct) = util {
+    println!("GPU utilization: {}%", pct);  // e.g., 82%
+}
+```
+
+| PyTorch | flodl | What it reports |
+|---------|-------|----------------|
+| `torch.cuda.memory_allocated()` | `cuda_memory_info()?.0` | Bytes used (hardware level) |
+| `torch.cuda.get_device_properties(0).total_mem` | `cuda_memory_info()?.1` | Total VRAM |
+| *(no built-in)* | `cuda_utilization()` | GPU compute % via NVML |
+
+The monitor samples these automatically on every `log()` call — you don't need
+to query them manually during training.
+
 ## Quick Reference Table
 
 | PyTorch | flodl | Notes |
@@ -910,4 +990,6 @@ The graph implements `Module`, so it works with optimizers, checkpointing, and e
 | `with torch.no_grad():` | `no_grad(\|\| { })` | Closure-based |
 | `nn.Sequential(...)` | `FlowBuilder::from(...).through(...).build()?` | Fluent builder |
 | `model.train()` | `module.set_training(true)` | |
-| `torch.save(...)` | `save_parameters_file(...)?` | Binary format |
+| `torch.save(...)` | `save_parameters_file("m.fdl", ...)?` | `.fdl` format |
+| `torch.cuda.memory_allocated()` | `cuda_memory_info()?` | `(used, total)` bytes |
+| `SummaryWriter` + TensorBoard | `Monitor::new(n).serve(3000)?` | Built-in live dashboard |

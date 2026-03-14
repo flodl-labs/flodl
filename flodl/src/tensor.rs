@@ -1112,7 +1112,8 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
-    /// Element-wise equality (returns float mask: 0.0 or 1.0).
+    /// Element-wise equality. Returns a mask (0.0 or 1.0) in the input's
+    /// dtype for float inputs, or Float32 for integer/bool inputs.
     pub fn eq_tensor(&self, other: &Tensor) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
         let err = unsafe { ffi::flodl_eq_tensor(self.handle, other.handle, &mut handle) };
@@ -1120,7 +1121,8 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
-    /// Element-wise not-equal (returns float mask: 0.0 or 1.0).
+    /// Element-wise not-equal. Returns a mask (0.0 or 1.0) in the input's
+    /// dtype for float inputs, or Float32 for integer/bool inputs.
     pub fn ne_tensor(&self, other: &Tensor) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
         let err = unsafe { ffi::flodl_ne_tensor(self.handle, other.handle, &mut handle) };

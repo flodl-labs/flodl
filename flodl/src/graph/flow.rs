@@ -66,7 +66,28 @@ pub struct FlowBuilder {
     pub(super) tag_groups: HashMap<String, Vec<String>>,
 }
 
+impl Default for FlowBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlowBuilder {
+    /// Start a graph flow with an implicit identity entry.
+    ///
+    /// Equivalent to `FlowBuilder::from(Identity)`. Useful when the first
+    /// meaningful operation is a tag or fork:
+    ///
+    /// ```ignore
+    /// let g = FlowBuilder::new()
+    ///     .tag("input")
+    ///     .through(encoder)
+    ///     .build()?;
+    /// ```
+    pub fn new() -> Self {
+        Self::from(crate::nn::Identity)
+    }
+
     /// Start a new graph flow with an entry module.
     /// The module's input becomes the graph's input.
     pub fn from(module: impl Module + 'static) -> Self {

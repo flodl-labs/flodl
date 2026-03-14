@@ -354,9 +354,51 @@ impl Monitor {
         Ok(html)
     }
 
+    /// Write a resource block to a JSON buffer.
+    fn write_resources(b: &mut String, res: &ResourceSample) {
+        b.push_str(",\"resources\":{");
+        let mut first = true;
+        if let Some(cpu) = res.cpu_percent
+            && cpu.is_finite()
+        {
+            let _ = write!(b, "\"cpu\":{:.1}", cpu);
+            first = false;
+        }
+        if let (Some(used), Some(total)) = (res.ram_used_bytes, res.ram_total_bytes) {
+            if !first { b.push(','); }
+            let _ = write!(b, "\"ram_used\":{},\"ram_total\":{}", used, total);
+            first = false;
+        }
+        if let Some(gpu) = res.gpu_util_percent
+            && gpu.is_finite()
+        {
+            if !first { b.push(','); }
+            let _ = write!(b, "\"gpu\":{:.1}", gpu);
+            first = false;
+        }
+        if let (Some(used), Some(total)) = (res.vram_used_bytes, res.vram_total_bytes) {
+            if !first { b.push(','); }
+            let _ = write!(b, "\"vram_used\":{},\"vram_total\":{}", used, total);
+        }
+        b.push('}');
+    }
+
+    /// Write metric values to a JSON buffer, replacing NaN/Infinity with null.
+    fn write_metrics(b: &mut String, metrics: &[(String, f64)]) {
+        b.push_str(",\"metrics\":{");
+        for (i, (name, val)) in metrics.iter().enumerate() {
+            if i > 0 { b.push(','); }
+            if val.is_finite() {
+                let _ = write!(b, "\"{}\":{:.8}", name, val);
+            } else {
+                let _ = write!(b, "\"{}\":null", name);
+            }
+        }
+        b.push('}');
+    }
+
     /// Serialize an epoch record to JSON from a stored record.
     fn epoch_record_to_json(&self, record: &EpochRecord) -> String {
-        let res = &record.resources;
         let epoch_display = record.epoch + 1;
 
         let mut b = String::with_capacity(512);
@@ -369,36 +411,8 @@ impl Monitor {
             record.duration_secs,
         );
 
-        // Metrics
-        b.push_str(",\"metrics\":{");
-        for (i, (name, val)) in record.metrics.iter().enumerate() {
-            if i > 0 { b.push(','); }
-            let _ = write!(b, "\"{}\":{:.8}", name, val);
-        }
-        b.push('}');
-
-        // Resources
-        b.push_str(",\"resources\":{");
-        let mut first = true;
-        if let Some(cpu) = res.cpu_percent {
-            let _ = write!(b, "\"cpu\":{:.1}", cpu);
-            first = false;
-        }
-        if let (Some(used), Some(total)) = (res.ram_used_bytes, res.ram_total_bytes) {
-            if !first { b.push(','); }
-            let _ = write!(b, "\"ram_used\":{},\"ram_total\":{}", used, total);
-            first = false;
-        }
-        if let Some(gpu) = res.gpu_util_percent {
-            if !first { b.push(','); }
-            let _ = write!(b, "\"gpu\":{:.1}", gpu);
-            first = false;
-        }
-        if let (Some(used), Some(total)) = (res.vram_used_bytes, res.vram_total_bytes) {
-            if !first { b.push(','); }
-            let _ = write!(b, "\"vram_used\":{},\"vram_total\":{}", used, total);
-        }
-        b.push('}');
+        Self::write_metrics(&mut b, &record.metrics);
+        Self::write_resources(&mut b, &record.resources);
 
         b.push('}');
         b
@@ -407,7 +421,6 @@ impl Monitor {
     /// Serialize an epoch record to JSON (no serde).
     fn epoch_to_json(&self, epoch: usize) -> String {
         let record = &self.epochs[self.epochs.len() - 1];
-        let res = &record.resources;
 
         let mut b = String::with_capacity(512);
         b.push('{');
@@ -425,41 +438,13 @@ impl Monitor {
             let elapsed = self.start_time.elapsed().as_secs_f64();
             let per_epoch = elapsed / epoch_display as f64;
             let remaining = per_epoch * (self.total_epochs - epoch_display) as f64;
-            let _ = write!(b, ",\"eta\":{:.1}", remaining);
-        }
-
-        // Metrics
-        b.push_str(",\"metrics\":{");
-        for (i, (name, val)) in record.metrics.iter().enumerate() {
-            if i > 0 {
-                b.push(',');
+            if remaining.is_finite() {
+                let _ = write!(b, ",\"eta\":{:.1}", remaining);
             }
-            let _ = write!(b, "\"{}\":{:.8}", name, val);
         }
-        b.push('}');
 
-        // Resources
-        b.push_str(",\"resources\":{");
-        let mut first = true;
-        if let Some(cpu) = res.cpu_percent {
-            let _ = write!(b, "\"cpu\":{:.1}", cpu);
-            first = false;
-        }
-        if let (Some(used), Some(total)) = (res.ram_used_bytes, res.ram_total_bytes) {
-            if !first { b.push(','); }
-            let _ = write!(b, "\"ram_used\":{},\"ram_total\":{}", used, total);
-            first = false;
-        }
-        if let Some(gpu) = res.gpu_util_percent {
-            if !first { b.push(','); }
-            let _ = write!(b, "\"gpu\":{:.1}", gpu);
-            first = false;
-        }
-        if let (Some(used), Some(total)) = (res.vram_used_bytes, res.vram_total_bytes) {
-            if !first { b.push(','); }
-            let _ = write!(b, "\"vram_used\":{},\"vram_total\":{}", used, total);
-        }
-        b.push('}');
+        Self::write_metrics(&mut b, &record.metrics);
+        Self::write_resources(&mut b, &record.resources);
 
         b.push('}');
         b

@@ -25,7 +25,7 @@ pub mod amp;
 
 pub use parameter::Parameter;
 pub use linear::Linear;
-pub use activation::{ReLU, Sigmoid, Tanh, GELU, SiLU};
+pub use activation::{Identity, ReLU, Sigmoid, Tanh, GELU, SiLU};
 pub use loss::{mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
 pub use optim::{Optimizer, Stateful, SGD, Adam, AdamW};
 pub use checkpoint::{save_parameters, load_parameters, save_parameters_file, load_parameters_file};
@@ -39,7 +39,7 @@ pub use grucell::GRUCell;
 pub use lstmcell::LSTMCell;
 pub use conv2d::Conv2d;
 pub use conv_transpose2d::ConvTranspose2d;
-pub use batchnorm::BatchNorm;
+pub use batchnorm::{BatchNorm, BatchNorm2d};
 pub use init::{xavier_uniform, xavier_normal};
 
 use std::collections::{HashMap, HashSet};
@@ -1182,5 +1182,139 @@ mod tests {
         loss.backward().unwrap();
         assert!(input.grad().is_some());
         assert!(grid.grad().is_some());
+    }
+
+    // --- Identity module ---
+
+    #[test]
+    fn test_identity() {
+        let id = activation::Identity;
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), true);
+        let y = id.forward(&x).unwrap();
+        assert_eq!(y.data().to_f32_vec().unwrap(), vec![1.0, 2.0, 3.0]);
+        assert!(id.parameters().is_empty());
+    }
+
+    // --- Cross-entropy with class indices ---
+
+    #[test]
+    fn test_cross_entropy_indices() {
+        // Same test as test_cross_entropy_loss but with integer indices
+        // Logits: [[2.0, 1.0], [1.0, 3.0]]
+        // Targets: class 0, class 1 (instead of one-hot)
+        let pred = Variable::new(
+            from_f32(&[2.0, 1.0, 1.0, 3.0], &[2, 2]),
+            true,
+        );
+        let target_idx = Variable::new(
+            Tensor::from_i64(&[0, 1], &[2]).unwrap(),
+            false,
+        );
+        let loss_idx = cross_entropy_loss(&pred, &target_idx).unwrap();
+
+        // Compare with one-hot version
+        let pred2 = Variable::new(
+            from_f32(&[2.0, 1.0, 1.0, 3.0], &[2, 2]),
+            true,
+        );
+        let target_oh = Variable::new(
+            from_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2]),
+            false,
+        );
+        let loss_oh = cross_entropy_loss(&pred2, &target_oh).unwrap();
+
+        let v1 = loss_idx.item().unwrap();
+        let v2 = loss_oh.item().unwrap();
+        assert!(
+            (v1 - v2).abs() < 1e-5,
+            "index loss ({}) should match one-hot loss ({})", v1, v2
+        );
+
+        // Backward works
+        loss_idx.backward().unwrap();
+        assert!(pred.grad().is_some());
+    }
+
+    #[test]
+    fn test_cross_entropy_indices_converges() {
+        let model = Linear::new(2, 3).unwrap();
+        let params = model.parameters();
+        let mut optim = Adam::new(&params, 0.05);
+
+        // 3 samples, 3 classes: class 0=[1,0], class 1=[0,1], class 2=[0.5,0.5]
+        let x = Variable::new(from_f32(&[1.0, 0.0, 0.0, 1.0, 0.5, 0.5], &[3, 2]), false);
+        let target = Variable::new(
+            Tensor::from_i64(&[0, 1, 2], &[3]).unwrap(),
+            false,
+        );
+
+        let mut last_loss = f64::MAX;
+        for _ in 0..200 {
+            optim.zero_grad();
+            let pred = model.forward(&x).unwrap();
+            let loss = cross_entropy_loss(&pred, &target).unwrap();
+            last_loss = loss.item().unwrap();
+            loss.backward().unwrap();
+            optim.step().unwrap();
+        }
+        assert!(last_loss < 0.5, "cross entropy with indices should converge, got {}", last_loss);
+    }
+
+    // --- BatchNorm2d ---
+
+    #[test]
+    fn test_batchnorm2d() {
+        let bn = BatchNorm2d::new(3).unwrap();
+        // [batch=4, channels=3, height=8, width=8]
+        let x = Variable::new(
+            Tensor::randn(&[4, 3, 8, 8], Default::default()).unwrap(),
+            true,
+        );
+        let out = bn.forward(&x).unwrap();
+        assert_eq!(out.shape(), vec![4, 3, 8, 8]);
+
+        // Backward
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert_eq!(bn.parameters().len(), 2); // gamma, beta
+    }
+
+    #[test]
+    fn test_batchnorm2d_eval() {
+        let bn = BatchNorm2d::new(4).unwrap();
+
+        // Run training to populate running stats
+        for _ in 0..3 {
+            let x = Variable::new(
+                Tensor::randn(&[4, 4, 6, 6], Default::default()).unwrap(),
+                false,
+            );
+            bn.forward(&x).unwrap();
+        }
+
+        bn.set_training(false);
+        let x = Variable::new(
+            Tensor::randn(&[2, 4, 6, 6], Default::default()).unwrap(),
+            false,
+        );
+        let out = bn.forward(&x).unwrap();
+        assert_eq!(out.shape(), vec![2, 4, 6, 6]);
+    }
+
+    // --- Comparison ops with integer input ---
+
+    #[test]
+    fn test_eq_tensor_int64() {
+        let a = Tensor::from_i64(&[1, 2, 3], &[3]).unwrap();
+        let b = Tensor::from_i64(&[1, 5, 3], &[3]).unwrap();
+        let eq = a.eq_tensor(&b).unwrap();
+        // Should be Float32 (not Int64) so mean() works
+        assert_eq!(eq.dtype(), crate::tensor::DType::Float32);
+        let data = eq.to_f32_vec().unwrap();
+        assert_eq!(data, vec![1.0, 0.0, 1.0]);
+        // mean should work without to_dtype
+        let m = eq.mean().unwrap().item().unwrap();
+        assert!((m - 2.0 / 3.0).abs() < 1e-5);
     }
 }

@@ -13,24 +13,63 @@ pub fn mse_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
 /// Cross-entropy loss with numerically stable log-softmax.
 ///
 /// `pred` shape: `[batch, classes]` (raw logits).
-/// `target` shape: `[batch, classes]` (one-hot or soft labels).
 ///
-/// Computes: `-mean(sum(target * log_softmax(pred), dim=1))`
+/// `target` accepts two formats (auto-detected):
+/// - **Class indices** `[batch]` (Int64) — like PyTorch's `F.cross_entropy`.
+///   Each value is the correct class index (0..classes-1).
+/// - **One-hot / soft labels** `[batch, classes]` (Float) — probability vectors.
+///
+/// ```ignore
+/// // With class indices (no one-hot allocation needed):
+/// let labels = Variable::new(Tensor::from_i64(&[0, 2, 1], &[3])?, false);
+/// let loss = cross_entropy_loss(&logits, &labels)?;
+///
+/// // With one-hot targets (same as before):
+/// let onehot = Variable::new(Tensor::from_f32(&[1.,0.,0., 0.,0.,1., 0.,1.,0.], &[3, 3])?, false);
+/// let loss = cross_entropy_loss(&logits, &onehot)?;
+/// ```
 pub fn cross_entropy_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
-    let shape = pred.shape();
-    if shape.len() != 2 {
+    let pred_shape = pred.shape();
+    if pred_shape.len() != 2 {
         return Err(TensorError::new("cross_entropy_loss: pred must be 2D [batch, classes]"));
     }
-    let batch = shape[0];
+    let batch = pred_shape[0];
 
     // Native log-softmax: numerically stable (handles max subtraction internally)
     let log_softmax = pred.log_softmax(1)?;
 
-    // -mean(sum(target * log_softmax, dim=1))
-    let weighted = target.mul(&log_softmax)?;
-    let per_sample = weighted.sum_dim(1, false)?; // [batch]
-    let total = per_sample.sum()?;
-    total.mul_scalar(-1.0 / batch as f64)
+    let target_shape = target.shape();
+
+    if target_shape.len() == 1 && target_shape[0] == batch {
+        // Index mode: target is [batch] class indices.
+        // Gather the log-prob at each target index: log_softmax[i, target[i]]
+        let indices = target.data().to_i64_vec()?;
+        let classes = pred_shape[1];
+        for &idx in &indices {
+            if idx < 0 || idx >= classes {
+                return Err(TensorError::new(&format!(
+                    "cross_entropy_loss: target index {} out of range [0, {})", idx, classes
+                )));
+            }
+        }
+        let idx_tensor = target.data().reshape(&[batch, 1])?;
+        let selected = log_softmax.gather(1, &idx_tensor)?; // [batch, 1]
+        let per_sample = selected.reshape(&[batch])?;
+        let total = per_sample.sum()?;
+        total.mul_scalar(-1.0 / batch as f64)
+    } else if target_shape.len() == 2 && target_shape[0] == batch && target_shape[1] == pred_shape[1] {
+        // One-hot / soft-label mode: target is [batch, classes].
+        let weighted = target.mul(&log_softmax)?;
+        let per_sample = weighted.sum_dim(1, false)?; // [batch]
+        let total = per_sample.sum()?;
+        total.mul_scalar(-1.0 / batch as f64)
+    } else {
+        Err(TensorError::new(&format!(
+            "cross_entropy_loss: target shape {:?} doesn't match pred shape {:?} — \
+             expected [batch] indices or [batch, classes] one-hot",
+            target_shape, pred_shape
+        )))
+    }
 }
 
 /// Binary cross-entropy loss from raw logits (numerically stable).

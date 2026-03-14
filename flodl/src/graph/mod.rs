@@ -1421,12 +1421,20 @@ mod tests {
         }
     }
 
-    /// Identity pass-through for tagging.
-    struct Identity;
-    impl Module for Identity {
-        fn forward(&self, input: &Variable) -> Result<Variable> {
-            Ok(input.clone())
-        }
+    use crate::nn::Identity;
+
+    #[test]
+    fn test_flowbuilder_new() {
+        // FlowBuilder::new() starts with implicit Identity
+        let graph = FlowBuilder::new()
+            .tag("input")
+            .through(Linear::new(3, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), false);
+        let y = graph.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 2]);
     }
 
     #[test]

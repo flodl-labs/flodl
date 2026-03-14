@@ -3,6 +3,35 @@ use crate::tensor::Result;
 
 use super::Module;
 
+/// Identity pass-through module. Returns its input unchanged.
+///
+/// Useful as a tagging entry point in graphs:
+/// ```ignore
+/// FlowBuilder::from(Identity).tag("image")
+/// ```
+pub struct Identity;
+
+impl Default for Identity {
+    fn default() -> Self {
+        Identity
+    }
+}
+
+impl Identity {
+    /// Create an Identity module.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Module for Identity {
+    fn name(&self) -> &str { "identity" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        Ok(input.clone())
+    }
+}
+
 /// ReLU activation module.
 pub struct ReLU;
 

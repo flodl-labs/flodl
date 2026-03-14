@@ -166,4 +166,5 @@ if flodl::cuda_available() {
 
 ---
 
+Previous: [Tutorial 0: Rust for PyTorch Users](00-rust-primer.md) |
 Next: [Tutorial 2: Automatic Differentiation](02-autograd.md)

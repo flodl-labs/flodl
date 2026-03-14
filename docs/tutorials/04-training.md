@@ -13,8 +13,9 @@ use flodl::*;
 let loss = mse_loss(&pred, &target)?;
 
 // Cross-Entropy from raw logits (not probabilities).
-// pred: [batch, classes] logits. target: [batch, classes] one-hot.
-let loss = cross_entropy_loss(&logits, &one_hot_target)?;
+// pred: [batch, classes] logits.
+// target: [batch] class indices (Int64) or [batch, classes] one-hot/soft labels.
+let loss = cross_entropy_loss(&logits, &target)?;
 
 // Binary Cross-Entropy with logits
 let loss = bce_with_logits_loss(&pred, &target)?;

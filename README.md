@@ -17,15 +17,33 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
 </p>
 
 <p align="center">
+  <a href="#getting-started">Getting Started</a> &bull;
   <a href="#the-graph-builder">Graph Builder</a> &bull;
   <a href="#training-monitor">Training Monitor</a> &bull;
-  <a href="#quick-start">Quick Start</a> &bull;
   <a href="#features">Features</a> &bull;
   <a href="docs/tutorials/01-tensors.md">Tutorials</a> &bull;
+  <a href="docs/pytorch_migration.md">PyTorch Migration</a> &bull;
+  <a href="docs/troubleshooting.md">Troubleshooting</a> &bull;
   <a href="#architecture">Architecture</a>
 </p>
 
 ---
+
+## Getting Started
+
+Create a new project with one command:
+
+```bash
+curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/init.sh | sh -s my-project
+cd my-project
+make build    # first build (~5 min, downloads libtorch)
+make run      # train the template model
+```
+
+This generates a complete project with Dockerfiles, Makefile, and an annotated
+training template. Edit `src/main.rs` to build your model.
+
+> **New to Rust?** Read [Rust for PyTorch Users](docs/tutorials/00-rust-primer.md) — 10 patterns in 15 minutes.
 
 ## The Graph Builder
 
@@ -152,6 +170,13 @@ See the full **[Training Monitor Tutorial](docs/tutorials/09-monitor.md)**.
 
 Requirements: Docker (with NVIDIA Container Toolkit for GPU support).
 
+**New project** (see [Getting Started](#getting-started) above):
+```bash
+curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/init.sh | sh -s my-project
+cd my-project && make run
+```
+
+**Develop floDl itself:**
 ```bash
 git clone https://github.com/fab2s/floDl.git
 cd floDl
@@ -202,8 +227,8 @@ for (input_t, target_t) in &batches {
 |-------|-------------|
 | **Tensor** | Owned RAII tensors with `Drop`, `Clone`. CPU and CUDA. |
 | **Autograd** | Reverse-mode automatic differentiation. Full backward for every op. |
-| **NN Modules** | `Linear`, `Conv2d`, `ConvTranspose2d`, `LayerNorm`, `BatchNorm`, `Dropout`, `Embedding`, `GRUCell`, `LSTMCell` |
-| **Activations** | `ReLU`, `Sigmoid`, `Tanh`, `GELU`, `SiLU` |
+| **NN Modules** | `Linear`, `Conv2d`, `ConvTranspose2d`, `LayerNorm`, `BatchNorm`/`BatchNorm2d`, `Dropout`, `Embedding`, `GRUCell`, `LSTMCell` |
+| **Activations** | `Identity`, `ReLU`, `Sigmoid`, `Tanh`, `GELU`, `SiLU` |
 | **Losses** | `mse_loss`, `cross_entropy_loss`, `bce_with_logits_loss`, `l1_loss`, `smooth_l1_loss`, `kl_div_loss` |
 | **Optimizers** | `SGD` (with momentum), `Adam`, `AdamW` |
 | **LR Scheduling** | `StepDecay`, `CosineScheduler`, `WarmupScheduler` (composable), `PlateauScheduler` |
@@ -413,6 +438,7 @@ and CPU. Switching hardware is a build flag, not a code change.
 
 Step-by-step guides from basics to advanced, each with code examples:
 
+0. **[Rust for PyTorch Users](docs/tutorials/00-rust-primer.md)** — 10 Rust patterns in 15 minutes (new to Rust? start here)
 1. **[Tensors](docs/tutorials/01-tensors.md)** — creation, ops, error handling, memory
 2. **[Autograd](docs/tutorials/02-autograd.md)** — variables, gradients, backward pass
 3. **[Modules](docs/tutorials/03-modules.md)** — Linear, Conv2d, normalization, RNN cells
@@ -430,6 +456,7 @@ Step-by-step guides from basics to advanced, each with code examples:
 
 ### Examples
 
+- [`flodl/examples/sine_wave.rs`](flodl/examples/sine_wave.rs) — sine regression with monitor, checkpoint round-trip
 - [`flodl/examples/quickstart.rs`](flodl/examples/quickstart.rs) — train a model in 30 lines
 - [`flodl/examples/showcase.rs`](flodl/examples/showcase.rs) — every graph builder method in one graph
 

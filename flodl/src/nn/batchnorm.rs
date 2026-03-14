@@ -60,6 +60,65 @@ impl BatchNorm {
     }
 }
 
+/// Batch normalization for 4D `[B, C, H, W]` inputs (conv layers).
+///
+/// Normalizes over the `(B, H, W)` dimensions per channel, matching
+/// PyTorch's `nn.BatchNorm2d`. Internally reshapes to `[B*H*W, C]`,
+/// applies `BatchNorm`, and reshapes back.
+///
+/// ```ignore
+/// let bn = BatchNorm2d::new(64)?;  // 64 channels
+/// let x: Variable  // [B, 64, H, W]
+/// let y = bn.forward(&x)?;  // [B, 64, H, W], normalized per channel
+/// ```
+pub struct BatchNorm2d {
+    inner: BatchNorm,
+}
+
+impl BatchNorm2d {
+    /// Create a BatchNorm2d layer for `num_channels` channels.
+    pub fn new(num_channels: i64) -> Result<Self> {
+        Ok(Self { inner: BatchNorm::new(num_channels)? })
+    }
+}
+
+impl Module for BatchNorm2d {
+    fn name(&self) -> &str { "batchnorm2d" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        let shape = input.shape();
+        if shape.len() != 4 {
+            return Err(TensorError::new(
+                "BatchNorm2d: input must be 4D [B, C, H, W]"
+            ));
+        }
+        let (b, c, h, w) = (shape[0], shape[1], shape[2], shape[3]);
+
+        // [B, C, H, W] -> [B, H, W, C] -> [B*H*W, C]
+        let permuted = input.permute(&[0, 2, 3, 1])?;
+        let flat = permuted.reshape(&[b * h * w, c])?;
+
+        // Apply 2D batch norm
+        let normed = self.inner.forward(&flat)?;
+
+        // [B*H*W, C] -> [B, H, W, C] -> [B, C, H, W]
+        let unflat = normed.reshape(&[b, h, w, c])?;
+        unflat.permute(&[0, 3, 1, 2])
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        self.inner.parameters()
+    }
+
+    fn set_training(&self, training: bool) {
+        self.inner.set_training(training);
+    }
+
+    fn move_to_device(&self, device: crate::tensor::Device) {
+        self.inner.move_to_device(device);
+    }
+}
+
 impl Module for BatchNorm {
     fn name(&self) -> &str { "batchnorm" }
 
