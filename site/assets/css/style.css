@@ -515,6 +515,14 @@ a:hover { color: var(--cyan); }
   margin: 0;
 }
 
+/* ── Thesis page ────────────────────────────────── */
+
+.thesis-content {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 48px 24px 80px;
+}
+
 /* ── Markdown content ───────────────────────────── */
 
 .content h1 {

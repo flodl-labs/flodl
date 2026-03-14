@@ -4,7 +4,7 @@ title: "The Trajectory Thesis"
 permalink: /thesis
 ---
 
-<main class="content" style="max-width: 780px; margin: 0 auto; padding: 48px 24px 80px;">
+<main class="content thesis-content" markdown="1">
 
 # The Trajectory Thesis
 
