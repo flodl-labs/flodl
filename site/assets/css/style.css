@@ -121,7 +121,7 @@ a:hover { color: var(--cyan); }
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-radius: 10px;
-  max-width: 640px;
+  max-width: 720px;
   margin: 0 auto;
   text-align: left;
   overflow: hidden;
@@ -151,6 +151,51 @@ a:hover { color: var(--cyan); }
   font-size: 11px;
   color: var(--dim);
   font-family: var(--mono);
+}
+
+.terminal-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-actions input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.terminal-actions input:focus {
+  border-color: var(--accent);
+}
+
+.terminal-actions button {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--dim);
+  display: flex;
+  align-items: center;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.terminal-actions button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.terminal-actions button svg {
+  width: 14px;
+  height: 14px;
 }
 
 .terminal pre {

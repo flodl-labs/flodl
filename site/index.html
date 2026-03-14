@@ -17,11 +17,52 @@ title: Deep learning in Rust
       <span class="terminal-dot"></span>
       <span class="terminal-dot"></span>
       <span class="terminal-title">Terminal</span>
+      <div class="terminal-actions">
+        <input type="text" id="projName" value="my-project" spellcheck="false" aria-label="Project name">
+        <button id="copyBtn" onclick="copyCommands()" aria-label="Copy to clipboard">
+          <svg id="copyIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          <svg id="checkIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><polyline points="20 6 9 17 4 12"/></svg>
+        </button>
+      </div>
     </div>
-    <pre><span class="prompt">$ </span><span class="cm">curl</span> <span class="flag">-sL</span> <span class="url">https://raw.githubusercontent.com/fab2s/floDl/main/init.sh</span> | <span class="cm">sh</span> <span class="flag">-s</span> my-project
-<span class="prompt">$ </span><span class="cm">cd</span> my-project
+    <pre id="terminalPre"><span class="prompt">$ </span><span class="cm">curl</span> <span class="flag">-sL</span> <span class="url">https://raw.githubusercontent.com/fab2s/floDl/main/init.sh</span> | <span class="cm">sh</span> <span class="flag">-s</span> <span id="name1">my-project</span>
+<span class="prompt">$ </span><span class="cm">cd</span> <span id="name2">my-project</span>
 <span class="prompt">$ </span><span class="cm">make</span> run         <span class="comment"># first build downloads libtorch (~5 min)</span></pre>
   </div>
+
+  <script>
+  (function() {
+    var input = document.getElementById('projName');
+    var name1 = document.getElementById('name1');
+    var name2 = document.getElementById('name2');
+
+    input.addEventListener('input', function() {
+      var v = this.value.replace(/[^a-zA-Z0-9_-]/g, '') || 'my-project';
+      name1.textContent = v;
+      name2.textContent = v;
+    });
+
+    // auto-size input to content
+    function resize() {
+      input.style.width = Math.max(input.value.length, 6) + 2 + 'ch';
+    }
+    input.addEventListener('input', resize);
+    resize();
+  })();
+
+  function copyCommands() {
+    var n = document.getElementById('projName').value.replace(/[^a-zA-Z0-9_-]/g, '') || 'my-project';
+    var text = 'curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/init.sh | sh -s ' + n + '\ncd ' + n + '\nmake run';
+    navigator.clipboard.writeText(text).then(function() {
+      document.getElementById('copyIcon').style.display = 'none';
+      document.getElementById('checkIcon').style.display = 'block';
+      setTimeout(function() {
+        document.getElementById('copyIcon').style.display = 'block';
+        document.getElementById('checkIcon').style.display = 'none';
+      }, 2000);
+    });
+  }
+  </script>
 
   <div class="cta-row">
     <a href="{{ '/guide/' | relative_url }}" class="btn btn-primary">Get Started</a>
