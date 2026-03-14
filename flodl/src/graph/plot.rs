@@ -11,7 +11,15 @@ struct PlotSeries {
 }
 
 impl Graph {
-    /// Generate a self-contained HTML file with training curves.
+    /// Generate a self-contained HTML file with training curves from epoch history.
+    ///
+    /// This plots data accumulated via [`record()`](Self::record) /
+    /// [`flush()`](Self::flush) — the graph's observation system for metrics
+    /// that feed back into training decisions.
+    ///
+    /// For a full dashboard with resource graphs, epoch log, and graph SVG,
+    /// use [`Monitor::save_html()`](crate::monitor::Monitor::save_html) instead.
+    ///
     /// Tag group names are expanded. If tags is empty, all epoch history is plotted.
     /// Uses inline Canvas JS — no external dependencies.
     pub fn plot_html(&self, path: &str, tags: &[&str]) -> std::io::Result<()> {

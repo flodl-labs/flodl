@@ -52,7 +52,6 @@ fn main() -> Result<()> {
 
     for epoch in 0..num_epochs {
         let t = std::time::Instant::now();
-        let mut epoch_loss = 0.0;
 
         for (xb, yb) in &batches {
             let input = Variable::new(xb.clone(), true);
@@ -65,13 +64,14 @@ fn main() -> Result<()> {
             clip_grad_norm(&params, 1.0)?;
             optimizer.step()?;
 
-            epoch_loss += loss.item()?;
+            model.record_scalar("loss", loss.item()?);
         }
 
-        let avg_loss = epoch_loss / n_batches as f64;
         let lr = scheduler.lr(epoch);
         optimizer.set_lr(lr);
-        monitor.log(epoch, t.elapsed(), &[("loss", avg_loss), ("lr", lr)]);
+        model.record_scalar("lr", lr);
+        model.flush(&[]);
+        monitor.log(epoch, t.elapsed(), &model);
     }
 
     monitor.finish();

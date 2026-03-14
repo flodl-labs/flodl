@@ -1,0 +1,4 @@
+# flodl training log
+epoch   1  loss=1655.53  [55ms  ETA 111ms]
+epoch   2  loss=1239.75  [24ms  ETA 40ms]
+epoch   3  loss=339.86  [23ms]

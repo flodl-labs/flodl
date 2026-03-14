@@ -9,7 +9,8 @@ dependencies.
 
 ## Basic Usage
 
-The monitor wraps your training loop with timing, ETA, and resource sampling:
+The monitor wraps your training loop with timing, ETA, and resource sampling.
+Record metrics on the graph during training, then pass the graph to `log`:
 
 ```rust
 use flodl::*;
@@ -29,7 +30,6 @@ let mut monitor = Monitor::new(num_epochs);
 
 for epoch in 0..num_epochs {
     let t = std::time::Instant::now();
-    let mut epoch_loss = 0.0;
 
     for (input_t, target_t) in &batches {
         let input = Variable::new(input_t.clone(), true);
@@ -40,11 +40,12 @@ for epoch in 0..num_epochs {
         optimizer.zero_grad();
         loss.backward()?;
         optimizer.step()?;
-        epoch_loss += loss.item()?;
+
+        model.record_scalar("loss", loss.item()?);
     }
 
-    let avg_loss = epoch_loss / batches.len() as f64;
-    monitor.log(epoch, t.elapsed(), &[("loss", avg_loss)]);
+    model.flush(&[]);
+    monitor.log(epoch, t.elapsed(), &model);
 }
 
 monitor.finish();
@@ -67,15 +68,21 @@ available. On CPU-only builds they are silently omitted.
 
 ## Multiple Metrics
 
-Pass any number of `(name, value)` pairs to `log`:
+Record everything on the graph — `flush` averages each tag independently:
 
 ```rust
-monitor.log(epoch, t.elapsed(), &[
-    ("loss", avg_loss),
-    ("lr", scheduler.lr(epoch)),
-    ("grad_norm", norm),
-]);
-// epoch  42/100  loss=0.0023  lr=0.0008  grad_norm=0.4521  [1.2s  ETA 1m 10s]
+model.record_scalar("loss", loss.item()?);
+model.record_scalar("grad_norm", norm);
+model.record_scalar("lr", scheduler.lr(epoch));
+model.flush(&[]);
+monitor.log(epoch, t.elapsed(), &model);
+// epoch  42/100  loss=0.0023  grad_norm=0.4521  lr=0.0008  [1.2s  ETA 1m 10s]
+```
+
+You can also pass metrics manually without a graph:
+
+```rust
+monitor.log(epoch, t.elapsed(), &[("loss", avg_loss), ("lr", lr)]);
 ```
 
 ## Live Dashboard
@@ -219,22 +226,33 @@ epoch,duration_s,loss,cpu_pct,ram_used,gpu_pct,vram_used
 
 ## Monitor vs. Graph Observation
 
-The monitor and the graph's built-in observation system serve different roles:
+floDl has two metric systems that serve different purposes:
 
-| | Graph (`collect`/`flush`/`trend`) | Monitor |
+- **Graph observation** (`record`/`flush`/`trend`) — metrics that **feed back
+  into training**. Use trends to trigger early stopping, LR decay, or
+  convergence checks. The graph owns this data and your training loop reads it.
+
+- **Monitor** (`log`/`serve`/`save_html`) — metrics for **the human watching
+  training**. Terminal output, live dashboard, resource tracking. It doesn't
+  feed back into anything — it's purely observational.
+
+| | Graph observation | Monitor |
 |---|---|---|
-| **Scope** | Per-node metrics within the graph | Whole training loop |
+| **Purpose** | Drive training decisions | Human-facing display |
+| **Record** | `record()`/`collect()` per step, `flush()` per epoch | `log()` per epoch |
+| **Analysis** | `trend().slope()`, `stalled()`, `improving()` | Raw history only |
 | **Resources** | No | CPU, RAM, GPU, VRAM |
-| **ETA** | `g.eta(total)` (basic) | Adaptive formatting |
-| **Dashboard** | Static HTML (`plot_html`) | Live web page |
-| **Trend analysis** | `slope`, `stalled`, `converged` | Raw history |
-| **Training decisions** | Yes (early stopping, LR decay) | No |
+| **HTML output** | `plot_html()` — static chart of epoch curves | `save_html()` — full dashboard archive with resource graphs, epoch log, and graph SVG |
+| **Live dashboard** | No | Yes (`serve()` with SSE streaming) |
 
-They complement each other. Use the graph's observation for metrics that
-drive training decisions (loss plateau detection, convergence checks). Use
-the monitor for human-facing output and system health.
+They complement each other: use graph observation for metrics that drive
+training decisions, and the monitor for human-facing output and system health.
 
 ### Using both together
+
+`log` accepts a graph reference directly — it reads the latest epoch
+history and forwards it to the monitor. You still flush yourself, so
+observation and monitoring stay decoupled:
 
 ```rust
 let mut monitor = Monitor::new(num_epochs);
@@ -254,27 +272,38 @@ for epoch in 0..num_epochs {
 
         model.record_scalar("loss", loss.item()?);
     }
-    model.flush(&["loss"]);
 
-    // Graph trends drive training decisions
+    // Observation: flush batch buffer into epoch history
+    model.flush(&[]);
+
+    // Training decisions use trends as usual
     if model.trend("loss").stalled(10, 1e-4) {
         optimizer.set_lr(scheduler.lr(epoch));
     }
 
-    // Monitor handles display and resource tracking
-    let loss_val = model.trend("loss").latest().unwrap_or(0.0);
-    monitor.log(epoch, t.elapsed(), &[
-        ("loss", loss_val),
-        ("lr", scheduler.lr(epoch)),
-    ]);
+    // Monitor: graph metrics + extras in one call
+    monitor.log(epoch, t.elapsed(), (&model, &[("lr", scheduler.lr(epoch))]));
 }
 
 monitor.finish_with(&model);  // final SVG with profiling heat map
 ```
 
+`log` accepts several forms via the [`Metrics`] trait:
+
+```rust
+// Plain metrics — no graph:
+monitor.log(epoch, t.elapsed(), &[("loss", val), ("lr", lr)]);
+
+// Graph only — all recorded metrics:
+monitor.log(epoch, t.elapsed(), &model);
+
+// Graph + extras — recorded metrics plus additional values:
+monitor.log(epoch, t.elapsed(), (&model, &[("lr", lr)]));
+```
+
 ## Complete Example
 
-See [`flodl/examples/quickstart.rs`](../../flodl/examples/quickstart.rs) for
+See [`flodl/examples/quickstart/`](../../flodl/examples/quickstart/) for
 a runnable example with the monitor.
 
 ---

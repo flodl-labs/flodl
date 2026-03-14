@@ -49,6 +49,7 @@ use flodl::{
     CosineScheduler,
     no_grad,
 };
+use flodl::monitor::Monitor;
 
 // ---------------------------------------------------------------------------
 // Reusable sub-graph builders
@@ -723,16 +724,16 @@ fn main() {
     println!("DOT: {} bytes", dot.len());
 
     // Write structural DOT
-    let dot_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase.dot");
+    let dot_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase.dot");
     std::fs::write(dot_path, &dot).expect("write showcase.dot");
     println!("Wrote {}", dot_path);
 
     // Write structural SVG
-    let svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase.svg");
+    let svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase.svg");
     let svg = g.svg(Some(svg_path)).expect("write showcase.svg");
     println!("Wrote {} ({} bytes)", svg_path, svg.len());
 
-    // -- Training loop with observation + profiling --
+    // -- Training loop with observation + profiling + monitor --
     println!("\n--- Training (5 epochs x 4 steps) ---");
     g.set_training(true);
     g.reset_state();
@@ -740,12 +741,14 @@ fn main() {
 
     let params = g.parameters();
     let mut optimizer = Adam::new(&params, 0.001);
-    let total_steps = 5 * 4;
+    let num_epochs = 5;
+    let total_steps = num_epochs * 4;
     let sched = CosineScheduler::new(0.001, 1e-5, total_steps);
+    let mut monitor = Monitor::new(num_epochs);
 
     let mut step_idx = 0;
-    for epoch in 0..5 {
-        let mut epoch_loss = 0.0;
+    for epoch in 0..num_epochs {
+        let t = std::time::Instant::now();
         for _ in 0..4 {
             optimizer.zero_grad();
             let input = make_input(true);
@@ -754,7 +757,6 @@ fn main() {
 
             let pred = g.forward_multi(&[input, ctx]).unwrap();
             let loss = mse_loss(&pred, &target).unwrap();
-            epoch_loss += loss.data().item().unwrap() as f64;
 
             loss.backward().unwrap();
             clip_grad_norm(&params, 1.0).unwrap();
@@ -762,18 +764,13 @@ fn main() {
             optimizer.step().unwrap();
             step_idx += 1;
 
-            g.record("loss", &[loss.data().item().unwrap()]);
+            g.record_scalar("loss", loss.item().unwrap());
+            g.record_scalar("lr", sched.lr(step_idx - 1));
             g.end_step();
         }
 
         g.end_epoch();
-
-        println!(
-            "  epoch {}: loss={:.4}  lr={:.6}",
-            epoch,
-            epoch_loss / 4.0,
-            sched.lr(step_idx - 1)
-        );
+        monitor.log(epoch, t.elapsed(), &g);
     }
 
     // -- Trends --
@@ -795,21 +792,21 @@ fn main() {
 
     // -- Write profiling DOT + SVG --
     let profile_dot = g.dot_with_profile();
-    let profile_dot_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_profile.dot");
+    let profile_dot_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_profile.dot");
     std::fs::write(profile_dot_path, &profile_dot).expect("write showcase_profile.dot");
     println!("Wrote {}", profile_dot_path);
 
-    let profile_svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_profile.svg");
+    let profile_svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_profile.svg");
     let profile_svg = g.svg_with_profile(Some(profile_svg_path)).expect("write showcase_profile.svg");
     println!("Wrote {} ({} bytes)", profile_svg_path, profile_svg.len());
 
     // -- Write training HTML --
-    let html_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_training.html");
+    let html_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_training.html");
     g.plot_html(html_path, &["loss"]).expect("write showcase_training.html");
     println!("Wrote {}", html_path);
 
     // -- Write training log --
-    let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_training.log");
+    let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_training.log");
     g.write_log(log_path, 5, &["loss"]).expect("write showcase_training.log");
     println!("Wrote {}", log_path);
 
@@ -960,7 +957,7 @@ mod tests {
 
             let pred = g.forward_multi(&[input, ctx]).unwrap();
             let loss = mse_loss(&pred, &target).unwrap();
-            losses.push(loss.data().item().unwrap());
+            losses.push(loss.item().unwrap());
 
             loss.backward().unwrap();
             clip_grad_norm(&params, 1.0).unwrap();
@@ -1081,11 +1078,11 @@ mod tests {
         assert!(dot.contains("digraph"), "DOT should contain digraph");
         assert!(dot.contains("#input"), "DOT should contain #input tag");
 
-        let dot_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase.dot");
+        let dot_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase.dot");
         std::fs::write(dot_path, &dot).unwrap();
 
         // Structural SVG
-        let svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase.svg");
+        let svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase.svg");
         let svg = g.svg(Some(svg_path)).unwrap();
         assert!(svg.len() > 100, "SVG should have content");
 
@@ -1096,11 +1093,11 @@ mod tests {
         let profile_dot = g.dot_with_profile();
         assert!(profile_dot.contains("Forward:"), "profile DOT should show total time");
 
-        let profile_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_profile.dot");
+        let profile_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_profile.dot");
         std::fs::write(profile_path, &profile_dot).unwrap();
 
         // Profile SVG
-        let profile_svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_profile.svg");
+        let profile_svg_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_profile.svg");
         let profile_svg = g.svg_with_profile(Some(profile_svg_path)).unwrap();
         assert!(profile_svg.len() > 100, "profile SVG should have content");
 
@@ -1118,18 +1115,18 @@ mod tests {
                 loss.backward().unwrap();
                 optimizer.step().unwrap();
 
-                g.record("loss", &[loss.data().item().unwrap()]);
+                g.record_scalar("loss", loss.item().unwrap());
                 g.end_step();
             }
             g.end_epoch();
         }
 
         // Training HTML plot
-        let html_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_training.html");
+        let html_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_training.html");
         g.plot_html(html_path, &["loss"]).unwrap();
 
         // Training log
-        let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase_training.log");
+        let log_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/showcase/showcase_training.log");
         g.write_log(log_path, 3, &["loss"]).unwrap();
 
         // Verify files exist and have content

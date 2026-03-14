@@ -12,12 +12,12 @@
 //!
 //! for epoch in 0..num_epochs {
 //!     let t = std::time::Instant::now();
-//!     // ... training ...
+//!     // ... training steps ...
+//!     model.record_scalar("loss", loss_val);
+//!     model.record_scalar("lr", current_lr);
 //!
-//!     monitor.log(epoch, t.elapsed(), &[
-//!         ("loss", loss_val),
-//!         ("lr", current_lr),
-//!     ]);
+//!     model.flush(&[]);
+//!     monitor.log(epoch, t.elapsed(), &model);
 //! }
 //!
 //! monitor.finish();
@@ -42,6 +42,56 @@ pub struct EpochRecord {
     pub duration_secs: f64,
     pub metrics: Vec<(String, f64)>,
     pub resources: ResourceSample,
+}
+
+/// Trait for values accepted by [`Monitor::log()`].
+///
+/// Implemented for plain metric slices, graph references, and tuples of
+/// (graph, extras) so that `log` accepts all three forms.
+pub trait Metrics {
+    /// Collect metrics as owned `(name, value)` pairs.
+    fn into_metrics(self) -> Vec<(String, f64)>;
+}
+
+/// Plain metric slice: `&[("loss", val)]`.
+impl<'a> Metrics for &'a [(&'a str, f64)] {
+    fn into_metrics(self) -> Vec<(String, f64)> {
+        self.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+}
+
+/// Plain metric array literal: `&[("loss", val), ("lr", lr)]`.
+impl<const N: usize> Metrics for &[(&str, f64); N] {
+    fn into_metrics(self) -> Vec<(String, f64)> {
+        self.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+}
+
+/// Graph only: `&model` — reads latest epoch history.
+impl Metrics for &Graph {
+    fn into_metrics(self) -> Vec<(String, f64)> {
+        self.latest_metrics()
+    }
+}
+
+/// Graph + extras tuple: `(&model, &[("lr", lr)])`.
+impl<'a> Metrics for (&'a Graph, &'a [(&'a str, f64)]) {
+    fn into_metrics(self) -> Vec<(String, f64)> {
+        let (graph, extra) = self;
+        let mut m = graph.latest_metrics();
+        m.extend(extra.iter().map(|(k, v)| (k.to_string(), *v)));
+        m
+    }
+}
+
+/// Graph + extras array literal: `(&model, &[("lr", lr)])`.
+impl<'a, const N: usize> Metrics for (&'a Graph, &'a [(&'a str, f64); N]) {
+    fn into_metrics(self) -> Vec<(String, f64)> {
+        let (graph, extra) = self;
+        let mut m = graph.latest_metrics();
+        m.extend(extra.iter().map(|(k, v)| (k.to_string(), *v)));
+        m
+    }
 }
 
 /// Training monitor with ETA, resource tracking, and optional live dashboard.
@@ -84,6 +134,9 @@ impl Monitor {
     ///
     /// The archive contains all epoch data, resource metrics, and the graph
     /// SVG baked into a single file — no server needed, just open it in a browser.
+    ///
+    /// This is the Monitor's export — for a simpler static chart from the
+    /// graph's observation system, see [`Graph::plot_html()`](crate::graph::Graph::plot_html).
     ///
     /// ```ignore
     /// monitor.save_html("training_report.html");
@@ -128,14 +181,32 @@ impl Monitor {
     /// to the dashboard if active.
     ///
     /// `epoch` is zero-based. `duration` is the wall-clock time for this epoch.
-    pub fn log(&mut self, epoch: usize, duration: Duration, metrics: &[(&str, f64)]) {
+    ///
+    /// The `metrics` argument accepts several forms:
+    ///
+    /// ```ignore
+    /// // Plain metrics:
+    /// monitor.log(epoch, t.elapsed(), &[("loss", val), ("lr", lr)]);
+    ///
+    /// // Graph observation (reads latest epoch history):
+    /// monitor.log(epoch, t.elapsed(), &model);
+    ///
+    /// // Graph + extras (graph metrics first, then extras):
+    /// monitor.log(epoch, t.elapsed(), (&model, &[("lr", lr)]));
+    /// ```
+    ///
+    /// When using a graph, call [`Graph::flush()`] first so the epoch
+    /// history is up to date. `log` does **not** flush — this keeps
+    /// observation and monitoring decoupled.
+    pub fn log(&mut self, epoch: usize, duration: Duration, metrics: impl Metrics) {
+        let metrics = metrics.into_metrics();
         let duration_secs = duration.as_secs_f64();
         let resources = self.sampler.sample();
 
         let record = EpochRecord {
             epoch,
             duration_secs,
-            metrics: metrics.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            metrics: metrics.clone(),
             resources: resources.clone(),
         };
         self.epochs.push(record);
@@ -146,7 +217,7 @@ impl Monitor {
         let width = digit_count(self.total_epochs);
         let _ = write!(line, "  epoch {:>w$}/{}", epoch_display, self.total_epochs, w = width);
 
-        for (name, val) in metrics {
+        for (name, val) in &metrics {
             let _ = write!(line, "  {}={}", name, format_metric(*val));
         }
 
@@ -468,6 +539,59 @@ mod tests {
         monitor.log(1, Duration::from_millis(90), &[("loss", 1.2)]);
         assert_eq!(monitor.history().len(), 2);
         assert_eq!(monitor.history()[1].epoch, 1);
+    }
+
+    #[test]
+    fn test_log_with_graph() {
+        use crate::*;
+
+        let model = FlowBuilder::from(Linear::new(2, 4).unwrap())
+            .through(Linear::new(4, 2).unwrap())
+            .tag("output")
+            .build()
+            .unwrap();
+
+        let mut monitor = Monitor::new(5);
+
+        // Record + flush (user's responsibility)
+        model.record_scalar("loss", 1.5);
+        model.record_scalar("loss", 1.3);
+        model.flush(&[]);
+
+        // Graph + extras via tuple
+        monitor.log(0, Duration::from_millis(50), (&model, &[("lr", 0.01)]));
+
+        assert_eq!(monitor.history().len(), 1);
+        let metrics = &monitor.history()[0].metrics;
+        assert!(metrics.iter().any(|(k, _)| k == "loss"), "missing graph metric 'loss'");
+        assert!(metrics.iter().any(|(k, _)| k == "lr"), "missing extra metric 'lr'");
+
+        // loss should be the mean of 1.5 and 1.3
+        let loss = metrics.iter().find(|(k, _)| k == "loss").unwrap().1;
+        assert!((loss - 1.4).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_log_graph_only() {
+        use crate::*;
+
+        let model = FlowBuilder::from(Linear::new(2, 4).unwrap())
+            .through(Linear::new(4, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let mut monitor = Monitor::new(5);
+
+        model.record_scalar("loss", 2.0);
+        model.flush(&[]);
+
+        // Graph only, no extras
+        monitor.log(0, Duration::from_millis(50), &model);
+
+        let metrics = &monitor.history()[0].metrics;
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].0, "loss");
+        assert!((metrics[0].1 - 2.0).abs() < 1e-10);
     }
 
     #[test]

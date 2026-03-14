@@ -83,7 +83,7 @@ references (`using` before `tag`) carry state across calls, enabling recurrent
 architectures without special-casing.
 
 See the **[Graph Builder Tutorial](docs/tutorials/05-graph-builder.md)** and
-the [full showcase](flodl/examples/showcase.rs) that exercises every builder
+the [full showcase](flodl/examples/showcase/) that exercises every builder
 method.
 
 ## Training Monitor
@@ -458,9 +458,9 @@ Step-by-step guides from basics to advanced, each with code examples:
 
 ### Examples
 
-- [`flodl/examples/sine_wave.rs`](flodl/examples/sine_wave.rs) — sine regression with monitor, checkpoint round-trip
-- [`flodl/examples/quickstart.rs`](flodl/examples/quickstart.rs) — train a model in 30 lines
-- [`flodl/examples/showcase.rs`](flodl/examples/showcase.rs) — every graph builder method in one graph
+- [`quickstart`](flodl/examples/quickstart/) — train a model in 30 lines
+- [`sine_wave`](flodl/examples/sine_wave/) — sine regression with monitor, checkpoint round-trip
+- [`showcase`](flodl/examples/showcase/) — every graph builder method in one graph
 
 ## Lineage
 

@@ -86,7 +86,13 @@ impl Graph {
     }
 
     /// Inject external scalar values into the batch buffer.
-    /// Useful for recording metrics not captured by tagged nodes.
+    ///
+    /// Recorded values accumulate per step and are averaged on
+    /// [`flush()`](Self::flush). Use [`trend()`](Self::trend) to read epoch
+    /// history for training decisions (early stopping, LR scheduling).
+    ///
+    /// For human-facing output (terminal, live dashboard), use
+    /// [`Monitor::log()`](crate::monitor::Monitor::log) instead.
     pub fn record(&self, tag: &str, values: &[f64]) {
         let mut buffer = self.batch_buffer.borrow_mut();
         buffer.entry(tag.to_string()).or_default().extend_from_slice(values);
@@ -95,6 +101,19 @@ impl Graph {
     /// Record a single scalar value. Convenience wrapper around [`record`](Self::record).
     pub fn record_scalar(&self, tag: &str, value: f64) {
         self.record(tag, &[value]);
+    }
+
+    /// Return the latest epoch value for every tag in the epoch history.
+    ///
+    /// Useful for bridging graph observation into
+    /// [`Monitor::log()`](crate::monitor::Monitor::log). Returns an empty
+    /// vec if no epochs have been flushed yet.
+    pub fn latest_metrics(&self) -> Vec<(String, f64)> {
+        let history = self.epoch_history.borrow();
+        history
+            .iter()
+            .filter_map(|(tag, vals)| vals.last().map(|&v| (tag.clone(), v)))
+            .collect()
     }
 
     /// Read raw batch buffer for a tag (all values since last flush).

@@ -46,9 +46,9 @@ digraph G {
     label="level 5";
     style=dashed; color="#999999"; fontcolor="#999999";
     rank=same;
-    "graph_7" [label="graph\n#spectral\n[72 params]" shape=box fillcolor="#eaecee"];
     "graph_8" [label="graph\n[88 params]" shape=box fillcolor="#eaecee"];
     "graph_9" [label="graph\n[88 params]" shape=box fillcolor="#eaecee"];
+    "graph_7" [label="graph\n#spectral\n[72 params]" shape=box fillcolor="#eaecee"];
   }
 
   subgraph cluster_level_6 {
@@ -258,8 +258,8 @@ digraph G {
     label="level 35";
     style=dashed; color="#999999"; fontcolor="#999999";
     rank=same;
-    "linear_40" [label="linear\n#final_heads_0\n[72 params]" shape=box fillcolor="#eaecee"];
     "linear_41" [label="linear\n#final_heads_1\n[72 params]" shape=box fillcolor="#eaecee"];
+    "linear_40" [label="linear\n#final_heads_0\n[72 params]" shape=box fillcolor="#eaecee"];
   }
 
   subgraph cluster_level_36 {

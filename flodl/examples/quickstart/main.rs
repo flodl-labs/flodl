@@ -40,7 +40,6 @@ fn main() -> Result<()> {
 
     for epoch in 0..num_epochs {
         let t = std::time::Instant::now();
-        let mut epoch_loss = 0.0;
 
         for (input_t, target_t) in &batches {
             let input = Variable::new(input_t.clone(), true);
@@ -54,11 +53,11 @@ fn main() -> Result<()> {
             clip_grad_norm(&params, 1.0)?;
             optimizer.step()?;
 
-            epoch_loss += loss.item()?;
+            model.record_scalar("loss", loss.item()?);
         }
 
-        let avg_loss = epoch_loss / batches.len() as f64;
-        monitor.log(epoch, t.elapsed(), &[("loss", avg_loss)]);
+        model.flush(&[]);
+        monitor.log(epoch, t.elapsed(), &model);
     }
 
     monitor.finish();
