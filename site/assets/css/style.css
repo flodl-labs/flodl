@@ -121,7 +121,7 @@ a:hover { color: var(--cyan); }
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-radius: 10px;
-  max-width: 720px;
+  max-width: 780px;
   margin: 0 auto;
   text-align: left;
   overflow: hidden;
@@ -180,12 +180,13 @@ a:hover { color: var(--cyan); }
   background: none;
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 4px 6px;
+  padding: 3px 10px;
   cursor: pointer;
   color: var(--dim);
-  display: flex;
-  align-items: center;
-  transition: color 0.15s, border-color 0.15s;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
 .terminal-actions button:hover {
@@ -193,9 +194,9 @@ a:hover { color: var(--cyan); }
   border-color: var(--accent);
 }
 
-.terminal-actions button svg {
-  width: 14px;
-  height: 14px;
+.terminal-actions button.copied {
+  color: var(--green);
+  border-color: var(--green);
 }
 
 .terminal pre {
