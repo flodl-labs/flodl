@@ -64,6 +64,7 @@ jobs:
           LIBTORCH_PATH: ${{ github.workspace }}/libtorch
           LD_LIBRARY_PATH: ${{ github.workspace }}/libtorch/lib
           LIBRARY_PATH: ${{ github.workspace }}/libtorch/lib
+          RUSTDOCFLAGS: "--html-before-content site/_rustdoc_banner.html"
         run: cargo doc --no-deps -p flodl -p flodl-sys
 
       # ── Merge cargo docs into Jekyll source ──────
