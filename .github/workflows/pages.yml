@@ -78,7 +78,9 @@ jobs:
 
       # ── Merge cargo docs into site ──────────────
       - name: Copy cargo docs into site
-        run: cp -r target/doc _site/api
+        run: |
+          chmod -R u+w _site
+          cp -r target/doc _site/api
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
