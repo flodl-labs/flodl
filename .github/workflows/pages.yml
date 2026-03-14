@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   LIBTORCH_VERSION: "2.10.0"
@@ -33,24 +33,31 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo + libtorch
+      # Separate libtorch cache — shared with CI workflow (same key).
+      - name: Cache libtorch
+        id: cache-libtorch
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/libtorch
+          key: libtorch-cpu-${{ env.LIBTORCH_VERSION }}
+
+      - name: Download libtorch
+        if: steps.cache-libtorch.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip"
+          unzip -q "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip"
+          rm "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip"
+
+      # Cargo registry + build artifacts — keyed on Cargo.lock.
+      - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-            ${{ github.workspace }}/libtorch
-          key: docs-${{ env.LIBTORCH_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: docs-${{ env.LIBTORCH_VERSION }}-
-
-      - name: Download libtorch
-        run: |
-          if [ ! -d "${{ github.workspace }}/libtorch" ]; then
-            wget -q "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip"
-            unzip -q "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip"
-            rm "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip"
-          fi
+          key: docs-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: docs-
 
       - name: Build cargo docs
         env:
