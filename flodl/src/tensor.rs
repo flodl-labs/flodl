@@ -915,6 +915,62 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    // --- Fused ops ---
+
+    /// Fused linear: `y = input @ weight^T + bias` (single ATen kernel).
+    pub fn linear(&self, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let bias_handle = bias.map_or(ptr::null_mut(), |b| b.handle);
+        let err = unsafe {
+            ffi::flodl_linear(self.handle, weight.handle, bias_handle, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused GRU cell: single ATen `gru_cell` kernel.
+    /// Returns new hidden state h'.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gru_cell(
+        &self, hx: &Tensor,
+        w_ih: &Tensor, w_hh: &Tensor,
+        b_ih: &Tensor, b_hh: &Tensor,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_gru_cell(
+                self.handle, hx.handle,
+                w_ih.handle, w_hh.handle,
+                b_ih.handle, b_hh.handle,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused LSTM cell: single ATen `lstm_cell` kernel.
+    /// Returns `(h', c')`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lstm_cell(
+        &self, hx: &Tensor, cx: &Tensor,
+        w_ih: &Tensor, w_hh: &Tensor,
+        b_ih: &Tensor, b_hh: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let mut h_out: FlodlTensor = ptr::null_mut();
+        let mut c_out: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_lstm_cell(
+                self.handle, hx.handle, cx.handle,
+                w_ih.handle, w_hh.handle,
+                b_ih.handle, b_hh.handle,
+                &mut h_out, &mut c_out,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(h_out), Tensor::from_raw(c_out)))
+    }
+
     // --- Missing wrappers for existing shims ---
 
     /// Create evenly spaced values.
@@ -1584,6 +1640,16 @@ pub fn cuda_memory_info() -> Result<(u64, u64)> {
 pub fn cuda_utilization() -> Option<u32> {
     let val = unsafe { ffi::flodl_cuda_utilization(0) };
     if val >= 0 { Some(val as u32) } else { None }
+}
+
+/// Enable or disable cuDNN benchmark mode.
+///
+/// When enabled, cuDNN will benchmark multiple convolution algorithms
+/// on the first call and cache the fastest. Benefits fixed-size workloads
+/// (FBRL, fixed image dims) with 5-10% speedup. Can hurt dynamic-shape
+/// workloads due to warmup cost. Off by default — users opt in.
+pub fn set_cudnn_benchmark(enable: bool) {
+    unsafe { ffi::flodl_set_cudnn_benchmark(enable as i32) }
 }
 
 /// Ask glibc to return free memory to the OS (Linux only).

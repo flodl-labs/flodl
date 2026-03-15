@@ -41,7 +41,7 @@ macro_rules! modules {
     };
 }
 
-pub use tensor::{cuda_available, cuda_device_count, cuda_memory_info, cuda_utilization, malloc_trim, live_tensor_count, rss_kb, Device, DType, Result, Tensor, TensorOptions};
+pub use tensor::{cuda_available, cuda_device_count, cuda_memory_info, cuda_utilization, set_cudnn_benchmark, malloc_trim, live_tensor_count, rss_kb, Device, DType, Result, Tensor, TensorOptions};
 pub use autograd::{Variable, no_grad, is_grad_enabled, NoGradGuard, adaptive_avg_pool2d, grid_sample};
 pub use nn::{
     Module, NamedInputModule,

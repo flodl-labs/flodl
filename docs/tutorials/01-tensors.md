@@ -179,6 +179,18 @@ if flodl::cuda_available() {
 }
 ```
 
+## cuDNN Benchmark Mode
+
+For fixed-size workloads (fixed batch size, fixed image dimensions), enabling cuDNN
+benchmark mode lets cuDNN auto-tune convolution algorithms on the first call:
+
+```rust
+flodl::set_cudnn_benchmark(true);  // opt-in, 5-10% speedup for fixed shapes
+```
+
+Leave this off for dynamic-shape workloads (variable-length sequences,
+multi-resolution images) — the warmup cost can hurt throughput.
+
 ---
 
 Previous: [Tutorial 0: Rust for PyTorch Users](00-rust-primer.md) |

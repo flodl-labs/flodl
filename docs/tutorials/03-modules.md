@@ -133,7 +133,8 @@ let output = emb.forward(&indices)?;
 
 ### GRUCell
 
-Single GRU timestep:
+Single GRU timestep. Backed by fused ATen `gru_cell` kernel (~2 GPU kernels
+instead of ~25):
 
 ```rust
 let gru = GRUCell::new(128, 256)?;
@@ -144,7 +145,8 @@ let h = gru.forward_step(&x2, Some(&h))?; // subsequent steps
 
 ### LSTMCell
 
-Single LSTM timestep. State packs hidden and cell states into one tensor:
+Single LSTM timestep. Backed by fused ATen `lstm_cell` kernel (~2 GPU
+kernels instead of ~40). State packs hidden and cell states into one tensor:
 
 ```rust
 let lstm = LSTMCell::new(128, 256)?;

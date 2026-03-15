@@ -802,9 +802,8 @@ mod tests {
         loss.backward().unwrap();
         assert!(x.grad().is_some());
 
-        // Should have 6 Linear modules' params
-        // 3 input (w+b=2 each) + 3 hidden (w only=1 each) = 9
-        assert_eq!(gru.parameters().len(), 9);
+        // 4 packed params: w_ih, w_hh, b_ih, b_hh
+        assert_eq!(gru.parameters().len(), 4);
     }
 
     // --- LSTMCell test ---
@@ -830,8 +829,8 @@ mod tests {
         loss.backward().unwrap();
         assert!(x.grad().is_some());
 
-        // 4 input Linear (w+b=2 each) + 4 hidden Linear (w only=1 each) = 12
-        assert_eq!(lstm.parameters().len(), 12);
+        // 4 packed params: w_ih, w_hh, b_ih, b_hh
+        assert_eq!(lstm.parameters().len(), 4);
     }
 
     #[test]

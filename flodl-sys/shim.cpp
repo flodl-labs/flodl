@@ -1492,6 +1492,61 @@ extern "C" char* flodl_zero_(FlodlTensor t) {
     }
 }
 
+// --- Fused ops ---
+
+extern "C" char* flodl_linear(FlodlTensor input, FlodlTensor weight,
+                              FlodlTensor bias, FlodlTensor* result) {
+    try {
+        c10::optional<torch::Tensor> b;
+        if (bias != nullptr) {
+            b = unwrap(bias);
+        }
+        *result = wrap(torch::linear(unwrap(input), unwrap(weight), b));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_gru_cell(FlodlTensor input, FlodlTensor hx,
+                                FlodlTensor w_ih, FlodlTensor w_hh,
+                                FlodlTensor b_ih, FlodlTensor b_hh,
+                                FlodlTensor* result) {
+    try {
+        *result = wrap(torch::gru_cell(
+            unwrap(input), unwrap(hx),
+            unwrap(w_ih), unwrap(w_hh),
+            unwrap(b_ih), unwrap(b_hh)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_lstm_cell(FlodlTensor input, FlodlTensor hx,
+                                 FlodlTensor cx,
+                                 FlodlTensor w_ih, FlodlTensor w_hh,
+                                 FlodlTensor b_ih, FlodlTensor b_hh,
+                                 FlodlTensor* h_out, FlodlTensor* c_out) {
+    try {
+        auto result = torch::lstm_cell(
+            unwrap(input), {unwrap(hx), unwrap(cx)},
+            unwrap(w_ih), unwrap(w_hh),
+            unwrap(b_ih), unwrap(b_hh));
+        *h_out = wrap(std::get<0>(result));
+        *c_out = wrap(std::get<1>(result));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- cuDNN benchmark ---
+
+extern "C" void flodl_set_cudnn_benchmark(int enable) {
+    at::globalContext().setBenchmarkCuDNN(enable != 0);
+}
+
 // --- Meshgrid ---
 
 extern "C" char* flodl_meshgrid(FlodlTensor* tensors, int count,

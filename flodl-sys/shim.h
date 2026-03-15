@@ -229,12 +229,26 @@ char* flodl_adaptive_avg_pool2d(FlodlTensor input, int64_t* output_size,
 char* flodl_grid_sample(FlodlTensor input, FlodlTensor grid,
                       int mode, int padding_mode, int align_corners,
                       FlodlTensor* result);
+// --- Fused ops ---
+
+char* flodl_linear(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
+                  FlodlTensor* result);
+char* flodl_gru_cell(FlodlTensor input, FlodlTensor hx,
+                    FlodlTensor w_ih, FlodlTensor w_hh,
+                    FlodlTensor b_ih, FlodlTensor b_hh,
+                    FlodlTensor* result);
+char* flodl_lstm_cell(FlodlTensor input, FlodlTensor hx, FlodlTensor cx,
+                     FlodlTensor w_ih, FlodlTensor w_hh,
+                     FlodlTensor b_ih, FlodlTensor b_hh,
+                     FlodlTensor* h_out, FlodlTensor* c_out);
+
 // --- Device ---
 
 char* flodl_to_device(FlodlTensor t, int device, FlodlTensor* result);
 int flodl_cuda_is_available(void);
 int flodl_cuda_device_count(void);
 int flodl_force_cuda_link(void);
+void flodl_set_cudnn_benchmark(int enable);
 
 // --- CUDA memory/utilization (monitor support) ---
 

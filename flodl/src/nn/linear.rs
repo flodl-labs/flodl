@@ -1,4 +1,4 @@
-use crate::autograd::Variable;
+use crate::autograd::{self, Variable};
 use crate::tensor::{Device, Result};
 
 use super::init;
@@ -54,12 +54,11 @@ impl Module for Linear {
     fn name(&self) -> &str { "linear" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        let wt = self.weight.variable.transpose(0, 1)?;
-        let out = input.matmul(&wt)?;
-        match self.bias {
-            Some(ref b) => out.add(&b.variable),
-            None => Ok(out),
-        }
+        autograd::linear(
+            input,
+            &self.weight.variable,
+            self.bias.as_ref().map(|b| &b.variable),
+        )
     }
 
     fn parameters(&self) -> Vec<Parameter> {

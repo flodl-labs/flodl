@@ -19,7 +19,7 @@ mod context;
 
 pub use variable::Variable;
 pub use context::{no_grad, is_grad_enabled, NoGradGuard};
-pub use ops::{layer_norm, conv2d, conv_transpose2d, adaptive_avg_pool2d, grid_sample};
+pub use ops::{linear, gru_cell, lstm_cell, layer_norm, conv2d, conv_transpose2d, adaptive_avg_pool2d, grid_sample};
 
 #[cfg(test)]
 mod tests {

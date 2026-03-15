@@ -474,6 +474,31 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // --- Fused ops ---
+
+    pub fn flodl_linear(
+        input: FlodlTensor, weight: FlodlTensor, bias: FlodlTensor,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_gru_cell(
+        input: FlodlTensor, hx: FlodlTensor,
+        w_ih: FlodlTensor, w_hh: FlodlTensor,
+        b_ih: FlodlTensor, b_hh: FlodlTensor,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_lstm_cell(
+        input: FlodlTensor, hx: FlodlTensor, cx: FlodlTensor,
+        w_ih: FlodlTensor, w_hh: FlodlTensor,
+        b_ih: FlodlTensor, b_hh: FlodlTensor,
+        h_out: *mut FlodlTensor, c_out: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- cuDNN benchmark ---
+
+    pub fn flodl_set_cudnn_benchmark(enable: i32);
+
     // --- In-place operations ---
 
     pub fn flodl_add_(t: FlodlTensor, other: FlodlTensor) -> *mut i8;

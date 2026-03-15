@@ -690,6 +690,7 @@ let x = Tensor::zeros(&[2, 3], opts)?;
 | Device count | `torch.cuda.device_count()` | `cuda_device_count()` |
 | Model move | `model.to(device)` | `module.move_to_device(device)` |
 | Tensor move | `x.to(device)` | `x.to_device(device)?` |
+| cuDNN benchmark | `torch.backends.cudnn.benchmark = True` | `set_cudnn_benchmark(true)` |
 
 ## Weight Initialization
 

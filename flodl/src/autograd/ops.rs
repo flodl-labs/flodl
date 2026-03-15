@@ -325,6 +325,62 @@ impl Variable {
 
 // --- Standalone differentiable ops ---
 
+/// Fused linear: `y = input @ weight^T + bias` with autograd support.
+/// Uses `torch::linear()` (single BLAS kernel) instead of separate
+/// transpose + matmul + add.
+pub fn linear(
+    input: &Variable,
+    weight: &Variable,
+    bias: Option<&Variable>,
+) -> Result<Variable> {
+    let bias_tensor = bias.map(|b| b.data());
+    let result = input.data().linear(
+        &weight.data(),
+        bias_tensor.as_ref(),
+    )?;
+    Ok(Variable::wrap(result))
+}
+
+/// Fused GRU cell with autograd support.
+/// Uses `torch::gru_cell()` (~2 kernels) instead of 6 separate linear ops.
+#[allow(clippy::too_many_arguments)]
+pub fn gru_cell(
+    input: &Variable,
+    hx: &Variable,
+    w_ih: &Variable,
+    w_hh: &Variable,
+    b_ih: &Variable,
+    b_hh: &Variable,
+) -> Result<Variable> {
+    let result = input.data().gru_cell(
+        &hx.data(),
+        &w_ih.data(), &w_hh.data(),
+        &b_ih.data(), &b_hh.data(),
+    )?;
+    Ok(Variable::wrap(result))
+}
+
+/// Fused LSTM cell with autograd support.
+/// Uses `torch::lstm_cell()` (~2 kernels) instead of 8 separate linear ops.
+/// Returns `(h', c')`.
+#[allow(clippy::too_many_arguments)]
+pub fn lstm_cell(
+    input: &Variable,
+    hx: &Variable,
+    cx: &Variable,
+    w_ih: &Variable,
+    w_hh: &Variable,
+    b_ih: &Variable,
+    b_hh: &Variable,
+) -> Result<(Variable, Variable)> {
+    let (h, c) = input.data().lstm_cell(
+        &hx.data(), &cx.data(),
+        &w_ih.data(), &w_hh.data(),
+        &b_ih.data(), &b_hh.data(),
+    )?;
+    Ok((Variable::wrap(h), Variable::wrap(c)))
+}
+
 /// Layer normalization with autograd support.
 pub fn layer_norm(
     input: &Variable,
