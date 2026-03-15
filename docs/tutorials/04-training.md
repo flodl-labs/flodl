@@ -250,22 +250,19 @@ everywhere the parameter is referenced.
 Save and restore model parameters using named checkpoints:
 
 ```rust
-// Save (parameters + buffers like BatchNorm running stats)
-let named = model.named_parameters();
-let buffers = model.named_buffers();
-let hash = Some(model.structural_hash()); // validates architecture on load
-save_checkpoint_file("/tmp/model.fdl", &named, &buffers, hash)?;
+// Save — includes all parameters, buffers, and structural hash
+model.save_checkpoint("/tmp/model.fdl")?;
 
-// Load
+// Load — validates architecture, returns a report
+let report = model.load_checkpoint("/tmp/model.fdl")?;
+```
+
+For custom destinations (network, in-memory buffer), the lower-level API is available:
+
+```rust
 let named = model.named_parameters();
 let buffers = model.named_buffers();
 let hash = Some(model.structural_hash());
-let report = load_checkpoint_file("/tmp/model.fdl", &named, &buffers, hash)?;
-```
-
-The `io::Write` / `io::Read` variants are also available:
-
-```rust
 save_checkpoint(&mut writer, &named, &buffers, hash)?;
 let report = load_checkpoint(&mut reader, &named, &buffers, hash)?;
 ```
@@ -276,12 +273,10 @@ Named checkpoints match by qualified name, so you can load a subset of parameter
 
 ```rust
 // Save with qualified names
-let named = model.named_parameters();
-let buffers = model.named_buffers();
-save_checkpoint_file("/tmp/model.fdl", &named, &buffers, Some(model.structural_hash()))?;
+model.save_checkpoint("/tmp/model.fdl")?;
 
 // Load into a different model — matches by name
-// Pass None for hash to skip architecture validation (architectures differ)
+// Use the lower-level API with None hash to skip architecture validation
 let new_named = new_model.named_parameters();
 let new_buffers = new_model.named_buffers();
 let report = load_checkpoint_file("/tmp/model.fdl", &new_named, &new_buffers, None)?;

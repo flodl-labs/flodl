@@ -698,6 +698,29 @@ impl Graph {
         &self.structural_hash()[..8]
     }
 
+    /// Save all parameters and buffers to a checkpoint file.
+    ///
+    /// Embeds the structural hash for architecture validation on load.
+    /// Supports `.gz` extension for gzip compression.
+    pub fn save_checkpoint(&self, path: &str) -> Result<()> {
+        let params = self.named_parameters();
+        let buffers = self.named_buffers();
+        let hash = self.structural_hash();
+        crate::nn::save_checkpoint_file(path, &params, &buffers, Some(hash))
+    }
+
+    /// Load parameters and buffers from a checkpoint file.
+    ///
+    /// Validates the structural hash against this graph's architecture.
+    /// Returns a [`LoadReport`](crate::nn::LoadReport) describing what was
+    /// loaded, skipped, or missing.
+    pub fn load_checkpoint(&self, path: &str) -> Result<crate::nn::LoadReport> {
+        let params = self.named_parameters();
+        let buffers = self.named_buffers();
+        let hash = self.structural_hash();
+        crate::nn::load_checkpoint_file(path, &params, &buffers, Some(hash))
+    }
+
     fn compute_structural_hash(&self) -> String {
         let mut hasher = Sha256::new();
 
@@ -2872,5 +2895,96 @@ mod tests {
             .unwrap();
 
         assert_eq!(g1.structural_hash(), g2.structural_hash());
+    }
+
+    #[test]
+    fn test_graph_save_load_checkpoint() {
+        let g = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .tag("enc")
+            .through(ReLU::new())
+            .through(Linear::new(8, 2).unwrap())
+            .tag("dec")
+            .build()
+            .unwrap();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_graph_ckpt.fdl");
+        let path_str = path.to_str().unwrap();
+
+        // Save
+        g.save_checkpoint(path_str).unwrap();
+
+        // Build identical architecture, load into it
+        let g2 = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .tag("enc")
+            .through(ReLU::new())
+            .through(Linear::new(8, 2).unwrap())
+            .tag("dec")
+            .build()
+            .unwrap();
+
+        let report = g2.load_checkpoint(path_str).unwrap();
+        assert_eq!(report.loaded.len(), 4); // 2 Linear × (weight + bias)
+        assert!(report.skipped.is_empty());
+        assert!(report.missing.is_empty());
+
+        // Verify weights match
+        for ((n1, p1), (n2, p2)) in g.named_parameters().iter().zip(g2.named_parameters().iter()) {
+            assert_eq!(n1, n2);
+            assert_eq!(p1.variable.data().to_f32_vec().unwrap(),
+                       p2.variable.data().to_f32_vec().unwrap());
+        }
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
+    fn test_graph_checkpoint_hash_mismatch() {
+        let g1 = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .through(Linear::new(8, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_graph_ckpt_mismatch.fdl");
+        let path_str = path.to_str().unwrap();
+
+        g1.save_checkpoint(path_str).unwrap();
+
+        // Different architecture
+        let g2 = FlowBuilder::from(Linear::new(4, 16).unwrap())
+            .through(Linear::new(16, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let result = g2.load_checkpoint(path_str);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("architecture mismatch"));
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
+    fn test_graph_checkpoint_gz() {
+        let g = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .through(Linear::new(8, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_graph_ckpt.fdl.gz");
+        let path_str = path.to_str().unwrap();
+
+        g.save_checkpoint(path_str).unwrap();
+
+        let g2 = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .through(Linear::new(8, 2).unwrap())
+            .build()
+            .unwrap();
+
+        let report = g2.load_checkpoint(path_str).unwrap();
+        assert_eq!(report.loaded.len(), 4);
+
+        std::fs::remove_file(path_str).ok();
     }
 }

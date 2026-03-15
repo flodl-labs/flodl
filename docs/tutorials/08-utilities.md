@@ -44,24 +44,28 @@ Save and restore model parameters with a compact binary format.
 ### Saving and loading
 
 ```rust
-use flodl::{save_checkpoint_file, load_checkpoint_file};
+// Save — parameters + buffers + structural hash, one call
+model.save_checkpoint("/tmp/model.fdl")?;
 
-// Save (parameters + buffers like BatchNorm running stats)
-let named = model.named_parameters();
-let buffers = model.named_buffers();
-let hash = Some(model.structural_hash()); // embeds architecture identity
-save_checkpoint_file("/tmp/model.fdl", &named, &buffers, hash)?;
+// Load — validates architecture, returns LoadReport
+let report = model.load_checkpoint("/tmp/model.fdl")?;
+```
 
-// Load — validates architecture matches before loading weights
+`load_checkpoint` validates names and shapes for both parameters and buffers.
+The returned `LoadReport` tells you exactly which entries were loaded,
+skipped, or missing. Append `.gz` for gzip compression.
+
+For custom I/O targets (network, in-memory buffer), use the lower-level API:
+
+```rust
+use flodl::{save_checkpoint, load_checkpoint};
+
 let named = model.named_parameters();
 let buffers = model.named_buffers();
 let hash = Some(model.structural_hash());
-let report = load_checkpoint_file("/tmp/model.fdl", &named, &buffers, hash)?;
+save_checkpoint(&mut writer, &named, &buffers, hash)?;
+let report = load_checkpoint(&mut reader, &named, &buffers, hash)?;
 ```
-
-`load_checkpoint_file` validates names and shapes for both parameters and buffers.
-The returned `LoadReport` tells you exactly which entries were loaded,
-skipped, or missing.
 
 ### Details
 
@@ -80,12 +84,10 @@ model:
 use flodl::*;
 
 // Save with qualified names from a Graph
-let named = model.named_parameters();
-let buffers = model.named_buffers();
-save_checkpoint_file("/tmp/model.fdl", &named, &buffers, Some(model.structural_hash()))?;
+model.save_checkpoint("/tmp/model.fdl")?;
 
 // Load into a different model — only matching names transfer
-// Pass None for hash since architectures differ
+// Use lower-level API with None hash since architectures differ
 let new_named = new_model.named_parameters();
 let new_buffers = new_model.named_buffers();
 let report = load_checkpoint_file("/tmp/model.fdl", &new_named, &new_buffers, None)?;
@@ -127,9 +129,7 @@ for epoch in 0..num_epochs {
 
     if (epoch + 1) % 10 == 0 {
         let path = format!("/tmp/checkpoint_epoch_{}.fdl", epoch + 1);
-        let named = model.named_parameters();
-        let buffers = model.named_buffers();
-        save_checkpoint_file(&path, &named, &buffers, Some(model.structural_hash()))?;
+        model.save_checkpoint(&path)?;
     }
 }
 ```
@@ -343,9 +343,7 @@ for epoch in 0..100 {
 
 // Save.
 g.set_training(false);
-let named = model.named_parameters();
-let buffers = model.named_buffers();
-save_checkpoint_file("/tmp/model.fdl", &named, &buffers, Some(model.structural_hash()))?;
+model.save_checkpoint("/tmp/model.fdl")?;
 ```
 
 ---
