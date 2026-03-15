@@ -115,6 +115,16 @@ impl Variable {
         Ok(Variable::wrap(result))
     }
 
+    pub fn min_dim(&self, dim: i32, keepdim: bool) -> Result<Variable> {
+        let result = self.data().min_dim(dim, keepdim)?;
+        Ok(Variable::wrap(result))
+    }
+
+    pub fn max_dim(&self, dim: i32, keepdim: bool) -> Result<Variable> {
+        let result = self.data().max_dim(dim, keepdim)?;
+        Ok(Variable::wrap(result))
+    }
+
     pub fn var(&self) -> Result<Variable> {
         let result = self.data().var()?;
         Ok(Variable::wrap(result))

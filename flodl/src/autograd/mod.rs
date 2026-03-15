@@ -499,6 +499,40 @@ mod tests {
     }
 
     #[test]
+    fn test_max_dim_gradient() {
+        // [[1, 4], [3, 2]] — max along dim=1 gives [4, 3]
+        let x = Variable::new(from_f32(&[1.0, 4.0, 3.0, 2.0], &[2, 2]), true);
+        let y = x.max_dim(1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        // Gradient flows only to argmax positions: (0,1) and (1,0)
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(grad, vec![0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_max_dim_keepdim_gradient() {
+        let x = Variable::new(from_f32(&[1.0, 4.0, 3.0, 2.0], &[2, 2]), true);
+        let y = x.max_dim(1, true).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(grad, vec![0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_min_dim_gradient() {
+        // [[1, 4], [3, 2]] — min along dim=1 gives [1, 2]
+        let x = Variable::new(from_f32(&[1.0, 4.0, 3.0, 2.0], &[2, 2]), true);
+        let y = x.min_dim(1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+
+        // Gradient flows only to argmin positions: (0,0) and (1,1)
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(grad, vec![1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn test_softmax_gradient() {
         let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), true);
         let w = Variable::new(from_f32(&[1.0, 0.0, 0.0], &[3]), false);

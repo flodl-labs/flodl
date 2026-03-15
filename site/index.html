@@ -160,6 +160,11 @@ model.<span class="fn">set_training</span>(<span class="kw">true</span>);
       <p>Same libtorch GPU kernels. Same training loop pattern. Linear, Conv2d, LayerNorm, BatchNorm, GRU/LSTM cells, all standard losses and optimizers.</p>
     </div>
     <div class="feature">
+      <div class="feature-icon gpu">&#9889;</div>
+      <h3>Wide GPU support</h3>
+      <p>Links libtorch's stable C API, not a specific CUDA toolkit version. Older GPUs (Pascal, Maxwell) work out of the box &mdash; no version pinning required. If <code>nvidia-smi</code> runs, floDl can train on it.</p>
+    </div>
+    <div class="feature">
       <div class="feature-icon typing">&#10003;</div>
       <h3>Compile-time safety</h3>
       <p>Every fallible op returns <code>Result&lt;T&gt;</code>. The borrow checker prevents data races. No silent error propagation, no nil pointer panics.</p>

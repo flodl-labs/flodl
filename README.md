@@ -340,7 +340,7 @@ Every differentiable path is verified against finite-difference gradients:
 - 37 autograd op-level checks (every op + compositions)
 - Module-level checks (every NN module, input + parameter gradients)
 - Exact optimizer step verifications (SGD, Adam, AdamW)
-- 308 library tests, zero clippy warnings — all tests run on both CPU and CUDA
+- 311 library tests, zero clippy warnings — all tests run on both CPU and CUDA
 
 ## Why Rust for Deep Learning?
 
@@ -408,6 +408,20 @@ codegen-units = 1
 The GPU kernels (cuBLAS, cuDNN) run at the same speed regardless of Rust
 optimization level — the profile settings affect graph dispatch, autograd
 bookkeeping, and module overhead.
+
+## Hardware Compatibility
+
+floDl is developed and tested on an NVIDIA GTX 1060 (6 GB VRAM, Pascal
+architecture). It works out of the box — no version pinning, no feature
+flags, no workarounds.
+
+This matters because PyTorch dropped Pascal support after version 2.5.1.
+Training on older GPUs now requires pinning `torch==2.5.1` and hoping
+nothing in your dependency tree pulls a newer version. floDl sidesteps
+this entirely: it links against libtorch's stable C API, which continues
+to support every CUDA architecture that the driver supports.
+
+If your GPU runs `nvidia-smi`, floDl can train on it.
 
 ## Architecture
 

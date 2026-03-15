@@ -85,8 +85,10 @@ animation:pulse 2s ease-in-out infinite}
 <body>
 
 <div class="header">
-  <h1>floDl <span>Training Dashboard</span></h1>
-  <div id="hwInfo" style="display:none;color:var(--dim);font-size:11px;letter-spacing:0.3px;margin:-6px 0 4px 0;font-family:monospace"></div>
+  <div style="display:flex;flex-direction:column">
+    <h1>floDl <span>Training Dashboard</span></h1>
+    <div id="hwInfo" style="display:none;color:var(--dim);font-size:11px;letter-spacing:0.3px;margin:2px 0 0 0;font-family:monospace"></div>
+  </div>
   <div class="status" id="status">
     <div class="status-dot" id="statusDot"></div>
     <span id="statusText">Waiting...</span>

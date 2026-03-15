@@ -307,6 +307,7 @@ a:hover { color: var(--cyan); }
 .feature-icon.pytorch { background: rgba(251, 191, 36, 0.12); color: var(--yellow); }
 .feature-icon.typing { background: rgba(103, 232, 249, 0.12); color: var(--cyan); }
 .feature-icon.docker { background: rgba(248, 113, 113, 0.12); color: var(--red); }
+.feature-icon.gpu { background: rgba(251, 191, 36, 0.12); color: var(--yellow); }
 
 .feature h3 {
   font-size: 15px;
