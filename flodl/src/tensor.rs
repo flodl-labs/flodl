@@ -1022,6 +1022,138 @@ impl Tensor {
         Ok((Tensor::from_raw(h_out), Tensor::from_raw(c_out)))
     }
 
+    // --- Fused loss functions ---
+
+    /// Fused MSE loss: single libtorch kernel.
+    /// reduction: 0=None, 1=Mean, 2=Sum.
+    pub fn mse_loss(&self, target: &Tensor, reduction: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_mse_loss(self.handle, target.handle, reduction, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused cross-entropy loss: single libtorch kernel.
+    /// pred: [N,C] logits. target: [N] Int64 indices or [N,C] Float probs.
+    /// reduction: 0=None, 1=Mean, 2=Sum.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cross_entropy_loss(
+        &self, target: &Tensor, reduction: i64,
+        ignore_index: i64, label_smoothing: f64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_cross_entropy_loss(
+                self.handle, target.handle,
+                reduction, ignore_index, label_smoothing,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused BCE with logits loss: single libtorch kernel.
+    /// Numerically stable binary cross-entropy from raw logits.
+    /// reduction: 0=None, 1=Mean, 2=Sum.
+    pub fn bce_with_logits_loss(&self, target: &Tensor, reduction: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_bce_with_logits_loss(
+                self.handle, target.handle, reduction, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused L1 loss: single libtorch kernel.
+    /// reduction: 0=None, 1=Mean, 2=Sum.
+    pub fn l1_loss(&self, target: &Tensor, reduction: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_l1_loss(self.handle, target.handle, reduction, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused Smooth L1 (Huber) loss: single libtorch kernel.
+    /// reduction: 0=None, 1=Mean, 2=Sum. beta: transition point.
+    pub fn smooth_l1_loss(&self, target: &Tensor, reduction: i64, beta: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_smooth_l1_loss(
+                self.handle, target.handle, reduction, beta, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused KL divergence loss: single libtorch kernel.
+    /// input: log-probabilities. target: probabilities.
+    /// reduction: 0=None, 1=Mean, 2=Sum, 5=BatchMean.
+    pub fn kl_div_loss(&self, target: &Tensor, reduction: i64, log_target: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_kl_div_loss(
+                self.handle, target.handle, reduction, log_target as i32, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    // --- Fused batch normalization ---
+
+    /// Fused batch normalization: single libtorch kernel.
+    /// When training=true, updates running_mean/running_var in-place.
+    #[allow(clippy::too_many_arguments)]
+    pub fn batch_norm(
+        &self, weight: Option<&Tensor>, bias: Option<&Tensor>,
+        running_mean: Option<&Tensor>, running_var: Option<&Tensor>,
+        training: bool, momentum: f64, eps: f64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let w = weight.map_or(ptr::null_mut(), |t| t.handle);
+        let b = bias.map_or(ptr::null_mut(), |t| t.handle);
+        let rm = running_mean.map_or(ptr::null_mut(), |t| t.handle);
+        let rv = running_var.map_or(ptr::null_mut(), |t| t.handle);
+        let err = unsafe {
+            ffi::flodl_batch_norm(
+                self.handle, w, b, rm, rv,
+                training as i32, momentum, eps, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    // --- Fused dropout ---
+
+    /// Fused dropout: single libtorch kernel with inverted scaling.
+    pub fn dropout(&self, p: f64, training: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_dropout(self.handle, p, training as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused 2D feature dropout: drops entire channels.
+    pub fn feature_dropout(&self, p: f64, training: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_feature_dropout(self.handle, p, training as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Missing wrappers for existing shims ---
 
     /// Create evenly spaced values.
@@ -1593,11 +1725,46 @@ impl Tensor {
         check_err(err)
     }
 
+    /// Null out the gradient pointer instead of zeroing the data.
+    /// No CUDA kernel — just resets the grad tensor to undefined.
+    /// This is what PyTorch does by default since 1.7.
+    pub fn zero_grad_set_to_none(&self) {
+        unsafe { ffi::flodl_zero_grad_set_to_none(self.handle) }
+    }
+
+    /// Fused clip_grad_norm: compute global L2 norm across all param grads
+    /// and scale in-place if it exceeds max_norm. Single C++ call.
+    /// Returns the original total norm before clipping.
+    pub fn clip_grad_norm_fused(params: &[Tensor], max_norm: f64) -> Result<f64> {
+        if params.is_empty() {
+            return Ok(0.0);
+        }
+        let mut handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
+        let mut total_norm: f64 = 0.0;
+        let err = unsafe {
+            ffi::flodl_clip_grad_norm(
+                handles.as_mut_ptr(),
+                handles.len() as i32,
+                max_norm,
+                &mut total_norm,
+            )
+        };
+        check_err(err)?;
+        Ok(total_norm)
+    }
+
     /// Whether this tensor is a leaf in the autograd graph.
     /// A tensor is a leaf if it was created by the user (not by an op)
     /// or if it doesn't require grad.
     pub fn is_leaf(&self) -> bool {
         unsafe { ffi::flodl_is_leaf(self.handle) != 0 }
+    }
+
+    /// Count unique autograd nodes reachable from this tensor's grad_fn.
+    /// Returns 0 for leaf tensors or tensors without gradient tracking.
+    /// This is the number of backward operations libtorch will execute.
+    pub fn autograd_node_count(&self) -> i64 {
+        unsafe { ffi::flodl_autograd_node_count(self.handle) }
     }
 
     /// Detach from the computation graph. Returns a new tensor that shares

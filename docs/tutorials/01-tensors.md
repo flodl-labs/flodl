@@ -155,7 +155,7 @@ copy). The C++ `TensorImpl` is reference-counted internally by libtorch.
 
 ### Diagnostics
 
-Two utilities are available for debugging memory issues:
+Utilities for debugging memory and performance issues:
 
 ```rust
 use flodl::{live_tensor_count, rss_kb};
@@ -166,6 +166,11 @@ println!("live handles: {}", live_tensor_count());
 
 // Current process RSS in kilobytes (Linux only).
 println!("RSS: {}MB", rss_kb() / 1024);
+
+// Count autograd nodes reachable from a tensor — measures graph
+// complexity. Compare against Python to detect decomposed-op bloat.
+let loss = mse_loss(&pred, &target)?;
+println!("autograd nodes: {}", loss.data().autograd_node_count());
 ```
 
 ## Device Transfer

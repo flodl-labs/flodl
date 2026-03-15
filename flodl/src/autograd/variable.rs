@@ -91,6 +91,13 @@ impl Variable {
         self.inner.borrow().data.is_leaf()
     }
 
+    /// Count unique autograd nodes reachable from this variable's grad_fn.
+    /// Returns 0 for leaf variables. Measures graph complexity — compare
+    /// against Python's equivalent to detect decomposed-op bloat.
+    pub fn autograd_node_count(&self) -> i64 {
+        self.inner.borrow().data.autograd_node_count()
+    }
+
     /// Shape of the underlying data tensor.
     pub fn shape(&self) -> Vec<i64> {
         self.inner.borrow().data.shape()
@@ -114,6 +121,11 @@ impl Variable {
     /// Zero out the accumulated gradient.
     pub fn zero_grad(&self) {
         let _ = self.inner.borrow().data.zero_grad();
+    }
+
+    /// Null out the gradient instead of zeroing it. No CUDA kernel.
+    pub fn zero_grad_set_to_none(&self) {
+        self.inner.borrow().data.zero_grad_set_to_none();
     }
 
     /// Detach from the computation graph. Returns a new leaf variable

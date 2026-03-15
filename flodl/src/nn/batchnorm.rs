@@ -9,7 +9,8 @@ use super::Module;
 
 /// Batch normalization over the first (batch) dimension.
 ///
-/// Training mode: uses batch statistics, updates running stats.
+/// Uses a single fused `torch::batch_norm` kernel (1 autograd node).
+/// Training mode: uses batch statistics, updates running stats in-place.
 /// Eval mode: uses running statistics (persisted via `buffers()`).
 pub struct BatchNorm {
     pub weight: Parameter,   // gamma
@@ -46,33 +47,13 @@ impl BatchNorm {
             training: Cell::new(true),
         })
     }
-
-    fn update_running_stats(&self, batch_mean: &Tensor, batch_var: &Tensor, batch_size: i64) -> Result<()> {
-        let m = self.momentum;
-        // Bessel's correction for unbiased variance estimate
-        let correction = batch_size as f64 / (batch_size as f64 - 1.0);
-
-        let rm = self.running_mean.get();
-        self.running_mean.set(rm.mul_scalar(1.0 - m)?.add(&batch_mean.mul_scalar(m)?)?);
-
-        let rv = self.running_var.get();
-        self.running_var.set(rv.mul_scalar(1.0 - m)?.add(&batch_var.mul_scalar(m * correction)?)?);
-
-        Ok(())
-    }
 }
 
 /// Batch normalization for 4D `[B, C, H, W]` inputs (conv layers).
 ///
-/// Normalizes over the `(B, H, W)` dimensions per channel, matching
-/// PyTorch's `nn.BatchNorm2d`. Internally reshapes to `[B*H*W, C]`,
-/// applies `BatchNorm`, and reshapes back.
-///
-/// ```ignore
-/// let bn = BatchNorm2d::new(64)?;  // 64 channels
-/// let x: Variable  // [B, 64, H, W]
-/// let y = bn.forward(&x)?;  // [B, 64, H, W], normalized per channel
-/// ```
+/// Uses fused `torch::batch_norm` which handles 4D input natively —
+/// normalizes over `(B, H, W)` dimensions per channel, matching
+/// PyTorch's `nn.BatchNorm2d`.
 pub struct BatchNorm2d {
     inner: BatchNorm,
 }
@@ -99,18 +80,8 @@ impl Module for BatchNorm2d {
                 "BatchNorm2d: input must be 4D [B, C, H, W]"
             ));
         }
-        let (b, c, h, w) = (shape[0], shape[1], shape[2], shape[3]);
-
-        // [B, C, H, W] -> [B, H, W, C] -> [B*H*W, C]
-        let permuted = input.permute(&[0, 2, 3, 1])?;
-        let flat = permuted.reshape(&[b * h * w, c])?;
-
-        // Apply 2D batch norm
-        let normed = self.inner.forward(&flat)?;
-
-        // [B*H*W, C] -> [B, H, W, C] -> [B, C, H, W]
-        let unflat = normed.reshape(&[b, h, w, c])?;
-        unflat.permute(&[0, 3, 1, 2])
+        // Fused batch_norm handles 4D input natively
+        self.inner.forward(input)
     }
 
     fn parameters(&self) -> Vec<Parameter> {
@@ -134,34 +105,28 @@ impl Module for BatchNorm {
     fn name(&self) -> &str { "batchnorm" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        if !self.training.get() {
-            // Eval mode: use running statistics
-            let mean = Variable::new(self.running_mean.get(), false);
-            let var = Variable::new(self.running_var.get(), false);
-            let std = var.add_scalar(self.eps)?.sqrt()?;
-            let normalized = input.sub(&mean)?.div(&std)?;
-            return normalized.mul(&self.weight.variable)?.add(&self.bias.variable);
+        let training = self.training.get();
+        if training {
+            let batch_size = input.shape()[0];
+            if batch_size < 2 {
+                return Err(TensorError::new(
+                    "BatchNorm requires batch_size >= 2 in training mode \
+                     (Bessel's correction divides by batch_size-1)"
+                ));
+            }
         }
 
-        // Training mode: use batch statistics
-        let batch_size = input.shape()[0];
-        if batch_size < 2 {
-            return Err(TensorError::new(
-                "BatchNorm requires batch_size >= 2 in training mode \
-                 (Bessel's correction divides by batch_size-1)"
-            ));
-        }
-        let batch_mean = input.mean_dim(0, false)?;
-        let centered = input.sub(&batch_mean)?;
-        let batch_var = centered.mul(&centered)?.mean_dim(0, false)?;
-        let std = batch_var.add_scalar(self.eps)?.sqrt()?;
-        let normalized = centered.div(&std)?;
-        let output = normalized.mul(&self.weight.variable)?.add(&self.bias.variable)?;
-
-        // Update running stats (detached from graph)
-        self.update_running_stats(&batch_mean.data(), &batch_var.data(), batch_size)?;
-
-        Ok(output)
+        // Single fused call: computes norm, applies affine, updates running stats.
+        // Running stats are updated in-place via shared storage when training=true.
+        let rm = self.running_mean.get();
+        let rv = self.running_var.get();
+        let result = input.data().batch_norm(
+            Some(&self.weight.variable.data()),
+            Some(&self.bias.variable.data()),
+            Some(&rm), Some(&rv),
+            training, self.momentum, self.eps,
+        )?;
+        Ok(Variable::wrap(result))
     }
 
     fn parameters(&self) -> Vec<Parameter> {

@@ -199,7 +199,7 @@ impl Optimizer for SGD {
 
     fn zero_grad(&self) {
         for param in &self.params {
-            param.zero_grad();
+            param.zero_grad_set_to_none();
         }
     }
 
@@ -364,7 +364,7 @@ impl Optimizer for Adam {
 
     fn zero_grad(&self) {
         for param in &self.params {
-            param.zero_grad();
+            param.zero_grad_set_to_none();
         }
     }
 

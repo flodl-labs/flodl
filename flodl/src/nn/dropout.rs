@@ -1,12 +1,13 @@
 use std::cell::Cell;
 
 use crate::autograd::Variable;
-use crate::tensor::{Result, Tensor, TensorOptions};
+use crate::tensor::Result;
 
 use super::Module;
 
 /// Inverted dropout module.
 ///
+/// Uses a single fused `torch::dropout` kernel (1 autograd node).
 /// During training: randomly zeros elements with probability `p`,
 /// scales remaining by `1/(1-p)`.
 /// During eval: identity function.
@@ -34,20 +35,8 @@ impl Module for Dropout {
         if !self.training.get() || self.p == 0.0 {
             return Ok(input.clone());
         }
-
-        let shape = input.shape();
-        let opts = TensorOptions {
-            dtype: input.dtype(),
-            device: input.device(),
-        };
-        // Generate random mask: 1 where rand > p, 0 otherwise
-        let rand_tensor = Tensor::rand(&shape, opts)?;
-        let mask_tensor = rand_tensor.gt_scalar(self.p)?;
-        let mask = Variable::new(mask_tensor, false);
-
-        // Scale by 1/(1-p) for inverted dropout
-        let scale = 1.0 / (1.0 - self.p);
-        input.mul(&mask)?.mul_scalar(scale)
+        let result = input.data().dropout(self.p, true)?;
+        Ok(Variable::wrap(result))
     }
 
     fn set_training(&self, training: bool) {
@@ -57,6 +46,7 @@ impl Module for Dropout {
 
 /// 2D channel dropout — drops entire channels (feature maps) at once.
 ///
+/// Uses a single fused `torch::feature_dropout` kernel (1 autograd node).
 /// During training: randomly zeros entire channels with probability `p`,
 /// scales remaining by `1/(1-p)`. Mask shape is `[B, C, 1, 1]`.
 /// During eval: identity function.
@@ -84,22 +74,8 @@ impl Module for Dropout2d {
         if !self.training.get() || self.p == 0.0 {
             return Ok(input.clone());
         }
-
-        let shape = input.shape();
-        assert!(shape.len() == 4, "Dropout2d expects [B, C, H, W], got {:?}", shape);
-
-        // Mask shape: [B, C, 1, 1] — broadcast across spatial dims
-        let mask_shape = [shape[0], shape[1], 1, 1];
-        let opts = TensorOptions {
-            dtype: input.dtype(),
-            device: input.device(),
-        };
-        let rand_tensor = Tensor::rand(&mask_shape, opts)?;
-        let mask_tensor = rand_tensor.gt_scalar(self.p)?;
-        let mask = Variable::new(mask_tensor, false);
-
-        let scale = 1.0 / (1.0 - self.p);
-        input.mul(&mask)?.mul_scalar(scale)
+        let result = input.data().feature_dropout(self.p, true)?;
+        Ok(Variable::wrap(result))
     }
 
     fn set_training(&self, training: bool) {
@@ -110,7 +86,7 @@ impl Module for Dropout2d {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::DType;
+    use crate::tensor::{DType, Tensor, TensorOptions};
 
     #[test]
     fn test_dropout2d_whole_channels_zeroed() {

@@ -340,6 +340,60 @@ int flodl_is_pinned(FlodlTensor t);
 // fragmentation from real leaks.
 int flodl_malloc_trim(void);
 
+// --- Zero grad (set_to_none) ---
+
+// Null out the gradient pointer instead of zeroing the data.
+// No CUDA kernel — just resets the grad tensor to undefined.
+void flodl_zero_grad_set_to_none(FlodlTensor t);
+
+// --- Fused clip_grad_norm ---
+
+// Compute global L2 norm across all param grads and scale in-place
+// if it exceeds max_norm. Replaces 2N FFI calls with 1.
+// Writes the original total norm to *total_norm_out.
+char* flodl_clip_grad_norm(FlodlTensor* params, int count,
+                           double max_norm, double* total_norm_out);
+
+// --- Autograd diagnostics ---
+
+// Count unique autograd nodes reachable from this tensor's grad_fn.
+// Returns 0 for leaf tensors or tensors without gradient tracking.
+int64_t flodl_autograd_node_count(FlodlTensor t);
+
+// --- Fused loss functions ---
+// reduction: 0=None, 1=Mean, 2=Sum (matches at::Reduction)
+
+char* flodl_mse_loss(FlodlTensor pred, FlodlTensor target,
+                     int64_t reduction, FlodlTensor* result);
+char* flodl_cross_entropy_loss(FlodlTensor pred, FlodlTensor target,
+                               int64_t reduction, int64_t ignore_index,
+                               double label_smoothing, FlodlTensor* result);
+char* flodl_bce_with_logits_loss(FlodlTensor pred, FlodlTensor target,
+                                  int64_t reduction, FlodlTensor* result);
+char* flodl_l1_loss(FlodlTensor pred, FlodlTensor target,
+                    int64_t reduction, FlodlTensor* result);
+char* flodl_smooth_l1_loss(FlodlTensor pred, FlodlTensor target,
+                           int64_t reduction, double beta,
+                           FlodlTensor* result);
+char* flodl_kl_div_loss(FlodlTensor input, FlodlTensor target,
+                        int64_t reduction, int log_target,
+                        FlodlTensor* result);
+
+// --- Fused batch normalization ---
+
+char* flodl_batch_norm(FlodlTensor input, FlodlTensor weight,
+                       FlodlTensor bias, FlodlTensor running_mean,
+                       FlodlTensor running_var, int training,
+                       double momentum, double eps,
+                       FlodlTensor* result);
+
+// --- Fused dropout ---
+
+char* flodl_dropout(FlodlTensor input, double p, int training,
+                    FlodlTensor* result);
+char* flodl_feature_dropout(FlodlTensor input, double p, int training,
+                            FlodlTensor* result);
+
 // --- Utility ---
 
 void flodl_free_string(char* s);

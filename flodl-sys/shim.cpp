@@ -10,8 +10,11 @@
 
 #include "shim.h"
 #include <torch/torch.h>
+#include <torch/csrc/autograd/function.h>
 #include <cstring>
 #include <string>
+#include <queue>
+#include <unordered_set>
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -1494,6 +1497,13 @@ extern "C" char* flodl_zero_grad(FlodlTensor t) {
     }
 }
 
+extern "C" void flodl_zero_grad_set_to_none(FlodlTensor t) {
+    auto& tensor = unwrap(t);
+    if (tensor.grad().defined()) {
+        tensor.mutable_grad().reset();
+    }
+}
+
 extern "C" char* flodl_detach(FlodlTensor t, FlodlTensor* result) {
     try {
         *result = wrap(unwrap(t).detach());
@@ -1733,6 +1743,194 @@ extern "C" int flodl_malloc_trim() {
 #else
     return 0;
 #endif
+}
+
+// --- Fused clip_grad_norm ---
+
+extern "C" char* flodl_clip_grad_norm(FlodlTensor* params, int count,
+                                       double max_norm, double* total_norm_out) {
+    try {
+        // Pass 1: compute global L2 norm across all param grads
+        torch::Tensor total_norm_sq;
+        bool has_grads = false;
+        for (int i = 0; i < count; i++) {
+            auto& p = unwrap(params[i]);
+            auto g = p.grad();
+            if (g.defined()) {
+                auto n2 = g.norm().pow(2);
+                if (!has_grads) {
+                    total_norm_sq = n2;
+                    has_grads = true;
+                } else {
+                    total_norm_sq.add_(n2);
+                }
+            }
+        }
+        if (!has_grads) {
+            *total_norm_out = 0.0;
+            return nullptr;
+        }
+        double total = total_norm_sq.sqrt().item<double>();
+        *total_norm_out = total;
+
+        // Pass 2: scale grads if needed
+        if (total > max_norm) {
+            double scale = max_norm / (total + 1e-6);
+            for (int i = 0; i < count; i++) {
+                auto& p = unwrap(params[i]);
+                auto g = p.grad();
+                if (g.defined()) {
+                    p.mutable_grad().mul_(scale);
+                }
+            }
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Autograd diagnostics ---
+
+extern "C" int64_t flodl_autograd_node_count(FlodlTensor t) {
+    auto& tensor = unwrap(t);
+    auto fn = tensor.grad_fn();
+    if (!fn) return 0;
+
+    std::unordered_set<torch::autograd::Node*> visited;
+    std::queue<torch::autograd::Node*> q;
+    q.push(fn.get());
+    visited.insert(fn.get());
+
+    while (!q.empty()) {
+        auto* node = q.front();
+        q.pop();
+        for (auto& edge : node->next_edges()) {
+            auto* next = edge.function.get();
+            if (next && visited.insert(next).second) {
+                q.push(next);
+            }
+        }
+    }
+    return static_cast<int64_t>(visited.size());
+}
+
+// --- Fused loss functions ---
+
+extern "C" char* flodl_mse_loss(FlodlTensor pred, FlodlTensor target,
+                                 int64_t reduction, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::mse_loss(unwrap(pred), unwrap(target), reduction));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cross_entropy_loss(FlodlTensor pred, FlodlTensor target,
+                                           int64_t reduction, int64_t ignore_index,
+                                           double label_smoothing, FlodlTensor* result) {
+    try {
+        *result = wrap(at::cross_entropy_loss(
+            unwrap(pred), unwrap(target),
+            /*weight=*/{}, reduction, ignore_index, label_smoothing));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_bce_with_logits_loss(FlodlTensor pred, FlodlTensor target,
+                                              int64_t reduction, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::binary_cross_entropy_with_logits(
+            unwrap(pred), unwrap(target),
+            /*weight=*/{}, /*pos_weight=*/{}, reduction));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_l1_loss(FlodlTensor pred, FlodlTensor target,
+                                int64_t reduction, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::l1_loss(unwrap(pred), unwrap(target), reduction));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_smooth_l1_loss(FlodlTensor pred, FlodlTensor target,
+                                       int64_t reduction, double beta,
+                                       FlodlTensor* result) {
+    try {
+        *result = wrap(torch::smooth_l1_loss(unwrap(pred), unwrap(target),
+                                              reduction, beta));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_kl_div_loss(FlodlTensor input, FlodlTensor target,
+                                    int64_t reduction, int log_target,
+                                    FlodlTensor* result) {
+    try {
+        *result = wrap(torch::kl_div(unwrap(input), unwrap(target),
+                                      reduction, log_target != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Fused batch normalization ---
+
+extern "C" char* flodl_batch_norm(FlodlTensor input, FlodlTensor weight,
+                                   FlodlTensor bias, FlodlTensor running_mean,
+                                   FlodlTensor running_var, int training,
+                                   double momentum, double eps,
+                                   FlodlTensor* result) {
+    try {
+        c10::optional<torch::Tensor> w = weight ? c10::make_optional(unwrap(weight))
+                                                : c10::nullopt;
+        c10::optional<torch::Tensor> b = bias ? c10::make_optional(unwrap(bias))
+                                              : c10::nullopt;
+        c10::optional<torch::Tensor> rm = running_mean
+            ? c10::make_optional(unwrap(running_mean)) : c10::nullopt;
+        c10::optional<torch::Tensor> rv = running_var
+            ? c10::make_optional(unwrap(running_var)) : c10::nullopt;
+
+        *result = wrap(torch::batch_norm(unwrap(input), w, b, rm, rv,
+                       training != 0, momentum, eps, /*cudnn_enabled=*/true));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Fused dropout ---
+
+extern "C" char* flodl_dropout(FlodlTensor input, double p, int training,
+                                FlodlTensor* result) {
+    try {
+        *result = wrap(torch::dropout(unwrap(input), p, training != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_feature_dropout(FlodlTensor input, double p, int training,
+                                        FlodlTensor* result) {
+    try {
+        *result = wrap(torch::feature_dropout(unwrap(input), p, training != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
 }
 
 // --- Utility ---

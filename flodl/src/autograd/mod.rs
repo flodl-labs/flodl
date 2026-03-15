@@ -1091,4 +1091,40 @@ mod tests {
             "RSS grew by {rss_growth_mb:.1}MB over {iters} graph+loop steps"
         );
     }
+
+    #[test]
+    fn test_autograd_node_count() {
+        let opts = crate::tensor::test_opts();
+
+        // Leaf variable: 0 nodes
+        let x = Variable::new(Tensor::randn(&[2, 3], opts).unwrap(), true);
+        assert_eq!(x.autograd_node_count(), 0);
+
+        // Single op: 1 node (MulBackward)
+        let y = x.mul_scalar(2.0).unwrap();
+        assert!(y.autograd_node_count() >= 1);
+
+        // Chain: mul -> sum -> 2 nodes
+        let z = y.sum().unwrap();
+        assert!(z.autograd_node_count() >= 2);
+
+        // Fused linear has fewer nodes than manual matmul+add
+        let w = Variable::new(Tensor::randn(&[4, 3], opts).unwrap(), true);
+        let b = Variable::new(Tensor::zeros(&[4], opts).unwrap(), true);
+        let inp = Variable::new(Tensor::randn(&[2, 3], opts).unwrap(), false);
+
+        // Fused: single linear node
+        let fused = linear(&inp, &w, Some(&b)).unwrap();
+        let fused_nodes = fused.autograd_node_count();
+
+        // Manual: matmul + add = 2 nodes
+        let wt = w.transpose(0, 1).unwrap();
+        let manual = inp.matmul(&wt).unwrap().add(&b).unwrap();
+        let manual_nodes = manual.autograd_node_count();
+
+        assert!(
+            fused_nodes < manual_nodes,
+            "fused linear ({fused_nodes}) should have fewer nodes than manual ({manual_nodes})"
+        );
+    }
 }

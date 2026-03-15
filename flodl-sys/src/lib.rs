@@ -547,6 +547,78 @@ unsafe extern "C" {
 
     pub fn flodl_malloc_trim() -> i32;
 
+    // --- Zero grad (set_to_none) ---
+
+    pub fn flodl_zero_grad_set_to_none(t: FlodlTensor);
+
+    // --- Fused clip_grad_norm ---
+
+    pub fn flodl_clip_grad_norm(
+        params: *mut FlodlTensor, count: i32,
+        max_norm: f64, total_norm_out: *mut f64,
+    ) -> *mut i8;
+
+    // --- Autograd diagnostics ---
+
+    pub fn flodl_autograd_node_count(t: FlodlTensor) -> i64;
+
+    // --- Fused loss functions ---
+
+    pub fn flodl_mse_loss(
+        pred: FlodlTensor, target: FlodlTensor,
+        reduction: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_cross_entropy_loss(
+        pred: FlodlTensor, target: FlodlTensor,
+        reduction: i64, ignore_index: i64, label_smoothing: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_bce_with_logits_loss(
+        pred: FlodlTensor, target: FlodlTensor,
+        reduction: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_l1_loss(
+        pred: FlodlTensor, target: FlodlTensor,
+        reduction: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_smooth_l1_loss(
+        pred: FlodlTensor, target: FlodlTensor,
+        reduction: i64, beta: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_kl_div_loss(
+        input: FlodlTensor, target: FlodlTensor,
+        reduction: i64, log_target: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Fused batch normalization ---
+
+    pub fn flodl_batch_norm(
+        input: FlodlTensor, weight: FlodlTensor,
+        bias: FlodlTensor, running_mean: FlodlTensor,
+        running_var: FlodlTensor, training: i32,
+        momentum: f64, eps: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Fused dropout ---
+
+    pub fn flodl_dropout(
+        input: FlodlTensor, p: f64, training: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_feature_dropout(
+        input: FlodlTensor, p: f64, training: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Utility ---
 
     pub fn flodl_free_string(s: *mut i8);

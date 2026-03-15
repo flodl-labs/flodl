@@ -50,7 +50,7 @@ pub use nn::{
     LoadReport,
     GradScaler, cast_parameters,
     Identity, ReLU, Sigmoid, Tanh, GELU, SiLU,
-    Dropout, LayerNorm, Embedding, GRUCell, LSTMCell,
+    Dropout, Dropout2d, LayerNorm, Embedding, GRUCell, LSTMCell,
     Conv2d, ConvTranspose2d, BatchNorm, BatchNorm2d,
     mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss,
     clip_grad_norm, clip_grad_value,
