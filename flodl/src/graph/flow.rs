@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use indexmap::IndexMap;
 
@@ -552,13 +552,13 @@ impl FlowBuilder {
 
     fn add_boxed_module(&mut self, module: Box<dyn Module>) -> NodeRef {
         let id = self.next_id(module.name());
-        let rc: Arc<dyn Module> = Arc::from(module);
+        let rc: Rc<dyn Module> = Rc::from(module);
         let run = wrap_module(rc.clone());
 
         // Auto-detect NamedInputModule capability for using() support
         let ref_forward = if rc.as_named_input().is_some() {
             let rc_clone = rc.clone();
-            let rf: RefForwardFn = Arc::new(move |input, refs| {
+            let rf: RefForwardFn = Rc::new(move |input, refs| {
                 rc_clone.as_named_input().unwrap().forward_named(input, refs)
             });
             Some(rf)
@@ -652,7 +652,7 @@ impl FlowBuilder {
         if let Some(ref loop_ports) = node.loop_ports {
             // Loop nodes: update the shared port list — the loop's run closure
             // already reads this at execution time via extract_refs.
-            *loop_ports.write().unwrap() = node.input_ports.clone();
+            *loop_ports.borrow_mut() = node.input_ports.clone();
         } else if let (Some(module), Some(ref_forward)) =
             (node.module.clone(), node.ref_forward.clone())
         {

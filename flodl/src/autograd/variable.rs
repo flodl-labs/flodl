@@ -1,5 +1,6 @@
+use std::cell::RefCell;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
 
 use crate::tensor::{DType, Device, Result, Tensor};
 
@@ -14,9 +15,8 @@ pub(crate) struct VariableInner {
 /// graph automatically. Calling `backward()` runs libtorch's backward
 /// engine — no Rust-side graph walking.
 ///
-/// Internally uses `Arc<RwLock<>>` for shared ownership — the same
-/// parameter can be referenced by both a Module and an Optimizer,
-/// and the Variable is Send + Sync for multi-GPU support.
+/// Internally uses `Rc<RefCell<>>` for shared ownership — the same
+/// parameter can be referenced by both a Module and an Optimizer.
 ///
 /// ```ignore
 /// let w = Variable::new(Tensor::randn(&[3, 2], opts)?, true);
@@ -27,7 +27,7 @@ pub(crate) struct VariableInner {
 /// ```
 #[derive(Clone)]
 pub struct Variable {
-    pub(crate) inner: Arc<RwLock<VariableInner>>,
+    pub(crate) inner: Rc<RefCell<VariableInner>>,
 }
 
 impl Variable {
@@ -41,7 +41,7 @@ impl Variable {
             data
         };
         Variable {
-            inner: Arc::new(RwLock::new(VariableInner { data })),
+            inner: Rc::new(RefCell::new(VariableInner { data })),
         }
     }
 
@@ -50,77 +50,77 @@ impl Variable {
     /// metadata from their inputs automatically).
     pub(crate) fn wrap(data: Tensor) -> Self {
         Variable {
-            inner: Arc::new(RwLock::new(VariableInner { data })),
+            inner: Rc::new(RefCell::new(VariableInner { data })),
         }
     }
 
     /// Get the underlying tensor data (shallow clone).
     pub fn data(&self) -> Tensor {
-        self.inner.read().unwrap().data.clone()
+        self.inner.borrow().data.clone()
     }
 
     /// Get the accumulated gradient, if any.
     /// Reads from the C++ tensor's .grad() field.
     pub fn grad(&self) -> Option<Tensor> {
-        self.inner.read().unwrap().data.grad()
+        self.inner.borrow().data.grad()
     }
 
     /// Replace the gradient tensor (for gradient clipping / unscaling).
     pub fn set_grad(&self, grad: Tensor) {
-        let _ = self.inner.read().unwrap().data.set_grad(&grad);
+        let _ = self.inner.borrow().data.set_grad(&grad);
     }
 
     /// Whether this variable tracks gradients.
     pub fn requires_grad(&self) -> bool {
-        self.inner.read().unwrap().data.requires_grad()
+        self.inner.borrow().data.requires_grad()
     }
 
     /// Change whether this variable tracks gradients.
     /// Replaces the inner data handle (the FFI returns a new handle sharing storage).
-    /// All clones of this Variable share the same `Arc<RwLock>`, so the change
+    /// All clones of this Variable share the same `Rc<RefCell>`, so the change
     /// is visible everywhere (module, optimizer, etc.).
     pub fn set_requires_grad(&self, requires_grad: bool) -> Result<()> {
-        let data = self.inner.read().unwrap().data.set_requires_grad(requires_grad)?;
-        self.inner.write().unwrap().data = data;
+        let data = self.inner.borrow().data.set_requires_grad(requires_grad)?;
+        self.inner.borrow_mut().data = data;
         Ok(())
     }
 
     /// Whether this is a leaf variable (no grad_fn in libtorch).
     /// A leaf tensor is one created by the user, not by an operation.
     pub fn is_leaf(&self) -> bool {
-        self.inner.read().unwrap().data.is_leaf()
+        self.inner.borrow().data.is_leaf()
     }
 
     /// Shape of the underlying data tensor.
     pub fn shape(&self) -> Vec<i64> {
-        self.inner.read().unwrap().data.shape()
+        self.inner.borrow().data.shape()
     }
 
     /// Data type of the underlying tensor.
     pub fn dtype(&self) -> DType {
-        self.inner.read().unwrap().data.dtype()
+        self.inner.borrow().data.dtype()
     }
 
     /// Device where the underlying tensor lives.
     pub fn device(&self) -> Device {
-        self.inner.read().unwrap().data.device()
+        self.inner.borrow().data.device()
     }
 
     /// Extract a scalar value as f64.
     pub fn item(&self) -> Result<f64> {
-        self.inner.read().unwrap().data.item()
+        self.inner.borrow().data.item()
     }
 
     /// Zero out the accumulated gradient.
     pub fn zero_grad(&self) {
-        let _ = self.inner.read().unwrap().data.zero_grad();
+        let _ = self.inner.borrow().data.zero_grad();
     }
 
     /// Detach from the computation graph. Returns a new leaf variable
     /// sharing the same data tensor (detached) with no gradient tracking.
     pub fn detach(&self) -> Variable {
-        let detached = self.inner.read().unwrap().data.detach()
-            .unwrap_or_else(|_| self.inner.read().unwrap().data.clone());
+        let detached = self.inner.borrow().data.detach()
+            .unwrap_or_else(|_| self.inner.borrow().data.clone());
         Variable::wrap(detached)
     }
 
@@ -129,7 +129,7 @@ impl Variable {
         if self.device() == device {
             return Ok(self.clone());
         }
-        let moved = self.inner.read().unwrap().data.to_device(device)?;
+        let moved = self.inner.borrow().data.to_device(device)?;
         Ok(Variable::new(moved, self.requires_grad()))
     }
 
@@ -142,12 +142,12 @@ impl Variable {
         } else {
             data
         };
-        self.inner.write().unwrap().data = data;
+        self.inner.borrow_mut().data = data;
     }
 
     /// Number of elements in the data tensor.
     pub fn numel(&self) -> i64 {
-        self.inner.read().unwrap().data.numel()
+        self.inner.borrow().data.numel()
     }
 
     /// Run backward pass from this scalar variable.
@@ -157,7 +157,7 @@ impl Variable {
     /// immediately release the C++ grad_fn chain. Without this, the
     /// autograd Node objects stay alive until the Variable is dropped.
     pub fn backward(&self) -> Result<()> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.borrow();
         inner.data.backward()?;
         inner.data.detach_()?;
         Ok(())
@@ -166,7 +166,7 @@ impl Variable {
 
 impl fmt::Debug for Variable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.borrow();
         write!(
             f,
             "Variable({:?}, {:?}, {:?}, requires_grad={})",

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 use crate::autograd::Variable;
 use crate::tensor::{Result, Tensor, TensorOptions};
@@ -12,7 +12,7 @@ use super::Module;
 /// During eval: identity function.
 pub struct Dropout {
     p: f64,
-    training: AtomicBool,
+    training: Cell<bool>,
 }
 
 impl Dropout {
@@ -21,7 +21,7 @@ impl Dropout {
     pub fn new(p: f64) -> Self {
         Dropout {
             p,
-            training: AtomicBool::new(true),
+            training: Cell::new(true),
         }
     }
 
@@ -31,7 +31,7 @@ impl Module for Dropout {
     fn name(&self) -> &str { "dropout" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        if !self.training.load(Ordering::Relaxed) || self.p == 0.0 {
+        if !self.training.get() || self.p == 0.0 {
             return Ok(input.clone());
         }
 
@@ -51,7 +51,7 @@ impl Module for Dropout {
     }
 
     fn set_training(&self, training: bool) {
-        self.training.store(training, Ordering::Relaxed);
+        self.training.set(training);
     }
 }
 
@@ -64,7 +64,7 @@ impl Module for Dropout {
 /// Expects 4-D input `[B, C, H, W]`.
 pub struct Dropout2d {
     p: f64,
-    training: AtomicBool,
+    training: Cell<bool>,
 }
 
 impl Dropout2d {
@@ -72,7 +72,7 @@ impl Dropout2d {
     pub fn new(p: f64) -> Self {
         Dropout2d {
             p,
-            training: AtomicBool::new(true),
+            training: Cell::new(true),
         }
     }
 }
@@ -81,7 +81,7 @@ impl Module for Dropout2d {
     fn name(&self) -> &str { "dropout2d" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        if !self.training.load(Ordering::Relaxed) || self.p == 0.0 {
+        if !self.training.get() || self.p == 0.0 {
             return Ok(input.clone());
         }
 
@@ -103,7 +103,7 @@ impl Module for Dropout2d {
     }
 
     fn set_training(&self, training: bool) {
-        self.training.store(training, Ordering::Relaxed);
+        self.training.set(training);
     }
 }
 

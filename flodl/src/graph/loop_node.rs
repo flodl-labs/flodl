@@ -1,5 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
 
 use crate::autograd::Variable;
 use crate::nn::Module;
@@ -34,11 +35,11 @@ impl LoopBuilder {
             return fb;
         }
 
-        let body: Arc<dyn Module> = Arc::from(self.body);
-        let trace_buf: Arc<RwLock<Vec<Variable>>> = Arc::new(RwLock::new(Vec::new()));
-        let ports: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(vec![DEFAULT_INPUT.into()]));
+        let body: Rc<dyn Module> = Rc::from(self.body);
+        let trace_buf: Rc<RefCell<Vec<Variable>>> = Rc::new(RefCell::new(Vec::new()));
+        let ports: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![DEFAULT_INPUT.into()]));
         let run = make_for_loop_func(body.clone(), n, trace_buf.clone(), ports.clone());
-        let composite: Arc<dyn Module> = Arc::new(LoopComposite {
+        let composite: Rc<dyn Module> = Rc::new(LoopComposite {
             body,
             cond: None,
         });
@@ -61,12 +62,12 @@ impl LoopBuilder {
             return fb;
         }
 
-        let body: Arc<dyn Module> = Arc::from(self.body);
-        let cond: Arc<dyn Module> = Arc::new(cond);
-        let trace_buf: Arc<RwLock<Vec<Variable>>> = Arc::new(RwLock::new(Vec::new()));
-        let ports: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(vec![DEFAULT_INPUT.into()]));
+        let body: Rc<dyn Module> = Rc::from(self.body);
+        let cond: Rc<dyn Module> = Rc::new(cond);
+        let trace_buf: Rc<RefCell<Vec<Variable>>> = Rc::new(RefCell::new(Vec::new()));
+        let ports: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![DEFAULT_INPUT.into()]));
         let run = make_while_loop_func(body.clone(), cond.clone(), max_iter, trace_buf.clone(), ports.clone());
-        let composite: Arc<dyn Module> = Arc::new(LoopComposite {
+        let composite: Rc<dyn Module> = Rc::new(LoopComposite {
             body,
             cond: Some(cond),
         });
@@ -89,12 +90,12 @@ impl LoopBuilder {
             return fb;
         }
 
-        let body: Arc<dyn Module> = Arc::from(self.body);
-        let cond: Arc<dyn Module> = Arc::new(cond);
-        let trace_buf: Arc<RwLock<Vec<Variable>>> = Arc::new(RwLock::new(Vec::new()));
-        let ports: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(vec![DEFAULT_INPUT.into()]));
+        let body: Rc<dyn Module> = Rc::from(self.body);
+        let cond: Rc<dyn Module> = Rc::new(cond);
+        let trace_buf: Rc<RefCell<Vec<Variable>>> = Rc::new(RefCell::new(Vec::new()));
+        let ports: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![DEFAULT_INPUT.into()]));
         let run = make_until_loop_func(body.clone(), cond.clone(), max_iter, trace_buf.clone(), ports.clone());
-        let composite: Arc<dyn Module> = Arc::new(LoopComposite {
+        let composite: Rc<dyn Module> = Rc::new(LoopComposite {
             body,
             cond: Some(cond),
         });
@@ -105,10 +106,10 @@ impl LoopBuilder {
 /// Wire a loop node into the graph and return the updated FlowBuilder.
 fn wire_loop(
     mut fb: FlowBuilder,
-    composite: Arc<dyn Module>,
+    composite: Rc<dyn Module>,
     run: NodeFn,
-    trace_buf: Arc<RwLock<Vec<Variable>>>,
-    ports: Arc<RwLock<Vec<String>>>,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
+    ports: Rc<RefCell<Vec<String>>>,
 ) -> FlowBuilder {
     let cur = fb.current[0].clone();
     let id = fb.next_id("loop");
@@ -120,7 +121,7 @@ fn wire_loop(
         .is_some()
     {
         let body_rc = composite.sub_modules().into_iter().next().unwrap();
-        let rf: RefForwardFn = Arc::new(move |input, refs| {
+        let rf: RefForwardFn = Rc::new(move |input, refs| {
             body_rc.as_named_input().unwrap().forward_named(input, refs)
         });
         Some(rf)
@@ -160,7 +161,7 @@ fn wire_loop(
 
 /// Execute body step: use forward_named if refs are available, plain forward otherwise.
 fn body_step(
-    body: &Arc<dyn Module>,
+    body: &Rc<dyn Module>,
     state: &Variable,
     refs: &HashMap<String, Variable>,
 ) -> Result<Variable> {
@@ -173,22 +174,22 @@ fn body_step(
 }
 
 fn make_for_loop_func(
-    body: Arc<dyn Module>,
+    body: Rc<dyn Module>,
     count: usize,
-    trace_buf: Arc<RwLock<Vec<Variable>>>,
-    ports: Arc<RwLock<Vec<String>>>,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
+    ports: Rc<RefCell<Vec<String>>>,
 ) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let mut state = inputs[0].clone();
-        let refs = extract_refs(&ports.read().unwrap(), inputs);
-        trace_buf.write().unwrap().clear();
+        let refs = extract_refs(&ports.borrow(), inputs);
+        trace_buf.borrow_mut().clear();
         body.reset();
         for i in 0..count {
             state = body_step(&body, &state, &refs).map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
             })?;
             if let Some(t) = body.trace() {
-                trace_buf.write().unwrap().push(t);
+                trace_buf.borrow_mut().push(t);
             }
         }
         Ok(vec![state])
@@ -196,16 +197,16 @@ fn make_for_loop_func(
 }
 
 fn make_while_loop_func(
-    body: Arc<dyn Module>,
-    cond: Arc<dyn Module>,
+    body: Rc<dyn Module>,
+    cond: Rc<dyn Module>,
     max_iter: usize,
-    trace_buf: Arc<RwLock<Vec<Variable>>>,
-    ports: Arc<RwLock<Vec<String>>>,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
+    ports: Rc<RefCell<Vec<String>>>,
 ) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let mut state = inputs[0].clone();
-        let refs = extract_refs(&ports.read().unwrap(), inputs);
-        trace_buf.write().unwrap().clear();
+        let refs = extract_refs(&ports.borrow(), inputs);
+        trace_buf.borrow_mut().clear();
         body.reset();
         for i in 0..max_iter {
             let halt = cond.forward(&state)?;
@@ -222,7 +223,7 @@ fn make_while_loop_func(
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
             })?;
             if let Some(t) = body.trace() {
-                trace_buf.write().unwrap().push(t);
+                trace_buf.borrow_mut().push(t);
             }
         }
         Ok(vec![state])
@@ -230,23 +231,23 @@ fn make_while_loop_func(
 }
 
 fn make_until_loop_func(
-    body: Arc<dyn Module>,
-    cond: Arc<dyn Module>,
+    body: Rc<dyn Module>,
+    cond: Rc<dyn Module>,
     max_iter: usize,
-    trace_buf: Arc<RwLock<Vec<Variable>>>,
-    ports: Arc<RwLock<Vec<String>>>,
+    trace_buf: Rc<RefCell<Vec<Variable>>>,
+    ports: Rc<RefCell<Vec<String>>>,
 ) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let mut state = inputs[0].clone();
-        let refs = extract_refs(&ports.read().unwrap(), inputs);
-        trace_buf.write().unwrap().clear();
+        let refs = extract_refs(&ports.borrow(), inputs);
+        trace_buf.borrow_mut().clear();
         body.reset();
         for i in 0..max_iter {
             state = body_step(&body, &state, &refs).map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
             })?;
             if let Some(t) = body.trace() {
-                trace_buf.write().unwrap().push(t);
+                trace_buf.borrow_mut().push(t);
             }
             // Skip condition check on last iteration
             if i < max_iter - 1 {
@@ -268,8 +269,8 @@ fn make_until_loop_func(
 
 /// Bundles body + optional condition for parameter collection.
 struct LoopComposite {
-    body: Arc<dyn Module>,
-    cond: Option<Arc<dyn Module>>,
+    body: Rc<dyn Module>,
+    cond: Option<Rc<dyn Module>>,
 }
 
 impl Module for LoopComposite {
@@ -277,7 +278,7 @@ impl Module for LoopComposite {
         self.body.forward(input)
     }
 
-    fn sub_modules(&self) -> Vec<Arc<dyn Module>> {
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
         let mut subs = vec![self.body.clone()];
         if let Some(ref cond) = self.cond {
             subs.push(cond.clone());

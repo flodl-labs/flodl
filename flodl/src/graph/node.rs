@@ -1,5 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
 
 use crate::autograd::Variable;
 use crate::nn::Module;
@@ -8,26 +9,26 @@ use crate::tensor::Result;
 pub(crate) const DEFAULT_INPUT: &str = "input";
 pub(crate) const DEFAULT_OUTPUT: &str = "output";
 
-pub(crate) type NodeFn = Box<dyn Fn(&[Variable]) -> Result<Vec<Variable>> + Send + Sync>;
+pub(crate) type NodeFn = Box<dyn Fn(&[Variable]) -> Result<Vec<Variable>>>;
 
 /// Closure type for modules that accept named refs via Using.
 pub(crate) type RefForwardFn =
-    Arc<dyn Fn(&Variable, &HashMap<String, Variable>) -> Result<Variable> + Send + Sync>;
+    Rc<dyn Fn(&Variable, &HashMap<String, Variable>) -> Result<Variable>>;
 
 pub(crate) struct Node {
     pub id: String,
     pub input_ports: Vec<String>,
     pub output_ports: Vec<String>,
     pub run: NodeFn,
-    pub module: Option<Arc<dyn Module>>,
+    pub module: Option<Rc<dyn Module>>,
     /// If set, this module can handle Using refs via forward_named.
     pub ref_forward: Option<RefForwardFn>,
     /// Trace buffer for loop nodes whose body implements Module::trace().
-    pub trace_buf: Option<Arc<RwLock<Vec<Variable>>>>,
+    pub trace_buf: Option<Rc<RefCell<Vec<Variable>>>>,
     /// Shared port list for loop nodes — the loop's run closure reads this
     /// at execution time to extract refs. Updated by wire_using when
     /// .using() is chained after a loop.
-    pub loop_ports: Option<Arc<RwLock<Vec<String>>>>,
+    pub loop_ports: Option<Rc<RefCell<Vec<String>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +85,7 @@ pub(crate) fn extract_refs(
 }
 
 /// Wrap a Module into a NodeFn (single input → single output).
-pub(crate) fn wrap_module(module: Arc<dyn Module>) -> NodeFn {
+pub(crate) fn wrap_module(module: Rc<dyn Module>) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let output = module.forward(&inputs[0])?;
         Ok(vec![output])
@@ -93,7 +94,7 @@ pub(crate) fn wrap_module(module: Arc<dyn Module>) -> NodeFn {
 
 /// Wrap a ref-capable module. Checks ports at call time to extract refs.
 pub(crate) fn wrap_ref_module(
-    module: Arc<dyn Module>,
+    module: Rc<dyn Module>,
     ref_forward: RefForwardFn,
     ports: Vec<String>,
 ) -> NodeFn {

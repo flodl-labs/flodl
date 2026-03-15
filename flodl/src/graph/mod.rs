@@ -27,9 +27,9 @@ pub mod halt;
 pub mod reshape;
 pub mod state;
 
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use std::time::Instant;
 
 use indexmap::IndexMap;
@@ -63,7 +63,7 @@ pub enum MergeOp {
 /// Forward-reference state buffer. Persists across `forward()` calls.
 struct StateEntry {
     writer_ni: usize,
-    value: Arc<RwLock<Option<Variable>>>,
+    value: Rc<RefCell<Option<Variable>>>,
 }
 
 /// An executable computation graph. Implements `Module` for composability.
@@ -106,25 +106,25 @@ pub struct Graph {
     // Observation: tag mapping (immutable after build)
     tag_names: HashMap<String, (usize, usize)>,           // tag name → (node_idx, port_idx)
     tag_capture: HashMap<usize, Vec<(String, usize)>>,     // node_idx → [(tag_name, port_idx)]
-    // Observation: mutable state (thread-safe for Send+Sync)
-    tagged_outputs: RwLock<HashMap<String, Variable>>,
-    batch_buffer: Mutex<HashMap<String, Vec<f64>>>,
-    epoch_history: Mutex<HashMap<String, Vec<f64>>>,
-    flush_count: AtomicUsize,
+    // Observation: mutable state (RefCell/Cell for &self methods)
+    tagged_outputs: RefCell<HashMap<String, Variable>>,
+    batch_buffer: RefCell<HashMap<String, Vec<f64>>>,
+    epoch_history: RefCell<HashMap<String, Vec<f64>>>,
+    flush_count: Cell<usize>,
     // Profiling
-    profiling: AtomicBool,
-    last_profile: Mutex<Option<profile::Profile>>,
-    timing_buffer: Mutex<HashMap<String, Vec<f64>>>,
-    timing_history: Mutex<HashMap<String, Vec<f64>>>,
+    profiling: Cell<bool>,
+    last_profile: RefCell<Option<profile::Profile>>,
+    timing_buffer: RefCell<HashMap<String, Vec<f64>>>,
+    timing_history: RefCell<HashMap<String, Vec<f64>>>,
     // Flush timestamps (seconds since first forward — for ETA in write_log)
-    flush_times: Mutex<Vec<f64>>,
-    training_start: Mutex<f64>,
+    flush_times: RefCell<Vec<f64>>,
+    training_start: Cell<f64>,
     // Step/epoch counters
-    step_count: AtomicUsize,
-    epoch_count: AtomicUsize,
+    step_count: Cell<usize>,
+    epoch_count: Cell<usize>,
     // Identity: label + structural hash
     label: Option<String>,
-    structural_hash_cache: OnceLock<String>,
+    structural_hash_cache: OnceCell<String>,
 }
 
 impl Graph {
@@ -142,13 +142,13 @@ impl Graph {
         // Set up forward-reference state buffers and wire state read nodes
         let mut state = Vec::with_capacity(forward_refs.len());
         for fr in &forward_refs {
-            let value: Arc<RwLock<Option<Variable>>> = Arc::new(RwLock::new(None));
+            let value: Rc<RefCell<Option<Variable>>> = Rc::new(RefCell::new(None));
             let reader_value = value.clone();
 
             // Wire the state read node to return the buffer value
             if let Some(node) = node_map.get_mut(&fr.reader_id) {
                 node.run = Box::new(move |_: &[Variable]| {
-                    match reader_value.read().unwrap().as_ref() {
+                    match reader_value.borrow().as_ref() {
                         Some(v) => Ok(vec![v.clone()]),
                         None => Ok(vec![]), // empty = no state yet
                     }
@@ -245,20 +245,20 @@ impl Graph {
             tag_groups,
             tag_names: tag_names_map,
             tag_capture,
-            tagged_outputs: RwLock::new(HashMap::new()),
-            batch_buffer: Mutex::new(HashMap::new()),
-            epoch_history: Mutex::new(HashMap::new()),
-            flush_count: AtomicUsize::new(0),
-            profiling: AtomicBool::new(false),
-            last_profile: Mutex::new(None),
-            timing_buffer: Mutex::new(HashMap::new()),
-            timing_history: Mutex::new(HashMap::new()),
-            flush_times: Mutex::new(Vec::new()),
-            training_start: Mutex::new(0.0),
-            step_count: AtomicUsize::new(0),
-            epoch_count: AtomicUsize::new(0),
+            tagged_outputs: RefCell::new(HashMap::new()),
+            batch_buffer: RefCell::new(HashMap::new()),
+            epoch_history: RefCell::new(HashMap::new()),
+            flush_count: Cell::new(0),
+            profiling: Cell::new(false),
+            last_profile: RefCell::new(None),
+            timing_buffer: RefCell::new(HashMap::new()),
+            timing_history: RefCell::new(HashMap::new()),
+            flush_times: RefCell::new(Vec::new()),
+            training_start: Cell::new(0.0),
+            step_count: Cell::new(0),
+            epoch_count: Cell::new(0),
             label,
-            structural_hash_cache: OnceLock::new(),
+            structural_hash_cache: OnceCell::new(),
         })
     }
 
@@ -272,14 +272,11 @@ impl Graph {
         }
 
         // Record training start on first forward (for ETA).
-        {
-            let mut ts = self.training_start.lock().unwrap();
-            if *ts == 0.0 {
-                *ts = instant_secs();
-            }
+        if self.training_start.get() == 0.0 {
+            self.training_start.set(instant_secs());
         }
 
-        let is_profiling = self.profiling.load(Ordering::Relaxed);
+        let is_profiling = self.profiling.get();
         let forward_start = if is_profiling { Some(Instant::now()) } else { None };
         let mut prof_nodes: Vec<profile::NodeTiming> = Vec::new();
         let mut prof_levels: Vec<profile::LevelTiming> = Vec::new();
@@ -386,7 +383,7 @@ impl Graph {
                 {
                     for &(si, port_idx) in writers {
                         if port_idx < outs.len() {
-                            *self.state[si].value.write().unwrap() = Some(outs[port_idx].clone());
+                            *self.state[si].value.borrow_mut() = Some(outs[port_idx].clone());
                         }
                     }
                 }
@@ -417,12 +414,12 @@ impl Graph {
 
         // Store tagged outputs
         if let Some(tagged) = tagged_outputs {
-            *self.tagged_outputs.write().unwrap() = tagged;
+            *self.tagged_outputs.borrow_mut() = tagged;
         }
 
         // Store profile
         if is_profiling {
-            *self.last_profile.lock().unwrap() = Some(profile::Profile {
+            *self.last_profile.borrow_mut() = Some(profile::Profile {
                 total: forward_start.unwrap().elapsed(),
                 levels: prof_levels,
                 nodes: prof_nodes,
@@ -450,7 +447,7 @@ impl Graph {
     /// Call when starting inference on a new sequence.
     pub fn reset_state(&self) {
         for entry in &self.state {
-            *entry.value.write().unwrap() = None;
+            *entry.value.borrow_mut() = None;
         }
     }
 
@@ -459,7 +456,7 @@ impl Graph {
     pub fn detach_state(&self) {
         // Detach graph-level state buffers (forward references).
         for entry in &self.state {
-            let mut val = entry.value.write().unwrap();
+            let mut val = entry.value.borrow_mut();
             if let Some(ref v) = *val {
                 *val = Some(v.detach());
             }
@@ -469,7 +466,7 @@ impl Graph {
         // Without this, the Node objects persist until the next forward
         // pass replaces tagged_outputs.
         {
-            let mut tagged = self.tagged_outputs.write().unwrap();
+            let mut tagged = self.tagged_outputs.borrow_mut();
             for var in tagged.values_mut() {
                 *var = var.detach();
             }
@@ -506,10 +503,10 @@ impl Graph {
     /// ```
     pub fn end_step(&self) {
         self.detach_state();
-        if self.profiling.load(Ordering::Relaxed) {
+        if self.profiling.get() {
             self.collect_timings(&[]);
         }
-        self.step_count.store(self.step_count.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        self.step_count.set(self.step_count.get() + 1);
     }
 
     /// End-of-sequence housekeeping: fully reset state buffers to None.
@@ -524,20 +521,20 @@ impl Graph {
     /// increment epoch counter.
     pub fn end_epoch(&self) {
         self.flush(&[]);
-        if self.profiling.load(Ordering::Relaxed) {
+        if self.profiling.get() {
             self.flush_timings(&[]);
         }
-        self.epoch_count.store(self.epoch_count.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        self.epoch_count.set(self.epoch_count.get() + 1);
     }
 
     /// Number of completed training steps.
     pub fn step_count(&self) -> usize {
-        self.step_count.load(Ordering::Relaxed)
+        self.step_count.get()
     }
 
     /// Number of completed training epochs.
     pub fn epoch_count(&self) -> usize {
-        self.epoch_count.load(Ordering::Relaxed)
+        self.epoch_count.get()
     }
 
     /// Get member tags of a tag group, or None if not registered.
@@ -565,7 +562,7 @@ impl Graph {
         }
         // Move state buffers
         for entry in &self.state {
-            let mut val = entry.value.write().unwrap();
+            let mut val = entry.value.borrow_mut();
             if let Some(ref v) = *val
                 && v.data().device() != device
                 && let Ok(t) = v.data().to_device(device)
@@ -617,7 +614,7 @@ impl Graph {
 
                 let mut name_idx: HashMap<String, usize> = HashMap::new();
                 for p in params {
-                    let ptr = Arc::as_ptr(&p.variable.inner) as usize;
+                    let ptr = Rc::as_ptr(&p.variable.inner) as usize;
                     if !seen.insert(ptr) {
                         continue;
                     }
@@ -664,7 +661,7 @@ impl Graph {
 
                 let mut name_idx: HashMap<String, usize> = HashMap::new();
                 for b in bufs {
-                    let ptr = Arc::as_ptr(&b.inner) as usize;
+                    let ptr = Rc::as_ptr(&b.inner) as usize;
                     if !seen.insert(ptr) {
                         continue;
                     }
@@ -839,7 +836,7 @@ impl Module for Graph {
         for &ni in &self.order {
             if let Some(ref module) = self.nodes[ni].module {
                 for p in module.parameters() {
-                    let ptr = Arc::as_ptr(&p.variable.inner) as usize;
+                    let ptr = Rc::as_ptr(&p.variable.inner) as usize;
                     if seen.insert(ptr) {
                         params.push(p);
                     }
@@ -2527,23 +2524,23 @@ mod tests {
 
     /// A loop body that implements trace() — captures per-iteration side data.
     struct TracingDoubler {
-        last_output: std::sync::Mutex<Option<Variable>>,
+        last_output: RefCell<Option<Variable>>,
     }
     impl TracingDoubler {
         fn new() -> Self {
             TracingDoubler {
-                last_output: std::sync::Mutex::new(None),
+                last_output: RefCell::new(None),
             }
         }
     }
     impl Module for TracingDoubler {
         fn forward(&self, input: &Variable) -> Result<Variable> {
             let out = input.add(input)?;
-            *self.last_output.lock().unwrap() = Some(out.clone());
+            *self.last_output.borrow_mut() = Some(out.clone());
             Ok(out)
         }
         fn trace(&self) -> Option<Variable> {
-            self.last_output.lock().unwrap().clone()
+            self.last_output.borrow().clone()
         }
     }
 
@@ -2986,19 +2983,5 @@ mod tests {
         assert_eq!(report.loaded.len(), 4);
 
         std::fs::remove_file(path_str).ok();
-    }
-
-    // --- Send + Sync compile-time checks ---
-
-    #[test]
-    fn test_graph_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Graph>();
-    }
-
-    #[test]
-    fn test_arc_dyn_module_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<std::sync::Arc<dyn Module>>();
     }
 }

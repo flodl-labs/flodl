@@ -1091,12 +1091,4 @@ mod tests {
             "RSS grew by {rss_growth_mb:.1}MB over {iters} graph+loop steps"
         );
     }
-
-    // --- Send + Sync compile-time checks ---
-
-    #[test]
-    fn test_variable_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Variable>();
-    }
 }

@@ -42,7 +42,7 @@ use flodl::graph::{FlowBuilder, Graph, MergeOp};
 | PyTorch | flodl | Notes |
 |---------|-------|-------|
 | `torch.Tensor` | `Tensor` | Immutable, `Drop`-based VRAM cleanup, `Send`+`Sync` |
-| `torch.autograd` | `Variable` | Wraps Tensor, tracks gradients via `Arc<RwLock>` |
+| `torch.autograd` | `Variable` | Wraps Tensor, tracks gradients via `Rc<RefCell>` |
 | `torch.nn.Module` | `Module` trait | `forward(&self, &Variable) -> Result<Variable>` + `parameters()` |
 | `model.train()` | `module.set_training(true)` | Called on individual modules |
 | `with torch.no_grad():` | `no_grad(\|\| { ... })` | RAII guard disables gradient tracking |

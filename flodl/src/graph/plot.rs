@@ -105,7 +105,7 @@ impl Graph {
             }
 
             // Per-epoch timing from flush times if available
-            let flush_times = self.flush_times.lock().unwrap();
+            let flush_times = self.flush_times.borrow();
             if i < flush_times.len() {
                 let dur = if i == 0 {
                     flush_times[0]
@@ -134,7 +134,7 @@ impl Graph {
     // --- Internal helpers ---
 
     fn gather_series(&self, tags: &[&str]) -> Vec<PlotSeries> {
-        let history = self.epoch_history.lock().unwrap();
+        let history = self.epoch_history.borrow();
         let expanded = if tags.is_empty() {
             let mut all: Vec<String> = history.keys().cloned().collect();
             all.sort();
@@ -161,7 +161,7 @@ impl Graph {
     }
 
     fn gather_timing_series(&self, tags: &[&str]) -> Vec<PlotSeries> {
-        let history = self.timing_history.lock().unwrap();
+        let history = self.timing_history.borrow();
         let expanded = if tags.is_empty() {
             let mut all: Vec<String> = history.keys().cloned().collect();
             all.sort();

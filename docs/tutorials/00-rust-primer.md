@@ -151,7 +151,7 @@ These appear in signatures and error messages. You don't need to construct them:
 | `Vec<T>` | Growable array | `parameters()`, shape data |
 | `&[T]` | Slice (borrowed view) | Shape arguments: `&[2, 3]` |
 | `Box<dyn Module>` | Any module, heap-allocated | Inside `modules![...]` macro |
-| `Arc<RwLock<...>>` | Thread-safe shared mutable state | Variable internals (you never touch this) |
+| `Rc<RefCell<...>>` | Shared mutable state | Variable internals (you never touch this) |
 | `f64`, `f32`, `i64` | Number types | Loss values, shapes, indices |
 | `usize` | Unsigned index | Loop counters, `.len()` |
 | `()` | "Nothing" (like Python's None) | `Result<()>` = "succeeds or fails, no value" |

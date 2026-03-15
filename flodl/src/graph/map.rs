@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::autograd::Variable;
 use crate::nn::Module;
@@ -77,8 +77,8 @@ impl MapBuilder {
         }
 
         let cur = fb.current[0].clone();
-        let body: Arc<dyn Module> = Arc::from(self.body);
-        let composite: Arc<dyn Module> = body.clone();
+        let body: Rc<dyn Module> = Rc::from(self.body);
+        let composite: Rc<dyn Module> = body.clone();
         let batched = self.batched;
         let run = make_slices_func(body, n, batched);
         let id = fb.next_id("map");
@@ -122,8 +122,8 @@ impl MapBuilder {
 }
 
 fn wire_map(fb: &mut FlowBuilder, body: Box<dyn Module>, source: NodeRef, batched: bool) {
-    let body: Arc<dyn Module> = Arc::from(body);
-    let composite: Arc<dyn Module> = body.clone();
+    let body: Rc<dyn Module> = Rc::from(body);
+    let composite: Rc<dyn Module> = body.clone();
     let run = make_map_each_func(body, batched);
     let id = fb.next_id("map");
 
@@ -156,7 +156,7 @@ fn wire_map(fb: &mut FlowBuilder, body: Box<dyn Module>, source: NodeRef, batche
     fb.on_target = Some(node_ref);
 }
 
-fn make_map_each_func(body: Arc<dyn Module>, batched: bool) -> NodeFn {
+fn make_map_each_func(body: Rc<dyn Module>, batched: bool) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let stream = &inputs[0];
 
@@ -184,7 +184,7 @@ fn make_map_each_func(body: Arc<dyn Module>, batched: bool) -> NodeFn {
     })
 }
 
-fn make_slices_func(body: Arc<dyn Module>, n: i64, batched: bool) -> NodeFn {
+fn make_slices_func(body: Rc<dyn Module>, n: i64, batched: bool) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let source = &inputs[0];
         let shape = source.shape();

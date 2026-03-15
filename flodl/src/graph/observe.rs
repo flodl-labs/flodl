@@ -33,7 +33,7 @@ impl Reduce {
 impl Graph {
     /// Get the output of a tagged node from the last forward pass.
     pub fn tagged(&self, tag: &str) -> Option<Variable> {
-        self.tagged_outputs.read().unwrap().get(tag).cloned()
+        self.tagged_outputs.borrow().get(tag).cloned()
     }
 
     /// Get all tag names defined in this graph.
@@ -45,8 +45,8 @@ impl Graph {
     /// Returns an error if any tag has a non-scalar output — use collect_with()
     /// with an explicit reduction for non-scalar tags.
     pub fn collect(&self, tags: &[&str]) -> Result<()> {
-        let tagged = self.tagged_outputs.read().unwrap();
-        let mut buffer = self.batch_buffer.lock().unwrap();
+        let tagged = self.tagged_outputs.borrow();
+        let mut buffer = self.batch_buffer.borrow_mut();
         for &tag in tags {
             if let Some(var) = tagged.get(tag) {
                 match var.item() {
@@ -70,8 +70,8 @@ impl Graph {
     /// Each tag's output is reduced to a scalar and recorded individually.
     pub fn collect_with(&self, tags: &[&str], reduce: Reduce) -> Result<()> {
         let expanded = self.expand_groups(tags);
-        let tagged = self.tagged_outputs.read().unwrap();
-        let mut buffer = self.batch_buffer.lock().unwrap();
+        let tagged = self.tagged_outputs.borrow();
+        let mut buffer = self.batch_buffer.borrow_mut();
         for tag in &expanded {
             if let Some(var) = tagged.get(tag) {
                 // Scalar tags work directly, non-scalar get reduced
@@ -94,7 +94,7 @@ impl Graph {
     /// For human-facing output (terminal, live dashboard), use
     /// [`Monitor::log()`](crate::monitor::Monitor::log) instead.
     pub fn record(&self, tag: &str, values: &[f64]) {
-        let mut buffer = self.batch_buffer.lock().unwrap();
+        let mut buffer = self.batch_buffer.borrow_mut();
         buffer.entry(tag.to_string()).or_default().extend_from_slice(values);
     }
 
@@ -109,7 +109,7 @@ impl Graph {
     /// [`Monitor::log()`](crate::monitor::Monitor::log). Returns an empty
     /// vec if no epochs have been flushed yet.
     pub fn latest_metrics(&self) -> Vec<(String, f64)> {
-        let history = self.epoch_history.lock().unwrap();
+        let history = self.epoch_history.borrow();
         history
             .iter()
             .filter_map(|(tag, vals)| vals.last().map(|&v| (tag.clone(), v)))
@@ -118,14 +118,14 @@ impl Graph {
 
     /// Read raw batch buffer for a tag (all values since last flush).
     pub fn collected(&self, tag: &str) -> Vec<f64> {
-        self.batch_buffer.lock().unwrap().get(tag).cloned().unwrap_or_default()
+        self.batch_buffer.borrow().get(tag).cloned().unwrap_or_default()
     }
 
     /// Compute batch means, append to epoch history, clear batch buffer.
     /// Call once per epoch. If tags is empty, flushes all buffered tags.
     pub fn flush(&self, tags: &[&str]) {
-        let mut buffer = self.batch_buffer.lock().unwrap();
-        let mut history = self.epoch_history.lock().unwrap();
+        let mut buffer = self.batch_buffer.borrow_mut();
+        let mut history = self.epoch_history.borrow_mut();
 
         let keys: Vec<String> = if tags.is_empty() {
             buffer.keys().cloned().collect()
@@ -145,22 +145,22 @@ impl Graph {
         }
 
         if flushed_any {
-            let count = self.flush_count.load(std::sync::atomic::Ordering::Relaxed);
-            self.flush_count.store(count + 1, std::sync::atomic::Ordering::Relaxed);
-            self.flush_times.lock().unwrap().push(
-                super::instant_secs() - *self.training_start.lock().unwrap(),
+            let count = self.flush_count.get();
+            self.flush_count.set(count + 1);
+            self.flush_times.borrow_mut().push(
+                super::instant_secs() - self.training_start.get(),
             );
         }
     }
 
     /// Number of flush calls that produced data.
     pub fn flush_count(&self) -> usize {
-        self.flush_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.flush_count.get()
     }
 
     /// Get epoch-level trend for a tag.
     pub fn trend(&self, tag: &str) -> Trend {
-        let history = self.epoch_history.lock().unwrap();
+        let history = self.epoch_history.borrow();
         Trend::new(history.get(tag).cloned().unwrap_or_default())
     }
 
@@ -168,7 +168,7 @@ impl Graph {
     /// expanded to their member tags.
     pub fn trends(&self, tags: &[&str]) -> TrendGroup {
         let expanded = self.expand_groups(tags);
-        let history = self.epoch_history.lock().unwrap();
+        let history = self.epoch_history.borrow();
         let trends = expanded
             .iter()
             .map(|tag| Trend::new(history.get(tag).cloned().unwrap_or_default()))
@@ -179,7 +179,7 @@ impl Graph {
     /// Clear epoch history. If tags is empty, clears all.
     /// Tag group names are automatically expanded.
     pub fn reset_trend(&self, tags: &[&str]) {
-        let mut history = self.epoch_history.lock().unwrap();
+        let mut history = self.epoch_history.borrow_mut();
         if tags.is_empty() {
             history.clear();
         } else {
@@ -200,7 +200,7 @@ impl Graph {
         if let Some(&(ni, _)) = self.tag_names.get(tag) {
             // Check if this node has a trace_buf
             if let Some(ref buf) = self.nodes[ni].trace_buf {
-                let traces = buf.read().unwrap().clone();
+                let traces = buf.borrow().clone();
                 if !traces.is_empty() {
                     return Some(traces);
                 }
@@ -209,7 +209,7 @@ impl Graph {
         // Search all nodes for a matching tag in the node id
         for node in &self.nodes {
             if let Some(ref buf) = node.trace_buf {
-                let traces = buf.read().unwrap().clone();
+                let traces = buf.borrow().clone();
                 if !traces.is_empty() && node.id.contains("loop") {
                     // If no tag match, return first loop with traces
                     return Some(traces);
@@ -224,7 +224,7 @@ impl Graph {
         if let Some(&ni) = self.node_index.get(node_id)
             && let Some(ref buf) = self.nodes[ni].trace_buf
         {
-            let traces = buf.read().unwrap().clone();
+            let traces = buf.borrow().clone();
             if !traces.is_empty() {
                 return Some(traces);
             }
@@ -236,11 +236,11 @@ impl Graph {
     ///
     /// Returns seconds remaining. Returns 0.0 if no flushes have occurred yet.
     pub fn eta(&self, total_epochs: usize) -> f64 {
-        let count = self.flush_count.load(std::sync::atomic::Ordering::Relaxed);
+        let count = self.flush_count.get();
         if count == 0 {
             return 0.0;
         }
-        let times = self.flush_times.lock().unwrap();
+        let times = self.flush_times.borrow();
         let elapsed = times[count - 1]; // already relative to training_start
         let per_flush = elapsed / count as f64;
         let remaining = total_epochs.saturating_sub(count);

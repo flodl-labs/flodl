@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::Cell;
 
 use crate::autograd::Variable;
 use crate::tensor::{Result, Tensor, TensorError, TensorOptions};
@@ -20,7 +20,7 @@ pub struct BatchNorm {
     num_features: i64,
     eps: f64,
     momentum: f64,
-    training: AtomicBool,
+    training: Cell<bool>,
 }
 
 impl BatchNorm {
@@ -43,7 +43,7 @@ impl BatchNorm {
             num_features,
             eps: 1e-5,
             momentum: 0.1,
-            training: AtomicBool::new(true),
+            training: Cell::new(true),
         })
     }
 
@@ -134,7 +134,7 @@ impl Module for BatchNorm {
     fn name(&self) -> &str { "batchnorm" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        if !self.training.load(Ordering::Relaxed) {
+        if !self.training.get() {
             // Eval mode: use running statistics
             let mean = Variable::new(self.running_mean.get(), false);
             let var = Variable::new(self.running_var.get(), false);
@@ -173,7 +173,7 @@ impl Module for BatchNorm {
     }
 
     fn set_training(&self, training: bool) {
-        self.training.store(training, Ordering::Relaxed);
+        self.training.set(training);
     }
 
     fn move_to_device(&self, device: crate::tensor::Device) {

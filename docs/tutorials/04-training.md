@@ -242,7 +242,7 @@ if param.is_frozen() { /* ... */ }
 ```
 
 Frozen parameters are automatically skipped by optimizers (they produce
-no gradient). Freezing works through `Arc<RwLock>` — a freeze is visible
+no gradient). Freezing works through `Rc<RefCell>` — a freeze is visible
 everywhere the parameter is referenced.
 
 ## Checkpoints

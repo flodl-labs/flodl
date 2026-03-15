@@ -25,7 +25,7 @@ impl Graph {
     /// Nodes are color-coded green → yellow → red by relative execution time,
     /// with per-node microsecond timings and per-level wall clock + parallelism.
     pub fn dot_with_profile(&self) -> String {
-        let profile = self.last_profile.lock().unwrap().clone();
+        let profile = self.last_profile.borrow().clone();
         self.build_dot(profile.as_ref())
     }
 

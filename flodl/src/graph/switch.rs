@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::autograd::Variable;
 use crate::nn::Module;
@@ -29,13 +29,13 @@ pub(super) fn wire_switch(
     let cur = fb.current[0].clone();
     let id = fb.next_id("switch");
 
-    let router: Arc<dyn Module> = Arc::from(router);
-    let branch_modules: Vec<Arc<dyn Module>> = branches
+    let router: Rc<dyn Module> = Rc::from(router);
+    let branch_modules: Vec<Rc<dyn Module>> = branches
         .into_iter()
-        .map(|b| Arc::from(b) as Arc<dyn Module>)
+        .map(|b| Rc::from(b) as Rc<dyn Module>)
         .collect();
 
-    let composite: Arc<dyn Module> = Arc::new(SwitchComposite {
+    let composite: Rc<dyn Module> = Rc::new(SwitchComposite {
         router: router.clone(),
         branches: branch_modules.clone(),
     });
@@ -80,10 +80,10 @@ pub(super) fn wire_switch(
 }
 
 fn switch_route(
-    router: &Arc<dyn Module>,
+    router: &Rc<dyn Module>,
     stream: &Variable,
     refs: &HashMap<String, Variable>,
-    branches: &[Arc<dyn Module>],
+    branches: &[Rc<dyn Module>],
 ) -> Result<Variable> {
     let route_out = if !refs.is_empty() {
         if let Some(named) = router.as_named_input() {
@@ -108,8 +108,8 @@ fn switch_route(
 }
 
 fn make_switch_func(
-    router: Arc<dyn Module>,
-    branches: Vec<Arc<dyn Module>>,
+    router: Rc<dyn Module>,
+    branches: Vec<Rc<dyn Module>>,
 ) -> NodeFn {
     Box::new(move |inputs: &[Variable]| {
         let empty = HashMap::new();
@@ -119,10 +119,10 @@ fn make_switch_func(
 }
 
 fn make_switch_ref_forward(
-    router: Arc<dyn Module>,
-    branches: Vec<Arc<dyn Module>>,
+    router: Rc<dyn Module>,
+    branches: Vec<Rc<dyn Module>>,
 ) -> RefForwardFn {
-    Arc::new(move |stream: &Variable, refs: &HashMap<String, Variable>| {
+    Rc::new(move |stream: &Variable, refs: &HashMap<String, Variable>| {
         switch_route(&router, stream, refs, &branches)
     })
 }
@@ -130,8 +130,8 @@ fn make_switch_ref_forward(
 
 /// Bundles router + branches for parameter collection.
 struct SwitchComposite {
-    router: Arc<dyn Module>,
-    branches: Vec<Arc<dyn Module>>,
+    router: Rc<dyn Module>,
+    branches: Vec<Rc<dyn Module>>,
 }
 
 impl Module for SwitchComposite {
@@ -139,7 +139,7 @@ impl Module for SwitchComposite {
         self.branches[0].forward(input)
     }
 
-    fn sub_modules(&self) -> Vec<Arc<dyn Module>> {
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
         let mut subs = vec![self.router.clone()];
         subs.extend(self.branches.iter().cloned());
         subs

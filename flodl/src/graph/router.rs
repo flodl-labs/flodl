@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::autograd::Variable;
 use crate::nn::{Linear, Module, NamedInputModule};
@@ -19,7 +19,7 @@ use crate::tensor::{Device, Result, Tensor};
 ///     .build()
 /// ```
 pub struct SoftmaxRouter {
-    proj: Arc<Linear>,
+    proj: Rc<Linear>,
 }
 
 impl SoftmaxRouter {
@@ -29,7 +29,7 @@ impl SoftmaxRouter {
 
     pub fn on_device(input_dim: i64, num_experts: i64, device: Device) -> Result<Self> {
         Ok(SoftmaxRouter {
-            proj: Arc::new(Linear::on_device(input_dim, num_experts, device)?),
+            proj: Rc::new(Linear::on_device(input_dim, num_experts, device)?),
         })
     }
 }
@@ -43,7 +43,7 @@ impl Module for SoftmaxRouter {
         out.softmax(dim)
     }
 
-    fn sub_modules(&self) -> Vec<Arc<dyn Module>> {
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
         vec![self.proj.clone()]
     }
 
@@ -71,7 +71,7 @@ impl NamedInputModule for SoftmaxRouter {
 /// Projects input to `num_experts` logits, applies sigmoid independently.
 /// Weights do NOT sum to 1 — each expert is gated between 0 and 1.
 pub struct SigmoidRouter {
-    proj: Arc<Linear>,
+    proj: Rc<Linear>,
 }
 
 impl SigmoidRouter {
@@ -81,7 +81,7 @@ impl SigmoidRouter {
 
     pub fn on_device(input_dim: i64, num_experts: i64, device: Device) -> Result<Self> {
         Ok(SigmoidRouter {
-            proj: Arc::new(Linear::on_device(input_dim, num_experts, device)?),
+            proj: Rc::new(Linear::on_device(input_dim, num_experts, device)?),
         })
     }
 }
@@ -93,7 +93,7 @@ impl Module for SigmoidRouter {
         self.proj.forward(input)?.sigmoid()
     }
 
-    fn sub_modules(&self) -> Vec<Arc<dyn Module>> {
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
         vec![self.proj.clone()]
     }
 
@@ -147,7 +147,7 @@ impl Module for FixedSelector {
 /// through the selected branch only. The projection parameters are
 /// included in Parameters() for policy-gradient training.
 pub struct ArgmaxSelector {
-    proj: Arc<Linear>,
+    proj: Rc<Linear>,
 }
 
 impl ArgmaxSelector {
@@ -157,7 +157,7 @@ impl ArgmaxSelector {
 
     pub fn on_device(input_dim: i64, num_branches: i64, device: Device) -> Result<Self> {
         Ok(ArgmaxSelector {
-            proj: Arc::new(Linear::on_device(input_dim, num_branches, device)?),
+            proj: Rc::new(Linear::on_device(input_dim, num_branches, device)?),
         })
     }
 }
@@ -180,7 +180,7 @@ impl Module for ArgmaxSelector {
         ))
     }
 
-    fn sub_modules(&self) -> Vec<Arc<dyn Module>> {
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
         vec![self.proj.clone()]
     }
 }

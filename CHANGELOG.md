@@ -66,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Key Design Decisions
 - **Deterministic VRAM**: Rust's Drop trait replaces goDl's entire 5-phase memory management.
 - **No GC overhead**: No runtime.KeepAlive, no pending-free queues, no VRAM budget heuristics.
-- **Variable**: `Arc<RwLock<VariableInner>>` for cheap Clone with interior mutability and thread safety.
+- **Variable**: `Rc<RefCell<VariableInner>>` for cheap Clone with interior mutability.
 - **Module trait**: single-input forward + optional NamedInputModule for multi-input. `structural_hash()` for architecture identity.
 - **Graph-as-Module**: Graph implements Module for hierarchical composition.
 - **NamedInputModule on routers**: SoftmaxRouter and SigmoidRouter sum refs into input before projection.
