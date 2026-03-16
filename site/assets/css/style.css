@@ -121,7 +121,7 @@ a:hover { color: var(--cyan); }
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-radius: 10px;
-  max-width: 730px;
+  max-width: 580px;
   margin: 0 auto;
   text-align: left;
   overflow: hidden;
