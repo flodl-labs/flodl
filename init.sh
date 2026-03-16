@@ -91,6 +91,9 @@ ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib"
 ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib"
 
+# Allow non-root users to access Rust toolchain (for user: mapping in compose)
+RUN chmod a+rx /root && chmod -R a+rwx /root/.cargo /root/.rustup
+
 WORKDIR /workspace
 DOCKERFILE_CPU_EOF
 
@@ -122,6 +125,9 @@ ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
 ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
 ENV CUDA_HOME="/usr/local/cuda"
 
+# Allow non-root users to access Rust toolchain (for user: mapping in compose)
+RUN chmod a+rx /root && chmod -R a+rwx /root/.cargo /root/.rustup
+
 WORKDIR /workspace
 DOCKERFILE_CUDA_EOF
 
@@ -134,6 +140,9 @@ services:
       context: .
       dockerfile: Dockerfile.cpu
     image: CRATE_PLACEHOLDER-dev
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - HOME=/root
     volumes:
       - .:/workspace
       - cargo-registry:/root/.cargo/registry
@@ -147,6 +156,9 @@ services:
       context: .
       dockerfile: Dockerfile.cuda
     image: CRATE_PLACEHOLDER-cuda
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - HOME=/root
     volumes:
       - .:/workspace
       - cargo-registry-cuda:/root/.cargo/registry
@@ -246,8 +258,8 @@ cat > src/main.rs << 'MAIN_EOF'
 //! This is a starting point for your model. Edit the architecture,
 //! data loading, and training loop to fit your task.
 //!
-//! New to Rust? Read: https://github.com/fab2s/floDl/blob/main/docs/tutorials/00-rust-primer.md
-//! Stuck?       Read: https://github.com/fab2s/floDl/blob/main/docs/troubleshooting.md
+//! New to Rust? Read: https://flodl.dev/guide/rust-primer
+//! Stuck?       Read: https://flodl.dev/guide/troubleshooting
 
 use flodl::*;                         // import torch / import torch.nn as nn
 use flodl::monitor::Monitor;
@@ -357,6 +369,6 @@ echo ""
 echo "Edit src/main.rs to build your model."
 echo ""
 echo "Guides:"
-echo "  Rust primer:      https://github.com/fab2s/floDl/blob/main/docs/tutorials/00-rust-primer.md"
-echo "  Troubleshooting:  https://github.com/fab2s/floDl/blob/main/docs/troubleshooting.md"
-echo "  PyTorch migration: https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md"
+echo "  Rust primer:       https://flodl.dev/guide/rust-primer"
+echo "  Troubleshooting:   https://flodl.dev/guide/troubleshooting"
+echo "  PyTorch migration: https://flodl.dev/guide/migration"

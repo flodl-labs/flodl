@@ -4,6 +4,9 @@ services:
       context: .
       dockerfile: Dockerfile.cpu
     image: flodl-dev
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - HOME=/root
     volumes:
       - .:/workspace
       # Cache Rust build artifacts and registry between runs
@@ -18,6 +21,9 @@ services:
       context: .
       dockerfile: Dockerfile.cuda
     image: flodl-cuda
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - HOME=/root
     volumes:
       - .:/workspace
       - cargo-registry-cuda:/root/.cargo/registry

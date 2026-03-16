@@ -30,4 +30,7 @@ ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib"
 ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib"
 
+# Allow non-root users to access Rust toolchain (for user: mapping in compose)
+RUN chmod a+rx /root && chmod -R a+rwx /root/.cargo /root/.rustup
+
 WORKDIR /workspace

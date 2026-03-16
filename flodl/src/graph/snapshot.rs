@@ -130,7 +130,7 @@ mod tests {
     use crate::autograd::Variable;
     use crate::nn::{Linear, Module};
     use crate::graph::FlowBuilder;
-    use crate::tensor::{test_device, test_opts, Tensor, TensorOptions};
+    use crate::tensor::{test_device, Tensor, TensorOptions};
     use crate::worker::CpuWorker;
 
     fn build_test_graph() -> Result<Graph> {
