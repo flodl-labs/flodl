@@ -107,6 +107,37 @@ a:hover { color: var(--cyan); }
   background-clip: text;
 }
 
+.cave-narrative {
+  max-width: 540px;
+  margin: 0 auto 32px;
+  line-height: 1.7;
+  font-size: 16px;
+}
+
+.cave-dark {
+  color: var(--dim);
+  margin-bottom: 16px;
+}
+
+.cave-turn {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 18px;
+  margin: 24px 0;
+}
+
+.cave-light {
+  color: var(--text);
+  margin-bottom: 16px;
+}
+
+.cave-close {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 17px;
+  margin-bottom: 0;
+}
+
 .hero .tagline {
   font-size: 18px;
   color: var(--dim);
@@ -818,6 +849,9 @@ a:hover { color: var(--cyan); }
 @media (max-width: 600px) {
   .hero { padding: 48px 16px 40px; }
   .hero h1 { font-size: 28px; }
+  .cave-narrative { font-size: 14px; }
+  .cave-turn { font-size: 16px; }
+  .cave-close { font-size: 15px; }
   .hero .tagline { font-size: 15px; }
   .terminal pre { font-size: 12px; padding: 14px; }
   .features { grid-template-columns: 1fr; }

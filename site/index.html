@@ -1,14 +1,32 @@
 ---
 layout: default
-title: Deep learning in Rust
+title: Out of the cave
 ---
 
 <section class="hero">
   <img src="{{ '/assets/images/logo.png' | relative_url }}" alt="floDl" class="hero-logo">
-  <h1>Deep learning in Rust</h1>
+  <h1>Out of the cave.</h1>
+
+  <div class="cave-narrative">
+    <p class="cave-dark">
+      We trained models in the dark. Loss numbers trickled through a Python
+      interpreter, minutes late. The GPU spiked and stalled behind a wall we
+      couldn't see through. We stared at nvidia-smi and hoped.
+    </p>
+    <p class="cave-dark">We learned to call this normal.</p>
+    <p class="cave-turn">Then one day, we walked out.</p>
+    <p class="cave-light">
+      Light &mdash; a live dashboard drawing loss curves as they happen, GPU and
+      VRAM breathing in real time. Speed &mdash; the same CUDA kernels, but the
+      GPU never starves. Nothing sits between you and the metal. Clarity &mdash;
+      every epoch lands the instant it finishes. No buffering. No hoping.
+    </p>
+    <p class="cave-close">You can't go back.</p>
+  </div>
+
   <p class="tagline">
-    Same GPU kernels as PyTorch. No Python. No GIL. No GC.<br>
-    Deterministic memory, fluent graph builder, built-in training monitor.
+    flodl is a native deep learning framework. Rust on libtorch.<br>
+    It doesn't replace your GPU &mdash; it gets out of its way.
   </p>
 
   <div class="terminal">
@@ -142,7 +160,7 @@ model.<span class="fn">set_training</span>(<span class="kw">true</span>);
     <div class="feature">
       <div class="feature-icon mem">&#9881;</div>
       <h3>Deterministic memory</h3>
-      <p>Tensor memory freed by <code>Drop</code> the instant it leaves scope. No GC, no finalizers, no VRAM budget heuristics. The entire goDl memory management system replaced by <code>impl Drop for Tensor</code>.</p>
+      <p>Tensor memory freed by <code>Drop</code> the instant it leaves scope. No GC, no finalizers, no VRAM budget heuristics. Five phases of memory management replaced by <code>impl Drop for Tensor</code>.</p>
     </div>
     <div class="feature">
       <div class="feature-icon graph">&#9670;</div>
