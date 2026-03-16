@@ -110,6 +110,7 @@ pub struct Graph {
     tagged_outputs: RefCell<HashMap<String, Variable>>,
     batch_buffer: RefCell<HashMap<String, Vec<f64>>>,
     epoch_history: RefCell<HashMap<String, Vec<f64>>>,
+    metric_order: RefCell<Vec<String>>,
     flush_count: Cell<usize>,
     // Profiling
     profiling: Cell<bool>,
@@ -248,6 +249,7 @@ impl Graph {
             tagged_outputs: RefCell::new(HashMap::new()),
             batch_buffer: RefCell::new(HashMap::new()),
             epoch_history: RefCell::new(HashMap::new()),
+            metric_order: RefCell::new(Vec::new()),
             flush_count: Cell::new(0),
             profiling: Cell::new(false),
             last_profile: RefCell::new(None),

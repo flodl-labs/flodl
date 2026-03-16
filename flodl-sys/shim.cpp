@@ -1720,6 +1720,41 @@ extern "C" char* flodl_adam_step(FlodlTensor param, FlodlTensor grad,
     }
 }
 
+// --- Batched Adam step ---
+
+extern "C" char* flodl_adam_step_batched(
+        FlodlTensor* params, FlodlTensor* grads,
+        FlodlTensor* ms, FlodlTensor* vs,
+        double* lrs, int count,
+        double beta1, double beta2, double eps,
+        double weight_decay, int64_t step) {
+    try {
+        double bc1 = 1.0 - std::pow(beta1, (double)step);
+        double bc2 = 1.0 - std::pow(beta2, (double)step);
+
+        for (int i = 0; i < count; i++) {
+            auto p = unwrap(params[i]).data();
+            auto& g = unwrap(grads[i]);
+            auto& m = unwrap(ms[i]);
+            auto& v = unwrap(vs[i]);
+            double lr = lrs[i];
+
+            if (weight_decay > 0.0) {
+                p.mul_(1.0 - lr * weight_decay);
+            }
+            m.mul_(beta1).add_(g, 1.0 - beta1);
+            v.mul_(beta2).addcmul_(g, g, 1.0 - beta2);
+
+            double step_size = lr / bc1;
+            auto denom = (v / bc2).sqrt_().add_(eps);
+            p.addcdiv_(m, denom, -step_size);
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Pinned memory ---
 
 extern "C" char* flodl_pin_memory(FlodlTensor t, FlodlTensor* result) {

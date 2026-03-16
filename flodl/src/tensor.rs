@@ -1842,6 +1842,32 @@ impl Tensor {
         check_err(err)
     }
 
+    // --- Batched Adam step ---
+
+    /// Perform Adam/AdamW update on all params in one C++ loop.
+    /// Eliminates per-param FFI overhead. `lrs[i]` supports per-group LR.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adam_step_batched(
+        params: &[Tensor], grads: &[Tensor], ms: &[Tensor], vs: &[Tensor],
+        lrs: &mut [f64], beta1: f64, beta2: f64, eps: f64,
+        weight_decay: f64, step: i64,
+    ) -> Result<()> {
+        let count = params.len() as i32;
+        let mut p_handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
+        let mut g_handles: Vec<FlodlTensor> = grads.iter().map(|t| t.handle).collect();
+        let mut m_handles: Vec<FlodlTensor> = ms.iter().map(|t| t.handle).collect();
+        let mut v_handles: Vec<FlodlTensor> = vs.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_adam_step_batched(
+                p_handles.as_mut_ptr(), g_handles.as_mut_ptr(),
+                m_handles.as_mut_ptr(), v_handles.as_mut_ptr(),
+                lrs.as_mut_ptr(), count,
+                beta1, beta2, eps, weight_decay, step,
+            )
+        };
+        check_err(err)
+    }
+
     // --- Pinned memory ---
 
     /// Copy this CPU tensor into page-locked (pinned) memory.

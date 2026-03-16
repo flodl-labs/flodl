@@ -47,10 +47,14 @@ impl Graph {
     pub fn collect(&self, tags: &[&str]) -> Result<()> {
         let tagged = self.tagged_outputs.borrow();
         let mut buffer = self.batch_buffer.borrow_mut();
+        let mut order = self.metric_order.borrow_mut();
         for &tag in tags {
             if let Some(var) = tagged.get(tag) {
                 match var.item() {
                     Ok(val) => {
+                        if !buffer.contains_key(tag) && !order.iter().any(|n| n == tag) {
+                            order.push(tag.to_string());
+                        }
                         buffer.entry(tag.to_string()).or_default().push(val);
                     }
                     Err(_) => {
@@ -72,6 +76,7 @@ impl Graph {
         let expanded = self.expand_groups(tags);
         let tagged = self.tagged_outputs.borrow();
         let mut buffer = self.batch_buffer.borrow_mut();
+        let mut order = self.metric_order.borrow_mut();
         for tag in &expanded {
             if let Some(var) = tagged.get(tag) {
                 // Scalar tags work directly, non-scalar get reduced
@@ -79,6 +84,9 @@ impl Graph {
                     Ok(v) => v,
                     Err(_) => reduce.apply(var)?,
                 };
+                if !buffer.contains_key(tag.as_str()) && !order.iter().any(|n| n == tag) {
+                    order.push(tag.clone());
+                }
                 buffer.entry(tag.clone()).or_default().push(val);
             }
         }
@@ -95,6 +103,12 @@ impl Graph {
     /// [`Monitor::log()`](crate::monitor::Monitor::log) instead.
     pub fn record(&self, tag: &str, values: &[f64]) {
         let mut buffer = self.batch_buffer.borrow_mut();
+        if !buffer.contains_key(tag) {
+            let mut order = self.metric_order.borrow_mut();
+            if !order.iter().any(|n| n == tag) {
+                order.push(tag.to_string());
+            }
+        }
         buffer.entry(tag.to_string()).or_default().extend_from_slice(values);
     }
 
@@ -110,9 +124,12 @@ impl Graph {
     /// vec if no epochs have been flushed yet.
     pub fn latest_metrics(&self) -> Vec<(String, f64)> {
         let history = self.epoch_history.borrow();
-        history
+        let order = self.metric_order.borrow();
+        order
             .iter()
-            .filter_map(|(tag, vals)| vals.last().map(|&v| (tag.clone(), v)))
+            .filter_map(|tag| {
+                history.get(tag).and_then(|vals| vals.last().map(|&v| (tag.clone(), v)))
+            })
             .collect()
     }
 

@@ -38,6 +38,8 @@ LINK_REWRITES = [
     (r"\(\.\./pytorch_migration\.md\)", "(/guide/migration)"),
     (r"\(\.\./troubleshooting\.md\)", "(/guide/troubleshooting)"),
     # From docs/ root level (troubleshooting.md, pytorch_migration.md)
+    (r"\(pytorch_migration\.md\)", "(/guide/migration)"),
+    (r"\(troubleshooting\.md\)", "(/guide/troubleshooting)"),
     (r"\(tutorials/00-rust-primer\.md\)", "(/guide/rust-primer)"),
     (r"\(tutorials/01-tensors\.md\)", "(/guide/tensors)"),
 ]

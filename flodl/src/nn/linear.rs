@@ -32,7 +32,7 @@ impl Linear {
 
     /// Create a linear layer on a specific device with bias.
     pub fn on_device(in_features: i64, out_features: i64, device: Device) -> Result<Self> {
-        let w = init::kaiming_uniform(&[out_features, in_features], in_features, device)?;
+        let w = init::kaiming_uniform(&[out_features, in_features], in_features, 5.0_f64.sqrt(), device)?;
         let b = init::uniform_bias(in_features, &[out_features], device)?;
         Ok(Linear {
             weight: Parameter::new(w, "weight"),
@@ -42,7 +42,7 @@ impl Linear {
 
     /// Create a linear layer without bias.
     pub fn no_bias(in_features: i64, out_features: i64) -> Result<Self> {
-        let w = init::kaiming_uniform(&[out_features, in_features], in_features, Device::CPU)?;
+        let w = init::kaiming_uniform(&[out_features, in_features], in_features, 5.0_f64.sqrt(), Device::CPU)?;
         Ok(Linear {
             weight: Parameter::new(w, "weight"),
             bias: None,

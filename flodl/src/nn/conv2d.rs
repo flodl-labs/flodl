@@ -54,7 +54,7 @@ impl Conv2d {
         let shape = [out_channels, in_channels / groups, kernel_size, kernel_size];
         let fan_in = (in_channels / groups) * kernel_size * kernel_size;
 
-        let weight_data = kaiming_uniform(&shape, fan_in, device)?;
+        let weight_data = kaiming_uniform(&shape, fan_in, 5.0_f64.sqrt(), device)?;
         let weight = Variable::new(weight_data, true);
 
         let bias = if with_bias {

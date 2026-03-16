@@ -387,10 +387,15 @@ impl Adam {
         self.t += 1;
 
         no_grad(|| {
+            // Collect params that have gradients, lazy-init moment buffers
+            let mut p_tensors = Vec::new();
+            let mut g_tensors = Vec::new();
+            let mut m_tensors = Vec::new();
+            let mut v_tensors = Vec::new();
+            let mut lrs = Vec::new();
+
             for (i, param) in self.params.iter().enumerate() {
                 if let Some(grad) = param.grad() {
-                    let lr = self.lr_for_param(i);
-
                     // Lazy-init moment buffers as zeros on first step
                     if self.m[i].is_none() {
                         self.m[i] = Some(crate::tensor::Tensor::zeros_like(&grad)?);
@@ -399,16 +404,21 @@ impl Adam {
                         self.v[i] = Some(crate::tensor::Tensor::zeros_like(&grad)?);
                     }
 
-                    // Single fused FFI call: ~5 kernels instead of ~16
-                    let data = param.data();
-                    data.adam_step(
-                        &grad,
-                        self.m[i].as_ref().unwrap(),
-                        self.v[i].as_ref().unwrap(),
-                        lr, self.beta1, self.beta2, self.eps,
-                        weight_decay, self.t as i64,
-                    )?;
+                    p_tensors.push(param.data());
+                    g_tensors.push(grad);
+                    m_tensors.push(self.m[i].as_ref().unwrap().clone());
+                    v_tensors.push(self.v[i].as_ref().unwrap().clone());
+                    lrs.push(self.lr_for_param(i));
                 }
+            }
+
+            if !p_tensors.is_empty() {
+                // Single batched FFI call for all params
+                crate::tensor::Tensor::adam_step_batched(
+                    &p_tensors, &g_tensors, &m_tensors, &v_tensors,
+                    &mut lrs, self.beta1, self.beta2, self.eps,
+                    weight_decay, self.t as i64,
+                )?;
             }
             Ok(())
         })

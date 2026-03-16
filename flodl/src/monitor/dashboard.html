@@ -222,6 +222,9 @@ if(typeof ARCHIVE_DATA!=='undefined'){
   }
   _skipDraw=false;
   try{drawMetrics();drawResources()}catch(e){console.error('drawMetrics/drawResources:',e);archiveErr=archiveErr||e}
+  // Set elapsed from sum of epoch durations (wall-clock startTime is meaningless in archive)
+  const totalElapsed=ARCHIVE_DATA.reduce((s,d)=>s+(d.duration||0),0);
+  document.getElementById('elapsedDisplay').textContent=fmtDur(totalElapsed);
   markComplete(archiveErr?'Archive error — see console':(ARCHIVE_COMPLETE||'Complete'));
   if(typeof ARCHIVE_SVG==='string'){try{showSvg(ARCHIVE_SVG)}catch(e){console.error('showSvg:',e)}}
   // Re-render after layout to ensure correct canvas dimensions

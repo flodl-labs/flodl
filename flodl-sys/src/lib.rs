@@ -538,6 +538,16 @@ unsafe extern "C" {
         weight_decay: f64, step: i64,
     ) -> *mut i8;
 
+    // --- Batched Adam step ---
+
+    pub fn flodl_adam_step_batched(
+        params: *mut FlodlTensor, grads: *mut FlodlTensor,
+        ms: *mut FlodlTensor, vs: *mut FlodlTensor,
+        lrs: *mut f64, count: i32,
+        beta1: f64, beta2: f64, eps: f64,
+        weight_decay: f64, step: i64,
+    ) -> *mut i8;
+
     // --- Pinned memory ---
 
     pub fn flodl_pin_memory(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;

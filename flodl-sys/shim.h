@@ -324,6 +324,16 @@ char* flodl_adam_step(FlodlTensor param, FlodlTensor grad,
                       double lr, double beta1, double beta2, double eps,
                       double weight_decay, int64_t step);
 
+// --- Batched Adam step ---
+
+// Perform Adam/AdamW update on all params in one C++ loop.
+// lrs[i] is the learning rate for param i (supports per-group LR).
+char* flodl_adam_step_batched(FlodlTensor* params, FlodlTensor* grads,
+                              FlodlTensor* ms, FlodlTensor* vs,
+                              double* lrs, int count,
+                              double beta1, double beta2, double eps,
+                              double weight_decay, int64_t step);
+
 // --- Pinned memory ---
 
 // Copy a CPU tensor into page-locked (pinned) memory.

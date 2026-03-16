@@ -30,7 +30,7 @@ pub struct GRUCell {
 
 impl GRUCell {
     /// Create a GRU cell with given input and hidden dimensions.
-    /// Parameters initialized with PyTorch-style uniform(-1/sqrt(hs), 1/sqrt(hs)).
+    /// All parameters initialized with PyTorch-style uniform(-1/sqrt(hs), 1/sqrt(hs)).
     pub fn new(input_size: i64, hidden_size: i64) -> Result<Self> {
         Self::on_device(input_size, hidden_size, Device::CPU)
     }
@@ -46,7 +46,8 @@ impl GRUCell {
             .mul_scalar(2.0 * bound)?.add_scalar(-bound)?;
         let b_ih = Tensor::rand(&[3 * hidden_size], opts)?
             .mul_scalar(2.0 * bound)?.add_scalar(-bound)?;
-        let b_hh = Tensor::zeros(&[3 * hidden_size], opts)?;
+        let b_hh = Tensor::rand(&[3 * hidden_size], opts)?
+            .mul_scalar(2.0 * bound)?.add_scalar(-bound)?;
 
         Ok(GRUCell {
             w_ih: Parameter::new(w_ih, "w_ih"),

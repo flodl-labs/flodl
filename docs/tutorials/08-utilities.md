@@ -144,8 +144,8 @@ override this when needed.
 
 | Function | Distribution | Best for |
 |----------|-------------|----------|
-| `kaiming_uniform(shape, fan_in, device)` | U(-bound, bound) | ReLU activations |
-| `kaiming_normal(shape, fan_in, device)` | N(0, std) | ReLU activations |
+| `kaiming_uniform(shape, fan_in, a, device)` | U(-bound, bound) | ReLU activations |
+| `kaiming_normal(shape, fan_in, a, device)` | N(0, std) | ReLU activations |
 | `xavier_uniform(shape, fan_in, fan_out, device)` | U(-bound, bound) | Sigmoid / Tanh |
 | `xavier_normal(shape, fan_in, fan_out, device)` | N(0, std) | Sigmoid / Tanh |
 

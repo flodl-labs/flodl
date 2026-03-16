@@ -46,7 +46,8 @@ impl LSTMCell {
             .mul_scalar(2.0 * bound)?.add_scalar(-bound)?;
         let b_ih = Tensor::rand(&[4 * hidden_size], opts)?
             .mul_scalar(2.0 * bound)?.add_scalar(-bound)?;
-        let b_hh = Tensor::zeros(&[4 * hidden_size], opts)?;
+        let b_hh = Tensor::rand(&[4 * hidden_size], opts)?
+            .mul_scalar(2.0 * bound)?.add_scalar(-bound)?;
 
         Ok(LSTMCell {
             w_ih: Parameter::new(w_ih, "w_ih"),
