@@ -398,16 +398,16 @@ iterative refinement, multi-head attention — this overhead dominates.
 
 Go solves the dispatch overhead with compiled binaries and goroutines, but
 Go's garbage collector cannot manage VRAM deterministically. GPU memory lives
-in libtorch's C++ allocator — invisible to Go's GC. This required goDl to
-build a 5-phase memory management system: atomic refcounting, saved-tensor
-lifecycle, GC callbacks, VRAM budgets, and autograd Scope. Hundreds of lines
-of `runtime.KeepAlive`, `Retain()`/`Release()`, and pending-free queues.
+in libtorch's C++ allocator — invisible to Go's GC. An earlier Go
+implementation required a 5-phase memory management system: atomic refcounting,
+saved-tensor lifecycle, GC callbacks, VRAM budgets, and autograd Scope.
+Hundreds of lines of `runtime.KeepAlive`, `Retain()`/`Release()`, and
+pending-free queues.
 
 Rust's ownership model eliminates all of this. `Tensor` owns a C++ handle.
 `Drop` frees it immediately when it goes out of scope. No GC, no finalizers,
-no reference counting, no VRAM budget heuristics, no KeepAlive. The entire
-goDl memory management system — Phases 1 through 5 — is replaced by a single
-`impl Drop for Tensor`.
+no reference counting, no VRAM budget heuristics, no KeepAlive. Five phases
+of memory management infrastructure replaced by a single `impl Drop for Tensor`.
 
 ### Zero-cost safety
 
@@ -541,13 +541,21 @@ Step-by-step guides from basics to advanced, each with code examples:
 - [`sine_wave`](flodl/examples/sine_wave/) — sine regression with monitor, checkpoint round-trip
 - [`showcase`](flodl/examples/showcase/) — every graph builder method in one graph
 
-## Lineage
+## Story
 
-floDl is a Rust port of [goDl](https://github.com/fab2s/goDl), a Go-native
-DL framework. The port was motivated by Go's inability to manage VRAM
-deterministically — Rust's ownership model solves this at the language level.
-The graph builder API, module architecture, and design philosophy carry over
-directly.
+floDl started as a question: what would a deep learning framework look like
+if you designed it around Rust's ownership model instead of fighting a garbage
+collector?
+
+An [earlier attempt in Go](https://github.com/fab2s/goDl) proved the
+architecture — the graph builder, the module system, the observation engine —
+but hit a wall: Go's GC cannot manage GPU memory deterministically. That
+required building five layers of memory management infrastructure on top of
+the language, not with it.
+
+Rust solved this at the language level. `impl Drop for Tensor` replaced
+hundreds of lines of lifecycle management. The graph builder, module
+composition, and design philosophy carried forward; the memory fights didn't.
 
 ## License
 

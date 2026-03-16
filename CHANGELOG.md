@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Module-level gradient checks.
 
 ### Key Design Decisions
-- **Deterministic VRAM**: Rust's Drop trait replaces goDl's entire 5-phase memory management.
+- **Deterministic VRAM**: Rust's Drop trait replaces 5 phases of GC-based memory management.
 - **No GC overhead**: No runtime.KeepAlive, no pending-free queues, no VRAM budget heuristics.
 - **Variable**: `Rc<RefCell<VariableInner>>` for cheap Clone with interior mutability.
 - **Module trait**: single-input forward + optional NamedInputModule for multi-input. `structural_hash()` for architecture identity.

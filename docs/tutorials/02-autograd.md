@@ -140,9 +140,9 @@ no_grad(|| {
 
 ## Error Handling
 
-Unlike goDl's error-chain pattern (where errors propagate silently through
-a chain), floDl uses Rust's `Result<T>` type. Every operation that can fail
-returns a `Result`, and the `?` operator propagates errors immediately:
+floDl uses Rust's `Result<T>` type for error handling. Every operation that
+can fail returns a `Result`, and the `?` operator propagates errors immediately
+— no silent failures, no error chains:
 
 ```rust
 let result = x.matmul(&w)?.add(&b)?;

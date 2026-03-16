@@ -170,10 +170,10 @@ composition primitive rather than an implementation challenge.
 
 ## Why Rust specifically
 
-Go (goDl) proved the graph engine concept but hit a fundamental limit:
-Go's garbage collector cannot manage VRAM deterministically. GPU memory
-lives in libtorch's C++ allocator — invisible to Go's GC. This required
-five phases of memory management infrastructure:
+An earlier Go implementation proved the graph engine concept but hit a
+fundamental limit: Go's garbage collector cannot manage VRAM deterministically.
+GPU memory lives in libtorch's C++ allocator — invisible to Go's GC. This
+required five phases of memory management infrastructure:
 
 1. Atomic reference counting on every tensor
 2. Saved-tensor lifecycle management in autograd

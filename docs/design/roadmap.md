@@ -1,7 +1,6 @@
 # floDl Roadmap
 
-A Rust-native deep learning framework built on libtorch, ported from
-[goDl](https://github.com/fab2s/goDl).
+A Rust-native deep learning framework built on libtorch.
 
 ---
 
@@ -24,8 +23,8 @@ adaptive computation, hypothesis-test loops).
    strengths: ownership, traits, Result types, zero-cost abstractions.
 
 3. **Deterministic memory.** Tensor memory freed by Drop — no GC, no
-   finalizers, no VRAM budgets. The entire goDl memory management system
-   (5 phases) replaced by `impl Drop for Tensor`.
+   finalizers, no VRAM budgets. Five phases of GC-based memory management
+   replaced by `impl Drop for Tensor`.
 
 4. **Composable primitives.** Small pieces that do one thing, compose into
    complex flows. A Linear layer is a Module. A graph is a Module. A
@@ -181,7 +180,7 @@ map (each/over/slices/batched)
 
 ## Phase 8: End-to-End Training Example — NEXT
 
-Port the fbrl letter recognition model from goDl to floDl. This proves
+Implement the fbrl letter recognition model in floDl. This proves
 the framework on real data with a non-trivial architecture (attention
 loops, multi-head, recurrent state).
 
@@ -232,10 +231,11 @@ All passing in Docker (CPU, libtorch 2.10.0).
 
 ---
 
-## Lineage
+## Story
 
-floDl is a Rust port of [goDl](https://github.com/fab2s/goDl). The port
-was motivated by Go's inability to manage VRAM deterministically — Rust's
-ownership model solves this at the language level. The graph builder API,
-module architecture, and design philosophy carry over directly. The FFI
-symbol prefix and C types have been renamed from `rdl_` to `flodl_`.
+The graph builder, module architecture, and design philosophy were first
+explored in [an earlier Go implementation](https://github.com/fab2s/goDl).
+Go's garbage collector could not manage GPU memory deterministically, which
+required increasingly complex workarounds. Rust's ownership model solved
+this at the language level — the architecture carried forward, the memory
+management fights did not.
