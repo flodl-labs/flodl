@@ -57,10 +57,13 @@ a:hover { color: var(--cyan); }
 }
 
 .logo {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--accent) !important;
-  letter-spacing: -0.5px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.logo-img {
+  height: 32px;
+  width: auto;
 }
 
 .nav-links { display: flex; gap: 24px; margin-left: auto; }

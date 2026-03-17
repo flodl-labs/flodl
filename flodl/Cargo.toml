@@ -1,22 +1,28 @@
 [package]
 name = "flodl"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "floDl — a flow-graph deep learning framework built on libtorch"
-license = "MIT"
-repository = "https://github.com/fab2s/floDl"
-homepage = "https://flodl.dev"
 readme = "../README.md"
 keywords = ["deep-learning", "machine-learning", "neural-network", "libtorch", "graph"]
 categories = ["science::machine-learning"]
+include = [
+    "src/**/*",
+    "examples/**/*.rs",
+    "examples/**/*.md",
+    "Cargo.toml",
+]
 
 [features]
 default = []
 cuda = ["flodl-sys/cuda"]
 
 [dependencies]
-flodl-sys = { path = "../flodl-sys" }
+flodl-sys = { version = "0.1.0", path = "../flodl-sys" }
 indexmap = "2"
 flate2 = "1"
 sha2 = "0.10"

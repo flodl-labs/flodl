@@ -102,8 +102,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_HOME="/usr/local/cargo"
+ENV RUSTUP_HOME="/usr/local/rustup"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
 # libtorch (CPU-only, ~200MB)
 ARG LIBTORCH_VERSION=2.10.0
@@ -114,9 +117,6 @@ RUN wget -q https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-
 ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib"
 ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib"
-
-# Allow non-root users to access Rust toolchain (for user: mapping in compose)
-RUN chmod a+rx /root && chmod -R a+rwx /root/.cargo /root/.rustup
 
 WORKDIR /workspace
 DOCKERFILE_CPU_EOF
@@ -135,8 +135,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_HOME="/usr/local/cargo"
+ENV RUSTUP_HOME="/usr/local/rustup"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
 # libtorch (CUDA 12.6)
 ARG LIBTORCH_VERSION=2.10.0
@@ -148,9 +151,6 @@ ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
 ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
 ENV CUDA_HOME="/usr/local/cuda"
-
-# Allow non-root users to access Rust toolchain (for user: mapping in compose)
-RUN chmod a+rx /root && chmod -R a+rwx /root/.cargo /root/.rustup
 
 WORKDIR /workspace
 DOCKERFILE_CUDA_EOF
@@ -165,12 +165,10 @@ services:
       dockerfile: Dockerfile.cpu
     image: CRATE_PLACEHOLDER-dev
     user: "${UID:-1000}:${GID:-1000}"
-    environment:
-      - HOME=/root
     volumes:
       - .:/workspace
-      - cargo-registry:/root/.cargo/registry
-      - cargo-git:/root/.cargo/git
+      - ./.cargo-cache:/usr/local/cargo/registry
+      - ./.cargo-git:/usr/local/cargo/git
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -181,12 +179,10 @@ services:
       dockerfile: Dockerfile.cuda
     image: CRATE_PLACEHOLDER-cuda
     user: "${UID:-1000}:${GID:-1000}"
-    environment:
-      - HOME=/root
     volumes:
       - .:/workspace
-      - cargo-registry-cuda:/root/.cargo/registry
-      - cargo-git-cuda:/root/.cargo/git
+      - ./.cargo-cache-cuda:/usr/local/cargo/registry
+      - ./.cargo-git-cuda:/usr/local/cargo/git
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -197,12 +193,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
-volumes:
-  cargo-registry:
-  cargo-git:
-  cargo-registry-cuda:
-  cargo-git-cuda:
 COMPOSE_EOF
 
 sed -i.bak "s/CRATE_PLACEHOLDER/$CRATE_NAME/g" docker-compose.yml && rm -f docker-compose.yml.bak
@@ -231,6 +221,7 @@ RUN_GPU = $(COMPOSE) run --rm cuda
 # --- CPU targets ---
 
 image:
+	@mkdir -p .cargo-cache .cargo-git
 	$(COMPOSE) build dev
 
 build: image
@@ -254,6 +245,7 @@ shell: image
 # --- CUDA targets ---
 
 cuda-image:
+	@mkdir -p .cargo-cache-cuda .cargo-git-cuda
 	$(COMPOSE) build cuda
 
 cuda-build: cuda-image
@@ -373,6 +365,10 @@ MAIN_EOF
 
 cat > .gitignore << 'GITIGNORE_EOF'
 /target
+.cargo-cache/
+.cargo-git/
+.cargo-cache-cuda/
+.cargo-git-cuda/
 *.fdl
 *.log
 *.csv

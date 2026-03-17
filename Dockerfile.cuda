@@ -20,8 +20,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Rust ---
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_HOME="/usr/local/cargo"
+ENV RUSTUP_HOME="/usr/local/rustup"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
 # --- libtorch (CUDA 12.4) ---
 ARG LIBTORCH_VERSION=2.10.0
@@ -33,8 +36,5 @@ ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
 ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
 ENV CUDA_HOME="/usr/local/cuda"
-
-# Allow non-root users to access Rust toolchain (for user: mapping in compose)
-RUN chmod a+rx /root && chmod -R a+rwx /root/.cargo /root/.rustup
 
 WORKDIR /workspace

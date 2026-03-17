@@ -5,13 +5,10 @@ services:
       dockerfile: Dockerfile.cpu
     image: flodl-dev
     user: "${UID:-1000}:${GID:-1000}"
-    environment:
-      - HOME=/root
     volumes:
       - .:/workspace
-      # Cache Rust build artifacts and registry between runs
-      - cargo-registry:/root/.cargo/registry
-      - cargo-git:/root/.cargo/git
+      - ./.cargo-cache:/usr/local/cargo/registry
+      - ./.cargo-git:/usr/local/cargo/git
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -22,12 +19,10 @@ services:
       dockerfile: Dockerfile.cuda
     image: flodl-cuda
     user: "${UID:-1000}:${GID:-1000}"
-    environment:
-      - HOME=/root
     volumes:
       - .:/workspace
-      - cargo-registry-cuda:/root/.cargo/registry
-      - cargo-git-cuda:/root/.cargo/git
+      - ./.cargo-cache-cuda:/usr/local/cargo/registry
+      - ./.cargo-git-cuda:/usr/local/cargo/git
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -39,8 +34,16 @@ services:
               count: all
               capabilities: [gpu]
 
+  jekyll:
+    image: jekyll/jekyll:4
+    volumes:
+      - ./site:/srv/jekyll
+      - jekyll-bundle:/usr/local/bundle
+    ports:
+      - "4000:4000"
+    command: bash -c "bundle install && jekyll serve --watch --force_polling --livereload"
+    environment:
+      - JEKYLL_ENV=development
+
 volumes:
-  cargo-registry:
-  cargo-git:
-  cargo-registry-cuda:
-  cargo-git-cuda:
+  jekyll-bundle:

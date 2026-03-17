@@ -8,12 +8,14 @@ RUN     = $(COMPOSE) run --rm dev
 RUN_GPU = $(COMPOSE) run --rm cuda
 
 .PHONY: build test test-release check clippy doc shell clean image \
-        cuda-image cuda-build cuda-test cuda-shell test-all
+        cuda-image cuda-build cuda-test cuda-shell test-all \
+        site site-stop test-init
 
 # --- CPU targets ---
 
 # Build the Docker image
 image:
+	@mkdir -p .cargo-cache .cargo-git
 	$(COMPOSE) build dev
 
 # Build the project (debug)
@@ -48,6 +50,7 @@ shell: image
 
 # Build the CUDA Docker image
 cuda-image:
+	@mkdir -p .cargo-cache-cuda .cargo-git-cuda
 	$(COMPOSE) build cuda
 
 # Build with CUDA feature
@@ -78,6 +81,29 @@ test-all: test
 		echo ""; \
 		echo "=== No GPU available — skipping CUDA tests ==="; \
 	fi
+
+# --- Site ---
+
+# Preview site locally at http://localhost:4000 (Ctrl-C to stop)
+site:
+	@python3 site/build_guide.py
+	$(COMPOSE) up jekyll
+
+# Stop the site preview
+site-stop:
+	$(COMPOSE) down jekyll
+
+# --- Smoke test: init.sh end-to-end ---
+
+# Test that init.sh produces a working project scaffold
+test-init:
+	@echo "=== Testing init.sh scaffold ==="
+	@cd /tmp && rm -rf flodl-init-test && sh $(CURDIR)/init.sh flodl-init-test
+	@cd /tmp/flodl-init-test && make image
+	@cd /tmp/flodl-init-test && docker compose run --rm dev \
+		sh -c "touch \$$CARGO_HOME/registry/.write-test && rm \$$CARGO_HOME/registry/.write-test && echo 'write ok'"
+	@rm -rf /tmp/flodl-init-test
+	@echo "=== init.sh smoke test passed ==="
 
 # --- Cleanup ---
 

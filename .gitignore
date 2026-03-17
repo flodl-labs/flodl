@@ -1,7 +1,16 @@
 /target
+Cargo.lock
+.cargo-cache/
+.cargo-git/
+.cargo-cache-cuda/
+.cargo-git-cuda/
 .idea/
 .*/
 !.github/
 
 # Generated guide pages (built from site/_stubs/ + docs/ by site/build_guide.py)
 site/guide/*.md
+# Jekyll build output and bundle lock
+site/_site/
+site/.jekyll-cache/
+site/Gemfile.lock

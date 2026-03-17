@@ -1,12 +1,12 @@
 [package]
 name = "flodl-sys"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Raw FFI bindings to libtorch via a thin C++ shim"
-license = "MIT"
-repository = "https://github.com/fab2s/floDl"
-homepage = "https://flodl.dev"
 keywords = ["deep-learning", "libtorch", "ffi"]
 categories = ["external-ffi-bindings", "science::machine-learning"]
 readme = "README.md"
