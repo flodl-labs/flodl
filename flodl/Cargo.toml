@@ -2,13 +2,14 @@
 name = "flodl"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "floDl — a flow-graph deep learning framework built on libtorch"
 license = "MIT"
 repository = "https://github.com/fab2s/floDl"
 homepage = "https://flodl.dev"
 readme = "../README.md"
 keywords = ["deep-learning", "machine-learning", "neural-network", "libtorch", "graph"]
-categories = ["science", "mathematics"]
+categories = ["science::machine-learning"]
 
 [features]
 default = []

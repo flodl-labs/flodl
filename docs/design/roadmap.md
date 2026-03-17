@@ -178,7 +178,7 @@ map (each/over/slices/batched)
 
 ---
 
-## Phase 8: End-to-End Training Example — NEXT
+## Phase 8: End-to-End Training Example — DONE
 
 Implement the fbrl letter recognition model in floDl. This proves
 the framework on real data with a non-trivial architecture (attention

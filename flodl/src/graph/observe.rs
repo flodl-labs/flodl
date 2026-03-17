@@ -254,6 +254,18 @@ impl Graph {
         None
     }
 
+    /// Get the last trace output from the most recent loop iteration.
+    ///
+    /// Convenience wrapper around [`traces()`](Self::traces) that returns only
+    /// the final iteration's trace. Useful for chaining loops where the last
+    /// output of one (e.g. scan) feeds into the next (e.g. read).
+    ///
+    /// Returns `None` if the tag has no associated loop or the body produced
+    /// no traces.
+    pub fn last_trace(&self, tag: &str) -> Option<Variable> {
+        self.traces(tag).and_then(|v| v.into_iter().last())
+    }
+
     /// Estimated time remaining based on average flush duration.
     ///
     /// Returns seconds remaining. Returns 0.0 if no flushes have occurred yet.

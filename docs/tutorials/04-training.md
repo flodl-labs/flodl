@@ -83,7 +83,7 @@ clip_grad_value(&params, 0.5)?;
 ## Device Placement
 
 By default, all tensors and parameters live on CPU. To train on CUDA, use
-`set_device` on the graph.
+`move_to_device` on the graph.
 
 ### Moving the model
 
@@ -91,10 +91,10 @@ By default, all tensors and parameters live on CPU. To train on CUDA, use
 let model = build_model()?;
 
 if flodl::cuda_available() {
-    model.set_device(Device::CUDA(0));
+    model.move_to_device(Device::CUDA(0));
 }
 
-// Create optimizer AFTER set_device.
+// Create optimizer AFTER move_to_device.
 let params = model.parameters();
 let optimizer = Adam::new(&params, 0.001);
 ```

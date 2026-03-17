@@ -327,7 +327,7 @@ let output = model.forward(&test_input)?;
 | Auto-reset | override `reset()` on Module | Loop resets body before iterating |
 | Soft routing | `gate(router, modules![...])` | All execute, weighted sum |
 | Hard routing | `switch(router, modules![...])` | One executes, index select |
-| Device placement | `g.set_device(Device::CUDA(0))` | Move params + state |
+| Device placement | `g.move_to_device(Device::CUDA(0))` | Move params + state |
 
 ## What's next
 

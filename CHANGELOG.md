@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Build**: Makefile with cpu/cuda targets (build, test, clippy, shell).
 
 ### Testing
-- 290 library tests + 15 showcase tests.
+- 329 library tests + showcase tests.
 - Zero clippy warnings.
 - Autograd numerical gradient checks.
 - Module-level gradient checks.

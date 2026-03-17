@@ -74,6 +74,9 @@ every op, module, and pattern.
 
 ## Getting Started
 
+**Prerequisite:** [Docker](https://docs.docker.com/get-docker/) (no Rust or
+libtorch needed on your machine — everything runs in containers).
+
 Create a new project with one command:
 
 ```bash
@@ -168,8 +171,11 @@ Call `monitor.serve(port)` and open the URL in a browser. The page updates
 in real time via Server-Sent Events — no polling, no WebSocket, no npm.
 
 <p align="center">
-  <img src="docs/dashboard.gif" alt="floDl live training dashboard" width="800">
+  <a href="https://flodl.dev/benchmark">
+    <img src="docs/dashboard.gif" alt="floDl live training dashboard — click for interactive version" width="800">
+  </a>
 </p>
+<p align="center"><em><a href="https://flodl.dev/benchmark">Interactive benchmark dashboard</a> — real data from a 100-epoch training run</em></p>
 
 The dashboard includes:
 
@@ -431,9 +437,22 @@ execution.
 floDl runs the same CUDA kernels as PyTorch — the performance difference comes
 from what happens *between* kernel launches: dispatch overhead, autograd
 bookkeeping, and memory management. Rust eliminates Python's per-op overhead
-and the GC pauses that plague Go. Detailed benchmarks are coming soon.
+and the GC pauses that plague Go.
 
-<!-- TODO: benchmark table after clean apples-to-apples comparison run -->
+Measured on a real training workload (FBRL letter recognition — recurrent
+attention with a 9-component loss stack), same model, same data, same GPU:
+
+| Metric | PyTorch 2.5.1 | flodl | Delta |
+|--------|--------------|-------|-------|
+| Avg epoch | 50.1s | 42.1s | **-16%** |
+| GPU utilization | ~80% (spiky) | 88-92% (flat) | more stable |
+| VRAM | 2,805 MB | 2,977 MB | +6%* |
+
+\* Static libtorch linkage + monitor thread + gzip checkpoint compression.
+
+Full methodology, raw data, and reproduction commands:
+**[Benchmark Report](docs/benchmark.md)** |
+[Raw artifacts](https://github.com/fab2s/fbrl/tree/102225b) (both sides, committed)
 
 ### Build profiles
 
@@ -532,6 +551,7 @@ Step-by-step guides from basics to advanced, each with code examples:
 
 ### Design
 
+- [Benchmark](docs/benchmark.md) — flodl vs PyTorch head-to-head with raw data
 - [Roadmap](docs/design/roadmap.md) — development plan and port status
 - [Trajectory Thesis](docs/design/trajectory-thesis.md) — geometric intuition behind the project
 
@@ -539,6 +559,10 @@ Step-by-step guides from basics to advanced, each with code examples:
 
 - [`quickstart`](flodl/examples/quickstart/) — build, train, and monitor a model with residual connections
 - [`sine_wave`](flodl/examples/sine_wave/) — sine regression with monitor, checkpoint round-trip
+- [`mixed_precision`](flodl/examples/mixed_precision/) — float16 training with `GradScaler`
+- [`transfer_learning`](flodl/examples/transfer_learning/) — checkpoint, partial load, freeze, fine-tune
+- [`schedulers`](flodl/examples/schedulers/) — warmup + cosine + plateau composition
+- [`observation`](flodl/examples/observation/) — collect, flush, trend queries, early stopping
 - [`showcase`](flodl/examples/showcase/) — every graph builder method in one graph
 
 ## Story

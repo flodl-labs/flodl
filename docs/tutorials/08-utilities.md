@@ -77,8 +77,7 @@ let report = load_checkpoint(&mut reader, &named, &buffers, hash)?;
 ### Partial loading (transfer learning)
 
 Named checkpoints match by qualified name, which allows loading a subset
-of position. This allows loading a subset of parameters from a different
-model:
+of parameters from a different model:
 
 ```rust
 use flodl::*;
@@ -377,7 +376,7 @@ for epoch in 0..100 {
 
 // Save.
 g.set_training(false);
-model.save_checkpoint("/tmp/model.fdl")?;
+g.save_checkpoint("/tmp/model.fdl")?;
 ```
 
 ---

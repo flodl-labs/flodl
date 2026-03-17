@@ -1,0 +1,75 @@
+---
+layout: default
+title: Benchmark
+description: "flodl vs PyTorch — head-to-head on a real training workload"
+---
+
+<section class="section">
+  <h2 class="section-title">flodl vs PyTorch</h2>
+  <p class="section-sub">
+    Same model, same data, same GPU. 100 epochs of FBRL letter recognition
+    on a GTX 1060 6GB. Below is the actual training dashboard from the flodl run.
+  </p>
+
+  <div class="bench-table">
+    <table>
+      <thead>
+        <tr><th>Metric</th><th>PyTorch 2.5.1</th><th>flodl</th><th>Delta</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Avg epoch</td><td>50.1s</td><td>42.1s</td><td><strong>-16%</strong></td></tr>
+        <tr><td>Total</td><td>83m 34s</td><td>70m 14s</td><td><strong>-16%</strong></td></tr>
+        <tr><td>GPU utilization</td><td>~80% (spiky)</td><td>88-92% (flat)</td><td>more stable</td></tr>
+        <tr><td>VRAM (device)</td><td>2,805 MB</td><td>2,977 MB</td><td>+6%*</td></tr>
+        <tr><td>RAM (RSS peak)</td><td>2,091 MB</td><td>2,345 MB</td><td>+12%*</td></tr>
+        <tr><td>Checkpoints</td><td>sync, flat .pth</td><td>async, gzip .fdl.gz</td><td>more work</td></tr>
+        <tr><td>Live dashboard</td><td>no</td><td>yes</td><td></td></tr>
+      </tbody>
+    </table>
+    <p class="bench-note">
+      * Higher memory from static libtorch linkage, monitor thread, and gzip compression.
+      The GPU computation dispatches identical CUDA kernels.
+    </p>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section class="section" style="text-align: center;">
+  <h2 class="section-title">Live benchmark dashboard</h2>
+  <p class="section-sub">
+    This is the actual dashboard from the benchmark run &mdash; not a mock, not a screenshot.
+    100 epochs of real training data, rendered by flodl's built-in monitor.
+  </p>
+
+  <div class="dash-embed">
+    <iframe src="{{ '/assets/benchmark-dashboard.html' | relative_url }}"
+            title="flodl benchmark training dashboard"
+            loading="lazy"></iframe>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section class="section">
+  <h2 class="section-title">Reproduce</h2>
+
+  <div class="showcase">
+    <div class="showcase-header"><span>Terminal</span></div>
+    <pre><span class="prompt">$ </span><span class="cm">git</span> clone https://github.com/fab2s/fbrl.git
+<span class="prompt">$ </span><span class="cm">cd</span> fbrl && <span class="cm">git</span> checkout 102225b
+
+<span class="comment"># PyTorch</span>
+<span class="prompt">$ </span><span class="cm">cd</span> python && <span class="cm">make</span> generate && <span class="cm">make</span> train CONFIG=runs/letters/v7-void-repulsion/config.yaml CKPT=50
+
+<span class="comment"># flodl</span>
+<span class="prompt">$ </span><span class="cm">cd</span> .. && <span class="cm">make</span> train-letter DATA=../python/data/letters EPOCHS=100 SAVE=training MONITOR=3000</pre>
+  </div>
+
+  <p style="text-align: center; margin-top: 1.5rem;">
+    All raw artifacts (per-epoch timings, logs, pseudocode, models) are committed at
+    <a href="https://github.com/fab2s/fbrl/tree/102225b">fbrl@102225b</a>.
+    See the full <a href="https://github.com/fab2s/floDl/blob/main/docs/benchmark.md">benchmark report</a>
+    for methodology and honest accounting of asymmetries.
+  </p>
+</section>

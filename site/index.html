@@ -197,16 +197,24 @@ model.<span class="fn">set_training</span>(<span class="kw">true</span>);
 
 <hr class="divider">
 
-<!-- Dashboard preview -->
+<!-- Benchmark dashboard -->
 <section class="section" style="text-align: center;">
-  <h2 class="section-title">Training monitor</h2>
-  <p class="section-sub">Real-time dashboard with SSE streaming. No npm, no TensorBoard, no separate process.</p>
+  <h2 class="section-title">16% faster than PyTorch</h2>
+  <p class="section-sub">
+    Same model, same data, same GPU. This is the actual training dashboard from the
+    <a href="{{ '/benchmark' | relative_url }}">benchmark run</a> &mdash;
+    not a mock.
+  </p>
 
-  <div class="dash-preview">
-    <video autoplay loop muted playsinline>
-      <source src="{{ '/assets/images/dashboard.mp4' | relative_url }}" type="video/mp4">
-      <!-- fallback for browsers without video support -->
-      <img src="{{ '/assets/images/dashboard.gif' | relative_url }}" alt="floDl live training dashboard" loading="lazy">
-    </video>
+  <div class="dash-embed">
+    <iframe src="{{ '/assets/benchmark-dashboard.html' | relative_url }}"
+            title="flodl benchmark training dashboard"
+            loading="lazy"></iframe>
   </div>
+
+  <p style="margin-top: 1.2rem;">
+    <a href="{{ '/benchmark' | relative_url }}" class="btn btn-outline" style="font-size: 14px;">
+      Full benchmark report &rarr;
+    </a>
+  </p>
 </section>

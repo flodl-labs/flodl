@@ -192,14 +192,8 @@ mod tests {
         snap.save(&mut buf).unwrap();
 
         // Load back using the standard checkpoint loader
-        let load_params: Vec<(String, crate::nn::Parameter)> = g.named_parameters()
-            .into_iter()
-            .map(|(name, p)| (name, p))
-            .collect();
-        let load_buffers: Vec<(String, crate::nn::Buffer)> = g.named_buffers()
-            .into_iter()
-            .map(|(name, b)| (name, b))
-            .collect();
+        let load_params: Vec<(String, crate::nn::Parameter)> = g.named_parameters();
+        let load_buffers: Vec<(String, crate::nn::Buffer)> = g.named_buffers();
         let mut cursor = std::io::Cursor::new(&buf);
         let report = crate::nn::load_checkpoint(
             &mut cursor, &load_params, &load_buffers, None,
@@ -226,10 +220,7 @@ mod tests {
         assert!(meta.len() > 0);
 
         // Load back
-        let load_params: Vec<(String, crate::nn::Parameter)> = g.named_parameters()
-            .into_iter()
-            .map(|(name, p)| (name, p))
-            .collect();
+        let load_params: Vec<(String, crate::nn::Parameter)> = g.named_parameters();
         let report = crate::nn::load_checkpoint_file(
             path_str, &load_params, &[], None,
         ).unwrap();
@@ -260,7 +251,7 @@ mod tests {
         worker.submit(move || {
             // Verify we can access snapshot data on the worker thread
             assert!(!snap.params.is_empty());
-            for (_, t) in &snap.params {
+            for t in snap.params.values() {
                 assert_eq!(t.device(), Device::CPU);
             }
             done2.store(true, std::sync::atomic::Ordering::Release);

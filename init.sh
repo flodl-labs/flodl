@@ -10,6 +10,30 @@
 
 set -e
 
+# --- Docker check ---
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "error: Docker is required but not installed." >&2
+    echo "" >&2
+    echo "Install Docker:" >&2
+    echo "  Linux:   https://docs.docker.com/engine/install/" >&2
+    echo "  macOS:   https://docs.docker.com/desktop/install/mac-install/" >&2
+    echo "  Windows: https://docs.docker.com/desktop/install/windows-install/" >&2
+    echo "" >&2
+    echo "After installing, make sure the Docker daemon is running," >&2
+    echo "then re-run this script." >&2
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo "error: Docker is installed but not running (or you lack permissions)." >&2
+    echo "" >&2
+    echo "  - Start Docker:     sudo systemctl start docker" >&2
+    echo "  - Or add yourself:  sudo usermod -aG docker \$USER  (then log out/in)" >&2
+    echo "  - Docker Desktop:   make sure the app is running" >&2
+    exit 1
+fi
+
 # --- Argument validation ---
 
 PROJECT_NAME="${1:?Usage: sh init.sh <project-name>}"

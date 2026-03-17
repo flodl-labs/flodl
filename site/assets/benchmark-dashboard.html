@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>floDl Training Report</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e4e6eb;--dim:#8b8fa3;
+--accent:#6c8cff;--green:#34d399;--red:#f87171;--yellow:#fbbf24;--purple:#a78bfa}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:var(--bg);color:var(--text);padding:0;min-height:100vh}
+
+/* Header */
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;
+display:flex;flex-direction:column;gap:8px}
+.header-row{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+.header h1{font-size:18px;font-weight:600;color:var(--accent);letter-spacing:-0.5px}
+.header h1 span{color:var(--dim);font-weight:400}
+.hw-info{color:var(--dim);font-size:11px;letter-spacing:0.3px;font-family:monospace}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat-label{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--dim)}
+.stat-value{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.progress-bar{flex:1;min-width:120px;max-width:300px;height:6px;background:var(--border);
+border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:var(--accent);border-radius:3px;transition:width 0.3s}
+
+/* Layout */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;overflow:hidden}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:var(--dim);margin-bottom:12px}
+.full-width{grid-column:1/-1}
+
+/* Charts */
+canvas{width:100%;height:260px;cursor:crosshair}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);cursor:pointer;
+user-select:none;padding:2px 6px;border-radius:4px;transition:opacity 0.2s,background 0.15s}
+.legend-item:hover{background:rgba(108,140,255,0.1)}
+.legend-item.dimmed{opacity:0.3}
+.legend-item.solo{background:rgba(108,140,255,0.15)}
+.legend-dot{width:8px;height:8px;border-radius:50%}
+
+/* Resource bars */
+.res-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.res-item{display:flex;flex-direction:column;gap:4px}
+.res-label{display:flex;justify-content:space-between;font-size:11px;color:var(--dim)}
+.res-bar{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+.res-fill{height:100%;border-radius:4px;transition:width 0.5s}
+.res-fill.cpu{background:var(--accent)}
+.res-fill.ram{background:var(--purple)}
+.res-fill.gpu{background:var(--green)}
+.res-fill.vram{background:var(--yellow)}
+
+/* Log table */
+.log-wrap{max-height:300px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.log-wrap::-webkit-scrollbar{width:6px}
+.log-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th{text-align:left;color:var(--dim);font-weight:500;padding:6px 8px;
+border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card)}
+td{padding:5px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(108,140,255,0.05)}
+
+/* SVG toggle */
+.svg-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px}
+.svg-toggle .arrow{transition:transform 0.2s;font-size:10px}
+.svg-toggle.open .arrow{transform:rotate(90deg)}
+.svg-container{max-height:0;overflow:hidden;transition:max-height 0.3s;background:#fff;border-radius:6px;margin-top:8px}
+.svg-container.open{max-height:2000px}
+.svg-container svg{width:100%;height:auto}
+
+/* Tooltip */
+.tooltip{position:fixed;background:rgba(26,29,39,0.95);color:var(--text);padding:8px 12px;
+border-radius:6px;font-size:11px;pointer-events:none;display:none;z-index:100;
+border:1px solid var(--border);white-space:nowrap;backdrop-filter:blur(8px)}
+
+/* Status */
+.status{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+animation:pulse 2s ease-in-out infinite}
+.status-dot.done{background:var(--dim);animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-row">
+    <h1>floDl <span>Training Dashboard</span></h1>
+    <div class="status" id="status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Waiting...</span>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Epoch</div>
+      <div class="stat-value" id="epochNum">—</div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="stat">
+      <div class="stat-label">ETA</div>
+      <div class="stat-value" id="etaDisplay">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Elapsed</div>
+      <div class="stat-value" id="elapsedDisplay">—</div>
+    </div>
+  </div>
+  <div class="hw-info" id="hwInfo" style="display:none"></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Training Metrics</h2>
+    <canvas id="metricsChart"></canvas>
+    <div class="legend" id="metricsLegend"></div>
+  </div>
+
+  <div class="card">
+    <h2>Resources</h2>
+    <canvas id="resourceChart"></canvas>
+    <div class="legend" id="resourceLegend"></div>
+    <div class="res-grid" id="resGrid">
+      <div class="res-item"><div class="res-label"><span>CPU</span><span id="cpuVal">—</span></div>
+        <div class="res-bar"><div class="res-fill cpu" id="cpuBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>RAM</span><span id="ramVal">—</span></div>
+        <div class="res-bar"><div class="res-fill ram" id="ramBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>GPU</span><span id="gpuVal">—</span></div>
+        <div class="res-bar"><div class="res-fill gpu" id="gpuBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>VRAM</span><span id="vramVal">—</span></div>
+        <div class="res-bar"><div class="res-fill vram" id="vramBar" style="width:0"></div></div></div>
+    </div>
+  </div>
+
+  <div class="card full-width">
+    <h2>Epoch Log</h2>
+    <div class="log-wrap" id="logWrap">
+      <table>
+        <thead><tr id="logHeader"><th>Epoch</th><th>Duration</th></tr></thead>
+        <tbody id="logBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card full-width" id="metaCard" style="display:none">
+    <details>
+      <summary style="cursor:pointer;color:var(--dim);font-size:13px;text-transform:uppercase;letter-spacing:0.5px">Training Configuration</summary>
+      <pre id="metaPre" style="margin-top:12px;color:var(--text);font-size:12px;white-space:pre-wrap;word-break:break-word"></pre>
+    </details>
+  </div>
+
+  <div class="card full-width" id="svgCard" style="display:none">
+    <div class="svg-toggle" id="svgToggle" onclick="toggleSvg()">
+      <span class="arrow">&#9654;</span>
+      <h2 style="margin:0">Graph Architecture</h2>
+    </div>
+    <div class="svg-container" id="svgContainer"></div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const ARCHIVE_DATA=[{"epoch":1,"total":100,"duration":48.1932,"metrics":{"letter_ce":3.09767578,"case_ce":0.69308176,"letter_acc":0.06424825,"case_acc":0.51853149,"recon_mse":0.02516542,"recode":0.02700715,"content":0.54678258,"guide":-1.27531424,"void":-1.91740859,"diversity":0.06748694,"total":0.99108551,"hit_rate":0.35107393,"lr":0.00100000},"resources":{"cpu":7.5,"ram_used":4206538752,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":2,"total":100,"duration":42.7068,"metrics":{"letter_ce":2.39256541,"case_ce":0.65538456,"letter_acc":0.18750001,"case_acc":0.59222030,"recon_mse":0.01883440,"recode":0.01912080,"content":0.27964629,"guide":-1.28215876,"void":-1.93695487,"diversity":0.02247662,"total":0.02909131,"hit_rate":0.37336414,"lr":0.00099975},"resources":{"cpu":7.5,"ram_used":4237799424,"ram_total":20971708416,"gpu":93.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":3,"total":100,"duration":42.7625,"metrics":{"letter_ce":1.41081545,"case_ce":0.51761074,"letter_acc":0.50987764,"case_acc":0.74571681,"recon_mse":0.01626719,"recode":0.01665649,"content":0.35558203,"guide":-1.27992251,"void":-1.92165336,"diversity":0.02288479,"total":-1.03955021,"hit_rate":0.34943806,"lr":0.00099901},"resources":{"cpu":7.7,"ram_used":4252303360,"ram_total":20971708416,"gpu":95.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":4,"total":100,"duration":43.2639,"metrics":{"letter_ce":0.78089950,"case_ce":0.30886642,"letter_acc":0.72788464,"case_acc":0.86319933,"recon_mse":0.01456635,"recode":0.01453407,"content":0.37298648,"guide":-1.27922444,"void":-1.93076156,"diversity":0.02417520,"total":-1.88045121,"hit_rate":0.36983017,"lr":0.00099778},"resources":{"cpu":8.3,"ram_used":4227047424,"ram_total":20971708416,"gpu":94.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":5,"total":100,"duration":42.1159,"metrics":{"letter_ce":0.50746974,"case_ce":0.18985543,"letter_acc":0.82211541,"case_acc":0.92360144,"recon_mse":0.01369007,"recode":0.01333336,"content":0.36335160,"guide":-1.27784415,"void":-1.93518665,"diversity":0.02656291,"total":-2.28044351,"hit_rate":0.38851149,"lr":0.00099606},"resources":{"cpu":7.6,"ram_used":4229423104,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":6,"total":100,"duration":42.0219,"metrics":{"letter_ce":0.38696691,"case_ce":0.15058040,"letter_acc":0.86503500,"case_acc":0.93942311,"recon_mse":0.01325046,"recode":0.01261203,"content":0.31211085,"guide":-1.27827305,"void":-1.93880774,"diversity":0.02975048,"total":-2.46786507,"hit_rate":0.41332418,"lr":0.00099384},"resources":{"cpu":7.6,"ram_used":4211589120,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":7,"total":100,"duration":42.7332,"metrics":{"letter_ce":0.26313100,"case_ce":0.10710613,"letter_acc":0.90743011,"case_acc":0.95673080,"recon_mse":0.01274909,"recode":0.01192966,"content":0.25870447,"guide":-1.27876775,"void":-1.94075037,"diversity":0.03092963,"total":-2.66432037,"hit_rate":0.42526224,"lr":0.00099114},"resources":{"cpu":7.3,"ram_used":4205142016,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":8,"total":100,"duration":41.6428,"metrics":{"letter_ce":0.22592112,"case_ce":0.09129672,"letter_acc":0.92438815,"case_acc":0.96424828,"recon_mse":0.01231214,"recode":0.01135687,"content":0.22703897,"guide":-1.27891365,"void":-1.94294154,"diversity":0.03048537,"total":-2.73696348,"hit_rate":0.42631119,"lr":0.00098796},"resources":{"cpu":7.4,"ram_used":4214091776,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":9,"total":100,"duration":42.1008,"metrics":{"letter_ce":0.18170396,"case_ce":0.07743406,"letter_acc":0.93688815,"case_acc":0.96914339,"recon_mse":0.01211064,"recode":0.01096829,"content":0.19393140,"guide":-1.27844686,"void":-1.94551801,"diversity":0.03010488,"total":-2.81467737,"hit_rate":0.42235265,"lr":0.00098429},"resources":{"cpu":7.5,"ram_used":4212129792,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":10,"total":100,"duration":41.8345,"metrics":{"letter_ce":0.14819021,"case_ce":0.06774426,"letter_acc":0.94921332,"case_acc":0.97552450,"recon_mse":0.01179922,"recode":0.01068443,"content":0.15493966,"guide":-1.27901133,"void":-1.94868537,"diversity":0.02864827,"total":-2.88316046,"hit_rate":0.41924326,"lr":0.00098015},"resources":{"cpu":7.4,"ram_used":4209561600,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":11,"total":100,"duration":41.9626,"metrics":{"letter_ce":0.14109784,"case_ce":0.07363768,"letter_acc":0.95087416,"case_acc":0.97438814,"recon_mse":0.01139589,"recode":0.01003619,"content":0.16536483,"guide":-1.27910402,"void":-1.95028416,"diversity":0.02860894,"total":-2.88192923,"hit_rate":0.42993257,"lr":0.00097553},"resources":{"cpu":7.3,"ram_used":4210118656,"ram_total":20971708416,"gpu":91.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":12,"total":100,"duration":41.9949,"metrics":{"letter_ce":0.11632561,"case_ce":0.07109170,"letter_acc":0.95795458,"case_acc":0.97386366,"recon_mse":0.01104408,"recode":0.00965014,"content":0.13901160,"guide":-1.27922747,"void":-1.94956986,"diversity":0.02745591,"total":-2.92372408,"hit_rate":0.41354895,"lr":0.00097044},"resources":{"cpu":7.5,"ram_used":4218175488,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":13,"total":100,"duration":42.2014,"metrics":{"letter_ce":0.09966483,"case_ce":0.04992788,"letter_acc":0.96311192,"case_acc":0.98199303,"recon_mse":0.01063512,"recode":0.00921751,"content":0.14052521,"guide":-1.28015071,"void":-1.95419416,"diversity":0.02393585,"total":-2.97070108,"hit_rate":0.41766983,"lr":0.00096489},"resources":{"cpu":7.4,"ram_used":4208660480,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":14,"total":100,"duration":42.5394,"metrics":{"letter_ce":0.09851930,"case_ce":0.04995368,"letter_acc":0.96564688,"case_acc":0.98076925,"recon_mse":0.01026668,"recode":0.00887526,"content":0.12315220,"guide":-1.28041567,"void":-1.95824113,"diversity":0.02553742,"total":-2.98392835,"hit_rate":0.42754745,"lr":0.00095888},"resources":{"cpu":7.3,"ram_used":4209467392,"ram_total":20971708416,"gpu":95.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":15,"total":100,"duration":42.5263,"metrics":{"letter_ce":0.09741147,"case_ce":0.04655128,"letter_acc":0.96625877,"case_acc":0.98243010,"recon_mse":0.00998180,"recode":0.00854853,"content":0.12297170,"guide":-1.28070578,"void":-1.95547941,"diversity":0.02325199,"total":-2.98895425,"hit_rate":0.41609640,"lr":0.00095241},"resources":{"cpu":7.5,"ram_used":4220071936,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":16,"total":100,"duration":42.5608,"metrics":{"letter_ce":0.07081137,"case_ce":0.04159375,"letter_acc":0.97421331,"case_acc":0.98505247,"recon_mse":0.00973746,"recode":0.00819141,"content":0.08967760,"guide":-1.28172249,"void":-1.95802018,"diversity":0.02405293,"total":-3.04051693,"hit_rate":0.41509740,"lr":0.00094550},"resources":{"cpu":7.4,"ram_used":4219965440,"ram_total":20971708416,"gpu":91.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":17,"total":100,"duration":42.6102,"metrics":{"letter_ce":0.06026958,"case_ce":0.03783093,"letter_acc":0.98015737,"case_acc":0.98601401,"recon_mse":0.00928374,"recode":0.00768297,"content":0.12995435,"guide":-1.28192325,"void":-1.96158438,"diversity":0.02354036,"total":-3.03992288,"hit_rate":0.41452298,"lr":0.00093815},"resources":{"cpu":7.5,"ram_used":4207165440,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":18,"total":100,"duration":42.6255,"metrics":{"letter_ce":0.04833103,"case_ce":0.03910145,"letter_acc":0.98269233,"case_acc":0.98583918,"recon_mse":0.00941674,"recode":0.00782726,"content":0.13223944,"guide":-1.28051434,"void":-1.96133954,"diversity":0.02081225,"total":-3.05024542,"hit_rate":0.39025974,"lr":0.00093037},"resources":{"cpu":7.4,"ram_used":4212092928,"ram_total":20971708416,"gpu":74.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":19,"total":100,"duration":42.5717,"metrics":{"letter_ce":0.04974823,"case_ce":0.03910114,"letter_acc":0.98417834,"case_acc":0.98819932,"recon_mse":0.00920525,"recode":0.00758509,"content":0.09369948,"guide":-1.28120924,"void":-1.96662421,"diversity":0.02439730,"total":-3.07094672,"hit_rate":0.42169081,"lr":0.00092216},"resources":{"cpu":7.5,"ram_used":4199899136,"ram_total":20971708416,"gpu":96.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":20,"total":100,"duration":42.0789,"metrics":{"letter_ce":0.04822497,"case_ce":0.04861673,"letter_acc":0.98426575,"case_acc":0.98339163,"recon_mse":0.00881186,"recode":0.00724884,"content":0.08122315,"guide":-1.28112525,"void":-1.96686223,"diversity":0.02213412,"total":-3.07233940,"hit_rate":0.41414835,"lr":0.00091354},"resources":{"cpu":7.5,"ram_used":4206075904,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":21,"total":100,"duration":41.6660,"metrics":{"letter_ce":0.04813292,"case_ce":0.02202213,"letter_acc":0.98435317,"case_acc":0.99248253,"recon_mse":0.00872012,"recode":0.00703482,"content":0.08482934,"guide":-1.28126202,"void":-1.96802137,"diversity":0.02360698,"total":-3.09735175,"hit_rate":0.41930569,"lr":0.00090451},"resources":{"cpu":7.4,"ram_used":4202016768,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":22,"total":100,"duration":41.5493,"metrics":{"letter_ce":0.04056637,"case_ce":0.02554400,"letter_acc":0.98645107,"case_acc":0.99195805,"recon_mse":0.00864739,"recode":0.00689542,"content":0.07893614,"guide":-1.28206793,"void":-1.96955945,"diversity":0.02140665,"total":-3.10909950,"hit_rate":0.41283716,"lr":0.00089508},"resources":{"cpu":7.3,"ram_used":4203593728,"ram_total":20971708416,"gpu":91.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":23,"total":100,"duration":41.5849,"metrics":{"letter_ce":0.03543054,"case_ce":0.02446421,"letter_acc":0.98758743,"case_acc":0.99073428,"recon_mse":0.00863371,"recode":0.00684574,"content":0.09186657,"guide":-1.28389624,"void":-1.97032956,"diversity":0.02034182,"total":-3.11257648,"hit_rate":0.40469530,"lr":0.00088526},"resources":{"cpu":7.5,"ram_used":4205555712,"ram_total":20971708416,"gpu":91.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":24,"total":100,"duration":41.5561,"metrics":{"letter_ce":0.02810168,"case_ce":0.03016944,"letter_acc":0.99029722,"case_acc":0.99038463,"recon_mse":0.00858216,"recode":0.00674939,"content":0.12696986,"guide":-1.28316410,"void":-1.97213422,"diversity":0.02111438,"total":-3.09709632,"hit_rate":0.41411089,"lr":0.00087506},"resources":{"cpu":7.5,"ram_used":4203405312,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":25,"total":100,"duration":41.5564,"metrics":{"letter_ce":0.02332931,"case_ce":0.01355999,"letter_acc":0.99248253,"case_acc":0.99536714,"recon_mse":0.00809784,"recode":0.00624602,"content":0.09684807,"guide":-1.28338097,"void":-1.97488581,"diversity":0.01815323,"total":-3.14045634,"hit_rate":0.39605395,"lr":0.00086448},"resources":{"cpu":7.4,"ram_used":4211765248,"ram_total":20971708416,"gpu":94.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":26,"total":100,"duration":41.6746,"metrics":{"letter_ce":0.03397304,"case_ce":0.02735581,"letter_acc":0.98959792,"case_acc":0.99195805,"recon_mse":0.00835912,"recode":0.00661268,"content":0.09081756,"guide":-1.28305894,"void":-1.97335805,"diversity":0.01895077,"total":-3.11575680,"hit_rate":0.39624126,"lr":0.00085355},"resources":{"cpu":7.6,"ram_used":4206612480,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":27,"total":100,"duration":41.5360,"metrics":{"letter_ce":0.01421553,"case_ce":0.00879798,"letter_acc":0.99597903,"case_acc":0.99702798,"recon_mse":0.00792762,"recode":0.00609524,"content":0.05085883,"guide":-1.28523906,"void":-1.97370075,"diversity":0.01681390,"total":-3.17966012,"hit_rate":0.38356643,"lr":0.00084227},"resources":{"cpu":7.4,"ram_used":4211482624,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":28,"total":100,"duration":41.5938,"metrics":{"letter_ce":0.01435919,"case_ce":0.00900977,"letter_acc":0.99536714,"case_acc":0.99650350,"recon_mse":0.00774064,"recode":0.00588182,"content":0.07507349,"guide":-1.28530889,"void":-1.97743211,"diversity":0.01721897,"total":-3.17099386,"hit_rate":0.39763986,"lr":0.00083066},"resources":{"cpu":7.4,"ram_used":4215095296,"ram_total":20971708416,"gpu":82.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":29,"total":100,"duration":41.6122,"metrics":{"letter_ce":0.02453013,"case_ce":0.02514664,"letter_acc":0.99213288,"case_acc":0.99283218,"recon_mse":0.00799252,"recode":0.00616793,"content":0.10262647,"guide":-1.28443901,"void":-1.97555745,"diversity":0.01702373,"total":-3.12782226,"hit_rate":0.39243257,"lr":0.00081871},"resources":{"cpu":7.3,"ram_used":4213379072,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":30,"total":100,"duration":42.4942,"metrics":{"letter_ce":0.01558538,"case_ce":0.01653378,"letter_acc":0.99589162,"case_acc":0.99615385,"recon_mse":0.00758614,"recode":0.00570495,"content":0.07244725,"guide":-1.28578477,"void":-1.97531776,"diversity":0.01605950,"total":-3.16340916,"hit_rate":0.38886114,"lr":0.00080645},"resources":{"cpu":7.4,"ram_used":4208205824,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":31,"total":100,"duration":42.5247,"metrics":{"letter_ce":0.02403333,"case_ce":0.00952645,"letter_acc":0.99248253,"case_acc":0.99685315,"recon_mse":0.00776979,"recode":0.00591213,"content":0.08924119,"guide":-1.28535992,"void":-1.97711631,"diversity":0.01803050,"total":-3.15258343,"hit_rate":0.39255744,"lr":0.00079389},"resources":{"cpu":7.4,"ram_used":4211986432,"ram_total":20971708416,"gpu":91.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":32,"total":100,"duration":42.3806,"metrics":{"letter_ce":0.01231225,"case_ce":0.01010839,"letter_acc":0.99685315,"case_acc":0.99737763,"recon_mse":0.00723862,"recode":0.00530875,"content":0.05540668,"guide":-1.28521493,"void":-1.97871003,"diversity":0.01465955,"total":-3.18659405,"hit_rate":0.37532468,"lr":0.00078104},"resources":{"cpu":7.3,"ram_used":4206239744,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":33,"total":100,"duration":41.7429,"metrics":{"letter_ce":0.01695151,"case_ce":0.01749153,"letter_acc":0.99466784,"case_acc":0.99536714,"recon_mse":0.00746223,"recode":0.00558675,"content":0.08030070,"guide":-1.28523059,"void":-1.97765732,"diversity":0.01583744,"total":-3.15940810,"hit_rate":0.38001998,"lr":0.00076791},"resources":{"cpu":7.5,"ram_used":4201177088,"ram_total":20971708416,"gpu":84.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":34,"total":100,"duration":41.8114,"metrics":{"letter_ce":0.00869412,"case_ce":0.00655194,"letter_acc":0.99746504,"case_acc":0.99763987,"recon_mse":0.00708910,"recode":0.00523489,"content":0.04944859,"guide":-1.28551149,"void":-1.98050117,"diversity":0.01584102,"total":-3.19787731,"hit_rate":0.37823427,"lr":0.00075452},"resources":{"cpu":7.3,"ram_used":4215287808,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":35,"total":100,"duration":41.6204,"metrics":{"letter_ce":0.01380519,"case_ce":0.01151007,"letter_acc":0.99536714,"case_acc":0.99694056,"recon_mse":0.00729731,"recode":0.00538155,"content":0.05365456,"guide":-1.28661825,"void":-1.97744797,"diversity":0.01681420,"total":-3.18243064,"hit_rate":0.39203297,"lr":0.00074088},"resources":{"cpu":7.5,"ram_used":4211503104,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":36,"total":100,"duration":41.3839,"metrics":{"letter_ce":0.03066018,"case_ce":0.03073297,"letter_acc":0.99195805,"case_acc":0.99248253,"recon_mse":0.00749212,"recode":0.00566489,"content":0.06267660,"guide":-1.28587194,"void":-1.97758208,"diversity":0.01518846,"total":-3.14237710,"hit_rate":0.38277972,"lr":0.00072700},"resources":{"cpu":7.2,"ram_used":4205420544,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":37,"total":100,"duration":41.4715,"metrics":{"letter_ce":0.00789168,"case_ce":0.01034440,"letter_acc":0.99737763,"case_acc":0.99737763,"recon_mse":0.00676584,"recode":0.00481135,"content":0.03794711,"guide":-1.28735642,"void":-1.97924109,"diversity":0.01290935,"total":-3.20490133,"hit_rate":0.35661838,"lr":0.00071289},"resources":{"cpu":7.5,"ram_used":4208373760,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":38,"total":100,"duration":41.9409,"metrics":{"letter_ce":0.00755491,"case_ce":0.00960472,"letter_acc":0.99737763,"case_acc":0.99720280,"recon_mse":0.00673372,"recode":0.00476483,"content":0.05233729,"guide":-1.28634348,"void":-1.98369998,"diversity":0.01356998,"total":-3.20164665,"hit_rate":0.36712038,"lr":0.00069857},"resources":{"cpu":7.5,"ram_used":4204605440,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":39,"total":100,"duration":42.0801,"metrics":{"letter_ce":0.00354746,"case_ce":0.00480850,"letter_acc":0.99886364,"case_acc":0.99851399,"recon_mse":0.00650366,"recode":0.00441515,"content":0.03269044,"guide":-1.28714716,"void":-1.98386313,"diversity":0.01317470,"total":-3.22221559,"hit_rate":0.36241259,"lr":0.00068406},"resources":{"cpu":7.4,"ram_used":4206530560,"ram_total":20971708416,"gpu":87.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":40,"total":100,"duration":42.4766,"metrics":{"letter_ce":0.00378696,"case_ce":0.00248404,"letter_acc":0.99895105,"case_acc":0.99921329,"recon_mse":0.00640015,"recode":0.00434124,"content":0.05180746,"guide":-1.28653779,"void":-1.98751165,"diversity":0.01219674,"total":-3.21893657,"hit_rate":0.34316933,"lr":0.00066937},"resources":{"cpu":7.7,"ram_used":4204105728,"ram_total":20971708416,"gpu":95.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":41,"total":100,"duration":42.4709,"metrics":{"letter_ce":0.00989549,"case_ce":0.00680674,"letter_acc":0.99755245,"case_acc":0.99798951,"recon_mse":0.00671546,"recode":0.00475768,"content":0.04416477,"guide":-1.28608432,"void":-1.98636925,"diversity":0.01218710,"total":-3.21000874,"hit_rate":0.35726773,"lr":0.00065451},"resources":{"cpu":7.6,"ram_used":4210466816,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":42,"total":100,"duration":42.5245,"metrics":{"letter_ce":0.00819928,"case_ce":0.00690830,"letter_acc":0.99825175,"case_acc":0.99825175,"recon_mse":0.00643935,"recode":0.00433727,"content":0.03852414,"guide":-1.28636553,"void":-1.98655181,"diversity":0.01188888,"total":-3.21588219,"hit_rate":0.34273227,"lr":0.00063950},"resources":{"cpu":7.5,"ram_used":4215738368,"ram_total":20971708416,"gpu":96.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":43,"total":100,"duration":42.4391,"metrics":{"letter_ce":0.00248613,"case_ce":0.00228143,"letter_acc":0.99930070,"case_acc":0.99930070,"recon_mse":0.00596593,"recode":0.00380837,"content":0.02530539,"guide":-1.28642278,"void":-1.98855915,"diversity":0.01092183,"total":-3.23686555,"hit_rate":0.32687313,"lr":0.00062434},"resources":{"cpu":7.3,"ram_used":4201177088,"ram_total":20971708416,"gpu":85.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":44,"total":100,"duration":42.5132,"metrics":{"letter_ce":0.00260165,"case_ce":0.00258553,"letter_acc":0.99938811,"case_acc":0.99956294,"recon_mse":0.00609090,"recode":0.00393200,"content":0.03263767,"guide":-1.28721755,"void":-1.98761239,"diversity":0.01149784,"total":-3.23180322,"hit_rate":0.34449301,"lr":0.00060907},"resources":{"cpu":7.5,"ram_used":4206866432,"ram_total":20971708416,"gpu":85.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":45,"total":100,"duration":42.5257,"metrics":{"letter_ce":0.01011072,"case_ce":0.00922379,"letter_acc":0.99737763,"case_acc":0.99755245,"recon_mse":0.00632096,"recode":0.00427154,"content":0.05408426,"guide":-1.28668016,"void":-1.98700529,"diversity":0.01173687,"total":-3.20497943,"hit_rate":0.34532967,"lr":0.00059369},"resources":{"cpu":7.4,"ram_used":4206559232,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":46,"total":100,"duration":42.4449,"metrics":{"letter_ce":0.00572433,"case_ce":0.00278376,"letter_acc":0.99851399,"case_acc":0.99930070,"recon_mse":0.00588478,"recode":0.00368959,"content":0.01723504,"guide":-1.28698678,"void":-1.98969200,"diversity":0.01002526,"total":-3.23995354,"hit_rate":0.32272727,"lr":0.00057822},"resources":{"cpu":7.5,"ram_used":4214337536,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":47,"total":100,"duration":42.4830,"metrics":{"letter_ce":0.00557417,"case_ce":0.00610374,"letter_acc":0.99877623,"case_acc":0.99851399,"recon_mse":0.00597428,"recode":0.00375479,"content":0.02200775,"guide":-1.28749669,"void":-1.98848319,"diversity":0.01095958,"total":-3.23260943,"hit_rate":0.34299451,"lr":0.00056267},"resources":{"cpu":7.3,"ram_used":4202582016,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":48,"total":100,"duration":42.3794,"metrics":{"letter_ce":0.00174048,"case_ce":0.00091301,"letter_acc":0.99965035,"case_acc":0.99965035,"recon_mse":0.00572860,"recode":0.00344774,"content":0.03360447,"guide":-1.28767075,"void":-1.98954297,"diversity":0.01026545,"total":-3.23831619,"hit_rate":0.33043207,"lr":0.00054705},"resources":{"cpu":7.4,"ram_used":4204249088,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":49,"total":100,"duration":42.4186,"metrics":{"letter_ce":0.00257511,"case_ce":0.00263992,"letter_acc":0.99912588,"case_acc":0.99886364,"recon_mse":0.00585431,"recode":0.00359502,"content":0.02784316,"guide":-1.28693085,"void":-1.98939161,"diversity":0.00901340,"total":-3.23872313,"hit_rate":0.31494755,"lr":0.00053140},"resources":{"cpu":7.4,"ram_used":4217278464,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":50,"total":100,"duration":42.3248,"metrics":{"letter_ce":0.00397378,"case_ce":0.00646903,"letter_acc":0.99895105,"case_acc":0.99851399,"recon_mse":0.00582204,"recode":0.00361161,"content":0.02133092,"guide":-1.28760785,"void":-1.98875836,"diversity":0.00943355,"total":-3.23639075,"hit_rate":0.31303696,"lr":0.00051571},"resources":{"cpu":7.2,"ram_used":4211101696,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":51,"total":100,"duration":41.6856,"metrics":{"letter_ce":0.00458746,"case_ce":0.00510946,"letter_acc":0.99877623,"case_acc":0.99877623,"recon_mse":0.00569568,"recode":0.00349775,"content":0.02561037,"guide":-1.28714844,"void":-1.99119818,"diversity":0.01004195,"total":-3.23660915,"hit_rate":0.32197802,"lr":0.00050000},"resources":{"cpu":8.2,"ram_used":4218183680,"ram_total":20971708416,"gpu":92.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":52,"total":100,"duration":41.8592,"metrics":{"letter_ce":0.00031764,"case_ce":0.00130464,"letter_acc":1.00000000,"case_acc":0.99965035,"recon_mse":0.00525147,"recode":0.00277232,"content":0.02153858,"guide":-1.28732255,"void":-1.99162214,"diversity":0.00825633,"total":-3.25027301,"hit_rate":0.29529221,"lr":0.00048429},"resources":{"cpu":7.3,"ram_used":4221231104,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":53,"total":100,"duration":42.4201,"metrics":{"letter_ce":0.00226791,"case_ce":0.00051675,"letter_acc":0.99938811,"case_acc":0.99982518,"recon_mse":0.00556016,"recode":0.00323187,"content":0.04603662,"guide":-1.28751187,"void":-1.99002045,"diversity":0.00814051,"total":-3.23479682,"hit_rate":0.31615884,"lr":0.00046860},"resources":{"cpu":7.7,"ram_used":4244656128,"ram_total":20971708416,"gpu":84.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":54,"total":100,"duration":42.0882,"metrics":{"letter_ce":0.00017527,"case_ce":0.00051583,"letter_acc":1.00000000,"case_acc":0.99982517,"recon_mse":0.00517404,"recode":0.00265489,"content":0.01654294,"guide":-1.28837081,"void":-1.98868170,"diversity":0.00740931,"total":-3.25285171,"hit_rate":0.30012488,"lr":0.00045295},"resources":{"cpu":7.6,"ram_used":4208287744,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":55,"total":100,"duration":42.0420,"metrics":{"letter_ce":0.00120678,"case_ce":0.00176480,"letter_acc":0.99956294,"case_acc":0.99947553,"recon_mse":0.00508551,"recode":0.00247838,"content":0.02310779,"guide":-1.28904879,"void":-1.98920742,"diversity":0.00684585,"total":-3.24932101,"hit_rate":0.27897103,"lr":0.00043733},"resources":{"cpu":7.4,"ram_used":4214140928,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":56,"total":100,"duration":41.8500,"metrics":{"letter_ce":0.00014689,"case_ce":0.00004456,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00486809,"recode":0.00217011,"content":0.01480699,"guide":-1.28801595,"void":-1.99177886,"diversity":0.00668739,"total":-3.25847428,"hit_rate":0.25901598,"lr":0.00042178},"resources":{"cpu":7.4,"ram_used":4219273216,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":57,"total":100,"duration":41.8563,"metrics":{"letter_ce":0.00068375,"case_ce":0.00005609,"letter_acc":0.99973776,"case_acc":1.00000000,"recon_mse":0.00480456,"recode":0.00205012,"content":0.01584272,"guide":-1.28821454,"void":-1.99214175,"diversity":0.00616726,"total":-3.25867316,"hit_rate":0.26041459,"lr":0.00040631},"resources":{"cpu":7.4,"ram_used":4207443968,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":58,"total":100,"duration":42.1208,"metrics":{"letter_ce":0.00008745,"case_ce":0.00006064,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00459382,"recode":0.00169503,"content":0.00931821,"guide":-1.28825144,"void":-1.99260033,"diversity":0.00537492,"total":-3.26438081,"hit_rate":0.24684066,"lr":0.00039093},"resources":{"cpu":7.2,"ram_used":4206940160,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":59,"total":100,"duration":43.5791,"metrics":{"letter_ce":0.00092455,"case_ce":0.00017427,"letter_acc":0.99982518,"case_acc":0.99991259,"recon_mse":0.00483347,"recode":0.00205783,"content":0.02846020,"guide":-1.28813097,"void":-1.99195988,"diversity":0.00588034,"total":-3.25199029,"hit_rate":0.25680569,"lr":0.00037566},"resources":{"cpu":7.1,"ram_used":4207550464,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":60,"total":100,"duration":41.8896,"metrics":{"letter_ce":0.00370623,"case_ce":0.00352142,"letter_acc":0.99903846,"case_acc":0.99938811,"recon_mse":0.00537509,"recode":0.00292762,"content":0.02091234,"guide":-1.28783608,"void":-1.99145480,"diversity":0.00684687,"total":-3.24645748,"hit_rate":0.28235514,"lr":0.00036050},"resources":{"cpu":7.4,"ram_used":4202356736,"ram_total":20971708416,"gpu":91.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":61,"total":100,"duration":41.7885,"metrics":{"letter_ce":0.00016352,"case_ce":0.00032122,"letter_acc":1.00000000,"case_acc":0.99991259,"recon_mse":0.00485026,"recode":0.00204086,"content":0.01534381,"guide":-1.28809931,"void":-1.99242243,"diversity":0.00643884,"total":-3.25903515,"hit_rate":0.27870879,"lr":0.00034549},"resources":{"cpu":7.2,"ram_used":4201971712,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":62,"total":100,"duration":41.4473,"metrics":{"letter_ce":0.00096526,"case_ce":0.00022517,"letter_acc":0.99956294,"case_acc":0.99991259,"recon_mse":0.00484942,"recode":0.00207422,"content":0.03226627,"guide":-1.28819489,"void":-1.99228606,"diversity":0.00605333,"total":-3.25018042,"hit_rate":0.26509740,"lr":0.00033063},"resources":{"cpu":7.5,"ram_used":4210712576,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":63,"total":100,"duration":41.6657,"metrics":{"letter_ce":0.00126136,"case_ce":0.00044973,"letter_acc":0.99956294,"case_acc":0.99982518,"recon_mse":0.00481016,"recode":0.00207132,"content":0.01848428,"guide":-1.28893010,"void":-1.99055672,"diversity":0.00613241,"total":-3.25551970,"hit_rate":0.26575924,"lr":0.00031594},"resources":{"cpu":7.5,"ram_used":4208652288,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":64,"total":100,"duration":43.8883,"metrics":{"letter_ce":0.00025807,"case_ce":0.00014827,"letter_acc":0.99991259,"case_acc":0.99991259,"recon_mse":0.00468876,"recode":0.00185412,"content":0.01616133,"guide":-1.28841996,"void":-1.99210684,"diversity":0.00670066,"total":-3.25879624,"hit_rate":0.27110390,"lr":0.00030143},"resources":{"cpu":7.0,"ram_used":4215726080,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":65,"total":100,"duration":41.4118,"metrics":{"letter_ce":0.00098791,"case_ce":0.00007575,"letter_acc":0.99965035,"case_acc":1.00000000,"recon_mse":0.00476077,"recode":0.00190937,"content":0.01903654,"guide":-1.28893090,"void":-1.99050370,"diversity":0.00603180,"total":-3.25615073,"hit_rate":0.25784216,"lr":0.00028711},"resources":{"cpu":7.2,"ram_used":4211179520,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":66,"total":100,"duration":41.3872,"metrics":{"letter_ce":0.00005395,"case_ce":0.00001412,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00448085,"recode":0.00144118,"content":0.01843085,"guide":-1.28841128,"void":-1.99205994,"diversity":0.00536621,"total":-3.25989947,"hit_rate":0.24128372,"lr":0.00027300},"resources":{"cpu":7.4,"ram_used":4211838976,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":67,"total":100,"duration":41.4148,"metrics":{"letter_ce":0.00004948,"case_ce":0.00012926,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00448453,"recode":0.00147941,"content":0.01141617,"guide":-1.28856320,"void":-1.99217650,"diversity":0.00534297,"total":-3.26354595,"hit_rate":0.24251998,"lr":0.00025912},"resources":{"cpu":7.5,"ram_used":4207546368,"ram_total":20971708416,"gpu":80.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":68,"total":100,"duration":41.6404,"metrics":{"letter_ce":0.00246102,"case_ce":0.00011130,"letter_acc":0.99947553,"case_acc":1.00000000,"recon_mse":0.00456067,"recode":0.00163029,"content":0.02015553,"guide":-1.28868955,"void":-1.99230417,"diversity":0.00518119,"total":-3.25697151,"hit_rate":0.24746503,"lr":0.00024548},"resources":{"cpu":7.3,"ram_used":4206915584,"ram_total":20971708416,"gpu":79.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":69,"total":100,"duration":42.7055,"metrics":{"letter_ce":0.00006560,"case_ce":0.00125025,"letter_acc":1.00000000,"case_acc":0.99973776,"recon_mse":0.00454417,"recode":0.00165095,"content":0.02087980,"guide":-1.28877177,"void":-1.99170965,"diversity":0.00552567,"total":-3.25700488,"hit_rate":0.24711538,"lr":0.00023209},"resources":{"cpu":7.6,"ram_used":4204806144,"ram_total":20971708416,"gpu":87.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":70,"total":100,"duration":42.5111,"metrics":{"letter_ce":0.00054399,"case_ce":0.00001282,"letter_acc":0.99991259,"case_acc":1.00000000,"recon_mse":0.00431507,"recode":0.00119809,"content":0.02163256,"guide":-1.28853120,"void":-1.99322185,"diversity":0.00450779,"total":-3.26035900,"hit_rate":0.22387612,"lr":0.00021896},"resources":{"cpu":7.5,"ram_used":4210155520,"ram_total":20971708416,"gpu":87.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":71,"total":100,"duration":42.8211,"metrics":{"letter_ce":0.00098799,"case_ce":0.00001712,"letter_acc":0.99965035,"case_acc":1.00000000,"recon_mse":0.00438186,"recode":0.00128255,"content":0.01596660,"guide":-1.28866508,"void":-1.99347007,"diversity":0.00478219,"total":-3.26270015,"hit_rate":0.22885864,"lr":0.00020611},"resources":{"cpu":7.5,"ram_used":4216303616,"ram_total":20971708416,"gpu":96.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":72,"total":100,"duration":43.1141,"metrics":{"letter_ce":0.00004819,"case_ce":0.00000748,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00423015,"recode":0.00102068,"content":0.01147090,"guide":-1.28871578,"void":-1.99376598,"diversity":0.00429164,"total":-3.26714819,"hit_rate":0.21563437,"lr":0.00019355},"resources":{"cpu":7.3,"ram_used":4214927360,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":73,"total":100,"duration":42.7749,"metrics":{"letter_ce":0.00014844,"case_ce":0.00010446,"letter_acc":0.99991259,"case_acc":1.00000000,"recon_mse":0.00426136,"recode":0.00104914,"content":0.01499827,"guide":-1.28878856,"void":-1.99340458,"diversity":0.00420835,"total":-3.26492228,"hit_rate":0.21028971,"lr":0.00018129},"resources":{"cpu":7.5,"ram_used":4198879232,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":74,"total":100,"duration":42.5538,"metrics":{"letter_ce":0.00005240,"case_ce":0.00000997,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00420391,"recode":0.00097158,"content":0.01116752,"guide":-1.28865231,"void":-1.99340075,"diversity":0.00409411,"total":-3.26713734,"hit_rate":0.21347403,"lr":0.00016934},"resources":{"cpu":7.4,"ram_used":4220837888,"ram_total":20971708416,"gpu":86.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":75,"total":100,"duration":42.3742,"metrics":{"letter_ce":0.00002708,"case_ce":0.00000565,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00412927,"recode":0.00082154,"content":0.01337797,"guide":-1.28872817,"void":-1.99356419,"diversity":0.00365878,"total":-3.26696105,"hit_rate":0.19996254,"lr":0.00015773},"resources":{"cpu":7.5,"ram_used":4221689856,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":76,"total":100,"duration":42.5139,"metrics":{"letter_ce":0.00002558,"case_ce":0.00000637,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00411363,"recode":0.00082989,"content":0.01638570,"guide":-1.28896881,"void":-1.99340759,"diversity":0.00353573,"total":-3.26567234,"hit_rate":0.19361888,"lr":0.00014645},"resources":{"cpu":7.6,"ram_used":4220162048,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":77,"total":100,"duration":42.4021,"metrics":{"letter_ce":0.00003451,"case_ce":0.00002813,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00412211,"recode":0.00081998,"content":0.01786905,"guide":-1.28902336,"void":-1.99320316,"diversity":0.00365337,"total":-3.26463391,"hit_rate":0.20122378,"lr":0.00013552},"resources":{"cpu":7.4,"ram_used":4217905152,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":78,"total":100,"duration":42.5065,"metrics":{"letter_ce":0.00002416,"case_ce":0.00000508,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00409662,"recode":0.00078439,"content":0.01338276,"guide":-1.28908510,"void":-1.99315562,"diversity":0.00357041,"total":-3.26706869,"hit_rate":0.20067433,"lr":0.00012494},"resources":{"cpu":7.4,"ram_used":4213092352,"ram_total":20971708416,"gpu":91.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":79,"total":100,"duration":42.5147,"metrics":{"letter_ce":0.00002299,"case_ce":0.00000424,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00408719,"recode":0.00076518,"content":0.01723995,"guide":-1.28910578,"void":-1.99336167,"diversity":0.00369411,"total":-3.26527376,"hit_rate":0.20103646,"lr":0.00011474},"resources":{"cpu":7.4,"ram_used":4214976512,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":80,"total":100,"duration":42.6970,"metrics":{"letter_ce":0.00003222,"case_ce":0.00000617,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00407674,"recode":0.00074072,"content":0.01201716,"guide":-1.28888578,"void":-1.99383440,"diversity":0.00351584,"total":-3.26833991,"hit_rate":0.19273227,"lr":0.00010492},"resources":{"cpu":7.2,"ram_used":4211593216,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":81,"total":100,"duration":42.5982,"metrics":{"letter_ce":0.00002053,"case_ce":0.00000586,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00399237,"recode":0.00061664,"content":0.00824336,"guide":-1.28903241,"void":-1.99397148,"diversity":0.00320822,"total":-3.27103861,"hit_rate":0.18769980,"lr":0.00009549},"resources":{"cpu":7.4,"ram_used":4209852416,"ram_total":20971708416,"gpu":81.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":82,"total":100,"duration":42.5825,"metrics":{"letter_ce":0.00001678,"case_ce":0.00000614,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00397392,"recode":0.00058526,"content":0.01302574,"guide":-1.28911831,"void":-1.99394877,"diversity":0.00308348,"total":-3.26888863,"hit_rate":0.18783716,"lr":0.00008646},"resources":{"cpu":7.5,"ram_used":4216684544,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":83,"total":100,"duration":42.0384,"metrics":{"letter_ce":0.00001952,"case_ce":0.00000382,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00397445,"recode":0.00058223,"content":0.00821863,"guide":-1.28940540,"void":-1.99342441,"diversity":0.00305597,"total":-3.27108450,"hit_rate":0.18686314,"lr":0.00007784},"resources":{"cpu":7.3,"ram_used":4210188288,"ram_total":20971708416,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":84,"total":100,"duration":41.5095,"metrics":{"letter_ce":0.00012257,"case_ce":0.00015026,"letter_acc":0.99991259,"case_acc":0.99991259,"recon_mse":0.00394703,"recode":0.00054912,"content":0.00727773,"guide":-1.28922024,"void":-1.99388054,"diversity":0.00295555,"total":-3.27173737,"hit_rate":0.18511489,"lr":0.00006963},"resources":{"cpu":7.4,"ram_used":4213055488,"ram_total":20971708416,"gpu":82.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":85,"total":100,"duration":41.3415,"metrics":{"letter_ce":0.00001579,"case_ce":0.00000393,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00393515,"recode":0.00052509,"content":0.00533923,"guide":-1.28918768,"void":-1.99421496,"diversity":0.00289453,"total":-3.27335855,"hit_rate":0.18411588,"lr":0.00006185},"resources":{"cpu":7.4,"ram_used":4213153792,"ram_total":20971708416,"gpu":95.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":86,"total":100,"duration":41.4022,"metrics":{"letter_ce":0.00001666,"case_ce":0.00000348,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00391419,"recode":0.00048980,"content":0.00598798,"guide":-1.28953981,"void":-1.99355672,"diversity":0.00281841,"total":-3.27286002,"hit_rate":0.18337912,"lr":0.00005450},"resources":{"cpu":7.4,"ram_used":4214718464,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":87,"total":100,"duration":41.6039,"metrics":{"letter_ce":0.00002607,"case_ce":0.00000930,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00390739,"recode":0.00048494,"content":0.01029590,"guide":-1.28933477,"void":-1.99410316,"diversity":0.00269758,"total":-3.27116470,"hit_rate":0.18135614,"lr":0.00004759},"resources":{"cpu":7.2,"ram_used":4207398912,"ram_total":20971708416,"gpu":92.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":88,"total":100,"duration":41.8295,"metrics":{"letter_ce":0.00001925,"case_ce":0.00000414,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00389027,"recode":0.00045800,"content":0.00793175,"guide":-1.28920606,"void":-1.99438642,"diversity":0.00267348,"total":-3.27258147,"hit_rate":0.17912088,"lr":0.00004112},"resources":{"cpu":7.4,"ram_used":4207165440,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":89,"total":100,"duration":41.5954,"metrics":{"letter_ce":0.00001487,"case_ce":0.00000476,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00388228,"recode":0.00044540,"content":0.00677115,"guide":-1.28945268,"void":-1.99401712,"diversity":0.00271643,"total":-3.27302050,"hit_rate":0.17930819,"lr":0.00003511},"resources":{"cpu":7.4,"ram_used":4215336960,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":90,"total":100,"duration":41.3423,"metrics":{"letter_ce":0.00001692,"case_ce":0.00000418,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00387891,"recode":0.00044258,"content":0.00528598,"guide":-1.28932348,"void":-1.99422331,"diversity":0.00259594,"total":-3.27396529,"hit_rate":0.17937063,"lr":0.00002956},"resources":{"cpu":7.2,"ram_used":4211118080,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":91,"total":100,"duration":41.4246,"metrics":{"letter_ce":0.00001461,"case_ce":0.00000258,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00385899,"recode":0.00041249,"content":0.00752270,"guide":-1.28941842,"void":-1.99420008,"diversity":0.00258081,"total":-3.27298767,"hit_rate":0.17683566,"lr":0.00002447},"resources":{"cpu":7.4,"ram_used":4211417088,"ram_total":20971708416,"gpu":90.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":92,"total":100,"duration":41.4441,"metrics":{"letter_ce":0.00001665,"case_ce":0.00000394,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00385751,"recode":0.00041153,"content":0.00861816,"guide":-1.28935661,"void":-1.99418334,"diversity":0.00250063,"total":-3.27244059,"hit_rate":0.17553696,"lr":0.00001985},"resources":{"cpu":7.3,"ram_used":4218793984,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":93,"total":100,"duration":41.4000,"metrics":{"letter_ce":0.00001365,"case_ce":0.00000284,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00384628,"recode":0.00039111,"content":0.00700282,"guide":-1.28940257,"void":-1.99418467,"diversity":0.00247436,"total":-3.27335759,"hit_rate":0.17544955,"lr":0.00001571},"resources":{"cpu":7.5,"ram_used":4218064896,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":94,"total":100,"duration":41.4860,"metrics":{"letter_ce":0.00001460,"case_ce":0.00000252,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00384438,"recode":0.00038543,"content":0.00548024,"guide":-1.28941038,"void":-1.99431665,"diversity":0.00243521,"total":-3.27430477,"hit_rate":0.17473776,"lr":0.00001204},"resources":{"cpu":7.2,"ram_used":4205355008,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":95,"total":100,"duration":41.3261,"metrics":{"letter_ce":0.00001473,"case_ce":0.00000289,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00384292,"recode":0.00038196,"content":0.00491128,"guide":-1.28943998,"void":-1.99430023,"diversity":0.00240183,"total":-3.27464026,"hit_rate":0.17395105,"lr":0.00000886},"resources":{"cpu":7.4,"ram_used":4219387904,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":96,"total":100,"duration":41.3682,"metrics":{"letter_ce":0.00001418,"case_ce":0.00000270,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00384065,"recode":0.00038058,"content":0.00533005,"guide":-1.28950852,"void":-1.99416600,"diversity":0.00238610,"total":-3.27438529,"hit_rate":0.17300200,"lr":0.00000616},"resources":{"cpu":7.4,"ram_used":4216066048,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":97,"total":100,"duration":41.2851,"metrics":{"letter_ce":0.00001362,"case_ce":0.00000320,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00383655,"recode":0.00037573,"content":0.00727330,"guide":-1.28942708,"void":-1.99438240,"diversity":0.00237323,"total":-3.27357052,"hit_rate":0.17278971,"lr":0.00000394},"resources":{"cpu":7.2,"ram_used":4217597952,"ram_total":20971708416,"gpu":96.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":98,"total":100,"duration":41.5263,"metrics":{"letter_ce":0.00001386,"case_ce":0.00000314,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00383513,"recode":0.00037361,"content":0.00619908,"guide":-1.28948048,"void":-1.99426431,"diversity":0.00236627,"total":-3.27405325,"hit_rate":0.17272727,"lr":0.00000222},"resources":{"cpu":7.4,"ram_used":4208234496,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":99,"total":100,"duration":41.3918,"metrics":{"letter_ce":0.00001398,"case_ce":0.00000324,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00383651,"recode":0.00037518,"content":0.00607222,"guide":-1.28947055,"void":-1.99432344,"diversity":0.00235254,"total":-3.27417643,"hit_rate":0.17225275,"lr":0.00000099},"resources":{"cpu":7.4,"ram_used":4212985856,"ram_total":20971708416,"gpu":89.0,"vram_used":3121348608,"vram_total":6442188800}},{"epoch":100,"total":100,"duration":41.6275,"metrics":{"letter_ce":0.00001429,"case_ce":0.00000323,"letter_acc":1.00000000,"case_acc":1.00000000,"recon_mse":0.00383585,"recode":0.00037437,"content":0.00677962,"guide":-1.28946073,"void":-1.99434830,"diversity":0.00234699,"total":-3.27384448,"hit_rate":0.17212787,"lr":0.00000025},"resources":{"cpu":7.4,"ram_used":4217987072,"ram_total":20971708416,"gpu":86.0,"vram_used":3121348608,"vram_total":6442188800}}];
+const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.43.0 (0)
+ -->
+<!-- Title: G Pages: 1 -->
+<svg width="444pt" height="658pt"
+ viewBox="0.00 0.00 444.00 657.81" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 653.81)">
+<title>G</title>
+<polygon fill="white" stroke="transparent" points="-4,4 -4,-653.81 440,-653.81 440,4 -4,4"/>
+<text text-anchor="middle" x="218" y="-634.61" font-family="Helvetica,sans-Serif" font-size="14.00">Forward: 13ms</text>
+<g id="clust1" class="cluster">
+<title>cluster_level_0</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="134,-502.89 134,-618.81 403,-618.81 403,-502.89 134,-502.89"/>
+<text text-anchor="middle" x="268.5" y="-603.61" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 0 &#160;7µs &#160;x0.1</text>
+</g>
+<g id="clust2" class="cluster">
+<title>cluster_level_1</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="105,-400.89 105,-483.89 220,-483.89 220,-400.89 105,-400.89"/>
+<text text-anchor="middle" x="162.5" y="-468.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 1 &#160;122µs</text>
+</g>
+<g id="clust3" class="cluster">
+<title>cluster_level_2</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="130,-286.89 130,-381.89 256,-381.89 256,-286.89 130,-286.89"/>
+<text text-anchor="middle" x="193" y="-366.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 2 &#160;11ms</text>
+</g>
+<g id="clust4" class="cluster">
+<title>cluster_level_3</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="134,-172.89 134,-267.89 252,-267.89 252,-172.89 134,-172.89"/>
+<text text-anchor="middle" x="193" y="-252.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 3 &#160;107µs</text>
+</g>
+<g id="clust5" class="cluster">
+<title>cluster_level_4</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="8,-8 8,-144.89 428,-144.89 428,-8 8,-8"/>
+<text text-anchor="middle" x="218" y="-129.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 4 &#160;2ms &#160;x1.0</text>
+</g>
+<!-- identity_1 -->
+<g id="node1" class="node">
+<title>identity_1</title>
+<polygon fill="#27ad5f" stroke="black" points="142.36,-537.48 194,-510.93 245.64,-537.48 245.59,-580.43 142.41,-580.43 142.36,-537.48"/>
+<text text-anchor="middle" x="194" y="-558.55" font-family="Helvetica,sans-Serif" font-size="11.00">identity</text>
+<text text-anchor="middle" x="194" y="-546.55" font-family="Helvetica,sans-Serif" font-size="11.00">#image</text>
+<text text-anchor="middle" x="194" y="-534.55" font-family="Helvetica,sans-Serif" font-size="11.00">1us</text>
+</g>
+<!-- h0_init_3 -->
+<g id="node3" class="node">
+<title>h0_init_3</title>
+<polygon fill="#2bad5e" stroke="black" points="210.5,-452.89 119.5,-452.89 119.5,-408.89 210.5,-408.89 210.5,-452.89"/>
+<text text-anchor="middle" x="165" y="-440.09" font-family="Helvetica,sans-Serif" font-size="11.00">h0_init</text>
+<text text-anchor="middle" x="165" y="-428.09" font-family="Helvetica,sans-Serif" font-size="11.00">121us</text>
+<text text-anchor="middle" x="165" y="-416.09" font-family="Helvetica,sans-Serif" font-size="11.00">[256 params]</text>
+</g>
+<!-- identity_1&#45;&gt;h0_init_3 -->
+<g id="edge1" class="edge">
+<title>identity_1&#45;&gt;h0_init_3</title>
+<path fill="none" stroke="#2c3e50" d="M185.69,-514.98C181.63,-498.66 176.76,-479.13 172.77,-463.11"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="176.11,-462.01 170.29,-453.15 169.31,-463.7 176.11,-462.01"/>
+</g>
+<!-- loop_4 -->
+<g id="node4" class="node">
+<title>loop_4</title>
+<polygon fill="#e74c3c" stroke="black" points="247.5,-350.89 142.5,-350.89 138.5,-346.89 138.5,-294.89 243.5,-294.89 247.5,-298.89 247.5,-350.89"/>
+<polyline fill="none" stroke="black" points="243.5,-346.89 138.5,-346.89 "/>
+<polyline fill="none" stroke="black" points="243.5,-346.89 243.5,-294.89 "/>
+<polyline fill="none" stroke="black" points="243.5,-346.89 247.5,-350.89 "/>
+<text text-anchor="middle" x="193" y="-338.09" font-family="Helvetica,sans-Serif" font-size="11.00">loop</text>
+<text text-anchor="middle" x="193" y="-326.09" font-family="Helvetica,sans-Serif" font-size="11.00">#attn</text>
+<text text-anchor="middle" x="193" y="-314.09" font-family="Helvetica,sans-Serif" font-size="11.00">10.55ms</text>
+<text text-anchor="middle" x="193" y="-302.09" font-family="Helvetica,sans-Serif" font-size="11.00">[844.8K params]</text>
+</g>
+<!-- identity_1&#45;&gt;loop_4 -->
+<g id="edge3" class="edge">
+<title>identity_1&#45;&gt;loop_4</title>
+<path fill="none" stroke="#2980b9" stroke-dasharray="5,2" d="M210.71,-519.46C216.07,-508.66 221.31,-496.06 224,-483.89 231.97,-447.87 231.02,-437.11 224,-400.89 221.34,-387.14 216.22,-372.72 210.91,-360.14"/>
+<polygon fill="#2980b9" stroke="#2980b9" points="214.08,-358.65 206.84,-350.91 207.67,-361.47 214.08,-358.65"/>
+<text text-anchor="middle" x="243" y="-428.69" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#2980b9">image</text>
+</g>
+<!-- input_case_2 -->
+<g id="node2" class="node">
+<title>input_case_2</title>
+<polygon fill="#27ad5f" stroke="black" points="263.4,-537.48 329,-510.93 394.6,-537.48 394.54,-580.43 263.46,-580.43 263.4,-537.48"/>
+<text text-anchor="middle" x="329" y="-558.55" font-family="Helvetica,sans-Serif" font-size="11.00">input_case</text>
+<text text-anchor="middle" x="329" y="-546.55" font-family="Helvetica,sans-Serif" font-size="11.00">#case</text>
+<text text-anchor="middle" x="329" y="-534.55" font-family="Helvetica,sans-Serif" font-size="11.00">0us</text>
+</g>
+<!-- visual_decoder_8 -->
+<g id="node8" class="node">
+<title>visual_decoder_8</title>
+<polygon fill="#7fa63e" stroke="black" points="419.8,-80.05 329,-113.84 238.2,-80.05 238.29,-25.39 419.71,-25.39 419.8,-80.05"/>
+<text text-anchor="middle" x="329" y="-80.15" font-family="Helvetica,sans-Serif" font-size="11.00">visual_decoder</text>
+<text text-anchor="middle" x="329" y="-68.15" font-family="Helvetica,sans-Serif" font-size="11.00">#recon</text>
+<text text-anchor="middle" x="329" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">2.30ms</text>
+<text text-anchor="middle" x="329" y="-44.15" font-family="Helvetica,sans-Serif" font-size="11.00">[33.9M params]</text>
+</g>
+<!-- input_case_2&#45;&gt;visual_decoder_8 -->
+<g id="edge9" class="edge">
+<title>input_case_2&#45;&gt;visual_decoder_8</title>
+<path fill="none" stroke="#2980b9" stroke-dasharray="5,2" d="M329,-510.85C329,-488.02 329,-458.28 329,-431.89 329,-431.89 329,-431.89 329,-207.89 329,-180.38 329,-149.88 329,-124.22"/>
+<polygon fill="#2980b9" stroke="#2980b9" points="332.5,-123.91 329,-113.91 325.5,-123.91 332.5,-123.91"/>
+<text text-anchor="middle" x="339.5" y="-320.69" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#2980b9">case</text>
+</g>
+<!-- h0_init_3&#45;&gt;loop_4 -->
+<g id="edge2" class="edge">
+<title>h0_init_3&#45;&gt;loop_4</title>
+<path fill="none" stroke="#2c3e50" d="M170.6,-408.7C174.19,-395.12 178.94,-377.12 183.15,-361.19"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="186.64,-361.66 185.81,-351.1 179.88,-359.87 186.64,-361.66"/>
+</g>
+<!-- linear_5 -->
+<g id="node5" class="node">
+<title>linear_5</title>
+<polygon fill="#2aad5e" stroke="black" points="244,-236.89 142,-236.89 142,-180.89 244,-180.89 244,-236.89"/>
+<text text-anchor="middle" x="193" y="-224.09" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
+<text text-anchor="middle" x="193" y="-212.09" font-family="Helvetica,sans-Serif" font-size="11.00">#latent</text>
+<text text-anchor="middle" x="193" y="-200.09" font-family="Helvetica,sans-Serif" font-size="11.00">101us</text>
+<text text-anchor="middle" x="193" y="-188.09" font-family="Helvetica,sans-Serif" font-size="11.00">[65.8K params]</text>
+</g>
+<!-- loop_4&#45;&gt;linear_5 -->
+<g id="edge4" class="edge">
+<title>loop_4&#45;&gt;linear_5</title>
+<path fill="none" stroke="#2c3e50" d="M193,-294.78C193,-280.58 193,-262.96 193,-247.46"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="196.5,-247.14 193,-237.14 189.5,-247.14 196.5,-247.14"/>
+</g>
+<!-- linear_6 -->
+<g id="node6" class="node">
+<title>linear_6</title>
+<polygon fill="#2aad5e" stroke="black" points="111.5,-92.95 16.5,-92.95 16.5,-36.95 111.5,-36.95 111.5,-92.95"/>
+<text text-anchor="middle" x="64" y="-80.15" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
+<text text-anchor="middle" x="64" y="-68.15" font-family="Helvetica,sans-Serif" font-size="11.00">#heads_0</text>
+<text text-anchor="middle" x="64" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">96us</text>
+<text text-anchor="middle" x="64" y="-44.15" font-family="Helvetica,sans-Serif" font-size="11.00">[6.7K params]</text>
+</g>
+<!-- linear_5&#45;&gt;linear_6 -->
+<g id="edge5" class="edge">
+<title>linear_5&#45;&gt;linear_6</title>
+<path fill="none" stroke="#2c3e50" d="M158.93,-180.83C146.42,-170.21 132.52,-157.54 121,-144.89 108.84,-131.54 96.9,-115.58 87.12,-101.52"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="89.86,-99.33 81.33,-93.05 84.08,-103.28 89.86,-99.33"/>
+</g>
+<!-- linear_7 -->
+<g id="node7" class="node">
+<title>linear_7</title>
+<polygon fill="#2aad5e" stroke="black" points="220.5,-92.95 129.5,-92.95 129.5,-36.95 220.5,-36.95 220.5,-92.95"/>
+<text text-anchor="middle" x="175" y="-80.15" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
+<text text-anchor="middle" x="175" y="-68.15" font-family="Helvetica,sans-Serif" font-size="11.00">#heads_1</text>
+<text text-anchor="middle" x="175" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">82us</text>
+<text text-anchor="middle" x="175" y="-44.15" font-family="Helvetica,sans-Serif" font-size="11.00">[514 params]</text>
+</g>
+<!-- linear_5&#45;&gt;linear_7 -->
+<g id="edge6" class="edge">
+<title>linear_5&#45;&gt;linear_7</title>
+<path fill="none" stroke="#2c3e50" d="M189.57,-180.86C186.79,-158.9 182.83,-127.69 179.74,-103.33"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="183.21,-102.84 178.48,-93.36 176.26,-103.72 183.21,-102.84"/>
+</g>
+<!-- linear_5&#45;&gt;visual_decoder_8 -->
+<g id="edge7" class="edge">
+<title>linear_5&#45;&gt;visual_decoder_8</title>
+<path fill="none" stroke="#2c3e50" d="M218.9,-180.86C238.37,-160.54 265.44,-132.29 287.86,-108.88"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="290.57,-111.11 294.96,-101.47 285.52,-106.27 290.57,-111.11"/>
+</g>
+<!-- linear_5&#45;&gt;visual_decoder_8 -->
+<g id="edge8" class="edge">
+<title>linear_5&#45;&gt;visual_decoder_8</title>
+<path fill="none" stroke="#2980b9" stroke-dasharray="5,2" d="M231.6,-180.65C238.65,-175.07 245.75,-169.02 252,-162.89 267.69,-147.5 283.14,-128.94 296.03,-112.19"/>
+<polygon fill="#2980b9" stroke="#2980b9" points="298.88,-114.22 302.14,-104.14 293.3,-109.99 298.88,-114.22"/>
+<text text-anchor="middle" x="274.5" y="-155.69" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#2980b9">latent</text>
+</g>
+</g>
+</svg>
+`;
+const ARCHIVE_COMPLETE="Complete (1h 10m)";
+const ARCHIVE_LABEL="LetterModel";
+const ARCHIVE_HASH="4d3ed67b10b76e51c8d478e15f5ac56121f7c043f93e64d9070cda3adc0a573c";
+const ARCHIVE_META={"batch_size":52,"blur_sigma_ratio":0.16,"checkpoint_interval":50,"content_weight":0.5,"diversity_sigma":0.1,"diversity_weight":1.0,"epochs":100,"latent_dim":256,"lr":0.001,"max_grad_norm":5.0,"min_lr":0.0,"n_classes":26,"n_read":6,"n_scales":1,"n_scan":1,"patch_size":12,"read_guide_weight":0.0,"read_vy":1.0,"recode_weight":1.0,"recon_weight":1.0,"save_dir":"training","scan_guide_weight":8.0,"scan_patch_w":18,"scan_void_weight":1.5,"scan_vy":0.3,"void_weight":0.5};
+const ARCHIVE_HARDWARE="Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz (16 threads, 19GB) | NVIDIA GeForce GTX 1060 6GB (5GB)";
+</script>
+<script>
+// State
+const epochs=[];
+const metricSeries={};  // name -> [values]
+const resourceSeries={cpu:[],gpu:[],ram:[],vram:[]};
+// Raw byte values for RAM/VRAM (for absolute-scale display when solo'd)
+const resourceRaw={ram_used:[],ram_total:[],vram_used:[],vram_total:[]};
+const COLORS=['#6c8cff','#f87171','#34d399','#fbbf24','#a78bfa','#fb923c','#67e8f9','#f472b6','#86efac','#fcd34d','#c4b5fd','#fdba74'];
+const RES_COLORS={cpu:'#6c8cff',ram:'#a78bfa',gpu:'#34d399',vram:'#fbbf24'};
+let metricNames=[];
+let startTime=null;
+let elapsedTimer=null;
+// Solo filter: {chartId: seriesName|null}. null = show all.
+const soloState={metricsChart:null,resourceChart:null};
+let _skipDraw=false;
+
+// --- Epoch processing (shared by live SSE and archive replay) ---
+function processEpoch(d){
+  epochs.push(d);
+  if(!startTime)startTime=Date.now()-(d.epoch*d.duration*1000);
+  const names=Object.keys(d.metrics||{});
+  names.forEach(n=>{
+    if(!metricSeries[n]){metricSeries[n]=[];metricNames.push(n)}
+    metricSeries[n].push(d.metrics[n]);
+  });
+  const r=d.resources||{};
+  resourceSeries.cpu.push(r.cpu!=null?r.cpu:null);
+  resourceSeries.gpu.push(r.gpu!=null?r.gpu:null);
+  resourceSeries.ram.push(r.ram_used!=null&&r.ram_total?r.ram_used/r.ram_total*100:null);
+  resourceSeries.vram.push(r.vram_used!=null&&r.vram_total?r.vram_used/r.vram_total*100:null);
+  resourceRaw.ram_used.push(r.ram_used||null);
+  resourceRaw.ram_total.push(r.ram_total||null);
+  resourceRaw.vram_used.push(r.vram_used||null);
+  resourceRaw.vram_total.push(r.vram_total||null);
+  updateHeader(d);
+  updateResources(r);
+  updateLog(d);
+  if(!_skipDraw){drawMetrics();drawResources()}
+  ensureLogHeaders();
+}
+function markComplete(msg){
+  document.getElementById('statusDot').classList.add('done');
+  document.getElementById('statusText').textContent=msg||'Complete';
+  if(elapsedTimer){clearInterval(elapsedTimer);elapsedTimer=null}
+}
+function showSvg(svg){
+  document.getElementById('svgCard').style.display='block';
+  document.getElementById('svgContainer').innerHTML=svg;
+}
+
+// --- Data source: live SSE or archive replay ---
+// ARCHIVE_DATA is injected by monitor.save_html(); if absent, connect live.
+if(typeof ARCHIVE_DATA!=='undefined'){
+  _skipDraw=true;
+  let archiveErr=null;
+  for(let i=0;i<ARCHIVE_DATA.length;i++){
+    try{processEpoch(ARCHIVE_DATA[i])}
+    catch(e){archiveErr=e;console.error('processEpoch failed at index '+i+':',e);break}
+  }
+  _skipDraw=false;
+  try{drawMetrics();drawResources()}catch(e){console.error('drawMetrics/drawResources:',e);archiveErr=archiveErr||e}
+  // Set elapsed from sum of epoch durations (wall-clock startTime is meaningless in archive)
+  const totalElapsed=ARCHIVE_DATA.reduce((s,d)=>s+(d.duration||0),0);
+  document.getElementById('elapsedDisplay').textContent=fmtDur(totalElapsed);
+  markComplete(archiveErr?'Archive error — see console':(ARCHIVE_COMPLETE||'Complete'));
+  if(typeof ARCHIVE_SVG==='string'){try{showSvg(ARCHIVE_SVG)}catch(e){console.error('showSvg:',e)}}
+  // Re-render after layout to ensure correct canvas dimensions
+  requestAnimationFrame(()=>{try{drawMetrics();drawResources()}catch(e){console.error('rAF redraw:',e)}});
+  if(archiveErr){
+    const d=document.createElement('div');
+    d.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1d27;color:#f87171;padding:24px;border-radius:8px;border:1px solid #f87171;z-index:999;font-family:monospace;max-width:80%;white-space:pre-wrap';
+    d.textContent='Archive replay error at epoch '+(epochs.length+1)+':\n'+archiveErr.message+'\n\nCheck browser console (F12) for details.\nProcessed '+epochs.length+'/'+ARCHIVE_DATA.length+' epochs.';
+    document.body.appendChild(d);
+  }
+}else{
+  const es=new EventSource('/events');
+  es.addEventListener('epoch',e=>processEpoch(JSON.parse(e.data)));
+  es.addEventListener('complete',()=>markComplete());
+  if(!elapsedTimer)elapsedTimer=setInterval(updateElapsed,1000);
+  fetch('/graph.svg').then(r=>{if(r.ok)return r.text();throw 0}).then(showSvg).catch(()=>{});
+}
+
+// --- Label/Hash/Metadata ---
+function applyLabelHash(label,hash){
+  const h1=document.querySelector('.header h1');
+  if(!h1)return;
+  const short=hash?hash.substring(0,8):null;
+  if(label&&short)h1.innerHTML='floDl <span>'+label+' ['+short+']</span>';
+  else if(short)h1.innerHTML='floDl <span>['+short+']</span>';
+  if(label||short){
+    const t=label?(short?label+' ['+short+']':'['+short+']'):'floDl';
+    document.title='floDl'+(label?' \u2014 '+label:'')+(short?' ['+short+']':'');
+  }
+}
+function showMeta(meta){
+  if(!meta)return;
+  const card=document.getElementById('metaCard');
+  const pre=document.getElementById('metaPre');
+  if(!card||!pre)return;
+  try{pre.textContent=typeof meta==='string'?meta:JSON.stringify(meta,null,2)}
+  catch(e){pre.textContent=String(meta)}
+  card.style.display='block';
+}
+function showHardware(hw){
+  if(!hw)return;
+  const el=document.getElementById('hwInfo');
+  if(!el)return;
+  el.textContent=hw;
+  el.style.display='block';
+}
+// Apply from archive constants
+if(typeof ARCHIVE_LABEL!=='undefined'||typeof ARCHIVE_HASH!=='undefined'){
+  applyLabelHash(typeof ARCHIVE_LABEL!=='undefined'?ARCHIVE_LABEL:null,typeof ARCHIVE_HASH!=='undefined'?ARCHIVE_HASH:null);
+}
+if(typeof ARCHIVE_META!=='undefined'&&ARCHIVE_META!==null){showMeta(ARCHIVE_META)}
+if(typeof ARCHIVE_HARDWARE!=='undefined'){showHardware(ARCHIVE_HARDWARE)}
+// Apply from live server injection
+if(typeof LIVE_LABEL!=='undefined'||typeof LIVE_HASH!=='undefined'){
+  applyLabelHash(typeof LIVE_LABEL!=='undefined'?LIVE_LABEL:null,typeof LIVE_HASH!=='undefined'?LIVE_HASH:null);
+}
+if(typeof LIVE_HARDWARE!=='undefined'){showHardware(LIVE_HARDWARE)}
+
+// --- Header ---
+function updateHeader(d){
+  document.getElementById('epochNum').textContent=d.epoch+'/'+d.total;
+  document.getElementById('progressFill').style.width=(d.epoch/d.total*100)+'%';
+  document.getElementById('statusDot').classList.remove('done');
+  document.getElementById('statusText').textContent='Training';
+  if(d.eta!=null)document.getElementById('etaDisplay').textContent=fmtDur(d.eta);
+  updateElapsed();
+}
+
+function updateElapsed(){
+  if(!startTime)return;
+  const s=(Date.now()-startTime)/1000;
+  document.getElementById('elapsedDisplay').textContent=fmtDur(s);
+}
+
+// --- Resources ---
+function updateResources(r){
+  setBar('cpu',r.cpu);
+  setBar('gpu',r.gpu);
+  if(r.ram_used!=null&&r.ram_total){
+    const pct=r.ram_used/r.ram_total*100;
+    document.getElementById('ramBar').style.width=pct+'%';
+    document.getElementById('ramVal').textContent=fmtBytes(r.ram_used)+'/'+fmtBytes(r.ram_total);
+  }
+  if(r.vram_used!=null&&r.vram_total){
+    const pct=r.vram_used/r.vram_total*100;
+    document.getElementById('vramBar').style.width=pct+'%';
+    document.getElementById('vramVal').textContent=fmtBytes(r.vram_used)+'/'+fmtBytes(r.vram_total);
+  }
+}
+function setBar(id,val){
+  if(val==null)return;
+  document.getElementById(id+'Bar').style.width=val+'%';
+  document.getElementById(id+'Val').textContent=val.toFixed(0)+'%';
+}
+
+// --- Log table ---
+var logHeadersSet=false;
+function ensureLogHeaders(){
+  if(logHeadersSet||metricNames.length===0)return;
+  logHeadersSet=true;
+  const hdr=document.getElementById('logHeader');
+  metricNames.forEach(n=>{const th=document.createElement('th');th.textContent=n;hdr.appendChild(th)});
+  const thRes=document.createElement('th');thRes.textContent='Resources';hdr.appendChild(thRes);
+}
+function updateLog(d){
+  const body=document.getElementById('logBody');
+  const tr=document.createElement('tr');
+  let html='<td>'+d.epoch+'/'+d.total+'</td><td>'+fmtDur(d.duration)+'</td>';
+  metricNames.forEach(n=>{
+    const v=d.metrics&&d.metrics[n]!=null?fmtVal(d.metrics[n]):'—';
+    html+='<td>'+v+'</td>';
+  });
+  const r=d.resources||{};
+  let res=[];
+  if(r.cpu!=null)res.push('CPU:'+r.cpu.toFixed(0)+'%');
+  if(r.gpu!=null)res.push('GPU:'+r.gpu.toFixed(0)+'%');
+  if(r.vram_used!=null&&r.vram_total)res.push('VRAM:'+fmtBytes(r.vram_used)+'/'+fmtBytes(r.vram_total));
+  html+='<td style="color:var(--dim);font-size:11px">'+res.join(' ')+'</td>';
+  tr.innerHTML=html;
+  body.insertBefore(tr,body.firstChild);
+}
+
+// --- Charts ---
+function drawChart(canvasId,series,colors,labels,isPercent,yFmt){
+  const canvas=document.getElementById(canvasId);
+  const ctx=canvas.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const rect=canvas.getBoundingClientRect();
+  canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;
+  ctx.scale(dpr,dpr);
+  const W=rect.width,H=rect.height;
+  const M={top:10,right:12,bottom:24,left:yFmt?70:48};
+  const pw=W-M.left-M.right,ph=H-M.top-M.bottom;
+  ctx.clearRect(0,0,W,H);
+
+  const allNames=Object.keys(series);
+  if(allNames.length===0)return;
+  const solo=soloState[canvasId]||null;
+  const names=solo?allNames.filter(n=>n===solo):allNames;
+  let maxEp=0,minV=Infinity,maxV=-Infinity;
+  // Scale axes to visible series only
+  names.forEach(n=>{
+    const vals=series[n];
+    maxEp=Math.max(maxEp,vals.length);
+    vals.forEach(v=>{if(v!=null){minV=Math.min(minV,v);maxV=Math.max(maxV,v)}});
+  });
+  // maxEp from all series (so X axis stays stable)
+  allNames.forEach(n=>{maxEp=Math.max(maxEp,series[n].length)});
+  if(!isFinite(minV)){minV=0;maxV=1}
+  if(minV===maxV){minV-=1;maxV+=1}
+  if(isPercent){minV=Math.min(0,minV);maxV=Math.max(100,maxV)}
+  const pad=(maxV-minV)*0.05;minV-=pad;maxV+=pad;
+  const xScale=i=>M.left+(i/Math.max(1,maxEp-1))*pw;
+  const yScale=v=>M.top+ph-(v-minV)/(maxV-minV)*ph;
+
+  // Grid
+  const yLabel=yFmt||fmtVal;
+  ctx.strokeStyle='rgba(42,45,58,0.8)';ctx.lineWidth=1;
+  const yTicks=4;
+  for(let i=0;i<=yTicks;i++){
+    const v=minV+(maxV-minV)*i/yTicks;
+    const y=yScale(v);
+    ctx.beginPath();ctx.moveTo(M.left,y);ctx.lineTo(W-M.right,y);ctx.stroke();
+    ctx.fillStyle='#8b8fa3';ctx.font='10px -apple-system,sans-serif';ctx.textAlign='right';
+    ctx.fillText(yLabel(v),M.left-6,y+3);
+  }
+  // X labels
+  const xStep=Math.max(1,Math.floor(maxEp/8));
+  ctx.textAlign='center';
+  for(let i=0;i<maxEp;i+=xStep){
+    ctx.fillStyle='#8b8fa3';ctx.font='10px -apple-system,sans-serif';
+    ctx.fillText(''+(i+1),xScale(i),H-M.bottom+14);
+  }
+
+  // Lines (filtered by solo state — names already filtered above)
+  allNames.forEach((n,si)=>{
+    if(solo&&solo!==n)return;
+    const vals=series[n];
+    const color=colors[si%colors.length];
+    ctx.strokeStyle=color;ctx.lineWidth=solo?3:2;ctx.beginPath();
+    let started=false;
+    vals.forEach((v,i)=>{
+      if(v==null)return;
+      const x=xScale(i),y=yScale(v);
+      if(!started){ctx.moveTo(x,y);started=true}else{ctx.lineTo(x,y)}
+    });
+    ctx.stroke();
+    // Dots for last point
+    if(vals.length>0){
+      const last=vals[vals.length-1];
+      if(last!=null){
+        ctx.fillStyle=color;ctx.beginPath();
+        ctx.arc(xScale(vals.length-1),yScale(last),3,0,Math.PI*2);ctx.fill();
+      }
+    }
+  });
+
+  // Store layout for tooltip
+  canvas._layout={xScale,yScale,maxEp,minV,maxV,series,names:allNames,colors,solo,yFmt:yLabel};
+}
+
+function drawMetrics(){
+  drawChart('metricsChart',metricSeries,COLORS,metricNames,false);
+  updateLegend('metricsLegend',metricNames,COLORS,'metricsChart',drawMetrics);
+}
+function drawResources(){
+  const resNames=['cpu','gpu','ram','vram'];
+  const resLabels={cpu:'CPU',gpu:'GPU',ram:'RAM',vram:'VRAM'};
+  const resColors=[RES_COLORS.cpu,RES_COLORS.gpu,RES_COLORS.ram,RES_COLORS.vram];
+  const solo=soloState['resourceChart'];
+  // When solo'd on RAM or VRAM, show raw bytes with proper scale
+  if(solo==='ram'||solo==='vram'){
+    const rawKey=solo+'_used';
+    const byteSeries={};
+    byteSeries[solo]=resourceRaw[rawKey];
+    drawChart('resourceChart',byteSeries,
+      [solo==='ram'?RES_COLORS.ram:RES_COLORS.vram],
+      [solo],false,fmtBytes);
+  }else if(solo==='cpu'||solo==='gpu'){
+    // Solo percentage metric with % suffix on axis
+    const pctSeries={};
+    pctSeries[solo]=resourceSeries[solo];
+    drawChart('resourceChart',pctSeries,
+      [solo==='cpu'?RES_COLORS.cpu:RES_COLORS.gpu],
+      [solo],true,v=>v.toFixed(0)+'%');
+  }else{
+    drawChart('resourceChart',resourceSeries,resColors,resNames,true);
+  }
+  updateLegend('resourceLegend',resNames,resColors,'resourceChart',drawResources,resLabels);
+}
+
+function updateLegend(id,names,colors,chartId,redrawFn,labels){
+  const el=document.getElementById(id);
+  // Rebuild if count changed
+  if(el.children.length!==names.length){
+    el.innerHTML='';
+    names.forEach((n,i)=>{
+      const item=document.createElement('div');item.className='legend-item';
+      item.dataset.name=n;
+      const dot=document.createElement('div');dot.className='legend-dot';
+      dot.style.background=colors[i%colors.length];
+      const label=(labels&&labels[n])||n;
+      item.appendChild(dot);item.appendChild(document.createTextNode(label));
+      item.addEventListener('click',()=>{
+        const cur=soloState[chartId];
+        soloState[chartId]=(cur===n)?null:n;
+        redrawFn();
+      });
+      el.appendChild(item);
+    });
+  }
+  // Update visual state
+  const solo=soloState[chartId];
+  Array.from(el.children).forEach(item=>{
+    const n=item.dataset.name;
+    item.classList.toggle('solo',solo===n);
+    item.classList.toggle('dimmed',solo!==null&&solo!==n);
+  });
+}
+
+// --- Tooltip ---
+['metricsChart','resourceChart'].forEach(id=>{
+  const canvas=document.getElementById(id);
+  canvas.addEventListener('mousemove',e=>{
+    const L=canvas._layout;if(!L)return;
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left;
+    let best=Infinity,bestI=-1;
+    for(let i=0;i<L.maxEp;i++){
+      const d=Math.abs(L.xScale(i)-mx);
+      if(d<best){best=d;bestI=i}
+    }
+    if(best>30){tooltip.style.display='none';return}
+    let html='<b>Epoch '+(bestI+1)+'</b>';
+    const tipFmt=L.yFmt||fmtVal;
+    L.names.forEach((n,si)=>{
+      if(L.solo&&L.solo!==n)return;
+      const v=L.series[n][bestI];
+      if(v!=null){
+        const c=L.colors[si%L.colors.length];
+        html+='<br><span style="color:'+c+'">&#9632;</span> '+n+': '+tipFmt(v);
+      }
+    });
+    const tip=document.getElementById('tooltip');
+    tip.innerHTML=html;tip.style.display='block';
+    let tx=e.clientX+14,ty=e.clientY-10;
+    const tw=tip.offsetWidth,th=tip.offsetHeight;
+    if(tx+tw>window.innerWidth)tx=e.clientX-tw-14;
+    if(ty+th>window.innerHeight)ty=e.clientY-th-10;
+    tip.style.left=tx+'px';tip.style.top=ty+'px';
+  });
+  canvas.addEventListener('mouseleave',()=>{document.getElementById('tooltip').style.display='none'});
+});
+
+// --- SVG toggle ---
+function toggleSvg(){
+  const t=document.getElementById('svgToggle');
+  const c=document.getElementById('svgContainer');
+  t.classList.toggle('open');c.classList.toggle('open');
+}
+
+// --- Formatters ---
+function fmtDur(s){
+  if(s<1)return Math.round(s*1000)+'ms';
+  if(s<60){const w=Math.floor(s);const f=Math.floor((s-w)*10);return f>0?w+'.'+f+'s':w+'s'}
+  const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);
+  if(h>0)return h+'h '+String(m).padStart(2,'0')+'m';
+  return m+'m '+String(sec).padStart(2,'0')+'s';
+}
+function fmtBytes(b){
+  const GB=1073741824,MB=1048576;
+  if(b>=GB)return(b/GB).toFixed(1)+' GB';
+  if(b>=MB)return Math.round(b/MB)+' MB';
+  return Math.round(b/1024)+' KB';
+}
+function fmtVal(v){
+  if(Math.abs(v)<0.001&&v!==0)return v.toExponential(2);
+  if(Math.abs(v)>=1000)return v.toFixed(1);
+  if(Math.abs(v)>=1)return v.toFixed(4);
+  return v.toFixed(4);
+}
+
+// --- Resize ---
+window.addEventListener('resize',()=>{drawMetrics();drawResources()});
+</script>
+</body>
+</html>

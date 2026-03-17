@@ -435,11 +435,11 @@ nn.SiLU()
 
 ```rust
 // flodl
-ReLU::new()
-Sigmoid::new()
-Tanh::new()
-GELU::new()
-SiLU::new()
+ReLU
+Sigmoid
+Tanh
+GELU
+SiLU
 ```
 
 ## Composite Modules
@@ -827,7 +827,7 @@ model = nn.Sequential(
 ```rust
 // flodl
 let model = FlowBuilder::from(Linear::new(784, 128)?)
-    .through(ReLU::new())
+    .through(ReLU)
     .through(Linear::new(128, 10)?)
     .build()?;
 ```
@@ -847,7 +847,7 @@ class ResBlock(nn.Module):
 ```rust
 // flodl — one line
 let model = FlowBuilder::from(Linear::new(128, 128)?)
-    .also(ReLU::new())    // skip connection: output = input + ReLU(input)
+    .also(ReLU)    // skip connection: output = input + ReLU(input)
     .build()?;
 ```
 
@@ -891,7 +891,7 @@ let model = FlowBuilder::from(init_module)
 ```rust
 // Hard routing — one expert per input
 let model = FlowBuilder::from(encoder)
-    .switch(ArgmaxSelector::new(), modules![expert1, expert2, expert3])
+    .switch(ArgmaxSelector::new(128, 3)?, modules![expert1, expert2, expert3])
     .build()?;
 
 // Soft routing — weighted mixture
@@ -916,7 +916,7 @@ let model = FlowBuilder::from(encoder)
 
 ```rust
 let mut model = FlowBuilder::from(Linear::new(4, 8)?)
-    .through(ReLU::new())
+    .through(ReLU)
     .build()?;
 
 // After each batch

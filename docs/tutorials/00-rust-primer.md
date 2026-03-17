@@ -277,6 +277,7 @@ fn main() -> Result<()> {
     model.set_training(true);
 
     for epoch in 0..200 {
+        let mut last_loss = 0.0;
         for (x, y) in &batches {
             let input = Variable::new(x.clone(), true);
             let target = Variable::new(y.clone(), false);
@@ -284,10 +285,11 @@ fn main() -> Result<()> {
             optimizer.zero_grad();
             let pred = model.forward(&input)?;
             let loss = mse_loss(&pred, &target)?;
+            last_loss = loss.item()?;
             loss.backward()?;
             optimizer.step()?;
         }
-        println!("Epoch {}: loss={:.4}", epoch, loss.item()?);
+        println!("Epoch {}: loss={:.4}", epoch, last_loss);
     }
     Ok(())
 }
