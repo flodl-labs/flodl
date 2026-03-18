@@ -145,8 +145,20 @@ a:hover { color: var(--cyan); }
   font-size: 18px;
   color: var(--dim);
   max-width: 560px;
-  margin: 0 auto 40px;
+  margin: 0 auto 24px;
   line-height: 1.5;
+}
+
+.hero-badges {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 40px;
+}
+
+.hero-badges img {
+  height: 20px;
 }
 
 /* ── Terminal block ─────────────────────────────── */
