@@ -1,0 +1,4 @@
+# Nothing is COPY'd into the images — workspace is bind-mounted.
+# Exclude everything to keep build context tiny and prevent
+# spurious image rebuilds when source files change.
+*

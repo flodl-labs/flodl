@@ -343,6 +343,10 @@ unsafe extern "C" {
         device_index: i32, allocated_bytes: *mut u64,
     ) -> *mut i8;
 
+    pub fn flodl_cuda_active_bytes(
+        device_index: i32, active_bytes: *mut u64,
+    ) -> *mut i8;
+
     pub fn flodl_cuda_empty_cache();
 
     pub fn flodl_cuda_utilization(device_index: i32) -> i32;
@@ -532,6 +536,11 @@ unsafe extern "C" {
     // --- cuDNN benchmark ---
 
     pub fn flodl_set_cudnn_benchmark(enable: i32);
+
+    // --- RNG seed ---
+
+    pub fn flodl_manual_seed(seed: u64);
+    pub fn flodl_cuda_manual_seed_all(seed: u64);
 
     // --- In-place operations ---
 

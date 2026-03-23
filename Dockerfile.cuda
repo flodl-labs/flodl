@@ -26,11 +26,15 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
     && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
-# --- libtorch (CUDA 12.4) ---
+# --- libtorch (CUDA 12.6) ---
 ARG LIBTORCH_VERSION=2.10.0
-RUN wget -q "https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu126.zip" \
-    && unzip -q "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu126.zip" -d /usr/local \
-    && rm "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu126.zip"
+RUN --mount=type=cache,target=/tmp/libtorch-cache \
+    ZIPFILE="libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu126.zip" && \
+    if [ ! -f "/tmp/libtorch-cache/${ZIPFILE}" ]; then \
+        wget -q "https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu126.zip" \
+            -O "/tmp/libtorch-cache/${ZIPFILE}"; \
+    fi && \
+    unzip -q "/tmp/libtorch-cache/${ZIPFILE}" -d /usr/local
 
 ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"

@@ -20,7 +20,10 @@ pub struct BenchResult {
     pub min_epoch_ms: f64,
     pub max_epoch_ms: f64,
     pub final_loss: f64,
+    /// Active tensor bytes (matches torch.cuda.memory_allocated semantics).
     pub vram_mb: Option<f64>,
+    /// Total allocator reservation (matches torch.cuda.memory_reserved semantics).
+    pub vram_reserved_mb: Option<f64>,
     pub rss_mb: f64,
 }
 
@@ -31,8 +34,10 @@ pub struct BenchConfig {
     pub measured_epochs: usize,
     pub batches_per_epoch: usize,
     pub batch_size: usize,
-    /// VRAM usage (bytes) before benchmark setup — subtracted from final reading.
+    /// Active VRAM (bytes) before benchmark setup.
     pub vram_baseline: u64,
+    /// Reserved VRAM (bytes) before benchmark setup.
+    pub vram_reserved_baseline: u64,
 }
 
 impl Default for BenchConfig {
@@ -44,18 +49,21 @@ impl Default for BenchConfig {
             batches_per_epoch: 100,
             batch_size: 128,
             vram_baseline: 0,
+            vram_reserved_baseline: 0,
         }
     }
 }
 
-/// Flush the caching allocator and snapshot allocator-level VRAM (bytes).
-/// Returns 0 on CPU.
-pub fn vram_baseline() -> u64 {
+/// Flush the caching allocator and snapshot VRAM baselines (active, reserved).
+/// Returns `(0, 0)` on CPU.
+pub fn vram_baseline() -> (u64, u64) {
     if flodl::cuda_available() {
         flodl::cuda_empty_cache();
-        flodl::cuda_allocated_bytes().unwrap_or(0)
+        let active = flodl::cuda_active_bytes().unwrap_or(0);
+        let reserved = flodl::cuda_allocated_bytes().unwrap_or(0);
+        (active, reserved)
     } else {
-        0
+        (0, 0)
     }
 }
 
@@ -97,11 +105,19 @@ pub fn run_benchmark(
         epoch_times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
 
-    // VRAM (allocator-level, delta from baseline)
-    let vram_mb = flodl::cuda_allocated_bytes()
+    // VRAM — active tensors (matches torch.cuda.memory_allocated)
+    let vram_mb = flodl::cuda_active_bytes()
         .ok()
         .map(|used| {
             let delta = used.saturating_sub(config.vram_baseline);
+            delta as f64 / (1024.0 * 1024.0)
+        });
+
+    // VRAM — allocator reservation (matches torch.cuda.memory_reserved)
+    let vram_reserved_mb = flodl::cuda_allocated_bytes()
+        .ok()
+        .map(|used| {
+            let delta = used.saturating_sub(config.vram_reserved_baseline);
             delta as f64 / (1024.0 * 1024.0)
         });
 
@@ -131,6 +147,7 @@ pub fn run_benchmark(
         max_epoch_ms: max,
         final_loss,
         vram_mb,
+        vram_reserved_mb,
         rss_mb,
     })
 }
@@ -147,7 +164,10 @@ pub fn print_result(r: &BenchResult) {
     eprintln!("    range:      {:.1} - {:.1} ms", r.min_epoch_ms, r.max_epoch_ms);
     eprintln!("    final loss: {:.6}", r.final_loss);
     if let Some(vram) = r.vram_mb {
-        eprintln!("    VRAM:       {:.0} MB", vram);
+        eprintln!("    VRAM alloc: {:.0} MB", vram);
+    }
+    if let Some(vram) = r.vram_reserved_mb {
+        eprintln!("    VRAM rsrvd: {:.0} MB", vram);
     }
     eprintln!("    RSS:        {:.0} MB", r.rss_mb);
     eprintln!();

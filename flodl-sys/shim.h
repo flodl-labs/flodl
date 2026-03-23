@@ -256,6 +256,8 @@ int flodl_cuda_is_available(void);
 int flodl_cuda_device_count(void);
 int flodl_force_cuda_link(void);
 void flodl_set_cudnn_benchmark(int enable);
+void flodl_manual_seed(uint64_t seed);
+void flodl_cuda_manual_seed_all(uint64_t seed);
 void flodl_set_current_device(int device_index);
 int flodl_get_current_device(void);
 void flodl_cuda_synchronize(int device_index);
@@ -270,6 +272,7 @@ char* flodl_cuda_mem_info(int device_index, uint64_t* used_bytes, uint64_t* tota
 // This can exceed physical VRAM when unified memory spills to host RAM.
 // spill = max(0, allocated - vram_total).
 char* flodl_cuda_alloc_bytes(int device_index, uint64_t* allocated_bytes);
+char* flodl_cuda_active_bytes(int device_index, uint64_t* active_bytes);
 
 // Release all unused cached memory from the CUDA caching allocator.
 // Equivalent to torch.cuda.empty_cache().

@@ -1118,6 +1118,28 @@ extern "C" char* flodl_cuda_alloc_bytes(int device_index,
 #endif
 }
 
+// Active allocator bytes (tensors actually in use, not cached free blocks).
+// Matches torch.cuda.max_memory_allocated() semantics.
+extern "C" char* flodl_cuda_active_bytes(int device_index,
+                                          uint64_t* active_bytes) {
+#ifdef FLODL_BUILD_CUDA
+    if (!torch::cuda::is_available()) {
+        return make_error("CUDA not available");
+    }
+    try {
+        auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(
+            (c10::DeviceIndex)device_index);
+        *active_bytes = (uint64_t)stats.allocated_bytes[0].current;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+#else
+    (void)device_index; (void)active_bytes;
+    return make_error("CUDA not available (built without cuda feature)");
+#endif
+}
+
 // --- CUDA empty cache ---
 
 extern "C" void flodl_cuda_empty_cache(void) {
@@ -1691,6 +1713,20 @@ extern "C" char* flodl_lstm_cell(FlodlTensor input, FlodlTensor hx,
 
 extern "C" void flodl_set_cudnn_benchmark(int enable) {
     at::globalContext().setBenchmarkCuDNN(enable != 0);
+}
+
+// --- RNG seed ---
+
+extern "C" void flodl_manual_seed(uint64_t seed) {
+    torch::manual_seed(static_cast<int64_t>(seed));
+}
+
+extern "C" void flodl_cuda_manual_seed_all(uint64_t seed) {
+#ifdef FLODL_BUILD_CUDA
+    torch::cuda::manual_seed_all(static_cast<int64_t>(seed));
+#else
+    (void)seed;
+#endif
 }
 
 // --- Meshgrid ---

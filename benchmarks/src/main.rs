@@ -47,7 +47,7 @@ fn main() {
 
     let run_all = !tier1_only && !tier2_only && single.is_none();
 
-    type BenchFn = Box<dyn Fn(Device, u64) -> flodl::Result<BenchResult>>;
+    type BenchFn = Box<dyn Fn(Device, u64, u64) -> flodl::Result<BenchResult>>;
 
     let benchmarks: Vec<(&str, BenchFn)> = vec![
         // Tier 1
@@ -79,8 +79,8 @@ fn main() {
         }
 
         eprintln!("--- {} ---", name);
-        let baseline = vram_baseline();
-        match run_fn(device, baseline) {
+        let (baseline_active, baseline_reserved) = vram_baseline();
+        match run_fn(device, baseline_active, baseline_reserved) {
             Ok(result) => {
                 if !json {
                     print_result(&result);
@@ -109,18 +109,21 @@ fn print_summary(results: &[BenchResult]) {
     eprintln!("=== Summary ===");
     eprintln!();
     eprintln!(
-        "  {:<20} {:>10} {:>10} {:>10} {:>10}",
-        "benchmark", "median", "mean", "params", "VRAM"
+        "  {:<20} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "benchmark", "median", "mean", "params", "alloc", "reserved"
     );
-    eprintln!("  {}", "-".repeat(64));
+    eprintln!("  {}", "-".repeat(74));
     for r in results {
-        let vram = r.vram_mb
+        let alloc = r.vram_mb
+            .map(|v| format!("{:.0} MB", v))
+            .unwrap_or_else(|| "—".into());
+        let rsrvd = r.vram_reserved_mb
             .map(|v| format!("{:.0} MB", v))
             .unwrap_or_else(|| "—".into());
         eprintln!(
-            "  {:<20} {:>8.1}ms {:>8.1}ms {:>10} {:>10}",
+            "  {:<20} {:>8.1}ms {:>8.1}ms {:>10} {:>10} {:>10}",
             r.name, r.median_epoch_ms, r.mean_epoch_ms,
-            format_count(r.param_count), vram,
+            format_count(r.param_count), alloc, rsrvd,
         );
     }
     eprintln!();

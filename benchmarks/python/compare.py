@@ -21,8 +21,8 @@ def main():
     # Header
     print()
     print(f"  {'benchmark':<20} {'PyTorch':>10} {'flodl':>10} {'delta':>8} "
-          f"{'VRAM(Py)':>10} {'VRAM(Rs)':>10}")
-    print(f"  {'-' * 72}")
+          f"{'Py alloc':>10} {'Rs alloc':>10} {'Py rsrvd':>10} {'Rs rsrvd':>10}")
+    print(f"  {'-' * 92}")
 
     for name in all_names:
         py = python_results.get(name)
@@ -37,10 +37,13 @@ def main():
         else:
             delta = "—"
 
-        py_vram = f"{py['vram_mb']:.0f} MB" if py and py.get("vram_mb") else "—"
-        rs_vram = f"{rs['vram_mb']:.0f} MB" if rs and rs.get("vram_mb") else "—"
+        py_alloc = f"{py['vram_mb']:.0f} MB" if py and py.get("vram_mb") else "—"
+        rs_alloc = f"{rs['vram_mb']:.0f} MB" if rs and rs.get("vram_mb") else "—"
+        py_rsrvd = f"{py['vram_reserved_mb']:.0f} MB" if py and py.get("vram_reserved_mb") else "—"
+        rs_rsrvd = f"{rs['vram_reserved_mb']:.0f} MB" if rs and rs.get("vram_reserved_mb") else "—"
 
-        print(f"  {name:<20} {py_ms:>10} {rs_ms:>10} {delta:>8} {py_vram:>10} {rs_vram:>10}")
+        print(f"  {name:<20} {py_ms:>10} {rs_ms:>10} {delta:>8} "
+              f"{py_alloc:>10} {rs_alloc:>10} {py_rsrvd:>10} {rs_rsrvd:>10}")
 
     print()
 

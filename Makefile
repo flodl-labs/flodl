@@ -15,10 +15,12 @@ RUN_BENCH = $(COMPOSE) run --rm bench
 
 # --- CPU targets ---
 
-# Build the Docker image
+# Build the Docker image (skips if already exists)
 image:
 	@mkdir -p .cargo-cache .cargo-git
-	$(COMPOSE) build dev
+	@if ! docker image inspect flodl-dev:latest >/dev/null 2>&1; then \
+		$(COMPOSE) build dev; \
+	fi
 
 # Build the project (debug)
 build: image
@@ -50,10 +52,12 @@ shell: image
 
 # --- CUDA targets ---
 
-# Build the CUDA Docker image
+# Build the CUDA Docker image (skips if already exists)
 cuda-image:
 	@mkdir -p .cargo-cache-cuda .cargo-git-cuda
-	$(COMPOSE) build cuda
+	@if ! docker image inspect flodl-cuda:latest >/dev/null 2>&1; then \
+		$(COMPOSE) build cuda; \
+	fi
 
 # Build with CUDA feature
 cuda-build: cuda-image

@@ -25,9 +25,13 @@ ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
 # --- libtorch (CPU-only, ~200MB) ---
 ARG LIBTORCH_VERSION=2.10.0
-RUN wget -q https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip \
-    && unzip -q libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip -d /usr/local \
-    && rm libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip
+RUN --mount=type=cache,target=/tmp/libtorch-cache \
+    ZIPFILE="libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip" && \
+    if [ ! -f "/tmp/libtorch-cache/${ZIPFILE}" ]; then \
+        wget -q "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip" \
+            -O "/tmp/libtorch-cache/${ZIPFILE}"; \
+    fi && \
+    unzip -q "/tmp/libtorch-cache/${ZIPFILE}" -d /usr/local
 
 ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib"

@@ -49,12 +49,13 @@ impl Module for GruSeqModel {
     }
 }
 
-pub fn run(device: Device, vram_baseline: u64) -> Result<BenchResult> {
+pub fn run(device: Device, vram_baseline: u64, vram_reserved_baseline: u64) -> Result<BenchResult> {
     let config = BenchConfig {
         name: "gru_seq".into(),
         batch_size: 128,
         batches_per_epoch: 50,
         vram_baseline,
+        vram_reserved_baseline,
         ..Default::default()
     };
 

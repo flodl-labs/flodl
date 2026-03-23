@@ -2025,6 +2025,22 @@ pub fn cuda_allocated_bytes() -> Result<u64> {
     cuda_allocated_bytes_idx(0)
 }
 
+/// Query bytes actively used by tensors on a specific device.
+///
+/// This is the Rust equivalent of `torch.cuda.memory_allocated()`. Unlike
+/// `cuda_allocated_bytes` (which reports the allocator's total reservation),
+/// this only counts sub-blocks currently backing live tensors.
+pub fn cuda_active_bytes_idx(device_index: i32) -> Result<u64> {
+    let mut active: u64 = 0;
+    check_err(unsafe { ffi::flodl_cuda_active_bytes(device_index, &mut active) })?;
+    Ok(active)
+}
+
+/// Query bytes actively used by tensors on device 0.
+pub fn cuda_active_bytes() -> Result<u64> {
+    cuda_active_bytes_idx(0)
+}
+
 /// Release all unused cached memory from the CUDA caching allocator.
 /// Equivalent to `torch.cuda.empty_cache()`.
 pub fn cuda_empty_cache() {
@@ -2168,6 +2184,23 @@ fn total_ram_gb() -> u64 {
 /// workloads due to warmup cost. Off by default — users opt in.
 pub fn set_cudnn_benchmark(enable: bool) {
     unsafe { ffi::flodl_set_cudnn_benchmark(enable as i32) }
+}
+
+/// Seed all libtorch RNGs (CPU + CUDA) for reproducible tensor ops.
+///
+/// This sets the global seed for `Tensor::rand`, `Tensor::randn`,
+/// dropout masks, and all other libtorch random operations.
+/// Call before model creation and training for full reproducibility.
+pub fn manual_seed(seed: u64) {
+    unsafe { ffi::flodl_manual_seed(seed) }
+}
+
+/// Seed all CUDA device RNGs. No-op when built without CUDA.
+///
+/// Usually you want `manual_seed()` instead, which seeds both CPU
+/// and CUDA. Use this only when you need to re-seed CUDA independently.
+pub fn cuda_manual_seed_all(seed: u64) {
+    unsafe { ffi::flodl_cuda_manual_seed_all(seed) }
 }
 
 /// Ask glibc to return free memory to the OS (Linux only).
@@ -2820,5 +2853,15 @@ mod tests {
     fn test_tensor_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Tensor>();
+    }
+
+    #[test]
+    fn test_manual_seed_reproducible() {
+        let opts = test_opts();
+        manual_seed(123);
+        let a = Tensor::randn(&[4, 4], opts).unwrap().to_f32_vec().unwrap();
+        manual_seed(123);
+        let b = Tensor::randn(&[4, 4], opts).unwrap().to_f32_vec().unwrap();
+        assert_eq!(a, b);
     }
 }

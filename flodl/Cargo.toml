@@ -27,6 +27,7 @@ indexmap = "2"
 flate2 = "1"
 hmac-sha256 = "1"
 serde_json = "1"
+rand = { version = "0.9", features = ["small_rng"] }
 
 [package.metadata.docs.rs]
 # docs.rs has no libtorch — build with this cfg so the -sys build.rs can skip compilation.

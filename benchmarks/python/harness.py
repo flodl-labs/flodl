@@ -28,6 +28,11 @@ def run_benchmark(name, model, batches, device, optimizer,
     """Run a benchmark and return a result dict."""
     param_count = sum(p.numel() for p in model.parameters())
 
+    # Reset VRAM tracking before each benchmark
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
     # Warmup
     for _ in range(warmup_epochs):
         for x, y in batches:
@@ -68,10 +73,12 @@ def run_benchmark(name, model, batches, device, optimizer,
     median = statistics.median(epoch_times)
     mean = statistics.mean(epoch_times)
 
-    # VRAM
+    # VRAM — report both allocated (active tensors) and reserved (allocator pool)
     vram_mb = None
+    vram_reserved_mb = None
     if device.type == "cuda":
         vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        vram_reserved_mb = torch.cuda.max_memory_reserved() / (1024 * 1024)
 
     # RSS
     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # Linux: kB
@@ -91,6 +98,7 @@ def run_benchmark(name, model, batches, device, optimizer,
         "max_epoch_ms": sorted_times[-1],
         "final_loss": final_loss,
         "vram_mb": vram_mb,
+        "vram_reserved_mb": vram_reserved_mb,
         "rss_mb": rss_mb,
     }
 
@@ -106,7 +114,8 @@ def print_result(r):
     print(f"    range:      {r['min_epoch_ms']:.1f} - {r['max_epoch_ms']:.1f} ms", file=sys.stderr)
     print(f"    final loss: {r['final_loss']:.6f}", file=sys.stderr)
     if r["vram_mb"] is not None:
-        print(f"    VRAM:       {r['vram_mb']:.0f} MB", file=sys.stderr)
+        print(f"    VRAM alloc: {r['vram_mb']:.0f} MB", file=sys.stderr)
+        print(f"    VRAM rsrvd: {r['vram_reserved_mb']:.0f} MB", file=sys.stderr)
     print(f"    RSS:        {r['rss_mb']:.0f} MB", file=sys.stderr)
     print(file=sys.stderr)
 
@@ -122,13 +131,14 @@ def format_count(n):
 def print_summary(results):
     print("=== Summary ===", file=sys.stderr)
     print(file=sys.stderr)
-    print(f"  {'benchmark':<20} {'median':>10} {'mean':>10} {'params':>10} {'VRAM':>10}", file=sys.stderr)
-    print(f"  {'-' * 64}", file=sys.stderr)
+    print(f"  {'benchmark':<20} {'median':>10} {'mean':>10} {'params':>10} {'alloc':>10} {'reserved':>10}", file=sys.stderr)
+    print(f"  {'-' * 74}", file=sys.stderr)
     for r in results:
-        vram = f"{r['vram_mb']:.0f} MB" if r["vram_mb"] is not None else "—"
+        alloc = f"{r['vram_mb']:.0f} MB" if r["vram_mb"] is not None else "—"
+        rsrvd = f"{r['vram_reserved_mb']:.0f} MB" if r.get("vram_reserved_mb") is not None else "—"
         print(
             f"  {r['name']:<20} {r['median_epoch_ms']:>8.1f}ms {r['mean_epoch_ms']:>8.1f}ms "
-            f"{format_count(r['param_count']):>10} {vram:>10}",
+            f"{format_count(r['param_count']):>10} {alloc:>10} {rsrvd:>10}",
             file=sys.stderr,
         )
     print(file=sys.stderr)
