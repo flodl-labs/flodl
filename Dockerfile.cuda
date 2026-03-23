@@ -3,7 +3,7 @@
 # Uses NVIDIA's CUDA base image with libtorch CUDA variant.
 # For runtime GPU access, use: docker run --gpus all ...
 
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -26,12 +26,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
     && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
-# --- libtorch (CUDA 12.6) ---
+# --- libtorch (CUDA 12.8) ---
 ARG LIBTORCH_VERSION=2.10.0
 RUN --mount=type=cache,target=/tmp/libtorch-cache \
-    ZIPFILE="libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu126.zip" && \
+    ZIPFILE="libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu128.zip" && \
     if [ ! -f "/tmp/libtorch-cache/${ZIPFILE}" ]; then \
-        wget -q "https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu126.zip" \
+        wget -q "https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu128.zip" \
             -O "/tmp/libtorch-cache/${ZIPFILE}"; \
     fi && \
     unzip -q "/tmp/libtorch-cache/${ZIPFILE}" -d /usr/local

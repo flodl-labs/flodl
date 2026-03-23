@@ -1053,16 +1053,25 @@ torch.cuda.max_memory_allocated()  # peak allocated
 let (used, total) = cuda_memory_info()?;   // (bytes_used, bytes_total)
 let util = cuda_utilization();              // Option<u32> — GPU % via NVML
 
-println!("VRAM: {}/{}", used, total);       // e.g., 2254857830/6442450944
-if let Some(pct) = util {
-    println!("GPU utilization: {}%", pct);  // e.g., 82%
-}
+// Allocator-level queries
+let active = cuda_active_bytes()?;             // bytes backing live tensors
+let peak = cuda_peak_active_bytes()?;          // max since last reset
+let peak_reserved = cuda_peak_reserved_bytes()?;  // max allocator reservation
+
+// Reset peak tracking (e.g., between profiling phases)
+cuda_empty_cache();
+cuda_reset_peak_stats();
 ```
 
 | PyTorch | flodl | What it reports |
 |---------|-------|----------------|
 | `torch.cuda.mem_get_info()` | `cuda_memory_info()?` | `(used, total)` bytes via `cudaMemGetInfo` |
+| `torch.cuda.memory_allocated()` | `cuda_active_bytes()?` | Bytes currently backing live tensors |
 | `torch.cuda.memory_reserved()` | `cuda_allocated_bytes()?` | Bytes reserved by caching allocator (includes spill) |
+| `torch.cuda.max_memory_allocated()` | `cuda_peak_active_bytes()?` | Peak allocated since last reset |
+| `torch.cuda.max_memory_reserved()` | `cuda_peak_reserved_bytes()?` | Peak reserved since last reset |
+| `torch.cuda.reset_peak_memory_stats()` | `cuda_reset_peak_stats()` | Reset peak counters |
+| `torch.cuda.empty_cache()` | `cuda_empty_cache()` | Release unused cached blocks |
 | *(no built-in)* | `cuda_utilization()` | GPU compute % via NVML |
 
 The monitor samples these automatically on every `log()` call — you don't need
@@ -1092,4 +1101,11 @@ to query them manually during training.
 | `torch.cuda.memory_reserved()` | `cuda_allocated_bytes()?` | Bytes reserved by caching allocator |
 | `x.pin_memory()` | `x.pin_memory()?` | Page-locked CPU memory for async transfers |
 | `x.is_pinned()` | `x.is_pinned()` | Check if tensor is in pinned memory |
+| `x.to(device, non_blocking=True)` | `x.to_device_async(device)?` | Non-blocking transfer (pair with `pin_memory`) |
+| `x.to(memory_format=channels_last)` | `x.to_channels_last()?` | NHWC layout for Conv2d (8-35% on Tensor Cores) |
+| `x.is_contiguous(channels_last)` | `x.is_channels_last()` | Check memory format |
+| `torch.cuda.amp.autocast()` | `autocast(DType::Float16, \|\| { })` | Automatic mixed precision dispatch |
+| `torch.cuda.amp.GradScaler()` | `GradScaler::new()` | Dynamic loss scaling for AMP |
+| `torch.cuda.CUDAGraph()` | `CudaGraph::new()?` | CUDA graph capture/replay |
+| `torch.cuda.graph(g)` | `cuda_graph_capture(warmup, pool, \|\| { })` | Convenience capture helper |
 | `SummaryWriter` + TensorBoard | `Monitor::new(n).serve(3000)?` | Built-in live dashboard |

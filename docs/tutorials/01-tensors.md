@@ -173,6 +173,48 @@ let loss = mse_loss(&pred, &target)?;
 println!("autograd nodes: {}", loss.data().autograd_node_count());
 ```
 
+### Peak VRAM Tracking
+
+On CUDA devices, you can track peak GPU memory usage during a training step or
+any other section of code. These match the standard PyTorch memory diagnostics:
+
+| flodl | PyTorch equivalent |
+|---|---|
+| `cuda_peak_active_bytes()` | `torch.cuda.max_memory_allocated()` |
+| `cuda_peak_reserved_bytes()` | `torch.cuda.max_memory_reserved()` |
+| `cuda_reset_peak_stats()` | `torch.cuda.reset_peak_memory_stats()` |
+
+"Active" bytes are memory currently holding tensor data. "Reserved" bytes
+include the CUDA caching allocator's free pool — memory that libtorch has
+obtained from the driver but is not currently in use by any tensor. The gap
+between the two tells you how much allocator headroom exists.
+
+A typical pattern for profiling a training step:
+
+```rust
+use flodl::{cuda_reset_peak_stats, cuda_peak_active_bytes, cuda_peak_reserved_bytes,
+            cuda_empty_cache};
+
+// Flush the allocator cache so reserved starts from a clean baseline
+cuda_empty_cache();
+cuda_reset_peak_stats();
+
+// --- run one training step ---
+let output = model.forward(&batch)?;
+let loss = mse_loss(&output, &targets)?;
+loss.backward()?;
+optimizer.step()?;
+optimizer.zero_grad()?;
+
+// Read peaks
+let active_mb = cuda_peak_active_bytes()? as f64 / 1048576.0;
+let reserved_mb = cuda_peak_reserved_bytes()? as f64 / 1048576.0;
+println!("peak active: {active_mb:.1} MB, peak reserved: {reserved_mb:.1} MB");
+```
+
+The `_idx` variants (`cuda_peak_active_bytes_idx`, `cuda_peak_reserved_bytes_idx`,
+`cuda_reset_peak_stats_idx`) accept an explicit device index for multi-GPU setups.
+
 ## Device Transfer
 
 ```rust
@@ -183,6 +225,36 @@ if flodl::cuda_available() {
     println!("CUDA devices: {}", flodl::cuda_device_count());
 }
 ```
+
+### Non-blocking Device Transfer
+
+The default `to_device()` blocks until the transfer completes. For CPU-to-GPU
+transfers, you can overlap the copy with CPU work by using pinned memory and an
+asynchronous transfer:
+
+```rust
+use flodl::{Tensor, Device, TensorOptions, cuda_synchronize};
+
+let cpu_tensor = Tensor::randn(&[256, 512], TensorOptions::default())?;
+
+// Pin the CPU tensor into page-locked memory (requires CUDA)
+let pinned = cpu_tensor.pin_memory()?;
+
+// Launch the transfer — returns immediately
+let gpu = pinned.to_device_async(Device::CUDA(0))?;
+
+// ... do CPU work while the DMA transfer runs ...
+
+// Synchronize before using the GPU tensor
+cuda_synchronize(0);
+```
+
+`pin_memory()` allocates the tensor in page-locked (pinned) host memory, which
+the GPU can DMA directly without an intermediate staging copy. This matters most
+when you are streaming large batches to the GPU and want to keep the CPU busy
+with data preprocessing for the next batch.
+
+You can check whether a tensor is already pinned with `t.is_pinned()`.
 
 ## Reproducibility
 
@@ -218,6 +290,75 @@ flodl::set_cudnn_benchmark(true);  // opt-in, 5-10% speedup for fixed shapes
 
 Leave this off for dynamic-shape workloads (variable-length sequences,
 multi-resolution images) — the warmup cost can hurt throughput.
+
+## Memory Format (Channels Last)
+
+By default, 4D tensors use the NCHW memory layout (batch, channels, height, width).
+GPUs with Tensor Cores (NVIDIA Volta and newer) can run convolutions significantly
+faster when tensors are stored in NHWC order, also called "channels last."
+
+```rust
+let images = Tensor::randn(&[8, 3, 224, 224], TensorOptions::default())?;
+
+// Convert to channels-last layout
+let images_cl = images.to_channels_last()?;
+
+assert!(images_cl.is_channels_last());
+assert_eq!(images_cl.shape(), &[8, 3, 224, 224]); // logical shape unchanged
+```
+
+The logical shape stays the same — only the physical memory stride order changes.
+This avoids format-conversion overhead inside cuDNN convolution kernels. On Tensor
+Core GPUs, expect an 8--35% speedup for Conv2d-heavy workloads, depending on layer
+sizes and batch dimensions.
+
+Convert your input tensors and model weights to channels-last format before
+training. flodl's Conv2d will pick up the layout automatically.
+
+## Foreach Operations
+
+Foreach operations apply the same operation to a list of tensors in a single
+fused CUDA kernel launch. When you have dozens or hundreds of parameter tensors
+(typical in any real model), this eliminates per-tensor kernel launch overhead.
+
+All foreach functions are associated functions on `Tensor`:
+
+```rust
+use flodl::Tensor;
+
+let params: Vec<Tensor> = model.parameters();
+
+// Zero all parameter gradients in one launch
+Tensor::foreach_zero_(&params)?;
+
+// Scale every tensor by a constant
+Tensor::foreach_mul_scalar_(&params, 0.99)?;
+
+// Add a constant to every tensor
+Tensor::foreach_add_scalar_(&params, 1e-8)?;
+```
+
+There are also multi-list variants that operate on pairs of tensor lists
+element-wise:
+
+```rust
+// params[i] += grads[i] * alpha, for all i
+Tensor::foreach_add_list_(&params, &grads, -0.01)?;
+
+// params[i] = lerp(params[i], targets[i], weight), for all i
+Tensor::foreach_lerp_scalar_(&params, &targets, 0.1)?;
+
+// In-place sqrt of every tensor
+Tensor::foreach_sqrt_(&params)?;
+
+// Compute the L2 norm of each tensor — returns a Vec<Tensor> of scalars
+let norms: Vec<Tensor> = Tensor::foreach_norm(&params, 2.0)?;
+```
+
+You typically do not need to call these directly. flodl's fused optimizers
+(Adam, AdamW) and gradient clipping routines use foreach operations internally
+to minimize kernel launch overhead. They are exposed in the public API for
+advanced use cases like custom optimizers or manual parameter surgery.
 
 ---
 

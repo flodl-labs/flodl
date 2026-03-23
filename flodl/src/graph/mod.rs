@@ -62,6 +62,21 @@ pub enum MergeOp {
     Mean,
 }
 
+/// Pre-computed route from one node's output port to another node's input port.
+/// Replaces HashMap-based edge routing in forward_impl for O(1) access.
+#[derive(Clone)]
+struct Route {
+    from_port_idx: usize,
+    to_node_idx: usize,
+    to_port_idx: usize,
+}
+
+/// Pre-computed graph input → node input slot mapping.
+struct InputRoute {
+    node_idx: usize,
+    port_idx: usize,
+}
+
 /// Forward-reference state buffer. Persists across `forward()` calls.
 struct StateEntry {
     writer_ni: usize,
@@ -96,6 +111,7 @@ pub struct Graph {
     node_index: HashMap<String, usize>,
     levels: Vec<Vec<usize>>,
     edges: Vec<Edge>,
+    #[allow(dead_code)] // kept for DOT/debug introspection
     edges_from: HashMap<usize, Vec<usize>>,
     inputs: Vec<ExposedPort>,
     outputs: Vec<ExposedPort>,
@@ -128,6 +144,14 @@ pub struct Graph {
     // Identity: label + structural hash
     label: Option<String>,
     structural_hash_cache: OnceCell<String>,
+    // Pre-computed execution plan (built once, used every forward call)
+    routes_from: Vec<Vec<Route>>,
+    input_routes: Vec<InputRoute>,
+    output_node_idx: usize,
+    output_port_idx: usize,
+    node_input_count: Vec<usize>,
+    // Cached execution buffers (reused across forward calls, avoids re-allocation)
+    exec_slots: RefCell<Vec<Vec<Option<Variable>>>>,
 }
 
 impl Graph {
@@ -234,6 +258,60 @@ impl Graph {
             }
         }
 
+        // Pre-compute routing table: flat Vec lookups replace HashMap edge routing
+        let n = nodes.len();
+        let mut routes_from: Vec<Vec<Route>> = vec![Vec::new(); n];
+        for edge in &edges {
+            let from_ni = node_index[&edge.from_node];
+            let to_ni = node_index[&edge.to_node];
+            let from_port_idx = nodes[from_ni]
+                .output_ports
+                .iter()
+                .position(|p| p == &edge.from_port)
+                .unwrap_or(0);
+            let to_port_idx = nodes[to_ni]
+                .input_ports
+                .iter()
+                .position(|p| p == &edge.to_port)
+                .unwrap_or(0);
+            routes_from[from_ni].push(Route {
+                from_port_idx,
+                to_node_idx: to_ni,
+                to_port_idx,
+            });
+        }
+
+        // Pre-compute graph input → slot mapping
+        let input_routes: Vec<InputRoute> = inputs
+            .iter()
+            .map(|ep| {
+                let ni = node_index[&ep.node_id];
+                let port_idx = nodes[ni]
+                    .input_ports
+                    .iter()
+                    .position(|p| p == &ep.port)
+                    .unwrap_or(0);
+                InputRoute {
+                    node_idx: ni,
+                    port_idx,
+                }
+            })
+            .collect();
+
+        // Pre-compute output location
+        let output_node_idx = node_index[&outputs[0].node_id];
+        let output_port_idx = nodes[output_node_idx]
+            .output_ports
+            .iter()
+            .position(|p| p == &outputs[0].port)
+            .unwrap_or(0);
+
+        // Pre-compute input port counts and allocate execution buffers
+        let node_input_count: Vec<usize> = nodes.iter().map(|nd| nd.input_ports.len()).collect();
+        let exec_slots = RefCell::new(
+            node_input_count.iter().map(|&c| vec![None; c]).collect(),
+        );
+
         Ok(Graph {
             nodes,
             node_index,
@@ -263,6 +341,12 @@ impl Graph {
             epoch_count: Cell::new(0),
             label,
             structural_hash_cache: OnceCell::new(),
+            routes_from,
+            input_routes,
+            output_node_idx,
+            output_port_idx,
+            node_input_count,
+            exec_slots,
         })
     }
 
@@ -296,22 +380,30 @@ impl Graph {
             HashMap::new()
         };
 
-        let n = self.nodes.len();
-        let mut input_slots: Vec<HashMap<String, Option<Variable>>> =
-            (0..n).map(|_| HashMap::new()).collect();
-        let mut output_values: Vec<Option<Vec<Variable>>> = vec![None; n];
         let has_tags = !self.tag_capture.is_empty();
-        let mut tagged_outputs = if has_tags {
-            Some(HashMap::new())
-        } else {
-            None
-        };
 
-        // Route graph inputs to node input ports
-        for (i, ep) in self.inputs.iter().enumerate() {
-            let ni = self.node_index[&ep.node_id];
-            input_slots[ni].insert(ep.port.clone(), Some(graph_inputs[i].clone()));
+        // Reuse cached execution buffers (Vec-indexed, no HashMap overhead)
+        let mut slots = self.exec_slots.borrow_mut();
+
+        // Clear previous values (drops old Variables, reuses allocations)
+        for node_slots in slots.iter_mut() {
+            for slot in node_slots.iter_mut() {
+                *slot = None;
+            }
         }
+
+        // Clear tagged outputs
+        if has_tags {
+            self.tagged_outputs.borrow_mut().clear();
+        }
+
+        // Route graph inputs via pre-computed index mapping
+        for (i, route) in self.input_routes.iter().enumerate() {
+            slots[route.node_idx][route.port_idx] = Some(graph_inputs[i].clone());
+        }
+
+        // Will hold the output node's results until we can extract the final value
+        let mut final_output: Option<Vec<Variable>> = None;
 
         // Execute levels sequentially
         for (level_idx, level) in self.levels.iter().enumerate() {
@@ -320,34 +412,39 @@ impl Graph {
 
             for &ni in level {
                 let node = &self.nodes[ni];
+                let input_count = self.node_input_count[ni];
 
-                // Collect inputs in port order, zero-filling nil state refs
-                let inputs: Vec<Variable> = node
-                    .input_ports
-                    .iter()
-                    .enumerate()
-                    .map(|(i, port)| {
-                        match input_slots[ni].get(port).and_then(|v| v.as_ref()) {
+                // Collect inputs from pre-indexed slots (no HashMap lookups)
+                let inputs: Vec<Variable> = (0..input_count)
+                    .map(|i| {
+                        match slots[ni][i].as_ref() {
                             Some(v) => v.clone(),
                             None if i > 0 => {
-                                // Zero fill: create zeros matching first input shape
-                                let first = input_slots[ni]
-                                    .get(&node.input_ports[0])
-                                    .and_then(|v| v.as_ref())
+                                // Zero fill for unconnected ref ports (forward refs)
+                                let first = slots[ni][0]
+                                    .as_ref()
                                     .expect("missing primary input");
                                 Variable::new(
                                     Tensor::zeros_like(&first.data()).unwrap(),
                                     false,
                                 )
                             }
-                            _ => panic!("missing input '{}' for node '{}'", port, node.id),
+                            _ => panic!(
+                                "missing input port {} for node '{}'",
+                                i, node.id
+                            ),
                         }
                     })
                     .collect();
 
-                // Execute (with optional per-node timing)
+                // Release input slots early (frees Rc references)
+                for slot in slots[ni].iter_mut() {
+                    *slot = None;
+                }
+
+                // Execute node (with optional per-node timing)
                 let node_start = if is_profiling { Some(Instant::now()) } else { None };
-                let outputs = (node.run)(&inputs)?;
+                let node_outputs = (node.run)(&inputs)?;
                 if is_profiling {
                     let elapsed = node_start.unwrap().elapsed();
                     level_sum_ns += elapsed.as_nanos() as u64;
@@ -358,50 +455,45 @@ impl Graph {
                         level: level_idx,
                     });
                 }
-                output_values[ni] = Some(outputs);
 
-                // Route outputs to downstream nodes
-                if let Some(edge_indices) = self.edges_from.get(&ni) {
-                    for &ei in edge_indices {
-                        let edge = &self.edges[ei];
-                        let from_port_idx = node
-                            .output_ports
-                            .iter()
-                            .position(|p| p == &edge.from_port)
-                            .expect("bad output port");
-                        let to_ni = self.node_index[&edge.to_node];
-                        let outs = output_values[ni].as_ref().unwrap();
-                        // State read with no value returns empty vec → insert None
-                        let value = if from_port_idx < outs.len() {
-                            Some(outs[from_port_idx].clone())
-                        } else {
-                            None
-                        };
-                        input_slots[to_ni].insert(edge.to_port.clone(), value);
-                    }
+                // Route outputs via pre-computed routing table (no HashMap, no String ops)
+                for route in &self.routes_from[ni] {
+                    let value = if route.from_port_idx < node_outputs.len() {
+                        Some(node_outputs[route.from_port_idx].clone())
+                    } else {
+                        None
+                    };
+                    slots[route.to_node_idx][route.to_port_idx] = value;
                 }
 
                 // Capture state: if this node is a state writer, store its output
-                if let Some(writers) = self.state_writers.get(&ni)
-                    && let Some(ref outs) = output_values[ni]
-                {
+                if let Some(writers) = self.state_writers.get(&ni) {
                     for &(si, port_idx) in writers {
-                        if port_idx < outs.len() {
-                            *self.state[si].value.borrow_mut() = Some(outs[port_idx].clone());
+                        if port_idx < node_outputs.len() {
+                            *self.state[si].value.borrow_mut() =
+                                Some(node_outputs[port_idx].clone());
                         }
                     }
                 }
 
                 // Capture tagged outputs for observation
-                if let Some(ref mut tagged) = tagged_outputs
-                    && let Some(captures) = self.tag_capture.get(&ni)
-                    && let Some(ref outs) = output_values[ni]
-                {
-                    for (tag_name, port_idx) in captures {
-                        if *port_idx < outs.len() {
-                            tagged.insert(tag_name.clone(), outs[*port_idx].clone());
+                if has_tags {
+                    if let Some(captures) = self.tag_capture.get(&ni) {
+                        let mut tagged = self.tagged_outputs.borrow_mut();
+                        for (tag_name, port_idx) in captures {
+                            if *port_idx < node_outputs.len() {
+                                tagged.insert(
+                                    tag_name.clone(),
+                                    node_outputs[*port_idx].clone(),
+                                );
+                            }
                         }
                     }
+                }
+
+                // Keep output node's results; all others drop here (early release)
+                if ni == self.output_node_idx {
+                    final_output = Some(node_outputs);
                 }
             }
 
@@ -416,10 +508,8 @@ impl Graph {
             }
         }
 
-        // Store tagged outputs
-        if let Some(tagged) = tagged_outputs {
-            *self.tagged_outputs.borrow_mut() = tagged;
-        }
+        // Drop the borrow before storing profile (which also borrows RefCells)
+        drop(slots);
 
         // Store profile
         if is_profiling {
@@ -430,18 +520,9 @@ impl Graph {
             });
         }
 
-        // Collect graph output
-        let out = &self.outputs[0];
-        let out_ni = self.node_index[&out.node_id];
-        let out_port_idx = self.nodes[out_ni]
-            .output_ports
-            .iter()
-            .position(|p| p == &out.port)
-            .expect("bad output port");
-
-        output_values[out_ni]
-            .as_ref()
-            .and_then(|o| o.get(out_port_idx).cloned())
+        // Extract graph output
+        final_output
+            .and_then(|o| o.into_iter().nth(self.output_port_idx))
             .ok_or_else(|| TensorError::new("graph produced no output"))
     }
 }

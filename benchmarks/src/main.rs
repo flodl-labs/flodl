@@ -15,15 +15,16 @@
 //!   --tier2        Run tier 2 only
 //!   --bench NAME   Run a single benchmark by name
 //!   --json         Output results as JSON (to stdout)
-//!   --epochs N     Measured epochs (default: 20)
-//!   --warmup N     Warmup epochs (default: 3)
+//!   --epochs N     Measured epochs per run (default: 20)
+//!   --warmup N     Warmup epochs per run (default: 3)
+//!   --runs N       Total runs per benchmark: 1 warmup + N-1 measured (default: 4)
 
 mod harness;
 mod tier1;
 mod tier2;
 
 use flodl::{cuda_available, set_cudnn_benchmark, Device};
-use harness::{BenchResult, print_result, vram_baseline};
+use harness::{BenchResult, print_result};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -47,7 +48,7 @@ fn main() {
 
     let run_all = !tier1_only && !tier2_only && single.is_none();
 
-    type BenchFn = Box<dyn Fn(Device, u64, u64) -> flodl::Result<BenchResult>>;
+    type BenchFn = Box<dyn Fn(Device) -> flodl::Result<BenchResult>>;
 
     let benchmarks: Vec<(&str, BenchFn)> = vec![
         // Tier 1
@@ -58,7 +59,7 @@ fn main() {
         ("residual_tower",    Box::new(tier2::residual_tower::run)),
         ("gated_routing",     Box::new(tier2::gated_routing::run)),
         ("iterative_refine",  Box::new(tier2::iterative_refine::run)),
-        ("feedback_loop",     Box::new(tier2::feedback_loop::run)),
+        ("feedback_fixed",   Box::new(tier2::feedback_loop_fixed::run)),
     ];
 
     let tier1_names = ["mlp", "convnet", "gru_seq"];
@@ -79,8 +80,7 @@ fn main() {
         }
 
         eprintln!("--- {} ---", name);
-        let (baseline_active, baseline_reserved) = vram_baseline();
-        match run_fn(device, baseline_active, baseline_reserved) {
+        match run_fn(device) {
             Ok(result) => {
                 if !json {
                     print_result(&result);

@@ -273,6 +273,20 @@ padding modules, `Unfold`/`Fold`
 - **`manual_seed` / `cuda_manual_seed_all`**: Full-stack reproducibility seeding
 - **`cuda_active_bytes`**: Active tensor VRAM measurement (complements `cuda_allocated_bytes`)
 - **`MaxPool2d`**: 2D max pooling with full FFI chain
+- **Foreach ops** (7 variants): `foreach_add_scalar_`, `foreach_mul_scalar_`, `foreach_zero_`, `foreach_add_list_`, `foreach_norm`, `foreach_lerp_scalar_`, `foreach_sqrt_`
+- **Fused Adam/AdamW**: `_fused_adamw_` single multi-tensor kernel on CUDA
+- **Fused gradient clipping**: foreach_norm + foreach_mul (2 kernels instead of 2N)
+- **Autocast / automatic mixed precision**: `AutocastGuard`, `autocast` closure, `is_autocast_enabled`
+- **GradScaler**: scale, unscale, step, update with dynamic scale
+- **CUDA Graphs**: capture/replay/reset, memory pools, capture modes (`CudaGraph`, `cuda_graph_capture`)
+- **Peak VRAM tracking**: `cuda_peak_active_bytes`, `cuda_peak_reserved_bytes`, `cuda_reset_peak_stats`
+- **Pre-computed graph routing**: Vec-indexed routes, cached exec buffers
+- **Gate vectorization**: stack + broadcast multiply + sum
+- **Loop fast-path**: direct forward when no refs
+- **Channels-last memory format**: `to_channels_last`, `is_channels_last`
+- **Non-blocking device transfer**: `to_device_async`
+- **`pin_memory`**
+- **`copy_` with non_blocking**
 
 ## Phase 11: Future
 

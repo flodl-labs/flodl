@@ -11,6 +11,7 @@
 #include "shim.h"
 #include <torch/torch.h>
 #include <torch/csrc/autograd/function.h>
+#include <ATen/autocast_mode.h>
 #include <cstring>
 #include <string>
 #include <queue>
@@ -88,6 +89,18 @@ static FlodlTensor wrap(torch::Tensor t) {
 // Helper: unwrap an FlodlTensor handle back to a reference.
 static torch::Tensor& unwrap(FlodlTensor t) {
     return *((torch::Tensor*)t);
+}
+
+// Helper: convert FlodlTensor* array to std::vector<at::Tensor>.
+// The returned tensors share storage with the originals — in-place ops
+// on the vector elements modify the original data.
+static std::vector<at::Tensor> unwrap_list(FlodlTensor* tensors, int count) {
+    std::vector<at::Tensor> result;
+    result.reserve(count);
+    for (int i = 0; i < count; i++) {
+        result.push_back(unwrap(tensors[i]));
+    }
+    return result;
 }
 
 // Helper: build IntArrayRef from C array.
@@ -1004,6 +1017,17 @@ extern "C" char* flodl_to_device(FlodlTensor t, int device_type,
     }
 }
 
+extern "C" char* flodl_to_device_async(FlodlTensor t, int device_type,
+                                       int device_index, FlodlTensor* result) {
+    try {
+        *result = wrap(unwrap(t).to(to_device(device_type, device_index),
+                                    /*non_blocking=*/true));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 extern "C" int flodl_cuda_is_available(void) {
     return torch::cuda::is_available() ? 1 : 0;
 }
@@ -1119,7 +1143,7 @@ extern "C" char* flodl_cuda_alloc_bytes(int device_index,
 }
 
 // Active allocator bytes (tensors actually in use, not cached free blocks).
-// Matches torch.cuda.max_memory_allocated() semantics.
+// Matches torch.cuda.memory_allocated() semantics (current, not peak).
 extern "C" char* flodl_cuda_active_bytes(int device_index,
                                           uint64_t* active_bytes) {
 #ifdef FLODL_BUILD_CUDA
@@ -1137,6 +1161,60 @@ extern "C" char* flodl_cuda_active_bytes(int device_index,
 #else
     (void)device_index; (void)active_bytes;
     return make_error("CUDA not available (built without cuda feature)");
+#endif
+}
+
+// Peak active allocator bytes (max since last reset).
+// Matches torch.cuda.max_memory_allocated() semantics.
+extern "C" char* flodl_cuda_peak_active_bytes(int device_index,
+                                               uint64_t* peak_bytes) {
+#ifdef FLODL_BUILD_CUDA
+    if (!torch::cuda::is_available()) {
+        return make_error("CUDA not available");
+    }
+    try {
+        auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(
+            (c10::DeviceIndex)device_index);
+        *peak_bytes = (uint64_t)stats.allocated_bytes[0].peak;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+#else
+    (void)device_index; (void)peak_bytes;
+    return make_error("CUDA not available (built without cuda feature)");
+#endif
+}
+
+// Peak reserved allocator bytes (max since last reset).
+// Matches torch.cuda.max_memory_reserved() semantics.
+extern "C" char* flodl_cuda_peak_reserved_bytes(int device_index,
+                                                  uint64_t* peak_bytes) {
+#ifdef FLODL_BUILD_CUDA
+    if (!torch::cuda::is_available()) {
+        return make_error("CUDA not available");
+    }
+    try {
+        auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(
+            (c10::DeviceIndex)device_index);
+        *peak_bytes = (uint64_t)stats.reserved_bytes[0].peak;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+#else
+    (void)device_index; (void)peak_bytes;
+    return make_error("CUDA not available (built without cuda feature)");
+#endif
+}
+
+// Reset peak allocator statistics.
+// Equivalent to torch.cuda.reset_peak_memory_stats().
+extern "C" void flodl_cuda_reset_peak_stats(int device_index) {
+#ifdef FLODL_BUILD_CUDA
+    c10::cuda::CUDACachingAllocator::resetPeakStats((c10::DeviceIndex)device_index);
+#else
+    (void)device_index;
 #endif
 }
 
@@ -1613,6 +1691,53 @@ extern "C" int flodl_is_grad_enabled() {
     return torch::GradMode::is_enabled() ? 1 : 0;
 }
 
+// --- Autocast (automatic mixed precision) ---
+
+// RAII struct: saves and restores autocast state on construction/destruction.
+struct FlodlAutocastGuard {
+    c10::DeviceType device;
+    bool was_enabled;
+    at::ScalarType old_dtype;
+
+    FlodlAutocastGuard(c10::DeviceType dev, at::ScalarType dtype)
+        : device(dev)
+        , was_enabled(at::autocast::is_autocast_enabled(dev))
+        , old_dtype(at::autocast::get_autocast_dtype(dev))
+    {
+        at::autocast::set_autocast_enabled(dev, true);
+        at::autocast::set_autocast_dtype(dev, dtype);
+        at::autocast::increment_nesting();
+    }
+
+    ~FlodlAutocastGuard() {
+        if (at::autocast::decrement_nesting() == 0) {
+            at::autocast::clear_cache();
+        }
+        at::autocast::set_autocast_dtype(device, old_dtype);
+        at::autocast::set_autocast_enabled(device, was_enabled);
+    }
+};
+
+static c10::DeviceType to_device_type_enum(int device_type) {
+    if (device_type == FLODL_CUDA) return c10::DeviceType::CUDA;
+    return c10::DeviceType::CPU;
+}
+
+extern "C" void* flodl_autocast_guard_new(int device_type, int dtype) {
+    auto dev = to_device_type_enum(device_type);
+    auto st = to_scalar_type(dtype);
+    return new FlodlAutocastGuard(dev, st);
+}
+
+extern "C" void flodl_autocast_guard_delete(void* guard) {
+    delete static_cast<FlodlAutocastGuard*>(guard);
+}
+
+extern "C" int flodl_is_autocast_enabled(int device_type) {
+    auto dev = to_device_type_enum(device_type);
+    return at::autocast::is_autocast_enabled(dev) ? 1 : 0;
+}
+
 // --- In-place operations ---
 
 extern "C" char* flodl_add_(FlodlTensor t, FlodlTensor other) {
@@ -1842,6 +1967,83 @@ extern "C" char* flodl_adam_step_batched(
     }
 }
 
+// --- Fused Adam/AdamW (multi-tensor kernel) ---
+
+// Shared implementation for _fused_adam_ and _fused_adamw_.
+static char* fused_adam_impl(FlodlTensor* params, FlodlTensor* grads,
+                              FlodlTensor* exp_avgs, FlodlTensor* exp_avg_sqs,
+                              int count, double lr,
+                              double beta1, double beta2, double eps,
+                              double weight_decay, int64_t step,
+                              FlodlTensor grad_scale, FlodlTensor found_inf,
+                              bool adamw) {
+    try {
+        if (count == 0) return nullptr;
+
+        auto p_list = unwrap_list(params, count);
+        auto g_list = unwrap_list(grads, count);
+        auto m_list = unwrap_list(exp_avgs, count);
+        auto v_list = unwrap_list(exp_avg_sqs, count);
+
+        // No amsgrad support — empty list
+        std::vector<at::Tensor> max_v_list;
+
+        // state_steps: float32 scalar tensors on same device as params
+        auto step_val = torch::tensor((float)step,
+            torch::dtype(torch::kFloat32).device(p_list[0].device()));
+        std::vector<at::Tensor> steps(count, step_val);
+
+        auto gs = grad_scale
+            ? c10::optional<at::Tensor>(unwrap(grad_scale))
+            : c10::nullopt;
+        auto fi = found_inf
+            ? c10::optional<at::Tensor>(unwrap(found_inf))
+            : c10::nullopt;
+
+        if (adamw) {
+            at::_fused_adamw_(
+                p_list, g_list, m_list, v_list,
+                max_v_list, steps,
+                lr, beta1, beta2, weight_decay, eps,
+                /*amsgrad=*/false, /*maximize=*/false, gs, fi);
+        } else {
+            at::_fused_adam_(
+                p_list, g_list, m_list, v_list,
+                max_v_list, steps,
+                lr, beta1, beta2, weight_decay, eps,
+                /*amsgrad=*/false, /*maximize=*/false, gs, fi);
+        }
+
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_fused_adam_(
+        FlodlTensor* params, FlodlTensor* grads,
+        FlodlTensor* exp_avgs, FlodlTensor* exp_avg_sqs,
+        int count, double lr,
+        double beta1, double beta2, double eps,
+        double weight_decay, int64_t step,
+        FlodlTensor grad_scale, FlodlTensor found_inf) {
+    return fused_adam_impl(params, grads, exp_avgs, exp_avg_sqs,
+        count, lr, beta1, beta2, eps, weight_decay, step,
+        grad_scale, found_inf, /*adamw=*/false);
+}
+
+extern "C" char* flodl_fused_adamw_(
+        FlodlTensor* params, FlodlTensor* grads,
+        FlodlTensor* exp_avgs, FlodlTensor* exp_avg_sqs,
+        int count, double lr,
+        double beta1, double beta2, double eps,
+        double weight_decay, int64_t step,
+        FlodlTensor grad_scale, FlodlTensor found_inf) {
+    return fused_adam_impl(params, grads, exp_avgs, exp_avg_sqs,
+        count, lr, beta1, beta2, eps, weight_decay, step,
+        grad_scale, found_inf, /*adamw=*/true);
+}
+
 // --- Pinned memory ---
 
 extern "C" char* flodl_pin_memory(FlodlTensor t, FlodlTensor* result) {
@@ -1857,6 +2059,21 @@ extern "C" int flodl_is_pinned(FlodlTensor t) {
     return unwrap(t).is_pinned() ? 1 : 0;
 }
 
+// --- Memory format ---
+
+extern "C" char* flodl_to_channels_last(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(unwrap(t).to(torch::MemoryFormat::ChannelsLast));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" int flodl_is_channels_last(FlodlTensor t) {
+    return unwrap(t).is_contiguous(at::MemoryFormat::ChannelsLast) ? 1 : 0;
+}
+
 // --- Memory diagnostics ---
 
 extern "C" int flodl_malloc_trim() {
@@ -1867,45 +2084,122 @@ extern "C" int flodl_malloc_trim() {
 #endif
 }
 
-// --- Fused clip_grad_norm ---
+// --- Fused clip_grad_norm (uses _foreach_* for batched kernels) ---
 
 extern "C" char* flodl_clip_grad_norm(FlodlTensor* params, int count,
                                        double max_norm, double* total_norm_out) {
     try {
-        // Pass 1: compute global L2 norm across all param grads
-        torch::Tensor total_norm_sq;
-        bool has_grads = false;
+        // Collect mutable grad tensors
+        std::vector<at::Tensor> grads;
+        grads.reserve(count);
         for (int i = 0; i < count; i++) {
             auto& p = unwrap(params[i]);
-            auto g = p.grad();
-            if (g.defined()) {
-                auto n2 = g.norm().pow(2);
-                if (!has_grads) {
-                    total_norm_sq = n2;
-                    has_grads = true;
-                } else {
-                    total_norm_sq.add_(n2);
-                }
+            if (p.grad().defined()) {
+                grads.push_back(p.mutable_grad());
             }
         }
-        if (!has_grads) {
+        if (grads.empty()) {
             *total_norm_out = 0.0;
             return nullptr;
         }
-        double total = total_norm_sq.sqrt().item<double>();
+
+        // Batched norm: 1 kernel for all grads instead of N
+        auto norms = at::_foreach_norm(grads, 2.0);
+        double total = at::stack(norms).norm().item<double>();
         *total_norm_out = total;
 
-        // Pass 2: scale grads if needed
+        // Batched scale: 1 kernel for all grads instead of N
         if (total > max_norm) {
             double scale = max_norm / (total + 1e-6);
-            for (int i = 0; i < count; i++) {
-                auto& p = unwrap(params[i]);
-                auto g = p.grad();
-                if (g.defined()) {
-                    p.mutable_grad().mul_(scale);
-                }
-            }
+            at::_foreach_mul_(grads, scale);
         }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Multi-tensor foreach operations ---
+
+extern "C" char* flodl_foreach_add_scalar_(FlodlTensor* tensors, int count, double scalar) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(tensors, count);
+        at::_foreach_add_(list, scalar);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_foreach_mul_scalar_(FlodlTensor* tensors, int count, double scalar) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(tensors, count);
+        at::_foreach_mul_(list, scalar);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_foreach_zero_(FlodlTensor* tensors, int count) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(tensors, count);
+        at::_foreach_zero_(list);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_foreach_add_list_(FlodlTensor* tensors1, FlodlTensor* tensors2,
+                                          int count, double alpha) {
+    try {
+        if (count == 0) return nullptr;
+        auto list1 = unwrap_list(tensors1, count);
+        auto list2 = unwrap_list(tensors2, count);
+        at::_foreach_add_(list1, list2, alpha);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_foreach_norm(FlodlTensor* tensors, int count, double ord,
+                                     FlodlTensor* results) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(tensors, count);
+        auto norms = at::_foreach_norm(list, ord);
+        for (size_t i = 0; i < norms.size(); i++) {
+            results[i] = wrap(norms[i]);
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_foreach_lerp_scalar_(FlodlTensor* tensors1, FlodlTensor* tensors2,
+                                             int count, double weight) {
+    try {
+        if (count == 0) return nullptr;
+        auto list1 = unwrap_list(tensors1, count);
+        auto list2 = unwrap_list(tensors2, count);
+        at::_foreach_lerp_(list1, list2, weight);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_foreach_sqrt_(FlodlTensor* tensors, int count) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(tensors, count);
+        at::_foreach_sqrt_(list);
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -2054,6 +2348,186 @@ extern "C" char* flodl_feature_dropout(FlodlTensor input, double p, int training
         return make_error(e.what());
     }
 }
+
+// --- In-place copy ---
+
+extern "C" char* flodl_copy_(FlodlTensor dst, FlodlTensor src, int non_blocking) {
+    try {
+        unwrap(dst).copy_(unwrap(src), non_blocking != 0);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- CUDA Graphs ---
+
+#ifdef FLODL_BUILD_CUDA
+#include <ATen/cuda/CUDAGraph.h>
+#include <ATen/cuda/CUDAEvent.h>
+#include <c10/cuda/CUDAStream.h>
+
+// Wrapper that owns a CUDAGraph + the side stream used for capture.
+// CUDA graphs must be captured on a non-default stream.
+struct FlodlCudaGraph {
+    at::cuda::CUDAGraph graph;
+    c10::optional<at::cuda::CUDAStream> capture_stream;
+    bool capturing = false;
+
+    ~FlodlCudaGraph() {
+        // If destroyed while still capturing (e.g. panic in Rust),
+        // end the capture to avoid leaving the stream in a bad state.
+        if (capturing && capture_stream.has_value()) {
+            cudaStreamCaptureStatus status;
+            cudaStreamIsCapturing(capture_stream.value().stream(), &status);
+            if (status == cudaStreamCaptureStatusActive) {
+                cudaGraph_t dummy = nullptr;
+                cudaStreamEndCapture(capture_stream.value().stream(), &dummy);
+                if (dummy) cudaGraphDestroy(dummy);
+            }
+            // Restore default stream on this thread.
+            at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
+        }
+    }
+};
+
+extern "C" char* flodl_cuda_graph_new(void** graph_out) {
+    try {
+        auto* g = new FlodlCudaGraph();
+        *graph_out = static_cast<void*>(g);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_graph_capture_begin(void* graph, uint64_t pool_hi,
+                                                  uint64_t pool_lo, int mode) {
+    auto* g = static_cast<FlodlCudaGraph*>(graph);
+    try {
+        at::cuda::MempoolId_t pool = {pool_hi, pool_lo};
+        auto capture_mode = static_cast<cudaStreamCaptureMode>(mode);
+
+        // Create a side stream for capture (CUDA graphs need non-default stream).
+        auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
+        g->capture_stream = stream;
+
+        // Wait for any pending work on the default stream.
+        at::cuda::CUDAEvent event;
+        event.record(at::cuda::getCurrentCUDAStream());
+        event.block(stream);
+
+        // Switch to the capture stream.
+        at::cuda::setCurrentCUDAStream(stream);
+
+        g->capturing = true;
+        g->graph.capture_begin(pool, capture_mode);
+        return nullptr;
+    } catch (const std::exception& e) {
+        // If capture_begin fails, restore default stream.
+        at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
+        g->capturing = false;
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_graph_capture_end(void* graph) {
+    try {
+        auto* g = static_cast<FlodlCudaGraph*>(graph);
+        g->graph.capture_end();
+        g->capturing = false;
+
+        // Restore the default stream.
+        auto default_stream = at::cuda::getDefaultCUDAStream();
+        if (g->capture_stream.has_value()) {
+            // Wait for capture stream to finish before handing back to default.
+            at::cuda::CUDAEvent event;
+            event.record(g->capture_stream.value());
+            event.block(default_stream);
+        }
+        at::cuda::setCurrentCUDAStream(default_stream);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_graph_replay(void* graph) {
+    try {
+        auto* g = static_cast<FlodlCudaGraph*>(graph);
+        g->graph.replay();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_graph_reset(void* graph) {
+    try {
+        auto* g = static_cast<FlodlCudaGraph*>(graph);
+        g->graph.reset();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" void flodl_cuda_graph_delete(void* graph) {
+    delete static_cast<FlodlCudaGraph*>(graph);
+}
+
+extern "C" void flodl_cuda_graph_pool(void* graph, uint64_t* pool_hi, uint64_t* pool_lo) {
+    auto* g = static_cast<FlodlCudaGraph*>(graph);
+    auto pool = g->graph.pool();
+    *pool_hi = pool.first;
+    *pool_lo = pool.second;
+}
+
+extern "C" void flodl_cuda_graph_pool_handle(uint64_t* pool_hi, uint64_t* pool_lo) {
+    auto pool = at::cuda::graph_pool_handle();
+    *pool_hi = pool.first;
+    *pool_lo = pool.second;
+}
+
+#else // CPU-only stubs
+
+extern "C" char* flodl_cuda_graph_new(void** graph_out) {
+    (void)graph_out;
+    return make_error("CUDA Graphs require a CUDA build");
+}
+
+extern "C" char* flodl_cuda_graph_capture_begin(void* graph, uint64_t pool_hi,
+                                                  uint64_t pool_lo, int mode) {
+    (void)graph; (void)pool_hi; (void)pool_lo; (void)mode;
+    return make_error("CUDA Graphs require a CUDA build");
+}
+
+extern "C" char* flodl_cuda_graph_capture_end(void* graph) {
+    (void)graph;
+    return make_error("CUDA Graphs require a CUDA build");
+}
+
+extern "C" char* flodl_cuda_graph_replay(void* graph) {
+    (void)graph;
+    return make_error("CUDA Graphs require a CUDA build");
+}
+
+extern "C" char* flodl_cuda_graph_reset(void* graph) {
+    (void)graph;
+    return make_error("CUDA Graphs require a CUDA build");
+}
+
+extern "C" void flodl_cuda_graph_delete(void* graph) { (void)graph; }
+
+extern "C" void flodl_cuda_graph_pool(void* graph, uint64_t* pool_hi, uint64_t* pool_lo) {
+    (void)graph; *pool_hi = 0; *pool_lo = 0;
+}
+
+extern "C" void flodl_cuda_graph_pool_handle(uint64_t* pool_hi, uint64_t* pool_lo) {
+    *pool_hi = 0; *pool_lo = 0;
+}
+
+#endif // FLODL_BUILD_CUDA
 
 // --- Utility ---
 

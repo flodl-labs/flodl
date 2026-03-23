@@ -306,15 +306,6 @@ impl Adam {
     pub fn lr(&self) -> f64 {
         self.lr
     }
-
-    fn lr_for_param(&self, i: usize) -> f64 {
-        for g in &self.groups {
-            if g.range.contains(&i) {
-                return g.lr;
-            }
-        }
-        self.lr
-    }
 }
 
 /// Builder for Adam with per-group learning rates.
@@ -388,38 +379,44 @@ impl Adam {
         self.t += 1;
 
         no_grad(|| {
-            // Collect params that have gradients, lazy-init moment buffers
-            let mut p_tensors = Vec::new();
-            let mut g_tensors = Vec::new();
-            let mut m_tensors = Vec::new();
-            let mut v_tensors = Vec::new();
-            let mut lrs = Vec::new();
+            // Determine effective groups (single group if none configured)
+            let effective_groups: Vec<(f64, std::ops::Range<usize>)> = if self.groups.is_empty() {
+                vec![(self.lr, 0..self.params.len())]
+            } else {
+                self.groups.iter().map(|g| (g.lr, g.range.clone())).collect()
+            };
 
-            for (i, param) in self.params.iter().enumerate() {
-                if let Some(grad) = param.grad() {
-                    // Lazy-init moment buffers as zeros on first step
-                    if self.m[i].is_none() {
-                        self.m[i] = Some(crate::tensor::Tensor::zeros_like(&grad)?);
-                    }
-                    if self.v[i].is_none() {
-                        self.v[i] = Some(crate::tensor::Tensor::zeros_like(&grad)?);
-                    }
+            for (lr, range) in &effective_groups {
+                let mut p_tensors = Vec::new();
+                let mut g_tensors = Vec::new();
+                let mut m_tensors = Vec::new();
+                let mut v_tensors = Vec::new();
 
-                    p_tensors.push(param.data());
-                    g_tensors.push(grad);
-                    m_tensors.push(self.m[i].as_ref().unwrap().clone());
-                    v_tensors.push(self.v[i].as_ref().unwrap().clone());
-                    lrs.push(self.lr_for_param(i));
+                for i in range.clone() {
+                    if let Some(grad) = self.params[i].grad() {
+                        // Lazy-init moment buffers as zeros on first step
+                        if self.m[i].is_none() {
+                            self.m[i] = Some(crate::tensor::Tensor::zeros_like(&grad)?);
+                        }
+                        if self.v[i].is_none() {
+                            self.v[i] = Some(crate::tensor::Tensor::zeros_like(&grad)?);
+                        }
+
+                        p_tensors.push(self.params[i].data());
+                        g_tensors.push(grad);
+                        m_tensors.push(self.m[i].as_ref().unwrap().clone());
+                        v_tensors.push(self.v[i].as_ref().unwrap().clone());
+                    }
                 }
-            }
 
-            if !p_tensors.is_empty() {
-                // Single batched FFI call for all params
-                crate::tensor::Tensor::adam_step_batched(
-                    &p_tensors, &g_tensors, &m_tensors, &v_tensors,
-                    &mut lrs, self.beta1, self.beta2, self.eps,
-                    weight_decay, self.t as i64,
-                )?;
+                if !p_tensors.is_empty() {
+                    // Single fused kernel for all params in this group
+                    crate::tensor::Tensor::fused_adamw_(
+                        &p_tensors, &g_tensors, &m_tensors, &v_tensors,
+                        *lr, self.beta1, self.beta2, self.eps,
+                        weight_decay, self.t as i64, None, None,
+                    )?;
+                }
             }
             Ok(())
         })

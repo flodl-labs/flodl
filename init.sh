@@ -149,7 +149,7 @@ DOCKERFILE_CPU_EOF
 cat > Dockerfile.cuda << 'DOCKERFILE_CUDA_EOF'
 # CUDA dev image for floDl projects.
 # Requires: docker run --gpus all ...
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -164,11 +164,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
     && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
-# libtorch (CUDA 12.6)
+# libtorch (CUDA 12.8)
 ARG LIBTORCH_VERSION=2.10.0
-RUN wget -q "https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu126.zip" \
-    && unzip -q "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu126.zip" -d /usr/local \
-    && rm "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu126.zip"
+RUN wget -q "https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu128.zip" \
+    && unzip -q "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu128.zip" -d /usr/local \
+    && rm "libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu128.zip"
 
 ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"

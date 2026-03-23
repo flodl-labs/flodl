@@ -179,13 +179,20 @@ fn make_for_loop_func(
     trace_buf: Rc<RefCell<Vec<Variable>>>,
     ports: Rc<RefCell<Vec<String>>>,
 ) -> NodeFn {
+    // Ports are mutated after build (by .using()), so ref detection must
+    // happen at call time, not build time.
     Box::new(move |inputs: &[Variable]| {
         let mut state = inputs[0].clone();
         let refs = extract_refs(&ports.borrow(), inputs);
         trace_buf.borrow_mut().clear();
         body.reset();
         for i in 0..count {
-            state = body_step(&body, &state, &refs).map_err(|e| {
+            // Fast path: skip body_step indirection when no refs
+            state = if refs.is_empty() {
+                body.forward(&state)
+            } else {
+                body_step(&body, &state, &refs)
+            }.map_err(|e| {
                 crate::tensor::TensorError::new(&format!("loop iteration {}: {}", i, e))
             })?;
             if let Some(t) = body.trace() {

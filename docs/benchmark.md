@@ -19,7 +19,7 @@ same hardware, same hyperparameters. No synthetic micro-benchmarks.
 `cuda_allocated_bytes`), which includes cached free blocks. Higher VRAM on
 the Rust side is a fixed overhead that does not grow with model size. Part of
 it is the CUDA toolkit version difference: flodl links libtorch built against
-CUDA 12.6 (cu126) while the PyTorch run used CUDA 12.4 (cu124) — newer CUDA
+CUDA 12.8 (cu128) while the PyTorch run used CUDA 12.4 (cu124) — newer CUDA
 toolkits allocate larger context structures. The remainder comes from
 libtorch's caching allocator rounding and the monitor thread. The GPU
 computation itself dispatches identical CUDA kernels. On a larger GPU (24 GB+)

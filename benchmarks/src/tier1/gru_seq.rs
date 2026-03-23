@@ -29,12 +29,10 @@ impl Module for GruSeqModel {
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
         // input: [B, seq_len, input_dim]
-        let batch = input.shape()[0];
-
         // Unroll GRU over timesteps
         let mut h: Option<Variable> = None;
         for t in 0..SEQ_LEN as i64 {
-            let x_t = input.narrow(1, t, 1)?.reshape(&[batch, INPUT_DIM])?;
+            let x_t = input.select(1, t)?;
             h = Some(self.gru.forward_step(&x_t, h.as_ref())?);
         }
 
@@ -49,13 +47,15 @@ impl Module for GruSeqModel {
     }
 }
 
-pub fn run(device: Device, vram_baseline: u64, vram_reserved_baseline: u64) -> Result<BenchResult> {
+pub fn run(device: Device) -> Result<BenchResult> {
+    // Disable cuDNN benchmark for GRU: cell-level unrolling triggers
+    // nondeterministic autotuning that causes massive run-to-run variance.
+    flodl::set_cudnn_benchmark(false);
+
     let config = BenchConfig {
         name: "gru_seq".into(),
         batch_size: 128,
         batches_per_epoch: 50,
-        vram_baseline,
-        vram_reserved_baseline,
         ..Default::default()
     };
 
@@ -75,10 +75,10 @@ pub fn run(device: Device, vram_baseline: u64, vram_reserved_baseline: u64) -> R
         })
         .collect();
 
-    run_benchmark(&config, param_count, |_epoch, _warmup| {
+    let result = run_benchmark(&config, param_count, |_epoch, _warmup| {
         let mut total_loss = 0.0;
         for (x, y) in &batches {
-            let input = Variable::new(x.clone(), true);
+            let input = Variable::new(x.clone(), false);
             let target = Variable::new(y.clone(), false);
             let pred = model.forward(&input)?;
             let loss = mse_loss(&pred, &target)?;
@@ -90,5 +90,8 @@ pub fn run(device: Device, vram_baseline: u64, vram_reserved_baseline: u64) -> R
             total_loss += loss.item()?;
         }
         Ok(total_loss / batches.len() as f64)
-    })
+    });
+
+    flodl::set_cudnn_benchmark(true); // restore for subsequent benchmarks
+    result
 }

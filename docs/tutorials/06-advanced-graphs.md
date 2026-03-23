@@ -111,6 +111,10 @@ The body runs exactly 5 times. Each iteration builds its own computation
 graph, so the backward pass unrolls automatically — backpropagation
 through time (BPTT) with no special handling.
 
+`for_n` detects at call time whether refs are needed and skips
+indirection when they are not. Loops without `.using()` run a tight
+`body.forward()` loop with no HashMap construction.
+
 ### Conditional loops with while_cond and until_cond
 
 Both take a condition module and a maximum iteration count. The condition
@@ -205,6 +209,11 @@ Key properties:
   sum to 1.
 - **Using wires to the router**, not the experts. The router can make
   routing decisions based on earlier representations.
+- **Vectorized combination.** Gate routing is vectorized internally: all
+  expert outputs are stacked into a single tensor, then combined via
+  broadcast multiply + sum in approximately 3 kernel launches regardless
+  of expert count (compared to 3N with naive per-expert accumulation).
+  This is transparent to the user -- just use `.gate()` as before.
 
 ### Built-in routers
 
@@ -265,6 +274,15 @@ The builder validates that `using()` refs are only wired to modules
 that implement `NamedInputModule`. If a router does not support named
 inputs, the builder returns a clear error at `build()` time — not a
 runtime crash.
+
+## Performance internals
+
+`Graph::build()` pre-computes a routing table at build time. Every node's
+successor list and reference wiring is resolved into Vec-indexed routes
+instead of HashMap lookups, and execution buffers are cached across
+forward calls. There is zero HashMap allocation during inference. This
+means graphs have near-zero framework overhead after build -- the cost
+is dominated by the modules themselves.
 
 ## Putting it together
 

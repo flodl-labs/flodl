@@ -103,7 +103,7 @@ sudo systemctl restart docker
 
 **Verify:**
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu24.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu24.04 nvidia-smi
 ```
 
 ### `service "cuda" depends on ... which is not healthy`

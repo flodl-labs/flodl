@@ -326,6 +326,11 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    pub fn flodl_to_device_async(
+        t: FlodlTensor, device_type: i32, device_index: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     pub fn flodl_cuda_is_available() -> i32;
     pub fn flodl_cuda_device_count() -> i32;
     pub fn flodl_force_cuda_link() -> i32;
@@ -346,6 +351,16 @@ unsafe extern "C" {
     pub fn flodl_cuda_active_bytes(
         device_index: i32, active_bytes: *mut u64,
     ) -> *mut i8;
+
+    pub fn flodl_cuda_peak_active_bytes(
+        device_index: i32, peak_bytes: *mut u64,
+    ) -> *mut i8;
+
+    pub fn flodl_cuda_peak_reserved_bytes(
+        device_index: i32, peak_bytes: *mut u64,
+    ) -> *mut i8;
+
+    pub fn flodl_cuda_reset_peak_stats(device_index: i32);
 
     pub fn flodl_cuda_empty_cache();
 
@@ -498,6 +513,12 @@ unsafe extern "C" {
     pub fn flodl_no_grad_guard_delete(guard: *mut c_void);
     pub fn flodl_is_grad_enabled() -> i32;
 
+    // --- Autocast (automatic mixed precision) ---
+
+    pub fn flodl_autocast_guard_new(device_type: i32, dtype: i32) -> *mut c_void;
+    pub fn flodl_autocast_guard_delete(guard: *mut c_void);
+    pub fn flodl_is_autocast_enabled(device_type: i32) -> i32;
+
     // --- Meshgrid ---
 
     pub fn flodl_meshgrid(
@@ -569,6 +590,26 @@ unsafe extern "C" {
         weight_decay: f64, step: i64,
     ) -> *mut i8;
 
+    // --- Fused Adam/AdamW (multi-tensor kernel) ---
+
+    pub fn flodl_fused_adam_(
+        params: *mut FlodlTensor, grads: *mut FlodlTensor,
+        exp_avgs: *mut FlodlTensor, exp_avg_sqs: *mut FlodlTensor,
+        count: i32, lr: f64,
+        beta1: f64, beta2: f64, eps: f64,
+        weight_decay: f64, step: i64,
+        grad_scale: FlodlTensor, found_inf: FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_fused_adamw_(
+        params: *mut FlodlTensor, grads: *mut FlodlTensor,
+        exp_avgs: *mut FlodlTensor, exp_avg_sqs: *mut FlodlTensor,
+        count: i32, lr: f64,
+        beta1: f64, beta2: f64, eps: f64,
+        weight_decay: f64, step: i64,
+        grad_scale: FlodlTensor, found_inf: FlodlTensor,
+    ) -> *mut i8;
+
     // --- Pinned memory ---
 
     pub fn flodl_pin_memory(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
@@ -587,6 +628,39 @@ unsafe extern "C" {
     pub fn flodl_clip_grad_norm(
         params: *mut FlodlTensor, count: i32,
         max_norm: f64, total_norm_out: *mut f64,
+    ) -> *mut i8;
+
+    // --- Multi-tensor foreach operations ---
+
+    pub fn flodl_foreach_add_scalar_(
+        tensors: *mut FlodlTensor, count: i32, scalar: f64,
+    ) -> *mut i8;
+
+    pub fn flodl_foreach_mul_scalar_(
+        tensors: *mut FlodlTensor, count: i32, scalar: f64,
+    ) -> *mut i8;
+
+    pub fn flodl_foreach_zero_(
+        tensors: *mut FlodlTensor, count: i32,
+    ) -> *mut i8;
+
+    pub fn flodl_foreach_add_list_(
+        tensors1: *mut FlodlTensor, tensors2: *mut FlodlTensor,
+        count: i32, alpha: f64,
+    ) -> *mut i8;
+
+    pub fn flodl_foreach_norm(
+        tensors: *mut FlodlTensor, count: i32, ord: f64,
+        results: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_foreach_lerp_scalar_(
+        tensors1: *mut FlodlTensor, tensors2: *mut FlodlTensor,
+        count: i32, weight: f64,
+    ) -> *mut i8;
+
+    pub fn flodl_foreach_sqrt_(
+        tensors: *mut FlodlTensor, count: i32,
     ) -> *mut i8;
 
     // --- Autograd diagnostics ---
@@ -649,6 +723,30 @@ unsafe extern "C" {
         input: FlodlTensor, p: f64, training: i32,
         result: *mut FlodlTensor,
     ) -> *mut i8;
+
+    // --- In-place copy ---
+
+    pub fn flodl_copy_(dst: FlodlTensor, src: FlodlTensor, non_blocking: i32) -> *mut i8;
+
+    // --- Memory format ---
+
+    pub fn flodl_to_channels_last(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_is_channels_last(t: FlodlTensor) -> i32;
+
+    // --- CUDA Graphs ---
+
+    pub fn flodl_cuda_graph_new(graph_out: *mut *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_graph_capture_begin(
+        graph: *mut c_void, pool_hi: u64, pool_lo: u64, mode: i32,
+    ) -> *mut i8;
+    pub fn flodl_cuda_graph_capture_end(graph: *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_graph_replay(graph: *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_graph_reset(graph: *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_graph_delete(graph: *mut c_void);
+    pub fn flodl_cuda_graph_pool(
+        graph: *mut c_void, pool_hi: *mut u64, pool_lo: *mut u64,
+    );
+    pub fn flodl_cuda_graph_pool_handle(pool_hi: *mut u64, pool_lo: *mut u64);
 
     // --- Utility ---
 

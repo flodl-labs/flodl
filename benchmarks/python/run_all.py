@@ -7,7 +7,7 @@ import sys
 from harness import get_device, print_result, print_summary
 
 from tier1 import mlp, convnet, gru_seq
-from tier2 import residual_tower, gated_routing, iterative_refine, feedback_loop
+from tier2 import residual_tower, gated_routing, iterative_refine, feedback_loop_fixed
 
 
 BENCHMARKS = {
@@ -19,7 +19,7 @@ BENCHMARKS = {
     "residual_tower": residual_tower,
     "gated_routing": gated_routing,
     "iterative_refine": iterative_refine,
-    "feedback_loop": feedback_loop,
+    "feedback_fixed": feedback_loop_fixed,
 }
 
 TIER1 = {"mlp", "convnet", "gru_seq"}

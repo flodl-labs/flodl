@@ -29,6 +29,11 @@ def run(device, batches_per_epoch=50, batch_size=128, **kwargs):
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
     from harness import run_benchmark
 
+    # Disable cuDNN benchmark for GRU: cell-level unrolling triggers
+    # nondeterministic autotuning that causes massive run-to-run variance.
+    prev_benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.benchmark = False
+
     model = GruSeqModel().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -38,4 +43,6 @@ def run(device, batches_per_epoch=50, batch_size=128, **kwargs):
         for _ in range(batches_per_epoch)
     ]
 
-    return run_benchmark("gru_seq", model, batches, device, optimizer, **kwargs)
+    result = run_benchmark("gru_seq", model, batches, device, optimizer, **kwargs)
+    torch.backends.cudnn.benchmark = prev_benchmark  # restore for subsequent benchmarks
+    return result

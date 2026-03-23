@@ -382,6 +382,66 @@ g.export_trends("metrics.csv", &["loss"])?;
 g.write_log("training.log", total_epochs, &["loss"])?;
 ```
 
+## Peak VRAM profiling
+
+When optimizing GPU memory, use the CUDA memory stats API to measure
+actual allocation peaks. Reset counters before the region of interest,
+then read the high-water marks:
+
+```rust
+cuda_empty_cache();
+cuda_reset_peak_stats();
+
+// ... training step or inference ...
+
+let peak_alloc = cuda_peak_active_bytes()?;  // bytes used by tensors
+let peak_reserved = cuda_peak_reserved_bytes()?;  // bytes held by allocator
+println!("Peak alloc: {:.0} MB", peak_alloc as f64 / 1048576.0);
+println!("Peak reserved: {:.0} MB", peak_reserved as f64 / 1048576.0);
+```
+
+These match `torch.cuda.max_memory_allocated()` and
+`torch.cuda.max_memory_reserved()` semantics. `peak_alloc` is the memory
+actively backing tensors; `peak_reserved` includes free blocks held by
+the caching allocator.
+
+## CUDA Graphs
+
+For models with fixed tensor shapes, CUDA graph capture replays an
+entire forward/backward/step sequence as a single GPU operation,
+eliminating per-kernel launch overhead.
+
+```rust
+use flodl::{CudaGraph, cuda_graph_capture, CaptureMode};
+
+// Static tensors (reused across replays via copy_)
+let static_input = Tensor::zeros(&[batch, dim], cuda_opts)?;
+let static_target = Tensor::zeros(&[batch, dim], cuda_opts)?;
+
+// Capture training step
+let graph = cuda_graph_capture(3, None, || {
+    let inp = Variable::new(static_input.clone(), false);
+    let tgt = Variable::new(static_target.clone(), false);
+    let pred = model.forward(&inp)?;
+    let loss = mse_loss(&pred, &tgt)?;
+    optimizer.zero_grad();
+    loss.backward()?;
+    optimizer.step()
+})?;
+
+// Training loop: copy data, replay captured graph
+for (x, y) in &batches {
+    static_input.copy_(x, true)?;   // non_blocking
+    static_target.copy_(y, true)?;
+    graph.replay()?;
+}
+```
+
+Expect 2-5x speedup for models with many small kernels (RNNs, GRUs).
+All tensors involved in the captured region must have fixed shapes --
+dynamic shapes require a new capture. Tests that use CUDA graphs must
+run single-threaded (`make cuda-test-graph`).
+
 ## Putting it together
 
 A complete training script using clipping, checkpoints, trends, and

@@ -252,6 +252,12 @@ char* flodl_lstm_cell(FlodlTensor input, FlodlTensor hx, FlodlTensor cx,
 
 char* flodl_to_device(FlodlTensor t, int device_type, int device_index,
                     FlodlTensor* result);
+
+// Non-blocking device transfer. If non_blocking=1 and src is pinned CPU
+// memory, the transfer overlaps with host computation.
+char* flodl_to_device_async(FlodlTensor t, int device_type, int device_index,
+                           FlodlTensor* result);
+
 int flodl_cuda_is_available(void);
 int flodl_cuda_device_count(void);
 int flodl_force_cuda_link(void);
@@ -273,6 +279,18 @@ char* flodl_cuda_mem_info(int device_index, uint64_t* used_bytes, uint64_t* tota
 // spill = max(0, allocated - vram_total).
 char* flodl_cuda_alloc_bytes(int device_index, uint64_t* allocated_bytes);
 char* flodl_cuda_active_bytes(int device_index, uint64_t* active_bytes);
+
+// Peak active allocator bytes (max since last reset).
+// Matches torch.cuda.max_memory_allocated() semantics.
+char* flodl_cuda_peak_active_bytes(int device_index, uint64_t* peak_bytes);
+
+// Peak reserved allocator bytes (max since last reset).
+// Matches torch.cuda.max_memory_reserved() semantics.
+char* flodl_cuda_peak_reserved_bytes(int device_index, uint64_t* peak_bytes);
+
+// Reset peak allocator statistics.
+// Equivalent to torch.cuda.reset_peak_memory_stats().
+void flodl_cuda_reset_peak_stats(int device_index);
 
 // Release all unused cached memory from the CUDA caching allocator.
 // Equivalent to torch.cuda.empty_cache().
@@ -308,6 +326,15 @@ int flodl_is_leaf(FlodlTensor t);
 void* flodl_no_grad_guard_new(void);
 void flodl_no_grad_guard_delete(void* guard);
 int flodl_is_grad_enabled(void);
+
+// --- Autocast (automatic mixed precision) ---
+
+// Create an autocast guard. While alive, eligible ops (matmul, conv, linear)
+// dispatch to the given dtype. device_type: FLODL_CUDA or FLODL_CPU.
+// dtype: FLODL_FLOAT16 or FLODL_BFLOAT16.
+void* flodl_autocast_guard_new(int device_type, int dtype);
+void flodl_autocast_guard_delete(void* guard);
+int flodl_is_autocast_enabled(int device_type);
 
 // --- In-place operations ---
 
@@ -349,6 +376,27 @@ char* flodl_adam_step_batched(FlodlTensor* params, FlodlTensor* grads,
                               double beta1, double beta2, double eps,
                               double weight_decay, int64_t step);
 
+// --- Fused Adam/AdamW (multi-tensor, single kernel on CUDA) ---
+// Uses libtorch's at::_fused_adam_ / at::_fused_adamw_ to perform the
+// complete Adam update across ALL params in one kernel launch on CUDA.
+// grad_scale / found_inf: pass NULL to skip (no mixed precision).
+
+// _fused_adam_: L2 weight decay (adds wd*param to gradient).
+char* flodl_fused_adam_(FlodlTensor* params, FlodlTensor* grads,
+                         FlodlTensor* exp_avgs, FlodlTensor* exp_avg_sqs,
+                         int count, double lr,
+                         double beta1, double beta2, double eps,
+                         double weight_decay, int64_t step,
+                         FlodlTensor grad_scale, FlodlTensor found_inf);
+
+// _fused_adamw_: decoupled weight decay (param *= 1 - lr*wd).
+char* flodl_fused_adamw_(FlodlTensor* params, FlodlTensor* grads,
+                          FlodlTensor* exp_avgs, FlodlTensor* exp_avg_sqs,
+                          int count, double lr,
+                          double beta1, double beta2, double eps,
+                          double weight_decay, int64_t step,
+                          FlodlTensor grad_scale, FlodlTensor found_inf);
+
 // --- Pinned memory ---
 
 // Copy a CPU tensor into page-locked (pinned) memory.
@@ -378,6 +426,35 @@ void flodl_zero_grad_set_to_none(FlodlTensor t);
 // Writes the original total norm to *total_norm_out.
 char* flodl_clip_grad_norm(FlodlTensor* params, int count,
                            double max_norm, double* total_norm_out);
+
+// --- Multi-tensor foreach operations ---
+// Use libtorch's _foreach_* ops: batch multiple tensors into fewer kernel
+// launches on CUDA. Falls back to per-tensor loops on CPU.
+
+// In-place add scalar: tensors[i] += scalar
+char* flodl_foreach_add_scalar_(FlodlTensor* tensors, int count, double scalar);
+
+// In-place multiply by scalar: tensors[i] *= scalar
+char* flodl_foreach_mul_scalar_(FlodlTensor* tensors, int count, double scalar);
+
+// In-place zero: tensors[i] = 0
+char* flodl_foreach_zero_(FlodlTensor* tensors, int count);
+
+// In-place list add: tensors1[i] += alpha * tensors2[i]
+char* flodl_foreach_add_list_(FlodlTensor* tensors1, FlodlTensor* tensors2,
+                               int count, double alpha);
+
+// Compute per-tensor L2 norms. results must be pre-allocated array of count
+// FlodlTensors. Each result is a new scalar tensor (caller must free).
+char* flodl_foreach_norm(FlodlTensor* tensors, int count, double ord,
+                          FlodlTensor* results);
+
+// In-place lerp: tensors1[i] += weight * (tensors2[i] - tensors1[i])
+char* flodl_foreach_lerp_scalar_(FlodlTensor* tensors1, FlodlTensor* tensors2,
+                                  int count, double weight);
+
+// In-place sqrt: tensors[i] = sqrt(tensors[i])
+char* flodl_foreach_sqrt_(FlodlTensor* tensors, int count);
 
 // --- Autograd diagnostics ---
 
@@ -418,6 +495,35 @@ char* flodl_dropout(FlodlTensor input, double p, int training,
                     FlodlTensor* result);
 char* flodl_feature_dropout(FlodlTensor input, double p, int training,
                             FlodlTensor* result);
+
+// --- In-place copy ---
+
+// Copy src into dst in-place (dst.copy_(src)).
+// non_blocking: if 1, may be asynchronous for cross-device copies.
+char* flodl_copy_(FlodlTensor dst, FlodlTensor src, int non_blocking);
+
+// --- Memory format ---
+
+// Convert tensor to channels-last (NHWC) memory format.
+// Only meaningful for 4D tensors (N, C, H, W).
+char* flodl_to_channels_last(FlodlTensor t, FlodlTensor* result);
+
+// Returns 1 if tensor is contiguous in channels-last format, 0 otherwise.
+int flodl_is_channels_last(FlodlTensor t);
+
+// --- CUDA Graphs ---
+// All CUDA Graph functions require CUDA builds. On CPU builds, they
+// return an error string.
+
+char* flodl_cuda_graph_new(void** graph_out);
+char* flodl_cuda_graph_capture_begin(void* graph, uint64_t pool_hi,
+                                      uint64_t pool_lo, int mode);
+char* flodl_cuda_graph_capture_end(void* graph);
+char* flodl_cuda_graph_replay(void* graph);
+char* flodl_cuda_graph_reset(void* graph);
+void  flodl_cuda_graph_delete(void* graph);
+void  flodl_cuda_graph_pool(void* graph, uint64_t* pool_hi, uint64_t* pool_lo);
+void  flodl_cuda_graph_pool_handle(uint64_t* pool_hi, uint64_t* pool_lo);
 
 // --- Utility ---
 

@@ -13,13 +13,11 @@ use crate::harness::{BenchConfig, BenchResult, run_benchmark};
 const DIM: i64 = 512;
 const MAX_ITER: usize = 10;
 
-pub fn run(device: Device, vram_baseline: u64, vram_reserved_baseline: u64) -> Result<BenchResult> {
+pub fn run(device: Device) -> Result<BenchResult> {
     let config = BenchConfig {
         name: "feedback_loop".into(),
         batch_size: 128,
         batches_per_epoch: 50,
-        vram_baseline,
-        vram_reserved_baseline,
         ..Default::default()
     };
 
@@ -63,7 +61,7 @@ pub fn run(device: Device, vram_baseline: u64, vram_reserved_baseline: u64) -> R
     run_benchmark(&config, param_count, |_epoch, _warmup| {
         let mut total_loss = 0.0;
         for (x, y) in &batches {
-            let input = Variable::new(x.clone(), true);
+            let input = Variable::new(x.clone(), false);
             let target = Variable::new(y.clone(), false);
             let pred = model.forward(&input)?;
             let loss = mse_loss(&pred, &target)?;

@@ -3,6 +3,20 @@
 //! All layers implement the [`Module`] trait (forward + parameters).
 //! Optimizers implement [`Optimizer`] (step + zero_grad).
 //! Both compose naturally with the graph builder in [`crate::graph`].
+//!
+//! # Features
+//!
+//! - **Layers**: Linear, Conv2d, ConvTranspose2d, LayerNorm, BatchNorm, Dropout, Embedding, GRUCell, LSTMCell, MaxPool2d
+//! - **Activations**: ReLU, Sigmoid, Tanh, GELU, SiLU (zero-sized types)
+//! - **Losses**: MSE, CrossEntropy, BCE, L1, SmoothL1, KLDiv
+//! - **Optimizers**: SGD (momentum), Adam, AdamW -- fused Adam/AdamW uses `_fused_adamw_` on CUDA for single-kernel multi-tensor updates
+//! - **Schedulers**: StepDecay, Cosine, Warmup, Plateau
+//! - **Gradient clipping**: `clip_grad_norm` / `clip_grad_value` -- fused clipping via foreach ops (2 kernels instead of 2N)
+//! - **Mixed precision**: [`AutocastGuard`] / [`autocast`] for automatic dtype casting, [`GradScaler`] for loss scaling, [`cast_parameters`] for dtype conversion
+//! - **CUDA Graphs**: [`CudaGraph`] capture/replay/reset via [`cuda_graph_capture`], memory pool handles, configurable capture modes
+//! - **Foreach operations**: 7 multi-tensor ops (`foreach_zero_`, `foreach_add_scalar_`, `foreach_mul_scalar_`, etc.) used internally by optimizers and gradient clipping
+//! - **Checkpointing**: save/load with named parameters, dtype-aware, partial loading
+//! - **Initialization**: Xavier uniform/normal, Kaiming
 
 pub mod parameter;
 pub mod buffer;
@@ -24,6 +38,7 @@ pub mod batchnorm;
 pub mod pooling;
 pub mod checkpoint;
 pub mod amp;
+pub mod cuda_graph;
 pub mod functional;
 
 pub use parameter::Parameter;
@@ -36,7 +51,7 @@ pub use checkpoint::{
     save_checkpoint, load_checkpoint, save_checkpoint_file, load_checkpoint_file,
     LoadReport,
 };
-pub use amp::{GradScaler, cast_parameters};
+pub use amp::{GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled};
 pub use clip::{clip_grad_norm, clip_grad_value};
 pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler};
 pub use dropout::{Dropout, Dropout2d};
@@ -50,6 +65,7 @@ pub use batchnorm::{BatchNorm, BatchNorm2d};
 pub use pooling::MaxPool2d;
 pub use init::{xavier_uniform, xavier_normal};
 pub use functional::gaussian_blur_2d;
+pub use cuda_graph::{CudaGraph, MemPoolId, CaptureMode, cuda_graph_capture, cuda_graph_pool_handle};
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -1219,6 +1235,65 @@ mod tests {
         let mut cursor = std::io::Cursor::new(&buf);
         scaler2.load_state(&mut cursor).unwrap();
         assert!((scaler2.scale_factor() - scaler.scale_factor()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_autocast_guard_toggle() {
+        assert!(!amp::is_autocast_enabled());
+        {
+            let _guard = amp::AutocastGuard::new(crate::tensor::DType::Float16);
+            assert!(amp::is_autocast_enabled());
+        }
+        assert!(!amp::is_autocast_enabled());
+    }
+
+    #[test]
+    fn test_autocast_nesting() {
+        assert!(!amp::is_autocast_enabled());
+        let outer = amp::AutocastGuard::new(crate::tensor::DType::Float16);
+        assert!(amp::is_autocast_enabled());
+        {
+            let _inner = amp::AutocastGuard::new(crate::tensor::DType::Float16);
+            assert!(amp::is_autocast_enabled());
+        }
+        // Outer still active
+        assert!(amp::is_autocast_enabled());
+        drop(outer);
+        assert!(!amp::is_autocast_enabled());
+    }
+
+    #[test]
+    fn test_autocast_closure() {
+        assert!(!amp::is_autocast_enabled());
+        amp::autocast(crate::tensor::DType::Float16, || {
+            assert!(amp::is_autocast_enabled());
+        });
+        assert!(!amp::is_autocast_enabled());
+    }
+
+    #[test]
+    fn test_autocast_matmul_output_dtype() {
+        // Under autocast, matmul of fp32 tensors should produce lower-precision output
+        let opts = crate::tensor::test_opts();
+        let dev = crate::tensor::test_device();
+        let (device_type, _) = dev.to_ffi();
+        let a = Tensor::randn(&[4, 4], opts).unwrap();
+        let b = Tensor::randn(&[4, 4], opts).unwrap();
+
+        // Without autocast: fp32 * fp32 = fp32
+        let c = a.matmul(&b).unwrap();
+        assert_eq!(c.dtype(), crate::tensor::DType::Float32);
+
+        // CUDA autocast uses Float16, CPU autocast uses BFloat16
+        let cast_dtype = if dev.is_cuda() {
+            crate::tensor::DType::Float16
+        } else {
+            crate::tensor::DType::BFloat16
+        };
+        let _guard = amp::AutocastGuard::for_device(device_type, cast_dtype);
+        let c_amp = a.matmul(&b).unwrap();
+        assert_eq!(c_amp.dtype(), cast_dtype,
+            "matmul under autocast should produce {:?}, got {:?}", cast_dtype, c_amp.dtype());
     }
 
     #[test]

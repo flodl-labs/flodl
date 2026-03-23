@@ -1,7 +1,7 @@
 # Tutorial 4: Training
 
 This tutorial puts everything together: loss functions, optimizers, gradient
-clipping, and the training loop. It builds on
+clipping, mixed precision training, and the training loop. It builds on
 [Tutorial 3: Modules](03-modules.md).
 
 ## Loss Functions
@@ -67,6 +67,23 @@ Adam with decoupled weight decay:
 let optimizer = AdamW::new(&params, 0.001, 0.01);
 ```
 
+### Fused CUDA Optimizers
+
+On CUDA, both `Adam` and `AdamW` automatically use `_fused_adamw_` -- a
+single multi-tensor kernel that updates all parameters, gradients, and
+moment buffers in one launch. A naive implementation would require 4N
+separate kernels (one each for momentum update, variance update, bias
+correction, and parameter update, per parameter). The fused path reduces
+this to a single kernel launch for all parameters in a group.
+
+This is completely automatic. `Adam::new()` and `AdamW::new()` use the
+fused path whenever parameters live on CUDA. No API changes are needed.
+
+The fused kernel also exposes `grad_scale` and `found_inf` tensor
+parameters internally, which `GradScaler` uses for integrated mixed
+precision training (see [Mixed Precision Training](#mixed-precision-training)
+below).
+
 ## Gradient Clipping
 
 Prevent exploding gradients by clipping after backward and before the
@@ -79,6 +96,12 @@ clip_grad_norm(&params, 1.0)?;
 // Clamp each gradient element to [-max_val, max_val]
 clip_grad_value(&params, 0.5)?;
 ```
+
+Under the hood, `clip_grad_norm` uses `_foreach_norm` + `_foreach_mul_`
+internally -- two kernels total regardless of the number of parameters,
+instead of 2N kernels with a naive per-parameter approach. This is
+particularly beneficial on CUDA where kernel launch overhead dominates
+for small per-parameter operations.
 
 ## Device Placement
 
@@ -317,6 +340,106 @@ Compose with warmup:
 let inner = CosineScheduler::new(0.001, 1e-6, 100);
 let scheduler = WarmupScheduler::new(inner, 0.001, 10);  // inner, target_lr, warmup_steps
 ```
+
+## Mixed Precision Training
+
+Mixed precision training runs eligible operations (matmul, convolutions,
+linear layers) in a reduced-precision dtype (typically `Float16` or
+`BFloat16`) while keeping numerically sensitive operations (losses, norms,
+softmax) in full `Float32`. On GPUs with Tensor Cores (RTX 30xx, RTX 40xx,
+RTX 50xx), this can deliver up to 3x speedup with minimal accuracy impact.
+
+### Autocast
+
+The `AutocastGuard` RAII guard enables automatic dtype dispatch for the
+duration of its lifetime. The `autocast()` closure helper provides a
+convenient scoped interface:
+
+```rust
+use flodl::*;
+
+// RAII guard style
+let _amp = AutocastGuard::new(DType::Float16);
+let output = model.forward(&input)?;  // matmul dispatches to fp16
+let loss = mse_loss(&output, &target)?;  // stays fp32
+drop(_amp);
+
+// Closure style (preferred)
+let loss = autocast(DType::Float16, || {
+    let output = model.forward(&input)?;
+    mse_loss(&output, &target)
+})?;
+
+// Query whether autocast is active
+if is_autocast_enabled() {
+    // inside an autocast region
+}
+```
+
+### GradScaler
+
+Half-precision gradients can underflow to zero. `GradScaler` solves this
+by scaling the loss before backward (inflating gradient magnitudes), then
+unscaling gradients before the optimizer step. It dynamically adjusts the
+scale factor -- growing it when gradients stay finite, backing off when
+inf/nan is detected.
+
+```rust
+let mut scaler = GradScaler::new();
+// Initial scale: 65536, growth: 2x, backoff: 0.5x, interval: 2000 steps
+```
+
+The `step` method handles unscaling, inf/nan checking, and the optimizer
+step in a single call. It returns `true` if the step was taken, or `false`
+if it was skipped due to non-finite gradients:
+
+```rust
+let stepped = scaler.step(&params, &mut || optimizer.step())?;
+scaler.update();  // adjust scale factor -- call after every step()
+```
+
+### Complete Mixed Precision Loop
+
+```rust
+let mut scaler = GradScaler::new();
+
+model.train();
+for (x, y) in &batches {
+    let input = Variable::new(x.clone(), false);
+    let target = Variable::new(y.clone(), false);
+
+    // Forward under autocast -- eligible ops run in fp16
+    let loss = autocast(DType::Float16, || {
+        let pred = model.forward(&input)?;
+        mse_loss(&pred, &target)
+    })?;
+
+    // Scale loss and backward
+    let scaled = scaler.scale(&loss)?;
+    optimizer.zero_grad();
+    scaled.backward()?;
+
+    // Unscale gradients, check for inf/nan, clip, and step
+    clip_grad_norm(&params, 1.0)?;
+    let stepped = scaler.step(&params, &mut || optimizer.step())?;
+    scaler.update();
+}
+```
+
+### Manual Dtype Conversion
+
+For cases where you need explicit control over parameter dtypes rather
+than relying on autocast:
+
+```rust
+// Cast all parameters to fp16
+cast_parameters(&params, DType::Float16);
+
+// Cast back to fp32
+cast_parameters(&params, DType::Float32);
+```
+
+Parameters already at the target dtype are skipped (no-op).
 
 ## Eval Mode
 

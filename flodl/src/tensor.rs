@@ -1748,6 +1748,23 @@ impl Tensor {
         self.to_device(target)
     }
 
+    /// Non-blocking device transfer. Combined with [`pin_memory`] for CPU->GPU,
+    /// this allows the transfer to overlap with host computation.
+    ///
+    /// ```ignore
+    /// let pinned = cpu_tensor.pin_memory()?;
+    /// let gpu = pinned.to_device_async(Device::CUDA(0))?;
+    /// // ... do CPU work while transfer runs ...
+    /// cuda_synchronize(0); // ensure transfer is done before using gpu tensor
+    /// ```
+    pub fn to_device_async(&self, device: Device) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let (dt, di) = device.to_ffi();
+        let err = unsafe { ffi::flodl_to_device_async(self.handle, dt, di, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Autograd ---
 
     /// Set requires_grad on this tensor. Returns a new tensor that shares
@@ -1894,6 +1911,16 @@ impl Tensor {
         check_err(err)
     }
 
+    /// In-place copy: `self = src`.
+    ///
+    /// Copies the data from `src` into `self`. Both tensors must have the
+    /// same shape. When `non_blocking` is true, cross-device copies may
+    /// be asynchronous (useful inside CUDA Graph capture).
+    pub fn copy_(&self, src: &Tensor, non_blocking: bool) -> Result<()> {
+        let err = unsafe { ffi::flodl_copy_(self.handle, src.handle, non_blocking as i32) };
+        check_err(err)
+    }
+
     /// Fused Adam/AdamW step: updates param, m, and v tensors in-place.
     #[allow(clippy::too_many_arguments)]
     ///
@@ -1945,6 +1972,168 @@ impl Tensor {
         check_err(err)
     }
 
+    // --- Fused Adam/AdamW (multi-tensor kernel) ---
+    // Uses libtorch's _fused_adam_ / _fused_adamw_ to perform the complete
+    // Adam update across ALL params in a single kernel launch on CUDA.
+
+    /// Fused Adam update (L2 weight decay) across all params in one kernel.
+    ///
+    /// On CUDA, this launches a single multi-tensor kernel instead of ~4N
+    /// separate kernels for N parameters. On CPU, falls back to a fused loop.
+    ///
+    /// - `grad_scale` / `found_inf`: pass `None` to skip mixed-precision integration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fused_adam_(
+        params: &[Tensor], grads: &[Tensor], exp_avgs: &[Tensor], exp_avg_sqs: &[Tensor],
+        lr: f64, beta1: f64, beta2: f64, eps: f64,
+        weight_decay: f64, step: i64,
+        grad_scale: Option<&Tensor>, found_inf: Option<&Tensor>,
+    ) -> Result<()> {
+        if params.is_empty() { return Ok(()); }
+        let count = params.len() as i32;
+        let mut p = Self::handles(params);
+        let mut g = Self::handles(grads);
+        let mut m = Self::handles(exp_avgs);
+        let mut v = Self::handles(exp_avg_sqs);
+        let gs = grad_scale.map_or(ptr::null_mut(), |t| t.handle);
+        let fi = found_inf.map_or(ptr::null_mut(), |t| t.handle);
+        let err = unsafe {
+            ffi::flodl_fused_adam_(
+                p.as_mut_ptr(), g.as_mut_ptr(), m.as_mut_ptr(), v.as_mut_ptr(),
+                count, lr, beta1, beta2, eps, weight_decay, step, gs, fi,
+            )
+        };
+        check_err(err)
+    }
+
+    /// Fused AdamW update (decoupled weight decay) across all params in one kernel.
+    ///
+    /// Same as [`fused_adam_`] but applies decoupled weight decay:
+    /// `param *= (1 - lr * weight_decay)` before the Adam step.
+    /// With `weight_decay = 0.0`, identical to `fused_adam_`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fused_adamw_(
+        params: &[Tensor], grads: &[Tensor], exp_avgs: &[Tensor], exp_avg_sqs: &[Tensor],
+        lr: f64, beta1: f64, beta2: f64, eps: f64,
+        weight_decay: f64, step: i64,
+        grad_scale: Option<&Tensor>, found_inf: Option<&Tensor>,
+    ) -> Result<()> {
+        if params.is_empty() { return Ok(()); }
+        let count = params.len() as i32;
+        let mut p = Self::handles(params);
+        let mut g = Self::handles(grads);
+        let mut m = Self::handles(exp_avgs);
+        let mut v = Self::handles(exp_avg_sqs);
+        let gs = grad_scale.map_or(ptr::null_mut(), |t| t.handle);
+        let fi = found_inf.map_or(ptr::null_mut(), |t| t.handle);
+        let err = unsafe {
+            ffi::flodl_fused_adamw_(
+                p.as_mut_ptr(), g.as_mut_ptr(), m.as_mut_ptr(), v.as_mut_ptr(),
+                count, lr, beta1, beta2, eps, weight_decay, step, gs, fi,
+            )
+        };
+        check_err(err)
+    }
+
+    /// Collect FlodlTensor handles from a slice.
+    fn handles(tensors: &[Tensor]) -> Vec<FlodlTensor> {
+        tensors.iter().map(|t| t.handle).collect()
+    }
+
+    // --- Multi-tensor foreach operations ---
+    // These use libtorch's _foreach_* ops which batch the same operation
+    // across all tensors into fewer kernel launches on CUDA.
+
+    /// In-place add scalar to all tensors: `tensors[i] += scalar`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_add_scalar_(tensors: &[Tensor], scalar: f64) -> Result<()> {
+        if tensors.is_empty() { return Ok(()); }
+        let mut handles: Vec<FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_foreach_add_scalar_(handles.as_mut_ptr(), handles.len() as i32, scalar)
+        };
+        check_err(err)
+    }
+
+    /// In-place multiply all tensors by scalar: `tensors[i] *= scalar`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_mul_scalar_(tensors: &[Tensor], scalar: f64) -> Result<()> {
+        if tensors.is_empty() { return Ok(()); }
+        let mut handles: Vec<FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_foreach_mul_scalar_(handles.as_mut_ptr(), handles.len() as i32, scalar)
+        };
+        check_err(err)
+    }
+
+    /// In-place zero all tensors: `tensors[i] = 0`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_zero_(tensors: &[Tensor]) -> Result<()> {
+        if tensors.is_empty() { return Ok(()); }
+        let mut handles: Vec<FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_foreach_zero_(handles.as_mut_ptr(), handles.len() as i32)
+        };
+        check_err(err)
+    }
+
+    /// In-place add two tensor lists: `tensors1[i] += alpha * tensors2[i]`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_add_list_(tensors1: &[Tensor], tensors2: &[Tensor], alpha: f64) -> Result<()> {
+        if tensors1.is_empty() { return Ok(()); }
+        assert_eq!(tensors1.len(), tensors2.len(), "foreach_add_list_: list length mismatch");
+        let mut h1: Vec<FlodlTensor> = tensors1.iter().map(|t| t.handle).collect();
+        let mut h2: Vec<FlodlTensor> = tensors2.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_foreach_add_list_(
+                h1.as_mut_ptr(), h2.as_mut_ptr(), h1.len() as i32, alpha,
+            )
+        };
+        check_err(err)
+    }
+
+    /// Compute per-tensor norms. Returns a Vec of scalar tensors.
+    /// Single batched kernel on CUDA instead of N separate norm calls.
+    pub fn foreach_norm(tensors: &[Tensor], ord: f64) -> Result<Vec<Tensor>> {
+        if tensors.is_empty() { return Ok(vec![]); }
+        let mut handles: Vec<FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let mut results: Vec<FlodlTensor> = vec![ptr::null_mut(); tensors.len()];
+        let err = unsafe {
+            ffi::flodl_foreach_norm(
+                handles.as_mut_ptr(), handles.len() as i32, ord,
+                results.as_mut_ptr(),
+            )
+        };
+        check_err(err)?;
+        Ok(results.into_iter().map(Tensor::from_raw).collect())
+    }
+
+    /// In-place lerp: `tensors1[i] += weight * (tensors2[i] - tensors1[i])`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_lerp_scalar_(tensors1: &[Tensor], tensors2: &[Tensor], weight: f64) -> Result<()> {
+        if tensors1.is_empty() { return Ok(()); }
+        assert_eq!(tensors1.len(), tensors2.len(), "foreach_lerp_scalar_: list length mismatch");
+        let mut h1: Vec<FlodlTensor> = tensors1.iter().map(|t| t.handle).collect();
+        let mut h2: Vec<FlodlTensor> = tensors2.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_foreach_lerp_scalar_(
+                h1.as_mut_ptr(), h2.as_mut_ptr(), h1.len() as i32, weight,
+            )
+        };
+        check_err(err)
+    }
+
+    /// In-place sqrt: `tensors[i] = sqrt(tensors[i])`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_sqrt_(tensors: &[Tensor]) -> Result<()> {
+        if tensors.is_empty() { return Ok(()); }
+        let mut handles: Vec<FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_foreach_sqrt_(handles.as_mut_ptr(), handles.len() as i32)
+        };
+        check_err(err)
+    }
+
     // --- Pinned memory ---
 
     /// Copy this CPU tensor into page-locked (pinned) memory.
@@ -1961,6 +2150,22 @@ impl Tensor {
     /// Returns true if this tensor is stored in pinned (page-locked) memory.
     pub fn is_pinned(&self) -> bool {
         unsafe { ffi::flodl_is_pinned(self.handle) != 0 }
+    }
+
+    // --- Memory format ---
+
+    /// Convert to channels-last (NHWC) memory format. Only meaningful for 4D tensors.
+    /// This is the Rust equivalent of `tensor.to(memory_format=torch.channels_last)`.
+    pub fn to_channels_last(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_to_channels_last(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Returns true if this tensor is contiguous in channels-last format.
+    pub fn is_channels_last(&self) -> bool {
+        unsafe { ffi::flodl_is_channels_last(self.handle) != 0 }
     }
 }
 
@@ -2039,6 +2244,45 @@ pub fn cuda_active_bytes_idx(device_index: i32) -> Result<u64> {
 /// Query bytes actively used by tensors on device 0.
 pub fn cuda_active_bytes() -> Result<u64> {
     cuda_active_bytes_idx(0)
+}
+
+/// Peak bytes allocated to tensors since last `cuda_reset_peak_stats()` on a specific device.
+///
+/// This is the Rust equivalent of `torch.cuda.max_memory_allocated()`.
+pub fn cuda_peak_active_bytes_idx(device_index: i32) -> Result<u64> {
+    let mut peak: u64 = 0;
+    check_err(unsafe { ffi::flodl_cuda_peak_active_bytes(device_index, &mut peak) })?;
+    Ok(peak)
+}
+
+/// Peak bytes allocated to tensors since last `cuda_reset_peak_stats()` on device 0.
+pub fn cuda_peak_active_bytes() -> Result<u64> {
+    cuda_peak_active_bytes_idx(0)
+}
+
+/// Peak bytes reserved by the CUDA caching allocator since last `cuda_reset_peak_stats()` on a specific device.
+///
+/// This is the Rust equivalent of `torch.cuda.max_memory_reserved()`.
+pub fn cuda_peak_reserved_bytes_idx(device_index: i32) -> Result<u64> {
+    let mut peak: u64 = 0;
+    check_err(unsafe { ffi::flodl_cuda_peak_reserved_bytes(device_index, &mut peak) })?;
+    Ok(peak)
+}
+
+/// Peak bytes reserved by the CUDA caching allocator since last `cuda_reset_peak_stats()` on device 0.
+pub fn cuda_peak_reserved_bytes() -> Result<u64> {
+    cuda_peak_reserved_bytes_idx(0)
+}
+
+/// Reset peak memory statistics for a specific device.
+/// Equivalent to `torch.cuda.reset_peak_memory_stats()`.
+pub fn cuda_reset_peak_stats_idx(device_index: i32) {
+    unsafe { ffi::flodl_cuda_reset_peak_stats(device_index) }
+}
+
+/// Reset peak memory statistics for device 0.
+pub fn cuda_reset_peak_stats() {
+    cuda_reset_peak_stats_idx(0)
 }
 
 /// Release all unused cached memory from the CUDA caching allocator.
@@ -2780,6 +3024,15 @@ mod tests {
     }
 
     #[test]
+    fn test_channels_last() {
+        let t = Tensor::randn(&[1, 3, 4, 4], test_opts()).unwrap();
+        assert!(!t.is_channels_last());
+        let cl = t.to_channels_last().unwrap();
+        assert!(cl.is_channels_last());
+        assert_eq!(cl.shape(), vec![1, 3, 4, 4]); // shape unchanged
+    }
+
+    #[test]
     fn test_adam_step_basic() {
         // Basic smoke test for the fused adam_step at tensor level
         let param = Tensor::from_f32(&[1.0, 2.0], &[2], test_device()).unwrap();
@@ -2863,5 +3116,209 @@ mod tests {
         manual_seed(123);
         let b = Tensor::randn(&[4, 4], opts).unwrap().to_f32_vec().unwrap();
         assert_eq!(a, b);
+    }
+
+    // --- fused adam tests ---
+
+    #[test]
+    fn test_fused_adamw_matches_batched() {
+        // Run the same update with both implementations, verify results match
+        let dev = test_device();
+        let opts = test_opts();
+
+        // Create two identical copies of params/moments
+        manual_seed(42);
+        let p1 = Tensor::randn(&[4, 3], opts).unwrap();
+        let p2 = Tensor::from_f32(&p1.to_f32_vec().unwrap(), &[4, 3], dev).unwrap();
+        let g = Tensor::randn(&[4, 3], opts).unwrap();
+        let m1 = Tensor::zeros(&[4, 3], opts).unwrap();
+        let m2 = Tensor::zeros(&[4, 3], opts).unwrap();
+        let v1 = Tensor::zeros(&[4, 3], opts).unwrap();
+        let v2 = Tensor::zeros(&[4, 3], opts).unwrap();
+
+        let lr = 0.001;
+        let beta1 = 0.9;
+        let beta2 = 0.999;
+        let eps = 1e-8;
+        let wd = 0.01;
+
+        // Batched (old path)
+        p1.adam_step(&g, &m1, &v1, lr, beta1, beta2, eps, wd, 1).unwrap();
+
+        // Fused (new path)
+        Tensor::fused_adamw_(
+            std::slice::from_ref(&p2), std::slice::from_ref(&g),
+            std::slice::from_ref(&m2), std::slice::from_ref(&v2),
+            lr, beta1, beta2, eps, wd, 1, None, None,
+        ).unwrap();
+
+        let p1_data = p1.to_f32_vec().unwrap();
+        let p2_data = p2.to_f32_vec().unwrap();
+        for (i, (a, b)) in p1_data.iter().zip(&p2_data).enumerate() {
+            assert!((a - b).abs() < 1e-5,
+                "param mismatch at {}: batched={}, fused={}", i, a, b);
+        }
+
+        let m1_data = m1.to_f32_vec().unwrap();
+        let m2_data = m2.to_f32_vec().unwrap();
+        for (i, (a, b)) in m1_data.iter().zip(&m2_data).enumerate() {
+            assert!((a - b).abs() < 1e-6,
+                "m mismatch at {}: batched={}, fused={}", i, a, b);
+        }
+    }
+
+    #[test]
+    fn test_fused_adam_no_weight_decay() {
+        let opts = test_opts();
+        let p = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[4], test_device()).unwrap();
+        let g = Tensor::from_f32(&[0.1, 0.2, 0.3, 0.4], &[4], test_device()).unwrap();
+        let m = Tensor::zeros(&[4], opts).unwrap();
+        let v = Tensor::zeros(&[4], opts).unwrap();
+
+        Tensor::fused_adamw_(
+            std::slice::from_ref(&p), std::slice::from_ref(&g),
+            std::slice::from_ref(&m), std::slice::from_ref(&v),
+            0.001, 0.9, 0.999, 1e-8, 0.0, 1, None, None,
+        ).unwrap();
+
+        let p_data = p.to_f32_vec().unwrap();
+        // Each param should decrease by ~lr
+        let orig = [1.0f32, 2.0, 3.0, 4.0];
+        for (i, &o) in orig.iter().enumerate() {
+            assert!((p_data[i] - (o - 0.001)).abs() < 1e-4,
+                "p[{}]: got {}, expected ~{}", i, p_data[i], o - 0.001);
+        }
+    }
+
+    #[test]
+    fn test_fused_adam_multi_step() {
+        let opts = test_opts();
+        let p = Tensor::from_f32(&[5.0], &[1], test_device()).unwrap();
+        let g = Tensor::from_f32(&[1.0], &[1], test_device()).unwrap();
+        let m = Tensor::zeros(&[1], opts).unwrap();
+        let v = Tensor::zeros(&[1], opts).unwrap();
+
+        for step in 1..=10 {
+            Tensor::fused_adamw_(
+                std::slice::from_ref(&p), std::slice::from_ref(&g),
+                std::slice::from_ref(&m), std::slice::from_ref(&v),
+                0.01, 0.9, 0.999, 1e-8, 0.0, step, None, None,
+            ).unwrap();
+        }
+
+        let p_data = p.to_f32_vec().unwrap();
+        assert!(p_data[0] < 5.0, "param should decrease: got {}", p_data[0]);
+        let m_data = m.to_f32_vec().unwrap();
+        assert!((m_data[0] - 0.6513).abs() < 0.01,
+            "m after 10 steps: got {}", m_data[0]);
+    }
+
+    #[test]
+    fn test_fused_adam_empty_is_noop() {
+        Tensor::fused_adamw_(&[], &[], &[], &[], 0.001, 0.9, 0.999, 1e-8, 0.0, 1, None, None).unwrap();
+        Tensor::fused_adam_(&[], &[], &[], &[], 0.001, 0.9, 0.999, 1e-8, 0.0, 1, None, None).unwrap();
+    }
+
+    // --- foreach ops tests ---
+
+    #[test]
+    fn test_foreach_add_scalar() {
+        let dev = test_device();
+        let a = Tensor::from_f32(&[1.0, 2.0], &[2], dev).unwrap();
+        let b = Tensor::from_f32(&[3.0, 4.0, 5.0], &[3], dev).unwrap();
+        Tensor::foreach_add_scalar_(&[a.clone(), b.clone()], 10.0).unwrap();
+        assert_eq!(a.to_f32_vec().unwrap(), vec![11.0, 12.0]);
+        assert_eq!(b.to_f32_vec().unwrap(), vec![13.0, 14.0, 15.0]);
+    }
+
+    #[test]
+    fn test_foreach_mul_scalar() {
+        let dev = test_device();
+        let a = Tensor::from_f32(&[2.0, 3.0], &[2], dev).unwrap();
+        let b = Tensor::from_f32(&[4.0, 5.0], &[2], dev).unwrap();
+        Tensor::foreach_mul_scalar_(&[a.clone(), b.clone()], 0.5).unwrap();
+        assert_eq!(a.to_f32_vec().unwrap(), vec![1.0, 1.5]);
+        assert_eq!(b.to_f32_vec().unwrap(), vec![2.0, 2.5]);
+    }
+
+    #[test]
+    fn test_foreach_zero() {
+        let dev = test_device();
+        let a = Tensor::from_f32(&[1.0, 2.0], &[2], dev).unwrap();
+        let b = Tensor::from_f32(&[3.0, 4.0], &[2], dev).unwrap();
+        Tensor::foreach_zero_(&[a.clone(), b.clone()]).unwrap();
+        assert_eq!(a.to_f32_vec().unwrap(), vec![0.0, 0.0]);
+        assert_eq!(b.to_f32_vec().unwrap(), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_foreach_add_list() {
+        let dev = test_device();
+        let a = Tensor::from_f32(&[1.0, 2.0], &[2], dev).unwrap();
+        let b = Tensor::from_f32(&[10.0, 20.0], &[2], dev).unwrap();
+        let x = Tensor::from_f32(&[0.5, 0.5], &[2], dev).unwrap();
+        let y = Tensor::from_f32(&[1.0, 1.0], &[2], dev).unwrap();
+        // a += 2.0 * x, b += 2.0 * y
+        Tensor::foreach_add_list_(
+            &[a.clone(), b.clone()],
+            &[x, y],
+            2.0,
+        ).unwrap();
+        assert_eq!(a.to_f32_vec().unwrap(), vec![2.0, 3.0]);
+        assert_eq!(b.to_f32_vec().unwrap(), vec![12.0, 22.0]);
+    }
+
+    #[test]
+    fn test_foreach_norm() {
+        let dev = test_device();
+        let a = Tensor::from_f32(&[3.0, 4.0], &[2], dev).unwrap();
+        let b = Tensor::from_f32(&[1.0, 0.0], &[1, 2], dev).unwrap();
+        let norms = Tensor::foreach_norm(&[a, b], 2.0).unwrap();
+        assert_eq!(norms.len(), 2);
+        let n0: f64 = norms[0].item().unwrap();
+        let n1: f64 = norms[1].item().unwrap();
+        assert!((n0 - 5.0).abs() < 1e-5, "norm of [3,4] should be 5, got {}", n0);
+        assert!((n1 - 1.0).abs() < 1e-5, "norm of [1,0] should be 1, got {}", n1);
+    }
+
+    #[test]
+    fn test_foreach_lerp_scalar() {
+        let dev = test_device();
+        let a = Tensor::from_f32(&[0.0, 10.0], &[2], dev).unwrap();
+        let b = Tensor::from_f32(&[10.0, 0.0], &[2], dev).unwrap();
+        // a = a + 0.5 * (b_target - a), where b_target is the second list
+        let a_target = Tensor::from_f32(&[10.0, 10.0], &[2], dev).unwrap();
+        let b_target = Tensor::from_f32(&[10.0, 10.0], &[2], dev).unwrap();
+        Tensor::foreach_lerp_scalar_(
+            &[a.clone(), b.clone()],
+            &[a_target, b_target],
+            0.5,
+        ).unwrap();
+        // a = 0 + 0.5*(10-0) = 5, 10 + 0.5*(10-10) = 10
+        assert_eq!(a.to_f32_vec().unwrap(), vec![5.0, 10.0]);
+        // b = 10 + 0.5*(10-10) = 10, 0 + 0.5*(10-0) = 5
+        assert_eq!(b.to_f32_vec().unwrap(), vec![10.0, 5.0]);
+    }
+
+    #[test]
+    fn test_foreach_sqrt() {
+        let dev = test_device();
+        let a = Tensor::from_f32(&[4.0, 9.0], &[2], dev).unwrap();
+        let b = Tensor::from_f32(&[16.0, 25.0], &[2], dev).unwrap();
+        Tensor::foreach_sqrt_(&[a.clone(), b.clone()]).unwrap();
+        assert_eq!(a.to_f32_vec().unwrap(), vec![2.0, 3.0]);
+        assert_eq!(b.to_f32_vec().unwrap(), vec![4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_foreach_empty_list_is_noop() {
+        // All foreach ops should handle empty lists gracefully
+        Tensor::foreach_add_scalar_(&[], 1.0).unwrap();
+        Tensor::foreach_mul_scalar_(&[], 1.0).unwrap();
+        Tensor::foreach_zero_(&[]).unwrap();
+        Tensor::foreach_add_list_(&[], &[], 1.0).unwrap();
+        assert!(Tensor::foreach_norm(&[], 2.0).unwrap().is_empty());
+        Tensor::foreach_lerp_scalar_(&[], &[], 0.5).unwrap();
+        Tensor::foreach_sqrt_(&[]).unwrap();
     }
 }

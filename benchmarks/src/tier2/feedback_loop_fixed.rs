@@ -1,39 +1,42 @@
-//! Residual tower benchmark: 8 layers with skip connections via `.also()`.
+//! Fixed-iteration feedback loop benchmark: encoder → loop(refine, N) → decoder.
 //!
-//! Tests graph builder overhead for deep residual networks.
-//! PyTorch equivalent requires manual `x = x + block(x)` in forward().
+//! Same architecture as `feedback_loop` but uses `.for_n(MAX_ITER)` instead of
+//! `.until_cond()`. Both sides always run exactly MAX_ITER iterations with no
+//! halt check and no GPU→CPU sync per iteration. This isolates pure framework
+//! overhead for looping from adaptive halt behavior.
 
 use flodl::*;
 use crate::harness::{BenchConfig, BenchResult, run_benchmark};
 
-const DIM: i64 = 1024;
-const NUM_BLOCKS: usize = 12;
+const DIM: i64 = 512;
+const MAX_ITER: usize = 10;
 
 pub fn run(device: Device) -> Result<BenchResult> {
     let config = BenchConfig {
-        name: "residual_tower".into(),
-        batch_size: 256,
+        name: "feedback_fixed".into(),
+        batch_size: 128,
         batches_per_epoch: 50,
         ..Default::default()
     };
 
     let opts = TensorOptions { dtype: DType::Float32, device };
 
-    // Build: projection → 8 residual blocks → output projection
-    let mut builder = FlowBuilder::from(Linear::on_device(DIM, DIM, device)?);
-
-    for _ in 0..NUM_BLOCKS {
-        // Each residual block: also(Linear → GELU → LayerNorm)
-        // x = x + LayerNorm(GELU(Linear(x)))
-        builder = builder.also(
+    // Loop body: residual refinement block (identical to feedback_loop)
+    let loop_body = FlowBuilder::new()
+        .also(
             FlowBuilder::from(Linear::on_device(DIM, DIM, device)?)
                 .through(GELU)
                 .through(LayerNorm::on_device(DIM, device)?)
                 .build()?
-        );
-    }
+        )
+        .build()?;
 
-    let model = builder
+    // Full model: encoder → fixed loop (no halt) → decoder
+    let model = FlowBuilder::from(Linear::on_device(DIM, DIM, device)?)
+        .through(GELU)
+        .through(LayerNorm::on_device(DIM, device)?)
+        .loop_body(loop_body)
+        .for_n(MAX_ITER)
         .through(Linear::on_device(DIM, DIM, device)?)
         .build()?;
 

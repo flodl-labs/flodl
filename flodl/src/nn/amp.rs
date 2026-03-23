@@ -1,4 +1,8 @@
+use std::ffi::c_void;
 use std::io::{Read, Write};
+use std::ptr;
+
+use flodl_sys as ffi;
 
 use crate::autograd::Variable;
 use crate::tensor::{DType, Result, Tensor};
@@ -6,6 +10,75 @@ use crate::tensor::{DType, Result, Tensor};
 use super::checkpoint::{write_f64_le, read_f64_le, write_i64_le, read_i64_le};
 use super::optim::Stateful;
 use super::parameter::Parameter;
+
+/// RAII guard that enables automatic mixed precision.
+///
+/// While active, eligible operations (matmul, conv, linear) dispatch to the
+/// given reduced-precision dtype. Numerically sensitive operations (losses,
+/// norms, softmax) stay in fp32 automatically.
+///
+/// Requires Tensor Core hardware (Volta/Turing/Ampere/Ada/Blackwell) for
+/// actual speedup. On older GPUs or CPU, ops still run but without perf gain.
+///
+/// ```ignore
+/// let _amp = AutocastGuard::new(DType::Float16);
+/// let output = model.forward(&input)?;  // matmul runs in fp16
+/// let loss = mse_loss(&output, &target)?;  // stays fp32
+/// drop(_amp);
+/// ```
+pub struct AutocastGuard {
+    guard: *mut c_void,
+}
+
+impl AutocastGuard {
+    /// Enable CUDA autocast with the given dtype (typically `Float16` or `BFloat16`).
+    pub fn new(dtype: DType) -> Self {
+        let guard = unsafe {
+            ffi::flodl_autocast_guard_new(ffi::FLODL_CUDA, dtype as i32)
+        };
+        AutocastGuard { guard }
+    }
+
+    /// Enable autocast for a specific device type with the given dtype.
+    pub fn for_device(device_type: i32, dtype: DType) -> Self {
+        let guard = unsafe {
+            ffi::flodl_autocast_guard_new(device_type, dtype as i32)
+        };
+        AutocastGuard { guard }
+    }
+}
+
+impl Drop for AutocastGuard {
+    fn drop(&mut self) {
+        if !self.guard.is_null() {
+            unsafe { ffi::flodl_autocast_guard_delete(self.guard) };
+            self.guard = ptr::null_mut();
+        }
+    }
+}
+
+/// Run a closure with CUDA autocast enabled.
+///
+/// Equivalent to creating an [`AutocastGuard`] for the duration of `f`.
+///
+/// ```ignore
+/// let loss = autocast(DType::Float16, || {
+///     let output = model.forward(&input)?;
+///     mse_loss(&output, &target)
+/// })?;
+/// ```
+pub fn autocast<F, R>(dtype: DType, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = AutocastGuard::new(dtype);
+    f()
+}
+
+/// Returns true if CUDA autocast is currently enabled.
+pub fn is_autocast_enabled() -> bool {
+    unsafe { ffi::flodl_is_autocast_enabled(ffi::FLODL_CUDA) != 0 }
+}
 
 /// Cast all parameters to a different dtype.
 ///

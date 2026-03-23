@@ -10,7 +10,7 @@ RUN_BENCH = $(COMPOSE) run --rm bench
 
 .PHONY: build test test-release check clippy doc shell clean image \
         cuda-image cuda-build cuda-test cuda-shell test-all \
-        bench-image bench bench-cpu bench-compare \
+        bench-image bench bench-cpu bench-compare bench-publish \
         site site-stop test-init
 
 # --- CPU targets ---
@@ -67,6 +67,10 @@ cuda-build: cuda-image
 cuda-test: cuda-image
 	$(RUN_GPU) cargo test --features cuda -- --nocapture
 
+# Run CUDA Graph tests (need exclusive GPU — single-threaded)
+cuda-test-graph: cuda-image
+	$(RUN_GPU) cargo test --features cuda -- --nocapture --ignored --test-threads=1 cuda_graph
+
 # Lint with CUDA feature
 cuda-clippy: cuda-image
 	$(RUN_GPU) cargo clippy --features cuda -- -W clippy::all
@@ -101,12 +105,20 @@ bench-image:
 	fi
 
 # Run CUDA benchmarks: flodl vs PyTorch comparison
+# Pass extra args: make bench ARGS="--tier1"
 bench: bench-image
-	$(RUN_BENCH) benchmarks/run.sh
+	$(RUN_BENCH) benchmarks/run.sh $(ARGS)
 
 # Run CPU-only benchmarks: flodl vs PyTorch comparison
 bench-cpu: bench-image
-	$(RUN_BENCH) benchmarks/run.sh --cpu
+	$(RUN_BENCH) benchmarks/run.sh --cpu $(ARGS)
+
+# Publication benchmarks: 10 interleaved rounds, locked clocks, long warmup.
+# Override rounds/freq: make bench-publish ROUNDS=20 CLOCK=2400
+ROUNDS ?= 10
+CLOCK  ?= 2407
+bench-publish: bench-image
+	$(RUN_BENCH) benchmarks/run.sh --rounds $(ROUNDS) --lock-clocks $(CLOCK) --warmup-secs 15 $(ARGS)
 
 # Run flodl + PyTorch benchmarks and compare (alias)
 bench-compare: bench

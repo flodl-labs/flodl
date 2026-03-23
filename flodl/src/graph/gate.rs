@@ -98,23 +98,24 @@ fn gate_route(
         router.forward(stream)?
     };
 
-    // Run all experts and combine with weights
-    let mut result: Option<Variable> = None;
-    for (i, expert) in experts.iter().enumerate() {
-        let expert_out = expert.forward(stream)?;
-        let last_dim = (weights.shape().len() - 1) as i32;
-        let w_i = weights.narrow(last_dim, i as i64, 1)?;
-        let weighted = expert_out.mul(&w_i)?;
+    // Run all experts and collect outputs
+    let expert_outs: Vec<Variable> = experts
+        .iter()
+        .map(|expert| expert.forward(stream))
+        .collect::<Result<Vec<_>>>()?;
 
-        result = Some(match result {
-            None => weighted,
-            Some(acc) => acc.add(&weighted)?,
-        });
+    if expert_outs.is_empty() {
+        panic!("gate: no experts (n={})", n_experts);
     }
 
-    Ok(result.unwrap_or_else(|| {
-        panic!("gate: no experts (n={})", n_experts)
-    }))
+    // Vectorized combination: stack → broadcast multiply → sum
+    // expert_outs: each [B, D] → stacked [B, D, N]
+    let stacked = Variable::stack(&expert_outs, -1)?;
+    // weights: [B, N] → [B, 1, N] for broadcast over D
+    let w = weights.unsqueeze(-2)?;
+    // [B, D, N] * [B, 1, N] → [B, D, N] → sum over N → [B, D]
+    let weighted = stacked.mul(&w)?;
+    weighted.sum_dim(-1, false)
 }
 
 fn make_gate_func(
