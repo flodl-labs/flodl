@@ -349,6 +349,9 @@ let output = model.forward(&test_input)?;
 
 ## What's next
 
-This covers the full builder API. See the
-[Visualization](07-visualization.md) tutorial for DOT/SVG output of
-your graphs.
+For hierarchical model composition -- freezing subgraphs, loading
+checkpoints into subtrees, cross-boundary observation -- see the
+[Graph Tree](10-graph-tree.md) tutorial.
+
+For DOT/SVG output of your graphs, see
+[Visualization](07-visualization.md).

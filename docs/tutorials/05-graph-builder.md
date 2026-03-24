@@ -163,8 +163,10 @@ let model = FlowBuilder::from(Linear::new(4, 8)?)
     .build()?;
 ```
 
-This is **Graph-as-Module** — the same pattern scales from small blocks
-to entire model components.
+This is **Graph-as-Module** -- the same pattern scales from small blocks
+to entire model components. Add `.label("encoder")` to enable
+[graph tree](10-graph-tree.md) features: selective freeze/thaw, subgraph
+checkpointing, and cross-boundary observation.
 
 ## Putting it together
 

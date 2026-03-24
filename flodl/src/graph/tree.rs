@@ -1,6 +1,20 @@
 //! Graph tree: hierarchical subgraph composition with label-path addressing.
 //!
+//! When a labeled [`Graph`] is used inside a [`FlowBuilder`](super::FlowBuilder),
+//! the parent registers it as a child subgraph. Dot-separated label paths
+//! (`"encoder.scan.hidden"`) address subgraphs and tags across boundaries.
+//!
 //! All operations are build-time or explicit-query-time. The forward path is untouched.
+//!
+//! # Key methods on [`Graph`]
+//!
+//! - **Navigation**: [`tree_children()`](Graph::tree_children), [`child_graph()`](Graph::child_graph),
+//!   [`subgraph()`](Graph::subgraph), [`is_composed()`](Graph::is_composed)
+//! - **Parameters**: [`parameters_at()`](Graph::parameters_at), [`named_parameters_at()`](Graph::named_parameters_at)
+//! - **Freeze/thaw**: [`freeze()`](Graph::freeze), [`thaw()`](Graph::thaw), [`is_frozen()`](Graph::is_frozen)
+//! - **Checkpoints**: [`load_subgraph_checkpoint()`](Graph::load_subgraph_checkpoint)
+//! - **Observation**: [`tagged_at()`](Graph::tagged_at), [`collect_at()`](Graph::collect_at),
+//!   [`record_at()`](Graph::record_at), [`trend_at()`](Graph::trend_at)
 
 use std::collections::HashMap;
 use crate::autograd::Variable;
