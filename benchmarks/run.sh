@@ -14,6 +14,7 @@
 #                      cost of peak throughput. Use base clock for stability
 #                      (e.g., 2407 for RTX 5060 Ti).
 #   --warmup-secs S    GPU warmup duration in seconds (default: 10)
+#   --output FILE      Write the comparison report to FILE (with metadata header)
 #   --tier1|--tier2    Filter benchmarks by tier
 #   --bench NAME       Run a single benchmark
 #
@@ -35,6 +36,7 @@ CPU_MODE=0
 ROUNDS=1
 LOCK_CLOCKS=""
 WARMUP_SECS=10
+OUTPUT_FILE="benchmarks/report.txt"
 PASS_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -53,6 +55,10 @@ while [ $# -gt 0 ]; do
             ;;
         --warmup-secs)
             WARMUP_SECS="${2:?--warmup-secs requires a number}"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_FILE="${2:?--output requires a file path}"
             shift 2
             ;;
         --)
@@ -100,8 +106,13 @@ trap cleanup_clocks EXIT
 
 if [ -n "$LOCK_CLOCKS" ] && [ "$CPU_MODE" -eq 0 ]; then
     echo "=== Locking GPU clocks to ${LOCK_CLOCKS} MHz ==="
-    nvidia-smi -lgc "$LOCK_CLOCKS","$LOCK_CLOCKS" 2>&1
-    CLOCKS_LOCKED=1
+    if nvidia-smi -lgc "$LOCK_CLOCKS","$LOCK_CLOCKS" 2>&1; then
+        CLOCKS_LOCKED=1
+    else
+        echo "WARNING: Could not lock GPU clocks (common in WSL2 / containers)."
+        echo "         Results may show higher variance from boost clock fluctuations."
+        echo ""
+    fi
     echo ""
 fi
 
@@ -126,38 +137,56 @@ else:
     echo ""
 fi
 
-# --- Per-round temp directory ---
-ROUND_DIR=$(mktemp -d /tmp/flodl_bench_XXXXXX)
+# --- Per-round data directory (in workspace so it survives container exit) ---
+ROUND_DIR="$SCRIPT_DIR/rounds"
+rm -rf "$ROUND_DIR"
+mkdir -p "$ROUND_DIR"
 echo "=== Round data: $ROUND_DIR ==="
 echo ""
 
 # --- Interleaved rounds ---
-for ((r=1; r<=ROUNDS; r++)); do
-    echo "=============================================="
-    echo "=== Round $r/$ROUNDS ==="
-    echo "=============================================="
-    echo ""
-
-    # Rust suite
-    echo "--- flodl (Rust) round $r ---"
+# Alternate which framework runs first each round to eliminate systematic
+# thermal/cache bias. Odd rounds: Rust first. Even rounds: Python first.
+run_rust_round() {
+    echo "--- flodl (Rust) round $1 ---"
     "$SCRIPT_DIR/target/release/flodl-bench" --json \
         "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}" \
-        > "$ROUND_DIR/flodl_r${r}.json" 2>/dev/stderr
+        > "$ROUND_DIR/flodl_r${1}.json" 2>/dev/stderr
     echo ""
+}
 
-    # Python suite
-    echo "--- PyTorch (Python) round $r ---"
+run_python_round() {
+    echo "--- PyTorch (Python) round $1 ---"
     cd "$SCRIPT_DIR/python"
     if [ "$CPU_MODE" -eq 1 ]; then
         CUDA_VISIBLE_DEVICES="" python3 run_all.py --json \
             "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}" \
-            > "$ROUND_DIR/pytorch_r${r}.json" 2>/dev/stderr
+            > "$ROUND_DIR/pytorch_r${1}.json" 2>/dev/stderr
     else
         python3 run_all.py --json \
             "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}" \
-            > "$ROUND_DIR/pytorch_r${r}.json" 2>/dev/stderr
+            > "$ROUND_DIR/pytorch_r${1}.json" 2>/dev/stderr
     fi
     echo ""
+}
+
+for ((r=1; r<=ROUNDS; r++)); do
+    echo "=============================================="
+    if (( r % 2 == 1 )); then
+        echo "=== Round $r/$ROUNDS (Rust first) ==="
+    else
+        echo "=== Round $r/$ROUNDS (Python first) ==="
+    fi
+    echo "=============================================="
+    echo ""
+
+    if (( r % 2 == 1 )); then
+        run_rust_round "$r"
+        run_python_round "$r"
+    else
+        run_python_round "$r"
+        run_rust_round "$r"
+    fi
 done
 
 # --- Merge rounds ---
@@ -175,5 +204,49 @@ else
 fi
 
 # --- Compare ---
-echo "=== Comparison ($MODE, $ROUNDS round$([ "$ROUNDS" -gt 1 ] && echo 's')) ==="
-python3 compare.py /tmp/flodl_bench.json /tmp/pytorch_bench.json
+COMPARISON_HEADER="=== Comparison ($MODE, $ROUNDS round$([ "$ROUNDS" -gt 1 ] && echo 's')) ==="
+
+if [ -n "$OUTPUT_FILE" ]; then
+    # Collect metadata for the report header.
+    FLODL_VERSION=$(cargo metadata --manifest-path "$WORKSPACE/flodl/Cargo.toml" --no-deps --format-version 1 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])" 2>/dev/null || echo "unknown")
+    PYTORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")
+    RUSTC_VERSION=$(rustc --version 2>/dev/null || echo "unknown")
+    COMMIT_SHA=$(git -C "$WORKSPACE" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    BENCH_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+
+    if [ "$CPU_MODE" -eq 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
+        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        CUDA_VERSION=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | xargs)
+        CUDA_RT=$(python3 -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "unknown")
+        GPU_INFO="GPU:      $GPU_NAME | Driver $DRIVER_VERSION | CUDA $CUDA_RT"
+        [ -n "$LOCK_CLOCKS" ] && GPU_INFO="$GPU_INFO | Clocks locked at ${LOCK_CLOCKS} MHz"
+    else
+        GPU_INFO="GPU:      CPU-only"
+    fi
+
+    {
+        echo "flodl Benchmark Report"
+        echo "======================"
+        echo ""
+        echo "Date:     $BENCH_DATE"
+        echo "Commit:   $COMMIT_SHA"
+        echo "flodl:    v$FLODL_VERSION"
+        echo "PyTorch:  $PYTORCH_VERSION"
+        echo "Rust:     $RUSTC_VERSION"
+        echo "$GPU_INFO"
+        echo "Rounds:   $ROUNDS | Warmup: ${WARMUP_SECS}s"
+        echo ""
+        echo "$COMPARISON_HEADER"
+        python3 compare.py /tmp/flodl_bench.json /tmp/pytorch_bench.json
+    } > "$OUTPUT_FILE"
+
+    echo "$COMPARISON_HEADER"
+    python3 compare.py /tmp/flodl_bench.json /tmp/pytorch_bench.json
+    echo ""
+    echo "=== Report saved to $OUTPUT_FILE ==="
+else
+    echo "$COMPARISON_HEADER"
+    python3 compare.py /tmp/flodl_bench.json /tmp/pytorch_bench.json
+fi

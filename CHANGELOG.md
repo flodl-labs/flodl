@@ -8,20 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **`MaxPool2d`** module: 2D max pooling layer with kernel size, stride, padding, dilation, and ceil mode. Full FFI chain (`shim.cpp` → `flodl-sys` → `Tensor::max_pool2d` → `autograd::max_pool2d` → `nn::MaxPool2d`). Matches PyTorch's `nn.MaxPool2d`.
-- **`Rng`** struct: CPU-side random number generator wrapping SmallRng (Xoshiro256++). Methods: `seed`, `from_entropy`, `usize`, `f32`, `f64`, `shuffle`, `bernoulli`, `range`, `normal`. For data loading, shuffling, and augmentation — not for tensor ops (use `manual_seed` for those).
-- **`manual_seed(u64)`**: Seed all libtorch RNGs (CPU + CUDA) for reproducible tensor operations (`rand`, `randn`, dropout masks, etc.). Equivalent to `torch.manual_seed()`.
-- **`cuda_manual_seed_all(u64)`**: Seed all CUDA device RNGs independently. No-op without CUDA. Equivalent to `torch.cuda.manual_seed_all()`.
-- **`cuda_active_bytes()` / `cuda_active_bytes_idx()`**: Query bytes actively used by live tensors (matches `torch.cuda.memory_allocated()` semantics). Complements `cuda_allocated_bytes()` which reports total allocator reservation.
+
+#### GPU Performance
+- **Fused Adam/AdamW**: `_fused_adamw_` single multi-tensor CUDA kernel for the complete optimizer step across all parameters. Reduces ~4N kernel launches to 1 per parameter group. Automatic on CUDA — no API change needed. `grad_scale`/`found_inf` params exposed for GradScaler integration.
+- **Foreach operations**: 7 batched tensor ops that reduce CUDA kernel launches — `foreach_add_scalar_`, `foreach_mul_scalar_`, `foreach_zero_`, `foreach_add_list_`, `foreach_norm`, `foreach_lerp_scalar_`, `foreach_sqrt_`. Used internally by fused optimizers and gradient clipping.
+- **Fused gradient clipping**: `clip_grad_norm` now uses `_foreach_norm` + `_foreach_mul_` internally (2 kernels instead of 2N).
+- **CUDA Graphs**: `CudaGraph` struct with capture/replay/reset for zero CPU dispatch overhead. `cuda_graph_capture()` convenience helper with warmup. `MemPoolId`, `CaptureMode` (Global/ThreadLocal/Relaxed), `cuda_graph_pool_handle()` for memory pool sharing. 2-5x speedup for models with many small kernels.
+- **Autocast (AMP)**: `AutocastGuard` RAII wrapper and `autocast()` closure helper for automatic mixed-precision dispatch. Eligible ops (matmul, conv, linear) run in Float16/BFloat16 on Tensor Core GPUs. Up to 3x speedup on RTX 30xx+.
+- **GradScaler**: Dynamic loss scaling for mixed-precision training. Scale, unscale with inf/nan detection, step with skip-on-inf, update with growth/backoff.
+
+#### Tensor Operations
+- **Channels-last memory format**: `Tensor::to_channels_last()` and `is_channels_last()` for NHWC layout. 8-35% speedup for Conv2d on Tensor Core GPUs.
+- **Non-blocking device transfer**: `Tensor::to_device_async()` for overlapped CPU-to-GPU transfer. Pair with `pin_memory()` for maximum overlap.
+- **`Tensor::copy_()`**: In-place copy with `non_blocking` parameter for async CUDA transfers. Used by CUDA Graph capture for data loading.
+- **`Tensor::pin_memory()`** and `is_pinned()`: Page-locked CPU memory for fast async GPU transfers.
+- **Peak VRAM tracking**: `cuda_peak_active_bytes()`, `cuda_peak_reserved_bytes()`, `cuda_reset_peak_stats()` — matches `torch.cuda.max_memory_allocated()` / `max_memory_reserved()` / `reset_peak_memory_stats()` semantics. With `_idx` variants for multi-GPU.
+
+#### Graph Engine
+- **Pre-computed routing**: `Graph::build()` pre-computes a Vec-indexed routing table. Forward dispatch uses flat array indexing instead of HashMap lookups. Cached execution buffers reused across forward calls. Zero allocation during inference.
+- **Vectorized gate combination**: Gate routing stacks all expert outputs and combines via broadcast multiply + sum (~3 kernel launches regardless of expert count, vs 3N with sequential accumulation).
+- **Loop fast-path**: `for_n` loops detect at call time whether refs are needed and call `body.forward()` directly when no `.using()` is chained, skipping HashMap construction and `body_step` indirection.
+
+#### Other
+- **`MaxPool2d`** module: 2D max pooling with kernel size, stride, padding, dilation, and ceil mode.
+- **`Rng`** struct: CPU-side RNG (SmallRng/Xoshiro256++) with seed, shuffle, bernoulli, range, normal.
+- **`manual_seed(u64)`** / **`cuda_manual_seed_all(u64)`**: Seed libtorch RNGs for reproducibility.
+- **`cuda_active_bytes()`**: Query bytes backing live tensors (matches `torch.cuda.memory_allocated()`).
 
 ### Fixed
-- **VRAM monitoring**: `cuda_allocated_bytes()` now returns `reserved_bytes` instead of `allocated_bytes` from the CUDA caching allocator. `allocated_bytes` only counts active sub-blocks and never exceeds physical VRAM, masking unified-memory spill. `reserved_bytes` includes host-spilled pages, making spill detection actually work.
-- Removed unused `ResourceSample::vram_used_bytes` field (dead since dashboard switched to allocator stats).
-- Dashboard now uses `vram_alloc` as the sole VRAM metric with a physical-limit reference line.
+- **VRAM monitoring**: `cuda_allocated_bytes()` now returns `reserved_bytes` from the allocator, making spill detection work.
+- Removed unused `ResourceSample::vram_used_bytes` field.
+- Dashboard uses `vram_alloc` as the sole VRAM metric.
 
 ### Improved
-- **Benchmark suite**: Both Rust and Python benchmarks now report allocated (active tensors) and reserved (allocator pool) VRAM separately. Python harness resets peak stats between benchmarks with `empty_cache()` + `reset_peak_memory_stats()` for honest per-benchmark measurement.
-- **Docker**: Added `.dockerignore` (excludes everything — source is bind-mounted). Libtorch downloads cached via BuildKit `--mount=type=cache`. Image targets skip rebuild when image exists.
+- **Benchmark suite**: Interleaved multi-round execution (`--rounds N`), GPU clock locking (`--lock-clocks FREQ`), configurable warmup (`--warmup-secs`). Peak VRAM tracking (not snapshots). Median interpolation for even-length arrays. `requires_grad=false` on benchmark inputs (matching Python). cuDNN benchmark disabled for GRU (eliminates autotuning variance). `make bench-publish` for publication-grade runs.
+- **Docker**: `.dockerignore`, BuildKit cache for libtorch downloads, skip-if-exists image targets.
 
 ## [0.1.2] - 2026-03-19
 
@@ -86,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Build**: Makefile with cpu/cuda targets (build, test, clippy, shell).
 
 ### Testing
-- 329 library tests + showcase tests.
+- 368 library tests + showcase tests.
 - Zero clippy warnings.
 - Autograd numerical gradient checks.
 - Module-level gradient checks.

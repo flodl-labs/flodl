@@ -12,6 +12,8 @@ Cargo.lock
 .*/
 !.github/
 __pycache__/
+benchmarks/rounds/
+benchmarks/report.txt
 
 # Generated guide pages (built from site/_stubs/ + docs/ by site/build_guide.py)
 site/guide/*.md

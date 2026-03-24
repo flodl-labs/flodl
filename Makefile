@@ -114,11 +114,12 @@ bench-cpu: bench-image
 	$(RUN_BENCH) benchmarks/run.sh --cpu $(ARGS)
 
 # Publication benchmarks: 10 interleaved rounds, locked clocks, long warmup.
-# Override rounds/freq: make bench-publish ROUNDS=20 CLOCK=2400
+# Override rounds/freq/output: make bench-publish ROUNDS=20 CLOCK=2400 OUTPUT=report.txt
 ROUNDS ?= 10
 CLOCK  ?= 2407
+OUTPUT ?= benchmarks/report.txt
 bench-publish: bench-image
-	$(RUN_BENCH) benchmarks/run.sh --rounds $(ROUNDS) --lock-clocks $(CLOCK) --warmup-secs 15 $(ARGS)
+	$(RUN_BENCH) benchmarks/run.sh --rounds $(ROUNDS) --lock-clocks $(CLOCK) --warmup-secs 15 --output $(OUTPUT) $(ARGS)
 
 # Run flodl + PyTorch benchmarks and compare (alias)
 bench-compare: bench
