@@ -104,9 +104,15 @@ impl Graph {
 
     // ── Public navigation ────────────────────────────────────────────
 
-    /// Direct children map: label -> node index.
-    pub fn tree_children(&self) -> &HashMap<String, usize> {
-        &self.children
+    /// Direct children: label -> child graph.
+    pub fn tree_children(&self) -> HashMap<&str, &Graph> {
+        self.children.iter()
+            .filter_map(|(label, &ni)| {
+                self.nodes[ni].module.as_ref()
+                    .and_then(|m| m.as_graph())
+                    .map(|g| (label.as_str(), g))
+            })
+            .collect()
     }
 
     /// Get a direct child graph by label (one level only).
