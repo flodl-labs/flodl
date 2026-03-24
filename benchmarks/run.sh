@@ -13,6 +13,8 @@
 #                      unlock after. Prevents boost clock variance at the
 #                      cost of peak throughput. Use base clock for stability
 #                      (e.g., 2407 for RTX 5060 Ti).
+#                      When omitted (and not WSL), auto-detects the GPU's
+#                      default applications clock and locks to that.
 #   --warmup-secs S    GPU warmup duration in seconds (default: 10)
 #   --output FILE      Write the comparison report to FILE (with metadata header)
 #   --tier1|--tier2    Filter benchmarks by tier
@@ -92,6 +94,33 @@ echo "=== Building flodl benchmarks (release, $MODE) ==="
 cargo build --manifest-path "$SCRIPT_DIR/Cargo.toml" --release $CARGO_FEATURES 2>&1
 echo ""
 
+# --- Detect WSL ---
+IS_WSL=0
+if grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null; then
+    IS_WSL=1
+fi
+
+# --- Auto-detect GPU base clock (when not manually set and not WSL) ---
+if [ -z "$LOCK_CLOCKS" ] && [ "$CPU_MODE" -eq 0 ] && [ "$IS_WSL" -eq 0 ] \
+   && command -v nvidia-smi >/dev/null 2>&1; then
+    # Try default applications clock first (works on most desktop GPUs)
+    DETECTED=$(nvidia-smi --query-gpu=clocks.default_applications.graphics \
+        --format=csv,noheader 2>/dev/null | grep -oP '\d+' | head -1)
+
+    # Fallback: parse "Default Applications Clocks" from verbose output
+    if [ -z "$DETECTED" ]; then
+        DETECTED=$(nvidia-smi -q -d CLOCK 2>/dev/null \
+            | sed -n '/Default Applications Clocks/,/^$/p' \
+            | grep -i 'Graphics' | grep -oP '\d+' | head -1)
+    fi
+
+    if [ -n "$DETECTED" ]; then
+        LOCK_CLOCKS="$DETECTED"
+        echo "=== Auto-detected GPU base clock: ${LOCK_CLOCKS} MHz ==="
+        echo ""
+    fi
+fi
+
 # --- Clock locking ---
 CLOCKS_LOCKED=0
 cleanup_clocks() {
@@ -109,8 +138,11 @@ if [ -n "$LOCK_CLOCKS" ] && [ "$CPU_MODE" -eq 0 ]; then
     if nvidia-smi -lgc "$LOCK_CLOCKS","$LOCK_CLOCKS" 2>&1; then
         CLOCKS_LOCKED=1
     else
-        echo "WARNING: Could not lock GPU clocks (common in WSL2 / containers)."
-        echo "         Results may show higher variance from boost clock fluctuations."
+        if [ "$IS_WSL" -eq 1 ]; then
+            echo "NOTE: WSL2 cannot lock GPU clocks. Use bench-publish.ps1 from Windows."
+        else
+            echo "WARNING: Could not lock GPU clocks. Results may show higher variance."
+        fi
         echo ""
     fi
     echo ""
