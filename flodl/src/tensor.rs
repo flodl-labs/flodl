@@ -1049,7 +1049,7 @@ impl Tensor {
     }
 
     /// Fused cross-entropy loss: single libtorch kernel.
-    /// pred: [N,C] logits. target: [N] Int64 indices or [N,C] Float probs.
+    /// pred: \[N,C\] logits. target: \[N\] Int64 indices or \[N,C\] Float probs.
     /// reduction: 0=None, 1=Mean, 2=Sum.
     #[allow(clippy::too_many_arguments)]
     pub fn cross_entropy_loss(
@@ -1748,7 +1748,7 @@ impl Tensor {
         self.to_device(target)
     }
 
-    /// Non-blocking device transfer. Combined with [`pin_memory`] for CPU->GPU,
+    /// Non-blocking device transfer. Combined with [`Tensor::pin_memory`] for CPU->GPU,
     /// this allows the transfer to overlap with host computation.
     ///
     /// ```ignore
@@ -2008,7 +2008,7 @@ impl Tensor {
 
     /// Fused AdamW update (decoupled weight decay) across all params in one kernel.
     ///
-    /// Same as [`fused_adam_`] but applies decoupled weight decay:
+    /// Same as [`Tensor::fused_adam_`] but applies decoupled weight decay:
     /// `param *= (1 - lr * weight_decay)` before the Adam step.
     /// With `weight_decay = 0.0`, identical to `fused_adam_`.
     #[allow(clippy::too_many_arguments)]

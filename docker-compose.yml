@@ -57,6 +57,18 @@ services:
               count: all
               capabilities: [gpu]
 
+  docs-rs:
+    image: rust:latest
+    volumes:
+      - .:/workspace
+      - ./.cargo-cache-docsrs:/usr/local/cargo/registry
+      - ./.cargo-git-docsrs:/usr/local/cargo/git
+      - ./.target-docsrs:/opt/target
+    working_dir: /workspace/flodl
+    environment:
+      - CARGO_TARGET_DIR=/opt/target
+      - DOCS_RS=1
+
   jekyll:
     image: jekyll/jekyll:4
     volumes:

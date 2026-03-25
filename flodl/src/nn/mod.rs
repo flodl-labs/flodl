@@ -594,6 +594,7 @@ mod tests {
 
     #[test]
     fn test_clip_grad_norm() {
+        crate::manual_seed(42);
         let model = Linear::on_device(2, 1, crate::tensor::test_device()).unwrap();
         let params = model.parameters();
 

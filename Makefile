@@ -11,7 +11,7 @@ RUN_BENCH = $(COMPOSE) run --rm bench
 .PHONY: build test test-release check clippy doc shell clean image \
         cuda-image cuda-build cuda-test cuda-shell test-all \
         bench-image bench bench-cpu bench-compare bench-publish \
-        site site-stop test-init
+        docs-rs site site-stop test-init
 
 # --- CPU targets ---
 
@@ -123,6 +123,19 @@ bench-publish: bench-image
 
 # Run flodl + PyTorch benchmarks and compare (alias)
 bench-compare: bench
+
+# --- docs.rs validation ---
+
+# Simulate docs.rs build (nightly, no libtorch, --cfg docsrs)
+docs-rs:
+	@mkdir -p .cargo-cache-docsrs .cargo-git-docsrs .target-docsrs
+	$(COMPOSE) run --rm docs-rs bash -c "\
+		rustup install nightly 2>&1 | tail -1 && \
+		cargo +nightly rustdoc --lib \
+			--no-default-features \
+			--config 'build.rustflags=[\"--cfg\", \"docsrs\"]' \
+			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]' \
+			-Zrustdoc-scrape-examples"
 
 # --- Site ---
 

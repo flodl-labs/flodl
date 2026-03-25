@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-03-25
+
+### Added
+- `make docs-rs` — local docs.rs build validation via disposable Docker container (nightly Rust, `--cfg docsrs`, no libtorch). Catches docs.rs failures before publishing.
+
+### Fixed
+- Fix docs.rs build: `rand` 0.9.2 uses `feature(doc_auto_cfg)` removed in nightly 1.92+. Made `rand` an optional dependency (`rng` feature, on by default) so docs.rs can build without it.
+- Fix flaky `test_clip_grad_norm` — seed RNG for deterministic weights.
+- Fix rustdoc broken intra-doc links in `Tensor` (escaped shape brackets, qualified method paths).
+
 ## [0.1.4] - 2026-03-25
 
 ### Fixed

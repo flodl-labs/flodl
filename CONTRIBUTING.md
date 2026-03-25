@@ -101,6 +101,25 @@ If you add new functionality:
 - **Graph features**: add a test in the graph module
 - **Module constructors**: always provide an `on_device()` variant alongside `new()`
 
+## Before Publishing to crates.io
+
+Always validate the docs.rs build locally before publishing. docs.rs uses nightly
+Rust with `--cfg docsrs` and no libtorch — things that build fine in the dev
+container can fail there.
+
+```bash
+make docs-rs    # simulates docs.rs build in a disposable container
+```
+
+This catches:
+- Broken intra-doc links (`rustdoc::broken_intra_doc_links`)
+- Dependencies that don't compile on nightly with `--cfg docsrs`
+- Example scraping failures (examples need libtorch)
+- Missing `#[cfg(docsrs)]` gates on FFI code
+
+crates.io is immutable — a broken publish means bumping the version. Run this
+before every `cargo publish`.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](./LICENSE).

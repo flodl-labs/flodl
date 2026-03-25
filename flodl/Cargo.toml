@@ -18,21 +18,25 @@ include = [
 ]
 
 [features]
-default = []
+default = ["rng"]
 cuda = ["flodl-sys/cuda"]
+rng = ["rand"]
 
 [dependencies]
-flodl-sys = { version = "0.1.4", path = "../flodl-sys" }
+flodl-sys = { version = "0.1.5", path = "../flodl-sys" }
 indexmap = "2"
 flate2 = "1"
 hmac-sha256 = "1"
 serde_json = "1"
-rand = { version = "0.9", features = ["small_rng"] }
+rand = { version = "0.9", features = ["small_rng"], optional = true }
 
 [package.metadata.docs.rs]
 # docs.rs has no libtorch — build with this cfg so the -sys build.rs can skip compilation.
 rustc-args = ["--cfg", "docsrs"]
 rustdoc-args = ["--cfg", "docsrs"]
+# rand 0.9 uses feature(doc_auto_cfg) which is removed in nightly 1.92+.
+# Build without rng to avoid the breakage. Rng is included by default for users.
+no-default-features = true
 
 # Examples need libtorch — disable scraping on docs.rs to prevent build failures.
 [[example]]
