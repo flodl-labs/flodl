@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### Graph Tree (hierarchical composition)
+- **Label-path addressing**: Dot-separated paths (`"encoder.scan.hidden"`) for addressing subgraphs and tags across graph boundaries. Strict dot semantics -- dots always mean subgraph boundaries, no fuzzy resolution.
+- **Tree registration**: Labeled graphs nested via `FlowBuilder` are automatically detected as child subgraphs. `tree_children()`, `child_graph()`, `subgraph()` for navigation. `is_composed()` flag on child graphs.
+- **Selective freeze/thaw**: `freeze("encoder.read")`, `thaw("encoder.scan")`, `is_frozen("encoder")` -- declarative training phase control by label path.
+- **Path-based parameter collection**: `parameters_at()`, `named_parameters_at()`, `named_buffers_at()` for per-subgraph optimizer groups. Target namespace used for checkpoint compatibility.
+- **Subgraph checkpoint loading**: `load_subgraph_checkpoint("encoder", "encoder_v1.fdl.gz")` -- loads a checkpoint into a specific subgraph using the child's own namespace and structural hash validation.
+- **Cross-boundary observation**: `tagged_at()` (null/nil semantics), `collect_at()`, `record_at()`, `trend_at()` -- read tagged outputs and metrics across graph boundaries.
+- **Internal tags**: Tags prefixed with `_` are auto-internal (hidden from parent resolution). Explicit `.internal("tag")` on FlowBuilder. Cross-boundary resolution rejects internal tags.
+- **Training mode propagation**: `set_training_at("encoder", false)` for selective eval mode on subgraphs (BatchNorm running stats).
+- **Verbose build output**: `.verbose(true)` on FlowBuilder prints tree structure, tag resolution, and parameter summary. `tree_summary()`, `param_summary()` methods.
+- **Path validation**: `validate_path()` returns `PathKind::Subgraph` or `PathKind::Tag` for build-time wiring checks.
+- **Module trait**: Added `as_graph()` method (default `None`, overridden in Graph) for subgraph detection.
+- **Zero forward-path impact**: All tree metadata is build-time/query-time only. The pre-computed Vec routing in `forward_impl()` is untouched.
+
+### Changed
+- **Breaking**: Graph tree features change `structural_hash()` — checkpoints saved before this version will fail architecture validation on load and need retraining.
+
 ## [0.1.5] - 2026-03-25
 
 ### Added
@@ -25,20 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.1.3] - 2026-03-25
 
 ### Added
-
-#### Graph Tree (hierarchical composition)
-- **Label-path addressing**: Dot-separated paths (`"encoder.scan.hidden"`) for addressing subgraphs and tags across graph boundaries. Strict dot semantics -- dots always mean subgraph boundaries, no fuzzy resolution.
-- **Tree registration**: Labeled graphs nested via `FlowBuilder` are automatically detected as child subgraphs. `tree_children()`, `child_graph()`, `subgraph()` for navigation. `is_composed()` flag on child graphs.
-- **Selective freeze/thaw**: `freeze("encoder.read")`, `thaw("encoder.scan")`, `is_frozen("encoder")` -- declarative training phase control by label path.
-- **Path-based parameter collection**: `parameters_at()`, `named_parameters_at()`, `named_buffers_at()` for per-subgraph optimizer groups. Target namespace used for checkpoint compatibility.
-- **Subgraph checkpoint loading**: `load_subgraph_checkpoint("encoder", "encoder_v1.fdl.gz")` -- loads a checkpoint into a specific subgraph using the child's own namespace and structural hash validation.
-- **Cross-boundary observation**: `tagged_at()` (null/nil semantics), `collect_at()`, `record_at()`, `trend_at()` -- read tagged outputs and metrics across graph boundaries.
-- **Internal tags**: Tags prefixed with `_` are auto-internal (hidden from parent resolution). Explicit `.internal("tag")` on FlowBuilder. Cross-boundary resolution rejects internal tags.
-- **Training mode propagation**: `set_training_at("encoder", false)` for selective eval mode on subgraphs (BatchNorm running stats).
-- **Verbose build output**: `.verbose(true)` on FlowBuilder prints tree structure, tag resolution, and parameter summary. `tree_summary()`, `param_summary()` methods.
-- **Path validation**: `validate_path()` returns `PathKind::Subgraph` or `PathKind::Tag` for build-time wiring checks.
-- **Module trait**: Added `as_graph()` method (default `None`, overridden in Graph) for subgraph detection.
-- **Zero forward-path impact**: All tree metadata is build-time/query-time only. The pre-computed Vec routing in `forward_impl()` is untouched.
 
 #### GPU Performance
 - **Fused Adam/AdamW**: `_fused_adamw_` single multi-tensor CUDA kernel for the complete optimizer step across all parameters. Reduces ~4N kernel launches to 1 per parameter group. Automatic on CUDA — no API change needed. `grad_scale`/`found_inf` params exposed for GradScaler integration.

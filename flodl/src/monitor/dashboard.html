@@ -67,8 +67,7 @@ tr:hover td{background:rgba(108,140,255,0.05)}
 .svg-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px}
 .svg-toggle .arrow{transition:transform 0.2s;font-size:10px}
 .svg-toggle.open .arrow{transform:rotate(90deg)}
-.svg-container{max-height:0;overflow:hidden;transition:max-height 0.3s;background:#fff;border-radius:6px;margin-top:8px}
-.svg-container.open{max-height:2000px}
+.svg-container{max-height:0;overflow:hidden;transition:max-height 0.3s ease;background:#fff;border-radius:6px;margin-top:8px}
 .svg-container svg{width:100%;height:auto}
 
 /* Tooltip */
@@ -208,7 +207,11 @@ function markComplete(msg){
 }
 function showSvg(svg){
   document.getElementById('svgCard').style.display='block';
-  document.getElementById('svgContainer').innerHTML=svg;
+  const c=document.getElementById('svgContainer');
+  c.innerHTML=svg;
+  if(document.getElementById('svgToggle').classList.contains('open')){
+    c.style.maxHeight=c.scrollHeight+'px';
+  }
 }
 
 // --- Data source: live SSE or archive replay ---
@@ -556,7 +559,10 @@ function updateLegend(id,names,colors,chartId,redrawFn,labels){
 function toggleSvg(){
   const t=document.getElementById('svgToggle');
   const c=document.getElementById('svgContainer');
-  t.classList.toggle('open');c.classList.toggle('open');
+  const opening=!t.classList.contains('open');
+  t.classList.toggle('open');
+  if(opening){c.style.maxHeight=c.scrollHeight+'px'}
+  else{c.style.maxHeight='0'}
 }
 
 // --- Formatters ---
