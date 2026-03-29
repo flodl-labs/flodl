@@ -1417,6 +1417,31 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Average pooling over spatial dimensions.
+    pub fn avg_pool2d(
+        &self,
+        kernel_size: [i64; 2],
+        stride: [i64; 2],
+        padding: [i64; 2],
+        ceil_mode: bool,
+        count_include_pad: bool,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let mut ks = kernel_size;
+        let mut st = stride;
+        let mut pd = padding;
+        let err = unsafe {
+            ffi::flodl_avg_pool2d(
+                self.handle,
+                ks.as_mut_ptr(), st.as_mut_ptr(), pd.as_mut_ptr(),
+                ceil_mode as i32, count_include_pad as i32,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Adaptive average pooling to target spatial size.
     pub fn adaptive_avg_pool2d(&self, output_size: [i64; 2]) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();

@@ -596,6 +596,19 @@ pub fn max_pool2d(
     Ok(Variable::wrap(result))
 }
 
+/// Average pooling over spatial dimensions.
+pub fn avg_pool2d(
+    input: &Variable,
+    kernel_size: [i64; 2],
+    stride: [i64; 2],
+    padding: [i64; 2],
+    ceil_mode: bool,
+    count_include_pad: bool,
+) -> Result<Variable> {
+    let result = input.data().avg_pool2d(kernel_size, stride, padding, ceil_mode, count_include_pad)?;
+    Ok(Variable::wrap(result))
+}
+
 /// Adaptive average pooling that outputs a fixed `[H, W]` regardless of input size.
 pub fn adaptive_avg_pool2d(
     input: &Variable,

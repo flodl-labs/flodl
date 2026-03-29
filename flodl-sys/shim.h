@@ -247,6 +247,10 @@ char* flodl_conv_transpose2d(FlodlTensor input, FlodlTensor weight, FlodlTensor 
 char* flodl_max_pool2d(FlodlTensor input, int64_t* kernel_size,
                       int64_t* stride, int64_t* padding, int64_t* dilation,
                       int ceil_mode, FlodlTensor* result);
+char* flodl_avg_pool2d(FlodlTensor input, int64_t* kernel_size,
+                      int64_t* stride, int64_t* padding,
+                      int ceil_mode, int count_include_pad,
+                      FlodlTensor* result);
 char* flodl_adaptive_avg_pool2d(FlodlTensor input, int64_t* output_size,
                               FlodlTensor* result);
 // --- Grid sampling ---

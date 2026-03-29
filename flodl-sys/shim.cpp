@@ -1062,6 +1062,24 @@ extern "C" char* flodl_max_pool2d(FlodlTensor input, int64_t* kernel_size,
     }
 }
 
+extern "C" char* flodl_avg_pool2d(FlodlTensor input, int64_t* kernel_size,
+                                   int64_t* stride, int64_t* padding,
+                                   int ceil_mode, int count_include_pad,
+                                   FlodlTensor* result) {
+    try {
+        *result = wrap(at::avg_pool2d(
+            unwrap(input),
+            torch::IntArrayRef(kernel_size, 2),
+            torch::IntArrayRef(stride, 2),
+            torch::IntArrayRef(padding, 2),
+            ceil_mode != 0,
+            count_include_pad != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 extern "C" char* flodl_adaptive_avg_pool2d(FlodlTensor input, int64_t* output_size,
                                           FlodlTensor* result) {
     try {
