@@ -99,4 +99,49 @@ mod tests {
         let y = pad.forward(&input).unwrap();
         assert_eq!(y.shape(), vec![1, 1, 4, 4]);
     }
+
+    #[test]
+    fn test_zero_pad2d_asymmetric() {
+        let opts = TensorOptions { dtype: DType::Float32, device: crate::tensor::test_device() };
+        let input = Variable::new(Tensor::ones(&[1, 1, 3, 3], opts).unwrap(), false);
+        let pad = ZeroPad2d::asymmetric(1, 2, 0, 3);
+        let y = pad.forward(&input).unwrap();
+        // Width: 1 + 3 + 2 = 6, Height: 0 + 3 + 3 = 6
+        assert_eq!(y.shape(), vec![1, 1, 6, 6]);
+    }
+
+    #[test]
+    fn test_reflection_pad2d_asymmetric() {
+        let device = crate::tensor::test_device();
+        let input = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4], TensorOptions { dtype: DType::Float32, device }).unwrap(),
+            false,
+        );
+        let pad = ReflectionPad2d::asymmetric(1, 2, 1, 2);
+        let y = pad.forward(&input).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 7, 7]);
+    }
+
+    #[test]
+    fn test_zero_pad2d_no_parameters() {
+        let pad = ZeroPad2d::new(2);
+        assert_eq!(pad.parameters().len(), 0);
+    }
+
+    #[test]
+    fn test_reflection_pad2d_values() {
+        let device = crate::tensor::test_device();
+        // [[1, 2], [3, 4]] with padding 1 should reflect boundary values
+        let input = Variable::new(
+            Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2], device).unwrap(),
+            false,
+        );
+        let pad = ReflectionPad2d::new(1);
+        let y = pad.forward(&input).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        // Center should contain original values
+        // Row 1, Col 1 = [1], Row 1, Col 2 = [2]
+        assert!((data[5] - 1.0).abs() < 1e-5); // [1,1] in 4x4
+        assert!((data[6] - 2.0).abs() < 1e-5); // [1,2] in 4x4
+    }
 }

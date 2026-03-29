@@ -88,3 +88,58 @@ impl Module for ConvTranspose2d {
         params
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{Tensor, test_device, test_opts};
+
+    #[test]
+    fn test_conv_transpose2d_forward() {
+        let conv = ConvTranspose2d::build(
+            8, 3, 3, true, [1, 1], [0, 0], [0, 0], [1, 1], 1, test_device(),
+        ).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 8, 4, 4], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        // (4-1)*1 - 2*0 + 3 = 6
+        assert_eq!(y.shape(), vec![1, 3, 6, 6]);
+    }
+
+    #[test]
+    fn test_conv_transpose2d_gradient() {
+        let conv = ConvTranspose2d::build(
+            4, 2, 3, true, [1, 1], [0, 0], [0, 0], [1, 1], 1, test_device(),
+        ).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 4, 4], test_opts()).unwrap(), true,
+        );
+        let y = conv.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(conv.weight.variable.grad().is_some());
+    }
+
+    #[test]
+    fn test_conv_transpose2d_with_stride() {
+        let conv = ConvTranspose2d::build(
+            4, 2, 3, true, [2, 2], [1, 1], [0, 0], [1, 1], 1, test_device(),
+        ).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 4, 4], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        // (4-1)*2 - 2*1 + 3 = 7
+        assert_eq!(y.shape(), vec![1, 2, 7, 7]);
+    }
+
+    #[test]
+    fn test_conv_transpose2d_no_bias() {
+        let conv = ConvTranspose2d::build(
+            4, 2, 3, false, [1, 1], [0, 0], [0, 0], [1, 1], 1, test_device(),
+        ).unwrap();
+        assert_eq!(conv.parameters().len(), 1);
+        assert!(conv.bias.is_none());
+    }
+}

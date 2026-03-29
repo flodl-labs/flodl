@@ -1137,4 +1137,691 @@ mod tests {
             "fused linear ({fused_nodes}) should have fewer nodes than manual ({manual_nodes})"
         );
     }
+
+    // --- Activation gradient tests ---
+
+    fn numerical_grad(f: &dyn Fn(f64) -> f64, x: f64) -> f64 {
+        let eps = 1e-5;
+        (f(x + eps) - f(x - eps)) / (2.0 * eps)
+    }
+
+    #[test]
+    fn test_leaky_relu_gradient() {
+        // Positive input: gradient = 1
+        let x = Variable::new(Tensor::from_f32(&[2.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.leaky_relu(0.01).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!((grad - 1.0).abs() < 1e-4);
+
+        // Negative input: gradient = negative_slope
+        let x2 = Variable::new(Tensor::from_f32(&[-2.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y2 = x2.leaky_relu(0.01).unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        let grad2 = x2.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!((grad2 - 0.01).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_elu_gradient() {
+        // Positive: gradient = 1
+        let x = Variable::new(Tensor::from_f32(&[1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.elu(1.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!((grad - 1.0).abs() < 1e-4);
+
+        // Negative: gradient = alpha * exp(x)
+        let x2 = Variable::new(Tensor::from_f32(&[-1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y2 = x2.elu(1.0).unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        let grad2 = x2.grad().unwrap().to_f32_vec().unwrap()[0];
+        let expected = (-1.0f64).exp(); // alpha * exp(x) = 1.0 * exp(-1)
+        assert!((grad2 as f64 - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_softplus_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.softplus(1.0, 20.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        // softplus'(x) = sigmoid(x) = 1/(1+exp(-x))
+        let expected = 1.0 / (1.0 + (-1.0f64).exp());
+        assert!((grad as f64 - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_mish_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[0.5], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.mish().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        // Numerical validation
+        let mish = |v: f64| v * (v.exp().ln_1p()).tanh();
+        let expected = numerical_grad(&mish, 0.5);
+        assert!((grad as f64 - expected).abs() < 1e-3,
+            "mish grad at 0.5: got {grad}, expected {expected}");
+    }
+
+    #[test]
+    fn test_selu_gradient() {
+        let scale = 1.0507009873554805;
+        // Positive: gradient = scale
+        let x = Variable::new(Tensor::from_f32(&[1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.selu().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!((grad as f64 - scale).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_hardswish_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.hardswish().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        // hardswish(x) = x * clip(x+3, 0, 6) / 6
+        // For x=1: x*(x+3)/6, derivative = (2x+3)/6 = 5/6
+        let expected = 5.0 / 6.0;
+        assert!((grad as f64 - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_hardsigmoid_gradient() {
+        // In the linear region (-3 < x < 3): gradient = 1/6
+        let x = Variable::new(Tensor::from_f32(&[1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.hardsigmoid().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!((grad as f64 - 1.0 / 6.0).abs() < 1e-3);
+
+        // Outside the range: gradient = 0
+        let x2 = Variable::new(Tensor::from_f32(&[5.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y2 = x2.hardsigmoid().unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        let grad2 = x2.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!(grad2.abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_prelu_gradient() {
+        let weight = Variable::new(
+            Tensor::from_f32(&[0.25], &[1], crate::tensor::test_device()).unwrap(), true,
+        );
+        // Positive input: gradient w.r.t. input = 1
+        let x = Variable::new(Tensor::from_f32(&[2.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.prelu(&weight).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!((grad - 1.0).abs() < 1e-4);
+
+        // Negative input: gradient w.r.t. input = weight
+        let x2 = Variable::new(Tensor::from_f32(&[-2.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y2 = x2.prelu(&weight).unwrap().sum().unwrap();
+        y2.backward().unwrap();
+        let grad2 = x2.grad().unwrap().to_f32_vec().unwrap()[0];
+        assert!((grad2 - 0.25).abs() < 1e-4);
+    }
+
+    // --- Element-wise math gradient tests ---
+
+    #[test]
+    fn test_tril_gradient() {
+        let x = Variable::new(Tensor::from_f32(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            &[3, 3], crate::tensor::test_device()).unwrap(), true);
+        let y = x.tril(0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Lower triangle should have grad=1, upper should be 0
+        assert!((grad[0] - 1.0).abs() < 1e-5); // [0,0]
+        assert!((grad[1] - 0.0).abs() < 1e-5); // [0,1] upper
+        assert!((grad[3] - 1.0).abs() < 1e-5); // [1,0]
+        assert!((grad[4] - 1.0).abs() < 1e-5); // [1,1]
+        assert!((grad[5] - 0.0).abs() < 1e-5); // [1,2] upper
+    }
+
+    #[test]
+    fn test_clamp_min_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[-1.0, 0.5, 2.0], &[3], crate::tensor::test_device()).unwrap(), true);
+        let y = x.clamp_min(0.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((grad[0] - 0.0).abs() < 1e-5); // clamped
+        assert!((grad[1] - 1.0).abs() < 1e-5); // pass-through
+        assert!((grad[2] - 1.0).abs() < 1e-5); // pass-through
+    }
+
+    #[test]
+    fn test_clamp_max_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[-1.0, 0.5, 2.0], &[3], crate::tensor::test_device()).unwrap(), true);
+        let y = x.clamp_max(1.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((grad[0] - 1.0).abs() < 1e-5); // pass-through
+        assert!((grad[1] - 1.0).abs() < 1e-5); // pass-through
+        assert!((grad[2] - 0.0).abs() < 1e-5); // clamped
+    }
+
+    #[test]
+    fn test_log1p_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.log1p().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        // d/dx log(1+x) = 1/(1+x) = 0.5
+        assert!((grad - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_expm1_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.expm1().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        // d/dx (exp(x)-1) = exp(x) = e
+        assert!((grad as f64 - 1.0f64.exp()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_log2_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[4.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.log2().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        // d/dx log2(x) = 1/(x*ln(2))
+        let expected = 1.0 / (4.0 * 2.0f64.ln());
+        assert!((grad as f64 - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_log10_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[10.0], &[1], crate::tensor::test_device()).unwrap(), true);
+        let y = x.log10().unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap()[0];
+        // d/dx log10(x) = 1/(x*ln(10))
+        let expected = 1.0 / (10.0 * 10.0f64.ln());
+        assert!((grad as f64 - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_maximum_gradient() {
+        let a = Variable::new(Tensor::from_f32(&[1.0, 5.0], &[2], crate::tensor::test_device()).unwrap(), true);
+        let b = Variable::new(Tensor::from_f32(&[3.0, 2.0], &[2], crate::tensor::test_device()).unwrap(), true);
+        let y = a.maximum(&b).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let ga = a.grad().unwrap().to_f32_vec().unwrap();
+        let gb = b.grad().unwrap().to_f32_vec().unwrap();
+        // max(1,3)=3 -> grad goes to b; max(5,2)=5 -> grad goes to a
+        assert!((ga[0] - 0.0).abs() < 1e-5);
+        assert!((ga[1] - 1.0).abs() < 1e-5);
+        assert!((gb[0] - 1.0).abs() < 1e-5);
+        assert!((gb[1] - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_minimum_gradient() {
+        let a = Variable::new(Tensor::from_f32(&[1.0, 5.0], &[2], crate::tensor::test_device()).unwrap(), true);
+        let b = Variable::new(Tensor::from_f32(&[3.0, 2.0], &[2], crate::tensor::test_device()).unwrap(), true);
+        let y = a.minimum(&b).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let ga = a.grad().unwrap().to_f32_vec().unwrap();
+        let gb = b.grad().unwrap().to_f32_vec().unwrap();
+        // min(1,3)=1 -> grad goes to a; min(5,2)=2 -> grad goes to b
+        assert!((ga[0] - 1.0).abs() < 1e-5);
+        assert!((ga[1] - 0.0).abs() < 1e-5);
+        assert!((gb[0] - 0.0).abs() < 1e-5);
+        assert!((gb[1] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_masked_fill_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[4], crate::tensor::test_device()).unwrap(), true);
+        let mask = Tensor::from_f32(&[1.0, 0.0, 1.0, 0.0], &[4], crate::tensor::test_device()).unwrap()
+            .gt_scalar(0.5).unwrap();
+        let y = x.masked_fill(&mask, 0.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // Masked positions get 0 gradient, others get 1
+        assert!((grad[0] - 0.0).abs() < 1e-5); // masked
+        assert!((grad[1] - 1.0).abs() < 1e-5); // kept
+        assert!((grad[2] - 0.0).abs() < 1e-5); // masked
+        assert!((grad[3] - 1.0).abs() < 1e-5); // kept
+    }
+
+    #[test]
+    fn test_cosine_similarity_gradient() {
+        let a = Variable::new(Tensor::from_f32(&[1.0, 0.0], &[1, 2], crate::tensor::test_device()).unwrap(), true);
+        let b = Variable::new(Tensor::from_f32(&[0.0, 1.0], &[1, 2], crate::tensor::test_device()).unwrap(), true);
+        let cos = a.cosine_similarity(&b, 1, 1e-8).unwrap().sum().unwrap();
+        cos.backward().unwrap();
+        assert!(a.grad().is_some());
+        assert!(b.grad().is_some());
+    }
+
+    #[test]
+    fn test_normalize_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[3.0, 4.0], &[1, 2], crate::tensor::test_device()).unwrap(), true);
+        let y = x.normalize(2.0, 1).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        // Normalized [3,4] with L2=5 gives [0.6, 0.8]
+        let normed = x.normalize(2.0, 1).unwrap().data().to_f32_vec().unwrap();
+        assert!((normed[0] - 0.6).abs() < 1e-4);
+        assert!((normed[1] - 0.8).abs() < 1e-4);
+    }
+
+    // --- Reduction gradient tests ---
+
+    #[test]
+    fn test_prod_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[2.0, 3.0, 4.0], &[3], crate::tensor::test_device()).unwrap(), true);
+        let y = x.prod().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // d(prod)/dx_i = prod / x_i
+        assert!((grad[0] - 12.0).abs() < 1e-3); // 24/2
+        assert!((grad[1] - 8.0).abs() < 1e-3);  // 24/3
+        assert!((grad[2] - 6.0).abs() < 1e-3);  // 24/4
+    }
+
+    #[test]
+    fn test_prod_dim_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], crate::tensor::test_device()).unwrap(), true);
+        let y = x.prod_dim(1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_cumsum_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], crate::tensor::test_device()).unwrap(), true);
+        let y = x.cumsum(0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // cumsum([a,b,c]) = [a, a+b, a+b+c], sum = 3a + 2b + c
+        assert!((grad[0] - 3.0).abs() < 1e-4);
+        assert!((grad[1] - 2.0).abs() < 1e-4);
+        assert!((grad[2] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_logsumexp_gradient() {
+        let x = Variable::new(Tensor::from_f32(&[1.0, 2.0, 3.0], &[1, 3], crate::tensor::test_device()).unwrap(), true);
+        let y = x.logsumexp(1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // d(logsumexp)/dx_i = exp(x_i) / sum(exp(x_j)) = softmax(x_i)
+        let sum_exp: f32 = [1.0f32, 2.0, 3.0].iter().map(|v| v.exp()).sum();
+        for (i, &v) in [1.0f32, 2.0, 3.0].iter().enumerate() {
+            let expected = v.exp() / sum_exp;
+            assert!((grad[i] - expected).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_flatten_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[2, 3, 4], opts).unwrap(), true);
+        let y = x.flatten(1, 2).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap();
+        assert_eq!(grad.shape(), vec![2, 3, 4]);
+    }
+
+    // --- Variable method tests ---
+
+    #[test]
+    fn test_variable_set_grad() {
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        assert!(x.grad().is_none());
+        let g = from_f32(&[0.5, 0.5], &[2]);
+        x.set_grad(g);
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        assert!((grad[0] - 0.5).abs() < 1e-5);
+        assert!((grad[1] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_variable_set_requires_grad() {
+        let x = Variable::new(from_f32(&[1.0], &[1]), false);
+        assert!(!x.requires_grad());
+        x.set_requires_grad(true).unwrap();
+        assert!(x.requires_grad());
+        x.set_requires_grad(false).unwrap();
+        assert!(!x.requires_grad());
+    }
+
+    #[test]
+    fn test_variable_is_leaf() {
+        let x = Variable::new(from_f32(&[1.0], &[1]), true);
+        assert!(x.is_leaf());
+        let y = x.mul_scalar(2.0).unwrap();
+        assert!(!y.is_leaf());
+    }
+
+    #[test]
+    fn test_variable_numel() {
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]), false);
+        assert_eq!(x.numel(), 6);
+    }
+
+    #[test]
+    fn test_variable_zero_grad_set_to_none() {
+        let x = Variable::new(from_f32(&[1.0], &[1]), true);
+        let g = from_f32(&[5.0], &[1]);
+        x.set_grad(g);
+        assert!(x.grad().is_some());
+        x.zero_grad_set_to_none();
+        assert!(x.grad().is_none());
+    }
+
+    #[test]
+    fn test_variable_set_data() {
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        assert!(x.requires_grad());
+        let new_data = from_f32(&[10.0, 20.0], &[2]);
+        x.set_data(new_data);
+        // Data should be replaced but requires_grad preserved
+        assert!(x.requires_grad());
+        let vals = x.data().to_f32_vec().unwrap();
+        assert!((vals[0] - 10.0).abs() < 1e-5);
+        assert!((vals[1] - 20.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_variable_to_device_same() {
+        let x = Variable::new(from_f32(&[1.0], &[1]), true);
+        let y = x.to_device(Device::CPU).unwrap();
+        assert_eq!(y.device(), Device::CPU);
+        assert!(y.requires_grad());
+    }
+
+    // --- Fused autograd op gradient tests ---
+
+    #[test]
+    fn test_fused_conv1d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 3, 10], opts).unwrap(), true);
+        let w = Variable::new(Tensor::randn(&[4, 3, 3], opts).unwrap(), true);
+        let b = Variable::new(Tensor::zeros(&[4], opts).unwrap(), true);
+        let y = conv1d(&x, &w, Some(&b), 1, 0, 1, 1).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+        assert!(b.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_conv2d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 3, 8, 8], opts).unwrap(), true);
+        let w = Variable::new(Tensor::randn(&[4, 3, 3, 3], opts).unwrap(), true);
+        let b = Variable::new(Tensor::zeros(&[4], opts).unwrap(), true);
+        let y = conv2d(&x, &w, Some(&b), [1,1], [0,0], [1,1], 1).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+        assert!(b.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_conv3d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 2, 4, 4, 4], opts).unwrap(), true);
+        let w = Variable::new(Tensor::randn(&[3, 2, 3, 3, 3], opts).unwrap(), true);
+        let y = conv3d(&x, &w, None, [1,1,1], [0,0,0], [1,1,1], 1).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_conv_transpose1d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 4, 5], opts).unwrap(), true);
+        let w = Variable::new(Tensor::randn(&[4, 2, 3], opts).unwrap(), true);
+        let y = conv_transpose1d(&x, &w, None, 1, 0, 0, 1, 1).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_conv_transpose2d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 4, 4, 4], opts).unwrap(), true);
+        let w = Variable::new(Tensor::randn(&[4, 2, 3, 3], opts).unwrap(), true);
+        let y = conv_transpose2d(&x, &w, None, [1,1], [0,0], [0,0], [1,1], 1).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_conv_transpose3d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 4, 3, 3, 3], opts).unwrap(), true);
+        let w = Variable::new(Tensor::randn(&[4, 2, 3, 3, 3], opts).unwrap(), true);
+        let y = conv_transpose3d(&x, &w, None, [1,1,1], [0,0,0], [0,0,0], [1,1,1], 1)
+            .unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_layer_norm_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[2, 8], opts).unwrap(), true);
+        let w = Variable::new(Tensor::ones(&[8], opts).unwrap(), true);
+        let b = Variable::new(Tensor::zeros(&[8], opts).unwrap(), true);
+        let y = layer_norm(&x, &w, &b, 8, 1e-5).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+        assert!(b.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_group_norm_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[2, 8, 4, 4], opts).unwrap(), true);
+        let w = Variable::new(Tensor::ones(&[8], opts).unwrap(), true);
+        let b = Variable::new(Tensor::zeros(&[8], opts).unwrap(), true);
+        let y = group_norm(&x, 2, &w, &b, 1e-5).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_instance_norm_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[2, 4, 8, 8], opts).unwrap(), true);
+        let w = Variable::new(Tensor::ones(&[4], opts).unwrap(), true);
+        let b = Variable::new(Tensor::zeros(&[4], opts).unwrap(), true);
+        let y = instance_norm(&x, Some(&w), Some(&b), None, None, true, 0.1, 1e-5)
+            .unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_max_pool2d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 4, 4], opts).unwrap(), true);
+        let y = max_pool2d(&x, [2, 2], [2, 2], [0, 0], [1, 1], false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_avg_pool2d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 4, 4], opts).unwrap(), true);
+        let y = avg_pool2d(&x, [2, 2], [2, 2], [0, 0], false, true).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad = x.grad().unwrap().to_f32_vec().unwrap();
+        // avg_pool with 2x2 kernel: each input contributes 1/4 to one output
+        assert!(grad.iter().all(|&v| (v - 0.25).abs() < 1e-4));
+    }
+
+    #[test]
+    fn test_fused_adaptive_avg_pool2d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 8, 8], opts).unwrap(), true);
+        let y = adaptive_avg_pool2d(&x, [2, 2]).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_adaptive_max_pool2d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 8, 8], opts).unwrap(), true);
+        let y = adaptive_max_pool2d(&x, [2, 2]).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_max_pool1d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 8], opts).unwrap(), true);
+        let y = max_pool1d(&x, 2, 2, 0, 1, false).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_avg_pool1d_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 8], opts).unwrap(), true);
+        let y = avg_pool1d(&x, 2, 2, 0, false, true).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_gru_cell_gradient() {
+        let opts = crate::tensor::test_opts();
+        let input_size = 4;
+        let hidden_size = 3;
+        let x = Variable::new(Tensor::randn(&[2, input_size], opts).unwrap(), true);
+        let hx = Variable::new(Tensor::zeros(&[2, hidden_size], opts).unwrap(), true);
+        let w_ih = Variable::new(Tensor::randn(&[3 * hidden_size, input_size], opts).unwrap(), true);
+        let w_hh = Variable::new(Tensor::randn(&[3 * hidden_size, hidden_size], opts).unwrap(), true);
+        let b_ih = Variable::new(Tensor::zeros(&[3 * hidden_size], opts).unwrap(), true);
+        let b_hh = Variable::new(Tensor::zeros(&[3 * hidden_size], opts).unwrap(), true);
+        let h = gru_cell(&x, &hx, &w_ih, &w_hh, &b_ih, &b_hh).unwrap();
+        let loss = h.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w_ih.grad().is_some());
+        assert!(w_hh.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_lstm_cell_gradient() {
+        let opts = crate::tensor::test_opts();
+        let input_size = 4;
+        let hidden_size = 3;
+        let x = Variable::new(Tensor::randn(&[2, input_size], opts).unwrap(), true);
+        let hx = Variable::new(Tensor::zeros(&[2, hidden_size], opts).unwrap(), true);
+        let cx = Variable::new(Tensor::zeros(&[2, hidden_size], opts).unwrap(), true);
+        let w_ih = Variable::new(Tensor::randn(&[4 * hidden_size, input_size], opts).unwrap(), true);
+        let w_hh = Variable::new(Tensor::randn(&[4 * hidden_size, hidden_size], opts).unwrap(), true);
+        let b_ih = Variable::new(Tensor::zeros(&[4 * hidden_size], opts).unwrap(), true);
+        let b_hh = Variable::new(Tensor::zeros(&[4 * hidden_size], opts).unwrap(), true);
+        let (h, _c) = lstm_cell(&x, &hx, &cx, &w_ih, &w_hh, &b_ih, &b_hh).unwrap();
+        let loss = h.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(w_ih.grad().is_some());
+        assert!(w_hh.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_bilinear_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x1 = Variable::new(Tensor::randn(&[2, 3], opts).unwrap(), true);
+        let x2 = Variable::new(Tensor::randn(&[2, 4], opts).unwrap(), true);
+        let w = Variable::new(Tensor::randn(&[5, 3, 4], opts).unwrap(), true);
+        let b = Variable::new(Tensor::zeros(&[5], opts).unwrap(), true);
+        let y = bilinear(&x1, &x2, &w, Some(&b)).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x1.grad().is_some());
+        assert!(x2.grad().is_some());
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_pixel_shuffle_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 4, 2, 2], opts).unwrap(), true);
+        let y = pixel_shuffle(&x, 2).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 4, 4]);
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_pixel_unshuffle_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 4, 4], opts).unwrap(), true);
+        let y = pixel_unshuffle(&x, 2).unwrap();
+        assert_eq!(y.shape(), vec![1, 4, 2, 2]);
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_im2col_col2im_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 4, 4], opts).unwrap(), true);
+        let cols = im2col(&x, [2, 2], [1, 1], [0, 0], [1, 1]).unwrap();
+        // im2col: [1, C*kH*kW, L] where L = output spatial positions
+        let loss = cols.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_embedding_bag_gradient() {
+        let opts = crate::tensor::test_opts();
+        let dev = crate::tensor::test_device();
+        let w = Variable::new(Tensor::randn(&[10, 4], opts).unwrap(), true);
+        let indices = Tensor::from_i64(&[0, 1, 2, 3, 4], &[5], dev).unwrap();
+        let offsets = Tensor::from_i64(&[0, 3], &[2], dev).unwrap();
+        let y = embedding_bag(&w, &indices, &offsets, 0).unwrap(); // SUM mode
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(w.grad().is_some());
+    }
+
+    #[test]
+    fn test_fused_grid_sample_gradient() {
+        let opts = crate::tensor::test_opts();
+        let x = Variable::new(Tensor::randn(&[1, 1, 4, 4], opts).unwrap(), true);
+        // Grid: normalized coordinates in [-1, 1], shape [N, H_out, W_out, 2]
+        let grid = Variable::new(
+            Tensor::from_f32(
+                &[0.0, 0.0, 0.5, 0.5, -0.5, -0.5, 0.0, 0.5],
+                &[1, 2, 2, 2],
+                crate::tensor::test_device(),
+            ).unwrap(),
+            true,
+        );
+        let y = grid_sample(&x, &grid, 0, 0, true).unwrap(); // bilinear, zeros padding
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(grid.grad().is_some());
+    }
 }

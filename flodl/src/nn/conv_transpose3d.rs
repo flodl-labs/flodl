@@ -97,4 +97,26 @@ mod tests {
         let y = conv.forward(&x).unwrap();
         assert_eq!(y.shape(), vec![1, 1, 6, 6, 6]);
     }
+
+    #[test]
+    fn test_conv_transpose3d_gradient() {
+        let conv = ConvTranspose3d::on_device(4, 1, [3, 3, 3], test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 4, 4, 4], test_opts()).unwrap(), true,
+        );
+        let y = conv.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(conv.weight.variable.grad().is_some());
+    }
+
+    #[test]
+    fn test_conv_transpose3d_no_bias() {
+        let conv = ConvTranspose3d::build(
+            4, 1, [3, 3, 3], false,
+            [1, 1, 1], [0, 0, 0], [0, 0, 0], [1, 1, 1], 1, test_device(),
+        ).unwrap();
+        assert_eq!(conv.parameters().len(), 1);
+        assert!(conv.bias.is_none());
+    }
 }

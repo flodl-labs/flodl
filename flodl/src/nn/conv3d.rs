@@ -149,4 +149,33 @@ mod tests {
         y.backward().unwrap();
         assert!(x.grad().is_some());
     }
+
+    #[test]
+    fn test_conv3d_no_bias() {
+        let conv = Conv3d::configure(1, 4, [3, 3, 3])
+            .without_bias()
+            .on_device(test_device())
+            .done().unwrap();
+        assert_eq!(conv.parameters().len(), 1);
+        assert!(conv.bias.is_none());
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 6, 6, 6], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn test_conv3d_with_padding() {
+        let conv = Conv3d::configure(1, 2, [3, 3, 3])
+            .with_padding([1, 1, 1])
+            .on_device(test_device())
+            .done().unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4, 4], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        // Same padding: output = input size
+        assert_eq!(y.shape(), vec![1, 2, 4, 4, 4]);
+    }
 }

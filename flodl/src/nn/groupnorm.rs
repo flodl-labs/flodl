@@ -62,3 +62,70 @@ impl Module for GroupNorm {
         vec![self.weight.clone(), self.bias.clone()]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{Tensor, test_device, test_opts};
+
+    #[test]
+    fn test_groupnorm_forward() {
+        let gn = GroupNorm::on_device(4, 16, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 16, 4, 4], test_opts()).unwrap(), false,
+        );
+        let y = gn.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 16, 4, 4]);
+    }
+
+    #[test]
+    fn test_groupnorm_single_group() {
+        // groups=1 is equivalent to LayerNorm over channels
+        let gn = GroupNorm::on_device(1, 8, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 8, 4, 4], test_opts()).unwrap(), false,
+        );
+        let y = gn.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 8, 4, 4]);
+    }
+
+    #[test]
+    fn test_groupnorm_groups_equal_channels() {
+        // groups=channels is equivalent to InstanceNorm
+        let gn = GroupNorm::on_device(4, 4, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 4, 8, 8], test_opts()).unwrap(), false,
+        );
+        let y = gn.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 4, 8, 8]);
+    }
+
+    #[test]
+    fn test_groupnorm_gradient() {
+        let gn = GroupNorm::on_device(2, 8, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[4, 8, 3, 3], test_opts()).unwrap(), true,
+        );
+        let y = gn.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(gn.weight.variable.grad().is_some());
+    }
+
+    #[test]
+    fn test_groupnorm_parameters() {
+        let gn = GroupNorm::on_device(4, 16, test_device()).unwrap();
+        assert_eq!(gn.parameters().len(), 2);
+    }
+
+    #[test]
+    fn test_groupnorm_batch_size_one() {
+        // GroupNorm should work with batch=1 (unlike BatchNorm)
+        let gn = GroupNorm::on_device(2, 4, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 4, 4], test_opts()).unwrap(), false,
+        );
+        let y = gn.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 4, 4, 4]);
+    }
+}

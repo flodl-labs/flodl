@@ -95,3 +95,51 @@ impl Module for ConvTranspose1d {
         params
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{Tensor, test_device, test_opts};
+
+    #[test]
+    fn test_conv_transpose1d_forward() {
+        let conv = ConvTranspose1d::on_device(4, 2, 3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 10], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        // output_size = (10-1)*1 - 2*0 + 3 = 12
+        assert_eq!(y.shape(), vec![1, 2, 12]);
+    }
+
+    #[test]
+    fn test_conv_transpose1d_gradient() {
+        let conv = ConvTranspose1d::on_device(4, 2, 3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 8], test_opts()).unwrap(), true,
+        );
+        let y = conv.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(conv.weight.variable.grad().is_some());
+    }
+
+    #[test]
+    fn test_conv_transpose1d_parameters() {
+        let conv = ConvTranspose1d::new(4, 2, 3).unwrap();
+        assert_eq!(conv.parameters().len(), 2); // weight + bias
+    }
+
+    #[test]
+    fn test_conv_transpose1d_with_stride() {
+        let conv = ConvTranspose1d::build(
+            4, 2, 3, true, 2, 0, 0, 1, 1, test_device(),
+        ).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 5], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        // output_size = (5-1)*2 - 2*0 + 3 = 11
+        assert_eq!(y.shape(), vec![1, 2, 11]);
+    }
+}

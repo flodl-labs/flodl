@@ -109,4 +109,31 @@ mod tests {
         let y = norm.forward(&x).unwrap();
         assert_eq!(y.shape(), vec![1, 3, 8, 8]);
     }
+
+    #[test]
+    fn test_instance_norm_gradient() {
+        let norm = InstanceNorm::on_device(3, true, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 3, 4, 4], test_opts()).unwrap(), true,
+        );
+        let y = norm.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_instance_norm_3d_input() {
+        let norm = InstanceNorm::on_device(4, true, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 4, 16], test_opts()).unwrap(), false,
+        );
+        let y = norm.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 4, 16]);
+    }
+
+    #[test]
+    fn test_instance_norm_affine_parameters() {
+        let norm = InstanceNorm::on_device(8, true, test_device()).unwrap();
+        assert_eq!(norm.parameters().len(), 2);
+    }
 }

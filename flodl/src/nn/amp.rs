@@ -211,3 +211,144 @@ impl Stateful for GradScaler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{Tensor, test_device, test_opts};
+
+    #[test]
+    fn test_autocast_guard_lifecycle() {
+        assert!(!is_autocast_enabled());
+        {
+            let _guard = AutocastGuard::new(DType::Float16);
+            assert!(is_autocast_enabled());
+        }
+        // Guard dropped, autocast should be disabled
+        assert!(!is_autocast_enabled());
+    }
+
+    #[test]
+    fn test_autocast_closure() {
+        assert!(!is_autocast_enabled());
+        let was_enabled = autocast(DType::Float16, || {
+            is_autocast_enabled()
+        });
+        assert!(was_enabled);
+        assert!(!is_autocast_enabled());
+    }
+
+    #[test]
+    fn test_cast_parameters() {
+        let t = Tensor::ones(&[4], test_opts()).unwrap();
+        let p = Parameter {
+            variable: Variable::new(t, true),
+            name: "w".into(),
+        };
+        assert_eq!(p.variable.data().dtype(), DType::Float32);
+        cast_parameters(&[p.clone()], DType::Float64);
+        assert_eq!(p.variable.data().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn test_cast_parameters_noop_same_dtype() {
+        let t = Tensor::ones(&[4], test_opts()).unwrap();
+        let p = Parameter {
+            variable: Variable::new(t, true),
+            name: "w".into(),
+        };
+        cast_parameters(&[p.clone()], DType::Float32);
+        assert_eq!(p.variable.data().dtype(), DType::Float32);
+    }
+
+    #[test]
+    fn test_grad_scaler_defaults() {
+        let scaler = GradScaler::new();
+        assert_eq!(scaler.scale_factor(), 65536.0);
+    }
+
+    #[test]
+    fn test_grad_scaler_scale() {
+        let scaler = GradScaler::new();
+        let loss = Variable::new(
+            Tensor::from_f32(&[1.0], &[1], test_device()).unwrap(), true,
+        );
+        let scaled = scaler.scale(&loss).unwrap();
+        assert!((scaled.item().unwrap() - 65536.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_grad_scaler_step_finite() {
+        let mut scaler = GradScaler::new();
+        let t = Tensor::from_f32(&[1.0, 2.0], &[2], test_device()).unwrap();
+        let p = Parameter {
+            variable: Variable::new(t, true),
+            name: "w".into(),
+        };
+        // Set a finite gradient
+        let grad = Tensor::from_f32(&[0.1, 0.2], &[2], test_device()).unwrap();
+        p.variable.set_grad(grad);
+
+        let mut stepped = false;
+        let ok = scaler.step(&[p.clone()], &mut || { stepped = true; Ok(()) }).unwrap();
+        assert!(ok);
+        assert!(stepped);
+    }
+
+    #[test]
+    fn test_grad_scaler_step_inf() {
+        let mut scaler = GradScaler::new();
+        let t = Tensor::from_f32(&[1.0], &[1], test_device()).unwrap();
+        let p = Parameter {
+            variable: Variable::new(t, true),
+            name: "w".into(),
+        };
+        // Set an infinite gradient
+        let grad = Tensor::from_f32(&[f32::INFINITY], &[1], test_device()).unwrap();
+        p.variable.set_grad(grad);
+
+        let mut stepped = false;
+        let ok = scaler.step(&[p], &mut || { stepped = true; Ok(()) }).unwrap();
+        assert!(!ok, "step should be skipped on inf");
+        assert!(!stepped, "optimizer should not have stepped");
+    }
+
+    #[test]
+    fn test_grad_scaler_update_growth() {
+        let mut scaler = GradScaler {
+            scale: 100.0,
+            growth: 2.0,
+            backoff: 0.5,
+            interval: 3,
+            steps_since_growth: 2,
+            found_inf: false,
+        };
+        scaler.update(); // steps_since_growth becomes 3 >= interval
+        assert_eq!(scaler.scale_factor(), 200.0);
+    }
+
+    #[test]
+    fn test_grad_scaler_update_backoff() {
+        let mut scaler = GradScaler::new();
+        let initial = scaler.scale_factor();
+        scaler.found_inf = true;
+        scaler.update();
+        assert_eq!(scaler.scale_factor(), initial * 0.5);
+    }
+
+    #[test]
+    fn test_grad_scaler_state_roundtrip() {
+        let mut scaler = GradScaler::new();
+        // Modify state
+        scaler.found_inf = true;
+        scaler.update(); // backoff
+        scaler.update(); // one good step
+
+        let mut buf = Vec::new();
+        scaler.save_state(&mut buf).unwrap();
+
+        let mut loaded = GradScaler::new();
+        loaded.load_state(&mut &buf[..]).unwrap();
+        assert_eq!(loaded.scale_factor(), scaler.scale_factor());
+    }
+}

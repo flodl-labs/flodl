@@ -198,3 +198,75 @@ impl Module for Conv1d {
         params
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{Tensor, test_device, test_opts};
+
+    #[test]
+    fn test_conv1d_forward() {
+        let conv = Conv1d::on_device(3, 16, 3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 3, 100], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 16, 98]); // (100 - 3 + 1) = 98
+    }
+
+    #[test]
+    fn test_conv1d_no_bias() {
+        let conv = Conv1d::configure(3, 8, 5)
+            .without_bias()
+            .on_device(test_device())
+            .done().unwrap();
+        assert_eq!(conv.parameters().len(), 1); // weight only
+        let x = Variable::new(
+            Tensor::randn(&[2, 3, 50], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 8, 46]);
+    }
+
+    #[test]
+    fn test_conv1d_with_stride_padding() {
+        let conv = Conv1d::configure(1, 4, 3)
+            .with_stride(2)
+            .with_padding(1)
+            .on_device(test_device())
+            .done().unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 20], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        // (20 + 2*1 - 3) / 2 + 1 = 10
+        assert_eq!(y.shape(), vec![1, 4, 10]);
+    }
+
+    #[test]
+    fn test_conv1d_gradient() {
+        let conv = Conv1d::on_device(2, 4, 3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 2, 10], test_opts()).unwrap(), true,
+        );
+        let y = conv.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(conv.weight.variable.grad().is_some());
+    }
+
+    #[test]
+    fn test_conv1d_builder_groups() {
+        let conv = Conv1d::configure(4, 8, 3)
+            .with_groups(2)
+            .on_device(test_device())
+            .done().unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 20], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 8, 18]);
+        // Weight shape: [8, 4/2, 3] = [8, 2, 3]
+        assert_eq!(conv.weight.variable.shape(), vec![8, 2, 3]);
+    }
+}

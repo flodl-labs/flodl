@@ -198,3 +198,98 @@ impl Module for Conv2d {
         params
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{Tensor, test_device, test_opts};
+
+    #[test]
+    fn test_conv2d_forward() {
+        let conv = Conv2d::on_device(3, 16, 3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 3, 32, 32], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 16, 30, 30]);
+    }
+
+    #[test]
+    fn test_conv2d_no_bias() {
+        let conv = Conv2d::configure(3, 8, 3)
+            .without_bias()
+            .on_device(test_device())
+            .done().unwrap();
+        assert_eq!(conv.parameters().len(), 1);
+        let x = Variable::new(
+            Tensor::randn(&[2, 3, 16, 16], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 8, 14, 14]);
+    }
+
+    #[test]
+    fn test_conv2d_with_padding() {
+        let conv = Conv2d::configure(1, 4, 3)
+            .with_padding(1)
+            .on_device(test_device())
+            .done().unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 8, 8], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        // Same padding: output = input size
+        assert_eq!(y.shape(), vec![1, 4, 8, 8]);
+    }
+
+    #[test]
+    fn test_conv2d_stride() {
+        let conv = Conv2d::configure(1, 4, 3)
+            .with_stride(2)
+            .with_padding(1)
+            .on_device(test_device())
+            .done().unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 16, 16], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 4, 8, 8]);
+    }
+
+    #[test]
+    fn test_conv2d_gradient() {
+        let conv = Conv2d::on_device(3, 8, 3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 3, 8, 8], test_opts()).unwrap(), true,
+        );
+        let y = conv.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert!(conv.weight.variable.grad().is_some());
+        assert!(conv.bias.as_ref().unwrap().variable.grad().is_some());
+    }
+
+    #[test]
+    fn test_conv2d_grouped() {
+        let conv = Conv2d::configure(4, 8, 3)
+            .with_groups(2)
+            .on_device(test_device())
+            .done().unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 10, 10], test_opts()).unwrap(), false,
+        );
+        let y = conv.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 8, 8, 8]);
+        // Weight: [8, 4/2, 3, 3] = [8, 2, 3, 3]
+        assert_eq!(conv.weight.variable.shape(), vec![8, 2, 3, 3]);
+    }
+
+    #[test]
+    fn test_conv2d_builder_without_bias() {
+        let conv = Conv2d::configure(3, 16, 3)
+            .without_bias()
+            .done().unwrap();
+        assert_eq!(conv.parameters().len(), 1);
+        assert!(conv.bias.is_none());
+    }
+}

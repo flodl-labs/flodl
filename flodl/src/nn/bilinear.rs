@@ -102,4 +102,34 @@ mod tests {
         let layer = Bilinear::on_device(3, 4, 5, test_device()).unwrap();
         assert_eq!(layer.parameters().len(), 2); // weight + bias
     }
+
+    #[test]
+    fn test_bilinear_gradient() {
+        let layer = Bilinear::on_device(3, 4, 5, test_device()).unwrap();
+        let x1 = Variable::new(Tensor::randn(&[2, 3], test_opts()).unwrap(), true);
+        let x2 = Variable::new(Tensor::randn(&[2, 4], test_opts()).unwrap(), true);
+        let y = layer.forward_bilinear(&x1, &x2).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x1.grad().is_some());
+        assert!(x2.grad().is_some());
+        assert!(layer.weight.variable.grad().is_some());
+    }
+
+    #[test]
+    fn test_bilinear_no_bias() {
+        let layer = Bilinear::build(3, 4, 5, false, test_device()).unwrap();
+        assert_eq!(layer.parameters().len(), 1); // weight only
+        assert!(layer.bias.is_none());
+        let x1 = Variable::new(Tensor::randn(&[2, 3], test_opts()).unwrap(), false);
+        let x2 = Variable::new(Tensor::randn(&[2, 4], test_opts()).unwrap(), false);
+        let y = layer.forward_bilinear(&x1, &x2).unwrap();
+        assert_eq!(y.shape(), vec![2, 5]);
+    }
+
+    #[test]
+    fn test_bilinear_forward_rejects_single_input() {
+        let layer = Bilinear::on_device(3, 4, 5, test_device()).unwrap();
+        let x = Variable::new(Tensor::randn(&[2, 3], test_opts()).unwrap(), false);
+        assert!(layer.forward(&x).is_err());
+    }
 }

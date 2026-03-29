@@ -211,4 +211,44 @@ mod tests {
         assert!(changed > 0, "alpha dropout should modify some elements during training");
     }
 
+    #[test]
+    fn test_dropout_training() {
+        let d = Dropout::new(0.5);
+        let opts = TensorOptions { dtype: DType::Float32, device: crate::tensor::test_device() };
+        let input = Variable::new(Tensor::ones(&[2, 100], opts).unwrap(), false);
+        let output = d.forward(&input).unwrap();
+        let data = output.data().to_f32_vec().unwrap();
+        let zeros = data.iter().filter(|&&v| v.abs() < 1e-5).count();
+        let nonzeros = data.iter().filter(|&&v| v.abs() > 1e-5).count();
+        // With p=0.5, roughly half should be zeroed
+        assert!(zeros > 30, "expected ~100 zeros, got {zeros}");
+        assert!(nonzeros > 30, "expected ~100 nonzeros, got {nonzeros}");
+        // Nonzero values should be scaled by 1/(1-p) = 2
+        for &v in &data {
+            if v.abs() > 1e-5 {
+                assert!((v - 2.0).abs() < 1e-5, "nonzero values should be 2.0 (scaled), got {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_dropout_eval_identity() {
+        let d = Dropout::new(0.5);
+        d.set_training(false);
+        let opts = TensorOptions { dtype: DType::Float32, device: crate::tensor::test_device() };
+        let input = Variable::new(Tensor::ones(&[2, 10], opts).unwrap(), false);
+        let output = d.forward(&input).unwrap();
+        let data = output.data().to_f32_vec().unwrap();
+        assert!(data.iter().all(|&v| (v - 1.0).abs() < 1e-5));
+    }
+
+    #[test]
+    fn test_dropout_p_zero_is_identity() {
+        let d = Dropout::new(0.0);
+        let opts = TensorOptions { dtype: DType::Float32, device: crate::tensor::test_device() };
+        let input = Variable::new(Tensor::ones(&[2, 10], opts).unwrap(), false);
+        let output = d.forward(&input).unwrap();
+        let data = output.data().to_f32_vec().unwrap();
+        assert!(data.iter().all(|&v| (v - 1.0).abs() < 1e-5));
+    }
 }

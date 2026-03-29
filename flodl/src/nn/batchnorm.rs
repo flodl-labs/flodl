@@ -146,3 +146,120 @@ impl Module for BatchNorm {
         let _ = self.running_var.to_device(device);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::{Tensor, test_device, test_opts};
+
+    #[test]
+    fn test_batchnorm_forward_training() {
+        let bn = BatchNorm::on_device(4, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[8, 4], test_opts()).unwrap(), false,
+        );
+        let y = bn.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![8, 4]);
+    }
+
+    #[test]
+    fn test_batchnorm_eval_mode() {
+        let bn = BatchNorm::on_device(4, test_device()).unwrap();
+        // First run in training to populate running stats
+        let x = Variable::new(
+            Tensor::randn(&[8, 4], test_opts()).unwrap(), false,
+        );
+        let _ = bn.forward(&x).unwrap();
+        // Switch to eval
+        bn.set_training(false);
+        // Eval should work with batch_size=1
+        let x_single = Variable::new(
+            Tensor::randn(&[1, 4], test_opts()).unwrap(), false,
+        );
+        let y = bn.forward(&x_single).unwrap();
+        assert_eq!(y.shape(), vec![1, 4]);
+    }
+
+    #[test]
+    fn test_batchnorm_training_requires_batch_ge_2() {
+        let bn = BatchNorm::on_device(4, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 4], test_opts()).unwrap(), false,
+        );
+        assert!(bn.forward(&x).is_err());
+    }
+
+    #[test]
+    fn test_batchnorm_running_stats_update() {
+        let bn = BatchNorm::on_device(2, test_device()).unwrap();
+        // Initial running_mean should be zero
+        let rm_before = bn.buffers()[0].get().to_f32_vec().unwrap();
+        assert!(rm_before.iter().all(|&v| v.abs() < 1e-6));
+
+        // Forward with non-zero-mean data should update running_mean
+        let x = Variable::new(
+            Tensor::from_f32(&[10.0, 20.0, 12.0, 22.0, 11.0, 21.0, 9.0, 19.0],
+                &[4, 2], test_device()).unwrap(),
+            false,
+        );
+        let _ = bn.forward(&x).unwrap();
+        let rm_after = bn.buffers()[0].get().to_f32_vec().unwrap();
+        // Running mean should have moved toward batch mean (~10.5, ~20.5)
+        assert!(rm_after[0].abs() > 0.5, "running_mean should have updated: {}", rm_after[0]);
+    }
+
+    #[test]
+    fn test_batchnorm_parameters() {
+        let bn = BatchNorm::on_device(8, test_device()).unwrap();
+        assert_eq!(bn.parameters().len(), 2); // weight + bias
+        assert_eq!(bn.buffers().len(), 2); // running_mean + running_var
+    }
+
+    #[test]
+    fn test_batchnorm_gradient() {
+        let bn = BatchNorm::on_device(3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[4, 3], test_opts()).unwrap(), true,
+        );
+        let y = bn.forward(&x).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        assert!(x.grad().is_some());
+    }
+
+    #[test]
+    fn test_batchnorm2d_forward() {
+        let bn = BatchNorm2d::on_device(3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 3, 4, 4], test_opts()).unwrap(), false,
+        );
+        let y = bn.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 3, 4, 4]);
+    }
+
+    #[test]
+    fn test_batchnorm2d_rejects_non_4d() {
+        let bn = BatchNorm2d::on_device(3, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 3], test_opts()).unwrap(), false,
+        );
+        assert!(bn.forward(&x).is_err());
+    }
+
+    #[test]
+    fn test_batchnorm2d_training_eval_differ() {
+        let bn = BatchNorm2d::on_device(2, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[4, 2, 3, 3], test_opts()).unwrap(), false,
+        );
+        let train_out = bn.forward(&x).unwrap().data().to_f32_vec().unwrap();
+
+        // Populate running stats, then switch to eval
+        bn.set_training(false);
+        let eval_out = bn.forward(&x).unwrap().data().to_f32_vec().unwrap();
+
+        // Outputs should differ (training uses batch stats, eval uses running stats)
+        let diff: f32 = train_out.iter().zip(&eval_out)
+            .map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 0.01, "train and eval outputs should differ");
+    }
+}

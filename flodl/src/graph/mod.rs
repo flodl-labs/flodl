@@ -3148,4 +3148,258 @@ mod tests {
 
         std::fs::remove_file(path_str).ok();
     }
+
+    // --- collect_with reduction tests ---
+
+    #[test]
+    fn test_collect_with_sum_reduction() {
+        // Non-scalar tagged output reduced via Sum
+        let graph = FlowBuilder::from(Identity)
+            .tag("features")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[1, 3]), false);
+        let _ = graph.forward(&x).unwrap();
+        graph.collect_with(&["features"], Reduce::Sum).unwrap();
+
+        let collected = graph.collected("features");
+        assert_eq!(collected.len(), 1);
+        assert!((collected[0] - 6.0).abs() < 1e-5, "sum([1,2,3]) = 6, got {}", collected[0]);
+    }
+
+    #[test]
+    fn test_collect_with_mean_reduction() {
+        let graph = FlowBuilder::from(Identity)
+            .tag("out")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[2.0, 4.0, 6.0], &[1, 3]), false);
+        let _ = graph.forward(&x).unwrap();
+        graph.collect_with(&["out"], Reduce::Mean).unwrap();
+
+        let collected = graph.collected("out");
+        assert!((collected[0] - 4.0).abs() < 1e-5, "mean([2,4,6]) = 4, got {}", collected[0]);
+    }
+
+    #[test]
+    fn test_collect_with_max_reduction() {
+        let graph = FlowBuilder::from(Identity)
+            .tag("out")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 5.0, 3.0], &[1, 3]), false);
+        let _ = graph.forward(&x).unwrap();
+        graph.collect_with(&["out"], Reduce::Max).unwrap();
+
+        let collected = graph.collected("out");
+        assert!((collected[0] - 5.0).abs() < 1e-5, "max([1,5,3]) = 5, got {}", collected[0]);
+    }
+
+    #[test]
+    fn test_collect_with_min_reduction() {
+        let graph = FlowBuilder::from(Identity)
+            .tag("out")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[-2.0, 0.0, 3.0], &[1, 3]), false);
+        let _ = graph.forward(&x).unwrap();
+        graph.collect_with(&["out"], Reduce::Min).unwrap();
+
+        let collected = graph.collected("out");
+        assert!((collected[0] - (-2.0)).abs() < 1e-5, "min([-2,0,3]) = -2, got {}", collected[0]);
+    }
+
+    #[test]
+    fn test_collect_with_norm_reduction() {
+        let graph = FlowBuilder::from(Identity)
+            .tag("out")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[3.0, 4.0], &[1, 2]), false);
+        let _ = graph.forward(&x).unwrap();
+        graph.collect_with(&["out"], Reduce::Norm).unwrap();
+
+        let collected = graph.collected("out");
+        // L2 norm of [3, 4] = 5
+        assert!((collected[0] - 5.0).abs() < 1e-4, "norm([3,4]) = 5, got {}", collected[0]);
+    }
+
+    #[test]
+    fn test_collect_rejects_non_scalar() {
+        // Plain collect() should reject non-scalar outputs
+        let graph = FlowBuilder::from(Identity)
+            .tag("out")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let _ = graph.forward(&x).unwrap();
+        assert!(graph.collect(&["out"]).is_err());
+    }
+
+    #[test]
+    fn test_collect_with_scalar_passthrough() {
+        // collect_with on already-scalar output should work without reduction
+        let graph = FlowBuilder::from(ScalarSum)
+            .tag("loss")
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[3.0, 7.0], &[1, 2]), false);
+        let _ = graph.forward(&x).unwrap();
+        graph.collect_with(&["loss"], Reduce::Max).unwrap();
+
+        let collected = graph.collected("loss");
+        // ScalarSum yields 10.0 (scalar), so it should pass through directly
+        assert!((collected[0] - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_collect_with_flush_trend_pipeline() {
+        // Full pipeline: non-scalar → reduce → flush → trend
+        let graph = FlowBuilder::from(Identity)
+            .tag("h")
+            .build()
+            .unwrap();
+
+        // Epoch 1: two batches with decreasing norms
+        let x1 = Variable::new(from_f32(&[3.0, 4.0], &[1, 2]), false);
+        let _ = graph.forward(&x1).unwrap();
+        graph.collect_with(&["h"], Reduce::Norm).unwrap();
+
+        let x2 = Variable::new(from_f32(&[1.0, 0.0], &[1, 2]), false);
+        let _ = graph.forward(&x2).unwrap();
+        graph.collect_with(&["h"], Reduce::Norm).unwrap();
+
+        graph.flush(&["h"]);
+
+        // Epoch 2
+        let x3 = Variable::new(from_f32(&[0.5, 0.5], &[1, 2]), false);
+        let _ = graph.forward(&x3).unwrap();
+        graph.collect_with(&["h"], Reduce::Norm).unwrap();
+        graph.flush(&["h"]);
+
+        let trend = graph.trend("h");
+        assert_eq!(trend.len(), 2);
+        // Epoch 1 mean: (5.0 + 1.0) / 2 = 3.0
+        assert!((trend.values()[0] - 3.0).abs() < 1e-4);
+        assert!(trend.improving(0)); // norms should be decreasing
+    }
+
+    // --- Map.over and Map.slices tests ---
+
+    #[test]
+    fn test_map_over_tag() {
+        // Tag a tensor, then map over it from a different stream position
+        let graph = FlowBuilder::from(Identity)
+            .tag("features")
+            .through(Doubler)        // stream is now 2x
+            .map(Doubler)
+            .over("features")        // map over original (1x), not current stream (2x)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        // .over("features") maps Doubler over the tagged value (original x)
+        // Doubler: x + x = 2x, applied element-wise along dim 0
+        assert_eq!(y.shape(), vec![2, 2]);
+        assert!((data[0] - 2.0).abs() < 1e-5);  // 1.0 * 2
+        assert!((data[1] - 4.0).abs() < 1e-5);  // 2.0 * 2
+        assert!((data[2] - 6.0).abs() < 1e-5);  // 3.0 * 2
+        assert!((data[3] - 8.0).abs() < 1e-5);  // 4.0 * 2
+    }
+
+    #[test]
+    fn test_map_over_unknown_tag_error() {
+        let result = FlowBuilder::from(Identity)
+            .map(Doubler)
+            .over("nonexistent")
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_map_slices() {
+        // Input [2, 4], slices(2): decompose → [4, 2], map Doubler, recompose → [2, 4]
+        let graph = FlowBuilder::from(Identity)
+            .map(Doubler)
+            .slices(2)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(
+            from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]),
+            false,
+        );
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+
+        // Each element doubled
+        assert_eq!(y.shape(), vec![2, 4]);
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[7] - 16.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_map_slices_batched() {
+        // Same as above but with batched fast path
+        let graph = FlowBuilder::from(Identity)
+            .map(Doubler)
+            .batched()
+            .slices(2)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(
+            from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]),
+            false,
+        );
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+
+        assert_eq!(y.shape(), vec![2, 4]);
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[7] - 16.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_map_slices_gradient() {
+        // Input [2, 4] → slices(2) decomposes to [4, 2] → Linear(2, 3) → [4, 3] → recompose [2, 6]
+        let graph = FlowBuilder::from(Identity)
+            .map(Linear::on_device(2, 3, crate::tensor::test_device()).unwrap())
+            .slices(2)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]), true);
+        let y = graph.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![2, 6]); // 3 * 2 slices = 6
+        let loss = y.sum().unwrap();
+        loss.backward().unwrap();
+
+        assert!(x.grad().is_some());
+        for p in graph.parameters() {
+            assert!(p.variable.grad().is_some(), "{} should have gradient", p.name);
+        }
+    }
+
+    #[test]
+    fn test_map_slices_not_divisible_error() {
+        let graph = FlowBuilder::from(Identity)
+            .map(Doubler)
+            .slices(3)
+            .build()
+            .unwrap();
+
+        // [2, 4] with slices(3) — 4 not divisible by 3
+        let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]), false);
+        assert!(graph.forward(&x).is_err());
+    }
 }
