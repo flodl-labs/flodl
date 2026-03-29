@@ -372,6 +372,111 @@ impl Module for Upsample {
     }
 }
 
+/// Unfold extracts sliding local blocks from a batched input tensor.
+///
+/// Input: `[N, C, H, W]`.
+/// Output: `[N, C * kH * kW, L]` where L is the number of valid blocks.
+///
+/// Equivalent to PyTorch's `nn.Unfold` (im2col).
+pub struct Unfold {
+    kernel_size: [i64; 2],
+    dilation: [i64; 2],
+    padding: [i64; 2],
+    stride: [i64; 2],
+}
+
+impl Unfold {
+    /// Create with square kernel.
+    pub fn new(kernel_size: i64) -> Self {
+        Self {
+            kernel_size: [kernel_size, kernel_size],
+            dilation: [1, 1],
+            padding: [0, 0],
+            stride: [1, 1],
+        }
+    }
+
+    /// Create with rectangular kernel.
+    pub fn with_kernel(kernel_size: [i64; 2]) -> Self {
+        Self {
+            kernel_size,
+            dilation: [1, 1],
+            padding: [0, 0],
+            stride: [1, 1],
+        }
+    }
+
+    pub fn dilation(mut self, dilation: [i64; 2]) -> Self { self.dilation = dilation; self }
+    pub fn padding(mut self, padding: [i64; 2]) -> Self { self.padding = padding; self }
+    pub fn stride(mut self, stride: [i64; 2]) -> Self { self.stride = stride; self }
+}
+
+impl Module for Unfold {
+    fn name(&self) -> &str { "unfold" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::im2col(input, self.kernel_size, self.dilation, self.padding, self.stride)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
+/// Fold reassembles columns into a batched image tensor.
+///
+/// Input: `[N, C * kH * kW, L]`.
+/// Output: `[N, C, output_H, output_W]`.
+///
+/// Equivalent to PyTorch's `nn.Fold` (col2im). Inverse of Unfold.
+pub struct Fold {
+    output_size: [i64; 2],
+    kernel_size: [i64; 2],
+    dilation: [i64; 2],
+    padding: [i64; 2],
+    stride: [i64; 2],
+}
+
+impl Fold {
+    /// Create with target output size and square kernel.
+    pub fn new(output_size: [i64; 2], kernel_size: i64) -> Self {
+        Self {
+            output_size,
+            kernel_size: [kernel_size, kernel_size],
+            dilation: [1, 1],
+            padding: [0, 0],
+            stride: [1, 1],
+        }
+    }
+
+    /// Create with target output size and rectangular kernel.
+    pub fn with_kernel(output_size: [i64; 2], kernel_size: [i64; 2]) -> Self {
+        Self {
+            output_size,
+            kernel_size,
+            dilation: [1, 1],
+            padding: [0, 0],
+            stride: [1, 1],
+        }
+    }
+
+    pub fn dilation(mut self, dilation: [i64; 2]) -> Self { self.dilation = dilation; self }
+    pub fn padding(mut self, padding: [i64; 2]) -> Self { self.padding = padding; self }
+    pub fn stride(mut self, stride: [i64; 2]) -> Self { self.stride = stride; self }
+}
+
+impl Module for Fold {
+    fn name(&self) -> &str { "fold" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::col2im(input, self.output_size, self.kernel_size, self.dilation, self.padding, self.stride)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +658,54 @@ mod tests {
         let up = Upsample::new(&[4, 4], 0); // nearest
         let y = up.forward(&x).unwrap();
         assert_eq!(y.shape(), vec![1, 1, 4, 4]);
+    }
+
+    #[test]
+    fn test_unfold() {
+        // [1, 1, 4, 4] with kernel=2, stride=1 -> L = 3*3 = 9 blocks
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let unfold = Unfold::new(2);
+        let y = unfold.forward(&x).unwrap();
+        // Output: [1, 1*2*2, 3*3] = [1, 4, 9]
+        assert_eq!(y.shape(), vec![1, 4, 9]);
+    }
+
+    #[test]
+    fn test_unfold_with_stride() {
+        // [1, 1, 4, 4] with kernel=2, stride=2 -> L = 2*2 = 4 blocks
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let unfold = Unfold::new(2).stride([2, 2]);
+        let y = unfold.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 4, 4]);
+    }
+
+    #[test]
+    fn test_fold_unfold_roundtrip() {
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        // Unfold with non-overlapping blocks (stride=kernel)
+        let unfold = Unfold::new(2).stride([2, 2]);
+        let cols = unfold.forward(&x).unwrap();
+        assert_eq!(cols.shape(), vec![1, 4, 4]);
+
+        // Fold back
+        let fold = Fold::new([4, 4], 2).stride([2, 2]);
+        let y = fold.forward(&cols).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 4, 4]);
+
+        // Non-overlapping roundtrip should be exact
+        let xv = x.data().to_f32_vec().unwrap();
+        let yv = y.data().to_f32_vec().unwrap();
+        for (a, b) in xv.iter().zip(yv.iter()) {
+            assert!((a - b).abs() < 1e-5, "roundtrip mismatch: {} vs {}", a, b);
+        }
     }
 }

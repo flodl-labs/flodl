@@ -1438,6 +1438,40 @@ extern "C" char* flodl_adaptive_max_pool2d(FlodlTensor input, int64_t* output_si
     }
 }
 
+// --- Unfold / Fold (im2col / col2im) ---
+
+extern "C" char* flodl_im2col(FlodlTensor input, int64_t* kernel_size,
+                              int64_t* dilation, int64_t* padding,
+                              int64_t* stride, FlodlTensor* result) {
+    try {
+        *result = wrap(at::im2col(unwrap(input),
+                                  torch::IntArrayRef(kernel_size, 2),
+                                  torch::IntArrayRef(dilation, 2),
+                                  torch::IntArrayRef(padding, 2),
+                                  torch::IntArrayRef(stride, 2)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_col2im(FlodlTensor input, int64_t* output_size,
+                              int64_t* kernel_size, int64_t* dilation,
+                              int64_t* padding, int64_t* stride,
+                              FlodlTensor* result) {
+    try {
+        *result = wrap(at::col2im(unwrap(input),
+                                  torch::IntArrayRef(output_size, 2),
+                                  torch::IntArrayRef(kernel_size, 2),
+                                  torch::IntArrayRef(dilation, 2),
+                                  torch::IntArrayRef(padding, 2),
+                                  torch::IntArrayRef(stride, 2)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- 3D convolution ---
 
 extern "C" char* flodl_conv3d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,

@@ -481,6 +481,54 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Unfold (im2col): extract sliding local blocks from a 4D input.
+    ///
+    /// Input: `[N, C, H, W]`.
+    /// Output: `[N, C * kH * kW, L]` where L is the number of valid blocks.
+    pub fn im2col(
+        &self, kernel_size: [i64; 2], dilation: [i64; 2],
+        padding: [i64; 2], stride: [i64; 2],
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let mut ks = kernel_size;
+        let mut dl = dilation;
+        let mut pd = padding;
+        let mut st = stride;
+        let err = unsafe {
+            ffi::flodl_im2col(
+                self.handle, ks.as_mut_ptr(), dl.as_mut_ptr(),
+                pd.as_mut_ptr(), st.as_mut_ptr(), &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fold (col2im): reassemble columns back into a 4D image.
+    ///
+    /// Input: `[N, C * kH * kW, L]`.
+    /// Output: `[N, C, output_H, output_W]`.
+    pub fn col2im(
+        &self, output_size: [i64; 2], kernel_size: [i64; 2],
+        dilation: [i64; 2], padding: [i64; 2], stride: [i64; 2],
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let mut os = output_size;
+        let mut ks = kernel_size;
+        let mut dl = dilation;
+        let mut pd = padding;
+        let mut st = stride;
+        let err = unsafe {
+            ffi::flodl_col2im(
+                self.handle, os.as_mut_ptr(), ks.as_mut_ptr(),
+                dl.as_mut_ptr(), pd.as_mut_ptr(), st.as_mut_ptr(),
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// 3D convolution. Input: `[N, C, D, H, W]`.
     #[allow(clippy::too_many_arguments)]
     pub fn conv3d(

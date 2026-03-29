@@ -77,7 +77,7 @@ pub use checkpoint::{
 pub use amp::{GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled};
 pub use clip::{clip_grad_norm, clip_grad_value};
 pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler, ExponentialLR, MultiStepLR, OneCycleLR, CyclicLR};
-pub use dropout::{Dropout, Dropout2d};
+pub use dropout::{Dropout, Dropout2d, AlphaDropout, ZeroPad2d, ReflectionPad2d};
 pub use layernorm::LayerNorm;
 pub use rmsnorm::RMSNorm;
 pub use embedding::{Embedding, EmbeddingBag};
@@ -94,7 +94,7 @@ pub use conv_transpose3d::ConvTranspose3d;
 pub use groupnorm::GroupNorm;
 pub use batchnorm::{BatchNorm, BatchNorm2d};
 pub use instancenorm::InstanceNorm;
-pub use pooling::{MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d, PixelShuffle, PixelUnshuffle, Upsample};
+pub use pooling::{MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d, PixelShuffle, PixelUnshuffle, Upsample, Unfold, Fold};
 pub use bilinear::Bilinear;
 pub use attention::MultiheadAttention;
 pub use init::{xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal, uniform_bias, uniform, normal, orthogonal, trunc_normal};

@@ -443,6 +443,19 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // --- Unfold / Fold (im2col / col2im) ---
+
+    pub fn flodl_im2col(
+        input: FlodlTensor, kernel_size: *mut i64, dilation: *mut i64,
+        padding: *mut i64, stride: *mut i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_col2im(
+        input: FlodlTensor, output_size: *mut i64,
+        kernel_size: *mut i64, dilation: *mut i64,
+        padding: *mut i64, stride: *mut i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- 3D convolution ---
 
     pub fn flodl_conv3d(

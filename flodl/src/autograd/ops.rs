@@ -761,6 +761,31 @@ pub fn adaptive_avg_pool2d(
     Ok(Variable::wrap(result))
 }
 
+/// Unfold (im2col) with autograd support.
+pub fn im2col(
+    input: &Variable,
+    kernel_size: [i64; 2],
+    dilation: [i64; 2],
+    padding: [i64; 2],
+    stride: [i64; 2],
+) -> Result<Variable> {
+    let result = input.data().im2col(kernel_size, dilation, padding, stride)?;
+    Ok(Variable::wrap(result))
+}
+
+/// Fold (col2im) with autograd support.
+pub fn col2im(
+    input: &Variable,
+    output_size: [i64; 2],
+    kernel_size: [i64; 2],
+    dilation: [i64; 2],
+    padding: [i64; 2],
+    stride: [i64; 2],
+) -> Result<Variable> {
+    let result = input.data().col2im(output_size, kernel_size, dilation, padding, stride)?;
+    Ok(Variable::wrap(result))
+}
+
 /// 3D convolution with autograd support (`F.conv3d`).
 /// `input` is `[N, C_in, D, H, W]`, `weight` is `[C_out, C_in/groups, kD, kH, kW]`.
 #[allow(clippy::too_many_arguments)]

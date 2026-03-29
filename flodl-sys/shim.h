@@ -386,6 +386,14 @@ char* flodl_adaptive_avg_pool2d(FlodlTensor input, int64_t* output_size,
 char* flodl_adaptive_max_pool2d(FlodlTensor input, int64_t* output_size,
                                FlodlTensor* result);
 
+// --- Unfold / Fold (im2col / col2im) ---
+
+char* flodl_im2col(FlodlTensor input, int64_t* kernel_size, int64_t* dilation,
+                  int64_t* padding, int64_t* stride, FlodlTensor* result);
+char* flodl_col2im(FlodlTensor input, int64_t* output_size,
+                  int64_t* kernel_size, int64_t* dilation,
+                  int64_t* padding, int64_t* stride, FlodlTensor* result);
+
 // --- 3D convolution ---
 
 char* flodl_conv3d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,

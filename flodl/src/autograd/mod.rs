@@ -22,6 +22,7 @@ pub use context::{no_grad, is_grad_enabled, NoGradGuard};
 pub use ops::{
     linear, gru_cell, lstm_cell, layer_norm,
     conv2d, conv1d, conv_transpose2d, conv_transpose1d,
+    im2col, col2im,
     conv3d, conv_transpose3d,
     group_norm, instance_norm,
     max_pool2d, avg_pool2d, max_pool1d, avg_pool1d,
