@@ -406,8 +406,11 @@ impl Unfold {
         }
     }
 
+    /// Set dilation (spacing between kernel elements).
     pub fn dilation(mut self, dilation: [i64; 2]) -> Self { self.dilation = dilation; self }
+    /// Set zero-padding added to both sides of the input.
     pub fn padding(mut self, padding: [i64; 2]) -> Self { self.padding = padding; self }
+    /// Set stride of the sliding blocks.
     pub fn stride(mut self, stride: [i64; 2]) -> Self { self.stride = stride; self }
 }
 
@@ -460,8 +463,11 @@ impl Fold {
         }
     }
 
+    /// Set dilation (spacing between kernel elements).
     pub fn dilation(mut self, dilation: [i64; 2]) -> Self { self.dilation = dilation; self }
+    /// Set zero-padding added to both sides of the input.
     pub fn padding(mut self, padding: [i64; 2]) -> Self { self.padding = padding; self }
+    /// Set stride of the sliding blocks.
     pub fn stride(mut self, stride: [i64; 2]) -> Self { self.stride = stride; self }
 }
 

@@ -1673,7 +1673,7 @@ mod tests {
         let t = Tensor::from_f32(&[0.0, 0.5, 1.0], &[3], test_device()).unwrap();
         let as_ = t.asin().unwrap().to_f32_vec().unwrap();
         assert!((as_[0] - 0.0).abs() < 1e-5);
-        assert!((as_[1] - 0.5236).abs() < 1e-3); // pi/6
+        assert!((as_[1] - std::f32::consts::FRAC_PI_6).abs() < 1e-3);
 
         let ac = t.acos().unwrap().to_f32_vec().unwrap();
         assert!((ac[0] - std::f32::consts::FRAC_PI_2).abs() < 1e-5);

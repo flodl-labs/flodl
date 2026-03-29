@@ -46,17 +46,16 @@ impl ConvTranspose3d {
         let fan_in = (in_channels / groups) * kernel_size[0] * kernel_size[1] * kernel_size[2];
 
         let weight_data = kaiming_uniform(&shape, fan_in, 5.0_f64.sqrt(), device)?;
-        let weight = Variable::new(weight_data, true);
 
         let bias = if with_bias {
             let bias_data = uniform_bias(fan_in, &[out_channels], device)?;
-            Some(Parameter { variable: Variable::new(bias_data, true), name: "bias".into() })
+            Some(Parameter::new(bias_data, "bias"))
         } else {
             None
         };
 
         Ok(ConvTranspose3d {
-            weight: Parameter { variable: weight, name: "weight".into() },
+            weight: Parameter::new(weight_data, "weight"),
             bias, stride, padding, output_padding, dilation, groups,
         })
     }

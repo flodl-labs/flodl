@@ -14,12 +14,12 @@ use super::Module;
 pub struct InstanceNorm {
     weight: Option<Parameter>,
     bias: Option<Parameter>,
-    #[allow(dead_code)]
-    num_features: i64,
+    /// Number of channels (C) expected in the input.
+    pub num_features: i64,
     eps: f64,
     momentum: f64,
-    #[allow(dead_code)]
-    affine: bool,
+    /// Whether this layer has learnable affine parameters.
+    pub affine: bool,
 }
 
 impl InstanceNorm {

@@ -28,6 +28,7 @@ pub mod optim;
 pub mod clip;
 pub mod scheduler;
 pub mod dropout;
+pub mod padding;
 pub mod layernorm;
 pub mod rmsnorm;
 pub mod embedding;
@@ -77,7 +78,8 @@ pub use checkpoint::{
 pub use amp::{GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled};
 pub use clip::{clip_grad_norm, clip_grad_value};
 pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler, ExponentialLR, MultiStepLR, OneCycleLR, CyclicLR};
-pub use dropout::{Dropout, Dropout2d, AlphaDropout, ZeroPad2d, ReflectionPad2d};
+pub use dropout::{Dropout, Dropout2d, AlphaDropout};
+pub use padding::{ZeroPad2d, ReflectionPad2d};
 pub use layernorm::LayerNorm;
 pub use rmsnorm::RMSNorm;
 pub use embedding::{Embedding, EmbeddingBag};

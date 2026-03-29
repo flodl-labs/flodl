@@ -282,7 +282,7 @@ pub fn poisson_nll_loss(input: &Variable, target: &Variable, log_input: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{Tensor, DType, test_device};
+    use crate::tensor::{Tensor, test_device};
 
     #[test]
     fn test_nll_loss() {
