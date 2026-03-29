@@ -362,6 +362,30 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Create a tensor filled with `value`, same shape/dtype/device as `t`.
+    pub fn full_like(t: &Tensor, value: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_full_like(t.handle, value, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Create a tensor with uniform random values in [0, 1), same shape/dtype/device as `t`.
+    pub fn rand_like(t: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_rand_like(t.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Create a tensor with standard normal random values, same shape/dtype/device as `t`.
+    pub fn randn_like(t: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_randn_like(t.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Random ---
 
     /// Create a tensor with uniform random values in [0, 1).
@@ -455,6 +479,58 @@ impl Tensor {
         };
         check_err(err)?;
         Ok(Self::from_raw(handle))
+    }
+
+    /// Create a tensor with random integers in `[low, high)`.
+    pub fn randint(low: i64, high: i64, shape: &[i64], opts: TensorOptions) -> Result<Self> {
+        let mut shape = shape.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let (dt, di) = opts.device.to_ffi();
+        let err = unsafe {
+            ffi::flodl_randint(
+                low, high,
+                shape.as_mut_ptr(), shape.len() as i32,
+                opts.dtype as i32, dt, di,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
+    /// Create an uninitialized tensor (like `torch.empty`).
+    /// Contents are undefined -- use for pre-allocation before copy_.
+    pub fn empty(shape: &[i64], opts: TensorOptions) -> Result<Self> {
+        let mut shape = shape.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let (dt, di) = opts.device.to_ffi();
+        let err = unsafe {
+            ffi::flodl_empty(
+                shape.as_mut_ptr(), shape.len() as i32,
+                opts.dtype as i32, dt, di,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
+    /// One-hot encode an Int64 tensor of class indices.
+    /// Returns a Float32 tensor with shape `[..., num_classes]`.
+    pub fn one_hot(&self, num_classes: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_one_hot(self.handle, num_classes, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Sample 0/1 from Bernoulli distribution with given probabilities.
+    /// `self` contains probabilities in [0, 1].
+    pub fn bernoulli(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_bernoulli(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
     }
 
     // --- Metadata ---
@@ -763,6 +839,30 @@ impl Tensor {
         check_err(err)
     }
 
+    /// In-place multiply: self *= other (tensor-tensor)
+    pub fn mul_(&self, other: &Tensor) -> Result<()> {
+        let err = unsafe { ffi::flodl_mul_(self.handle, other.handle) };
+        check_err(err)
+    }
+
+    /// In-place divide by scalar: self /= scalar
+    pub fn div_scalar_(&self, scalar: f64) -> Result<()> {
+        let err = unsafe { ffi::flodl_div_scalar_(self.handle, scalar) };
+        check_err(err)
+    }
+
+    /// In-place divide: self /= other (tensor-tensor)
+    pub fn div_(&self, other: &Tensor) -> Result<()> {
+        let err = unsafe { ffi::flodl_div_(self.handle, other.handle) };
+        check_err(err)
+    }
+
+    /// In-place fill: set all elements to `value`
+    pub fn fill_(&self, value: f64) -> Result<()> {
+        let err = unsafe { ffi::flodl_fill_(self.handle, value) };
+        check_err(err)
+    }
+
     /// In-place copy: `self = src`.
     ///
     /// Copies the data from `src` into `self`. Both tensors must have the
@@ -1018,6 +1118,11 @@ impl Tensor {
     /// Returns true if this tensor is contiguous in channels-last format.
     pub fn is_channels_last(&self) -> bool {
         unsafe { ffi::flodl_is_channels_last(self.handle) != 0 }
+    }
+
+    /// Returns true if this tensor is contiguous in memory.
+    pub fn is_contiguous(&self) -> bool {
+        unsafe { ffi::flodl_is_contiguous(self.handle) != 0 }
     }
 }
 
@@ -1746,5 +1851,113 @@ mod tests {
         assert!(Tensor::foreach_norm(&[], 2.0).unwrap().is_empty());
         Tensor::foreach_lerp_scalar_(&[], &[], 0.5).unwrap();
         Tensor::foreach_sqrt_(&[]).unwrap();
+    }
+
+    // --- Tier 2 creation ops ---
+
+    #[test]
+    fn test_full_like() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], test_device()).unwrap();
+        let fl = Tensor::full_like(&t, 7.0).unwrap();
+        assert_eq!(fl.to_f32_vec().unwrap(), vec![7.0, 7.0, 7.0]);
+        assert_eq!(fl.dtype(), DType::Float32);
+    }
+
+    #[test]
+    fn test_rand_like_randn_like() {
+        let t = Tensor::ones(&[3, 4], test_opts()).unwrap();
+        let rl = Tensor::rand_like(&t).unwrap();
+        assert_eq!(rl.shape(), vec![3, 4]);
+        let data = rl.to_f32_vec().unwrap();
+        // All values should be in [0, 1)
+        assert!(data.iter().all(|&v| (0.0..1.0).contains(&v)));
+
+        let nl = Tensor::randn_like(&t).unwrap();
+        assert_eq!(nl.shape(), vec![3, 4]);
+    }
+
+    #[test]
+    fn test_randint() {
+        let mut opts = test_opts();
+        opts.dtype = DType::Int64;
+        let t = Tensor::randint(0, 10, &[100], opts).unwrap();
+        assert_eq!(t.shape(), vec![100]);
+        let data = t.to_i64_vec().unwrap();
+        assert!(data.iter().all(|&v| (0..10).contains(&v)));
+    }
+
+    #[test]
+    fn test_empty() {
+        let t = Tensor::empty(&[2, 3], test_opts()).unwrap();
+        assert_eq!(t.shape(), vec![2, 3]);
+        assert_eq!(t.dtype(), DType::Float32);
+    }
+
+    #[test]
+    fn test_one_hot() {
+        let t = Tensor::from_i64(&[0, 1, 2], &[3], test_device()).unwrap();
+        let oh = t.one_hot(4).unwrap();
+        assert_eq!(oh.shape(), vec![3, 4]);
+        let data = oh.to_f32_vec().unwrap();
+        // class 0: [1, 0, 0, 0]
+        assert_eq!(&data[0..4], &[1.0, 0.0, 0.0, 0.0]);
+        // class 1: [0, 1, 0, 0]
+        assert_eq!(&data[4..8], &[0.0, 1.0, 0.0, 0.0]);
+        // class 2: [0, 0, 1, 0]
+        assert_eq!(&data[8..12], &[0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_bernoulli() {
+        let probs = Tensor::from_f32(&[0.0, 1.0, 0.0, 1.0], &[4], test_device()).unwrap();
+        let samples = probs.bernoulli().unwrap();
+        assert_eq!(samples.shape(), vec![4]);
+        let data = samples.to_f32_vec().unwrap();
+        assert!((data[0] - 0.0).abs() < 1e-5);
+        assert!((data[1] - 1.0).abs() < 1e-5);
+        assert!((data[2] - 0.0).abs() < 1e-5);
+        assert!((data[3] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_is_contiguous() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], test_device()).unwrap();
+        assert!(t.is_contiguous());
+    }
+
+    // --- Tier 2 in-place ops ---
+
+    #[test]
+    fn test_mul_inplace() {
+        let a = Tensor::from_f32(&[2.0, 3.0], &[2], test_device()).unwrap();
+        let b = Tensor::from_f32(&[4.0, 5.0], &[2], test_device()).unwrap();
+        a.mul_(&b).unwrap();
+        assert_eq!(a.to_f32_vec().unwrap(), vec![8.0, 15.0]);
+    }
+
+    #[test]
+    fn test_div_scalar_inplace() {
+        let t = Tensor::from_f32(&[6.0, 9.0], &[2], test_device()).unwrap();
+        t.div_scalar_(3.0).unwrap();
+        let data = t.to_f32_vec().unwrap();
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[1] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_div_inplace() {
+        let a = Tensor::from_f32(&[8.0, 15.0], &[2], test_device()).unwrap();
+        let b = Tensor::from_f32(&[4.0, 5.0], &[2], test_device()).unwrap();
+        a.div_(&b).unwrap();
+        let data = a.to_f32_vec().unwrap();
+        assert!((data[0] - 2.0).abs() < 1e-5);
+        assert!((data[1] - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fill_inplace() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], test_device()).unwrap();
+        t.fill_(42.0).unwrap();
+        assert_eq!(t.to_f32_vec().unwrap(), vec![42.0, 42.0, 42.0]);
     }
 }

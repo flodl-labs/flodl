@@ -368,7 +368,7 @@ mod tests {
         let t = Tensor::from_f32(&[0.0], &[1], test_device()).unwrap();
         let x = Variable::new(t, false);
         let y = m.forward(&x).unwrap().data().to_f32_vec().unwrap();
-        assert!((y[0] - 0.6931).abs() < 1e-3);
+        assert!((y[0] - std::f32::consts::LN_2).abs() < 1e-3);
     }
 
     #[test]

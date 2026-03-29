@@ -586,6 +586,62 @@ extern "C" char* flodl_clamp(FlodlTensor t, double min_val, double max_val,
     }
 }
 
+extern "C" char* flodl_clamp_min(FlodlTensor t, double min_val,
+                                  FlodlTensor* result) {
+    try {
+        *result = wrap(unwrap(t).clamp_min(min_val));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_clamp_max(FlodlTensor t, double max_val,
+                                  FlodlTensor* result) {
+    try {
+        *result = wrap(unwrap(t).clamp_max(max_val));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_log1p(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::log1p(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_expm1(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::expm1(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_log2(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::log2(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_log10(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::log10(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Reductions ---
 
 extern "C" char* flodl_sum(FlodlTensor t, FlodlTensor* result) {
@@ -766,6 +822,102 @@ extern "C" char* flodl_lt_scalar(FlodlTensor t, double scalar,
                                 FlodlTensor* result) {
     try {
         auto mask = torch::lt(unwrap(t), scalar);
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_eq_scalar(FlodlTensor t, double scalar,
+                                FlodlTensor* result) {
+    try {
+        auto mask = torch::eq(unwrap(t), scalar);
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_ne_scalar(FlodlTensor t, double scalar,
+                                FlodlTensor* result) {
+    try {
+        auto mask = torch::ne(unwrap(t), scalar);
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Boolean / detection (return float masks) ---
+
+extern "C" char* flodl_isnan(FlodlTensor t, FlodlTensor* result) {
+    try {
+        auto mask = torch::isnan(unwrap(t));
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_isinf(FlodlTensor t, FlodlTensor* result) {
+    try {
+        auto mask = torch::isinf(unwrap(t));
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_logical_and(FlodlTensor a, FlodlTensor b,
+                                    FlodlTensor* result) {
+    try {
+        auto mask = torch::logical_and(unwrap(a), unwrap(b));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_logical_or(FlodlTensor a, FlodlTensor b,
+                                   FlodlTensor* result) {
+    try {
+        auto mask = torch::logical_or(unwrap(a), unwrap(b));
+        *result = wrap(mask.to(mask_dtype(unwrap(a))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_logical_not(FlodlTensor t, FlodlTensor* result) {
+    try {
+        auto mask = torch::logical_not(unwrap(t));
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_any(FlodlTensor t, FlodlTensor* result) {
+    try {
+        auto mask = unwrap(t).any();
+        *result = wrap(mask.to(mask_dtype(unwrap(t))));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_all(FlodlTensor t, FlodlTensor* result) {
+    try {
+        auto mask = unwrap(t).all();
         *result = wrap(mask.to(mask_dtype(unwrap(t))));
         return nullptr;
     } catch (const std::exception& e) {
@@ -986,6 +1138,83 @@ extern "C" char* flodl_zeros_like(FlodlTensor t, FlodlTensor* result) {
 extern "C" char* flodl_ones_like(FlodlTensor t, FlodlTensor* result) {
     try {
         *result = wrap(torch::ones_like(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_full_like(FlodlTensor t, double value, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::full_like(unwrap(t), value));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_rand_like(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::rand_like(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_randn_like(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::randn_like(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_randint(int64_t low, int64_t high,
+                                int64_t* shape, int ndim,
+                                int dtype, int device_type, int device_index,
+                                FlodlTensor* result) {
+    try {
+        auto options = torch::TensorOptions()
+            .dtype(to_scalar_type(dtype))
+            .device(to_device(device_type, device_index));
+        *result = wrap(torch::randint(low, high, make_shape(shape, ndim), options));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_empty(int64_t* shape, int ndim, int dtype,
+                              int device_type, int device_index,
+                              FlodlTensor* result) {
+    try {
+        auto options = torch::TensorOptions()
+            .dtype(to_scalar_type(dtype))
+            .device(to_device(device_type, device_index));
+        *result = wrap(torch::empty(make_shape(shape, ndim), options));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_one_hot(FlodlTensor t, int64_t num_classes,
+                                FlodlTensor* result) {
+    try {
+        auto oh = torch::one_hot(unwrap(t), num_classes);
+        // Convert to float for consistency (one_hot returns Int64)
+        *result = wrap(oh.to(torch::kFloat32));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_bernoulli(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::bernoulli(unwrap(t)));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -1475,6 +1704,35 @@ extern "C" char* flodl_ne_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* resu
     }
 }
 
+// --- Element-wise binary (differentiable) ---
+
+extern "C" char* flodl_atan2(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::atan2(unwrap(a), unwrap(b)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_maximum(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::maximum(unwrap(a), unwrap(b)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_minimum(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::minimum(unwrap(a), unwrap(b)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Additional reductions ---
 
 extern "C" char* flodl_argmin(FlodlTensor t, int dim, int keepdim, FlodlTensor* result) {
@@ -1747,6 +2005,101 @@ extern "C" char* flodl_pad(FlodlTensor t, int64_t* padding, int pad_len, double 
     }
 }
 
+extern "C" char* flodl_flip(FlodlTensor t, int64_t* dims, int ndim,
+                             FlodlTensor* result) {
+    try {
+        *result = wrap(torch::flip(unwrap(t), torch::IntArrayRef(dims, ndim)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_roll(FlodlTensor t, int64_t shift, int dim,
+                             FlodlTensor* result) {
+    try {
+        *result = wrap(torch::roll(unwrap(t), shift, dim));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_split(FlodlTensor t, int64_t split_size, int dim,
+                              FlodlTensor** results, int* count) {
+    try {
+        auto splits = torch::split(unwrap(t), split_size, dim);
+        int n = (int)splits.size();
+        auto* arr = (FlodlTensor*)malloc(sizeof(FlodlTensor) * n);
+        if (!arr) {
+            return make_error("malloc failed");
+        }
+        for (int i = 0; i < n; i++) {
+            arr[i] = wrap(splits[i].contiguous());
+        }
+        *results = arr;
+        *count = n;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_unbind(FlodlTensor t, int dim,
+                               FlodlTensor** results, int* count) {
+    try {
+        auto slices = torch::unbind(unwrap(t), dim);
+        int n = (int)slices.size();
+        auto* arr = (FlodlTensor*)malloc(sizeof(FlodlTensor) * n);
+        if (!arr) {
+            return make_error("malloc failed");
+        }
+        for (int i = 0; i < n; i++) {
+            arr[i] = wrap(slices[i].contiguous());
+        }
+        *results = arr;
+        *count = n;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_contiguous(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(unwrap(t).contiguous());
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" int flodl_is_contiguous(FlodlTensor t) {
+    return unwrap(t).is_contiguous() ? 1 : 0;
+}
+
+extern "C" char* flodl_argsort(FlodlTensor t, int dim, int descending,
+                                FlodlTensor* result) {
+    try {
+        *result = wrap(torch::argsort(unwrap(t), dim, descending != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_scatter(FlodlTensor t, int dim, FlodlTensor index,
+                                FlodlTensor src, FlodlTensor* result) {
+    try {
+        auto out = unwrap(t).clone();
+        out.scatter_(dim, unwrap(index), unwrap(src));
+        *result = wrap(out);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Autograd ---
 
 extern "C" char* flodl_set_requires_grad(FlodlTensor t, int requires_grad,
@@ -1938,6 +2291,42 @@ extern "C" char* flodl_add_scalar_(FlodlTensor t, double scalar) {
 extern "C" char* flodl_zero_(FlodlTensor t) {
     try {
         unwrap(t).zero_();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_mul_(FlodlTensor t, FlodlTensor other) {
+    try {
+        unwrap(t).mul_(unwrap(other));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_div_scalar_(FlodlTensor t, double scalar) {
+    try {
+        unwrap(t).div_(scalar);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_div_(FlodlTensor t, FlodlTensor other) {
+    try {
+        unwrap(t).div_(unwrap(other));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_fill_(FlodlTensor t, double value) {
+    try {
+        unwrap(t).fill_(value);
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());

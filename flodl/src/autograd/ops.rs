@@ -325,6 +325,60 @@ impl Variable {
         Ok(Variable::wrap(result))
     }
 
+    /// Clamp all elements to be at least `min`.
+    pub fn clamp_min(&self, min: f64) -> Result<Variable> {
+        let result = self.data().clamp_min(min)?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Clamp all elements to be at most `max`.
+    pub fn clamp_max(&self, max: f64) -> Result<Variable> {
+        let result = self.data().clamp_max(max)?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Element-wise `log(1 + x)`, numerically stable for small x.
+    pub fn log1p(&self) -> Result<Variable> {
+        let result = self.data().log1p()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Element-wise `exp(x) - 1`, numerically stable for small x.
+    pub fn expm1(&self) -> Result<Variable> {
+        let result = self.data().expm1()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Element-wise base-2 logarithm.
+    pub fn log2(&self) -> Result<Variable> {
+        let result = self.data().log2()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Element-wise base-10 logarithm.
+    pub fn log10(&self) -> Result<Variable> {
+        let result = self.data().log10()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Element-wise atan2 (arc tangent of y/x).
+    pub fn atan2(&self, other: &Variable) -> Result<Variable> {
+        let result = self.data().atan2(&other.data())?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Element-wise maximum of two variables.
+    pub fn maximum(&self, other: &Variable) -> Result<Variable> {
+        let result = self.data().maximum(&other.data())?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Element-wise minimum of two variables.
+    pub fn minimum(&self, other: &Variable) -> Result<Variable> {
+        let result = self.data().minimum(&other.data())?;
+        Ok(Variable::wrap(result))
+    }
+
     /// Fill elements where `mask` is true (non-zero) with `value`.
     pub fn masked_fill(&self, mask: &Tensor, value: f64) -> Result<Variable> {
         let result = self.data().masked_fill(mask, value)?;

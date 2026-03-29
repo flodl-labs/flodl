@@ -158,6 +158,19 @@ unsafe extern "C" {
         t: FlodlTensor, min_val: f64, max_val: f64, result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    pub fn flodl_clamp_min(
+        t: FlodlTensor, min_val: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_clamp_max(
+        t: FlodlTensor, max_val: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_log1p(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_expm1(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_log2(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_log10(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+
     // --- Reductions ---
 
     pub fn flodl_sum(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
@@ -218,6 +231,28 @@ unsafe extern "C" {
     pub fn flodl_lt_scalar(
         t: FlodlTensor, scalar: f64, result: *mut FlodlTensor,
     ) -> *mut i8;
+
+    pub fn flodl_eq_scalar(
+        t: FlodlTensor, scalar: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_ne_scalar(
+        t: FlodlTensor, scalar: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Boolean / detection (return float masks) ---
+
+    pub fn flodl_isnan(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_isinf(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_logical_and(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_logical_or(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_logical_not(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_any(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_all(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
 
     // --- Shape operations ---
 
@@ -310,6 +345,32 @@ unsafe extern "C" {
 
     pub fn flodl_zeros_like(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_ones_like(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_full_like(
+        t: FlodlTensor, value: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_rand_like(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_randn_like(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+
+    // --- Tensor creation (tier 2) ---
+
+    pub fn flodl_randint(
+        low: i64, high: i64, shape: *mut i64, ndim: i32,
+        dtype: i32, device_type: i32, device_index: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_empty(
+        shape: *mut i64, ndim: i32, dtype: i32,
+        device_type: i32, device_index: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_one_hot(
+        t: FlodlTensor, num_classes: i64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_bernoulli(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
 
     // --- Convolution ---
 
@@ -441,6 +502,20 @@ unsafe extern "C" {
         a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // --- Element-wise binary (differentiable) ---
+
+    pub fn flodl_atan2(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_maximum(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_minimum(
+        a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Additional reductions ---
 
     pub fn flodl_argmin(
@@ -538,6 +613,39 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    pub fn flodl_flip(
+        t: FlodlTensor, dims: *mut i64, ndim: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_roll(
+        t: FlodlTensor, shift: i64, dim: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_split(
+        t: FlodlTensor, split_size: i64, dim: i32,
+        results: *mut *mut FlodlTensor, count: *mut i32,
+    ) -> *mut i8;
+
+    pub fn flodl_unbind(
+        t: FlodlTensor, dim: i32,
+        results: *mut *mut FlodlTensor, count: *mut i32,
+    ) -> *mut i8;
+
+    pub fn flodl_contiguous(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_is_contiguous(t: FlodlTensor) -> i32;
+
+    pub fn flodl_argsort(
+        t: FlodlTensor, dim: i32, descending: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_scatter(
+        t: FlodlTensor, dim: i32, index: FlodlTensor, src: FlodlTensor,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Autograd ---
 
     pub fn flodl_set_requires_grad(
@@ -623,6 +731,10 @@ unsafe extern "C" {
     pub fn flodl_mul_scalar_(t: FlodlTensor, scalar: f64) -> *mut i8;
     pub fn flodl_add_scalar_(t: FlodlTensor, scalar: f64) -> *mut i8;
     pub fn flodl_zero_(t: FlodlTensor) -> *mut i8;
+    pub fn flodl_mul_(t: FlodlTensor, other: FlodlTensor) -> *mut i8;
+    pub fn flodl_div_scalar_(t: FlodlTensor, scalar: f64) -> *mut i8;
+    pub fn flodl_div_(t: FlodlTensor, other: FlodlTensor) -> *mut i8;
+    pub fn flodl_fill_(t: FlodlTensor, value: f64) -> *mut i8;
 
     // --- Fused Adam step ---
 

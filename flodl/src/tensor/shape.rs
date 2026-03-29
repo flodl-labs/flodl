@@ -186,6 +186,72 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Reverse the order of elements along the given dimensions.
+    pub fn flip(&self, dims: &[i64]) -> Result<Tensor> {
+        let mut dims = dims.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_flip(self.handle, dims.as_mut_ptr(), dims.len() as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Roll elements along a dimension by `shift` positions.
+    pub fn roll(&self, shift: i64, dim: i32) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_roll(self.handle, shift, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Split tensor into pieces of `split_size` along a dimension.
+    /// The last piece may be smaller.
+    pub fn split(&self, split_size: i64, dim: i32) -> Result<Vec<Tensor>> {
+        let mut results_ptr: *mut FlodlTensor = ptr::null_mut();
+        let mut count: i32 = 0;
+        let err = unsafe {
+            ffi::flodl_split(self.handle, split_size, dim, &mut results_ptr, &mut count)
+        };
+        check_err(err)?;
+        let mut tensors = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            let handle = unsafe { *results_ptr.add(i) };
+            tensors.push(Tensor::from_raw(handle));
+        }
+        if !results_ptr.is_null() {
+            unsafe { ffi::flodl_free_string(results_ptr as *mut i8) };
+        }
+        Ok(tensors)
+    }
+
+    /// Remove a dimension by unpacking the tensor into a Vec of slices.
+    pub fn unbind(&self, dim: i32) -> Result<Vec<Tensor>> {
+        let mut results_ptr: *mut FlodlTensor = ptr::null_mut();
+        let mut count: i32 = 0;
+        let err = unsafe {
+            ffi::flodl_unbind(self.handle, dim, &mut results_ptr, &mut count)
+        };
+        check_err(err)?;
+        let mut tensors = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            let handle = unsafe { *results_ptr.add(i) };
+            tensors.push(Tensor::from_raw(handle));
+        }
+        if !results_ptr.is_null() {
+            unsafe { ffi::flodl_free_string(results_ptr as *mut i8) };
+        }
+        Ok(tensors)
+    }
+
+    /// Return a contiguous copy if the tensor is not already contiguous.
+    pub fn contiguous(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_contiguous(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Split tensor into chunks along a dimension.
     pub fn chunk(&self, chunks: i32, dim: i32) -> Result<Vec<Tensor>> {
         let mut results_ptr: *mut FlodlTensor = ptr::null_mut();
@@ -408,6 +474,51 @@ mod tests {
         let u2 = t.unsqueeze(1).unwrap().unsqueeze(2).unwrap();
         assert_eq!(u.shape(), u2.shape());
         assert_eq!(u.to_f32_vec().unwrap(), u2.to_f32_vec().unwrap());
+    }
+
+    #[test]
+    fn test_flip() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], test_device()).unwrap();
+        let f = t.flip(&[0]).unwrap().to_f32_vec().unwrap();
+        assert_eq!(f, vec![3.0, 4.0, 1.0, 2.0]);
+        let f1 = t.flip(&[1]).unwrap().to_f32_vec().unwrap();
+        assert_eq!(f1, vec![2.0, 1.0, 4.0, 3.0]);
+    }
+
+    #[test]
+    fn test_roll() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[4], test_device()).unwrap();
+        let r = t.roll(1, 0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(r, vec![4.0, 1.0, 2.0, 3.0]);
+        let r2 = t.roll(-1, 0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(r2, vec![2.0, 3.0, 4.0, 1.0]);
+    }
+
+    #[test]
+    fn test_split() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5], test_device()).unwrap();
+        let parts = t.split(2, 0).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].to_f32_vec().unwrap(), vec![1.0, 2.0]);
+        assert_eq!(parts[1].to_f32_vec().unwrap(), vec![3.0, 4.0]);
+        assert_eq!(parts[2].to_f32_vec().unwrap(), vec![5.0]);
+    }
+
+    #[test]
+    fn test_unbind() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2], test_device()).unwrap();
+        let rows = t.unbind(0).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].to_f32_vec().unwrap(), vec![1.0, 2.0]);
+        assert_eq!(rows[1].to_f32_vec().unwrap(), vec![3.0, 4.0]);
+        assert_eq!(rows[2].to_f32_vec().unwrap(), vec![5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_contiguous() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], test_device()).unwrap();
+        let c = t.contiguous().unwrap();
+        assert_eq!(c.to_f32_vec().unwrap(), t.to_f32_vec().unwrap());
     }
 
     #[test]

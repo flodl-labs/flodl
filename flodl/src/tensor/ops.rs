@@ -160,6 +160,54 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Clamp all elements to be at least `min`.
+    pub fn clamp_min(&self, min: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_clamp_min(self.handle, min, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Clamp all elements to be at most `max`.
+    pub fn clamp_max(&self, max: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_clamp_max(self.handle, max, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise `log(1 + x)`, numerically stable for small x.
+    pub fn log1p(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_log1p(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise `exp(x) - 1`, numerically stable for small x.
+    pub fn expm1(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_expm1(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise base-2 logarithm.
+    pub fn log2(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_log2(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise base-10 logarithm.
+    pub fn log10(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_log10(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Element-wise sine.
     pub fn sin(&self) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
@@ -504,6 +552,102 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Element-wise equality comparison against a scalar (returns float mask: 0.0 or 1.0).
+    pub fn eq_scalar(&self, scalar: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_eq_scalar(self.handle, scalar, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise not-equal comparison against a scalar (returns float mask: 0.0 or 1.0).
+    pub fn ne_scalar(&self, scalar: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_ne_scalar(self.handle, scalar, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise NaN detection (returns float mask: 0.0 or 1.0).
+    pub fn isnan(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_isnan(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise infinity detection (returns float mask: 0.0 or 1.0).
+    pub fn isinf(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_isinf(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise logical AND of two tensors (returns float mask).
+    pub fn logical_and(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_logical_and(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise logical OR of two tensors (returns float mask).
+    pub fn logical_or(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_logical_or(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise logical NOT (returns float mask).
+    pub fn logical_not(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_logical_not(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Returns a scalar float tensor: 1.0 if any element is non-zero, 0.0 otherwise.
+    pub fn any(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_any(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Returns a scalar float tensor: 1.0 if all elements are non-zero, 0.0 otherwise.
+    pub fn all(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_all(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise atan2 (arc tangent of y/x).
+    pub fn atan2(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_atan2(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise maximum of two tensors.
+    pub fn maximum(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_maximum(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise minimum of two tensors.
+    pub fn minimum(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_minimum(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Element-wise greater-than (returns float mask: 0.0 or 1.0).
     pub fn gt(&self, other: &Tensor) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
@@ -604,6 +748,16 @@ impl Tensor {
         Ok((Tensor::from_raw(values), Tensor::from_raw(indices)))
     }
 
+    /// Return indices that would sort the tensor along a dimension.
+    pub fn argsort(&self, dim: i32, descending: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_argsort(self.handle, dim, descending as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Advanced indexing ---
 
     /// Gather values along a dimension using an index tensor.
@@ -621,6 +775,16 @@ impl Tensor {
         let mut handle: FlodlTensor = ptr::null_mut();
         let err = unsafe {
             ffi::flodl_scatter_add(self.handle, dim, index.handle, src.handle, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Scatter: write src values into self at index positions along dim (replaces, not adds).
+    pub fn scatter(&self, dim: i32, index: &Tensor, src: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_scatter(self.handle, dim, index.handle, src.handle, &mut handle)
         };
         check_err(err)?;
         Ok(Tensor::from_raw(handle))
@@ -1055,8 +1219,8 @@ mod tests {
     fn test_softplus() {
         let t = Tensor::from_f32(&[-1.0, 0.0, 1.0], &[3], test_device()).unwrap();
         let r = t.softplus(1.0, 20.0).unwrap().to_f32_vec().unwrap();
-        // softplus(0) = ln(2) ~ 0.6931
-        assert!((r[1] - 0.6931).abs() < 1e-3);
+        // softplus(0) = ln(2)
+        assert!((r[1] - std::f32::consts::LN_2).abs() < 1e-3);
         // softplus(x) > 0 for all x
         assert!(r[0] > 0.0);
     }
@@ -1088,6 +1252,119 @@ mod tests {
         let y = Tensor::from_f32(&[3.0, 4.0], &[1, 1, 2], test_device()).unwrap();
         let d = x.cdist_p(&y, 1.0).unwrap();
         assert!((d.item().unwrap() - 7.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_clamp_min_max() {
+        let t = Tensor::from_f32(&[-2.0, 0.5, 3.0], &[3], test_device()).unwrap();
+        let cmin = t.clamp_min(0.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(cmin, vec![0.0, 0.5, 3.0]);
+        let cmax = t.clamp_max(1.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(cmax, vec![-2.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn test_log1p_expm1() {
+        let t = Tensor::from_f32(&[0.0, 1.0], &[2], test_device()).unwrap();
+        let l = t.log1p().unwrap().to_f32_vec().unwrap();
+        assert!((l[0] - 0.0).abs() < 1e-5); // log(1+0) = 0
+        assert!((l[1] - 2.0_f32.ln()).abs() < 1e-5); // log(1+1) = ln(2)
+
+        let e = t.expm1().unwrap().to_f32_vec().unwrap();
+        assert!((e[0] - 0.0).abs() < 1e-5); // exp(0)-1 = 0
+        assert!((e[1] - (1.0_f32.exp() - 1.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_log2_log10() {
+        let t = Tensor::from_f32(&[1.0, 8.0, 100.0], &[3], test_device()).unwrap();
+        let l2 = t.log2().unwrap().to_f32_vec().unwrap();
+        assert!((l2[0] - 0.0).abs() < 1e-5);
+        assert!((l2[1] - 3.0).abs() < 1e-4);
+
+        let l10 = t.log10().unwrap().to_f32_vec().unwrap();
+        assert!((l10[0] - 0.0).abs() < 1e-5);
+        assert!((l10[2] - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_eq_ne_scalar() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], test_device()).unwrap();
+        let eq = t.eq_scalar(2.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(eq, vec![0.0, 1.0, 0.0]);
+        let ne = t.ne_scalar(2.0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(ne, vec![1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_isnan_isinf() {
+        let t = Tensor::from_f32(&[1.0, f32::NAN, f32::INFINITY], &[3], test_device()).unwrap();
+        let nan = t.isnan().unwrap().to_f32_vec().unwrap();
+        assert_eq!(nan, vec![0.0, 1.0, 0.0]);
+        let inf = t.isinf().unwrap().to_f32_vec().unwrap();
+        assert_eq!(inf, vec![0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_logical_ops() {
+        let a = Tensor::from_f32(&[1.0, 0.0, 1.0], &[3], test_device()).unwrap();
+        let b = Tensor::from_f32(&[0.0, 0.0, 1.0], &[3], test_device()).unwrap();
+        let and = a.logical_and(&b).unwrap().to_f32_vec().unwrap();
+        assert_eq!(and, vec![0.0, 0.0, 1.0]);
+        let or = a.logical_or(&b).unwrap().to_f32_vec().unwrap();
+        assert_eq!(or, vec![1.0, 0.0, 1.0]);
+        let not = a.logical_not().unwrap().to_f32_vec().unwrap();
+        assert_eq!(not, vec![0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_any_all() {
+        let t = Tensor::from_f32(&[0.0, 0.0, 1.0], &[3], test_device()).unwrap();
+        assert!((t.any().unwrap().item().unwrap() - 1.0).abs() < 1e-5);
+        assert!((t.all().unwrap().item().unwrap() - 0.0).abs() < 1e-5);
+
+        let all_true = Tensor::from_f32(&[1.0, 1.0], &[2], test_device()).unwrap();
+        assert!((all_true.all().unwrap().item().unwrap() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_atan2() {
+        let y = Tensor::from_f32(&[1.0, 0.0], &[2], test_device()).unwrap();
+        let x = Tensor::from_f32(&[0.0, 1.0], &[2], test_device()).unwrap();
+        let result = y.atan2(&x).unwrap().to_f32_vec().unwrap();
+        // atan2(1, 0) = pi/2
+        assert!((result[0] - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        // atan2(0, 1) = 0
+        assert!((result[1] - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_maximum_minimum() {
+        let a = Tensor::from_f32(&[1.0, 5.0, 3.0], &[3], test_device()).unwrap();
+        let b = Tensor::from_f32(&[4.0, 2.0, 3.0], &[3], test_device()).unwrap();
+        assert_eq!(a.maximum(&b).unwrap().to_f32_vec().unwrap(), vec![4.0, 5.0, 3.0]);
+        assert_eq!(a.minimum(&b).unwrap().to_f32_vec().unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_argsort() {
+        let t = Tensor::from_f32(&[3.0, 1.0, 2.0], &[3], test_device()).unwrap();
+        let idx = t.argsort(0, false).unwrap().to_i64_vec().unwrap();
+        assert_eq!(idx, vec![1, 2, 0]); // ascending: 1.0(1), 2.0(2), 3.0(0)
+    }
+
+    #[test]
+    fn test_scatter() {
+        let base = Tensor::zeros(&[2, 3], test_opts()).unwrap();
+        let idx = Tensor::from_i64(&[0, 2, 1, 0], &[2, 2], test_device()).unwrap();
+        let src = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], test_device()).unwrap();
+        let result = base.scatter(1, &idx, &src).unwrap().to_f32_vec().unwrap();
+        // Row 0: pos 0 = 1.0, pos 2 = 2.0 -> [1, 0, 2]
+        // Row 1: pos 1 = 3.0, pos 0 = 4.0 -> [4, 3, 0]
+        assert!((result[0] - 1.0).abs() < 1e-5);
+        assert!((result[2] - 2.0).abs() < 1e-5);
+        assert!((result[3] - 4.0).abs() < 1e-5);
+        assert!((result[4] - 3.0).abs() < 1e-5);
     }
 
     #[test]

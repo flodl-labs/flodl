@@ -98,6 +98,12 @@ char* flodl_triu(FlodlTensor t, int64_t diagonal, FlodlTensor* result);
 char* flodl_tril(FlodlTensor t, int64_t diagonal, FlodlTensor* result);
 char* flodl_clamp(FlodlTensor t, double min_val, double max_val,
                 FlodlTensor* result);
+char* flodl_clamp_min(FlodlTensor t, double min_val, FlodlTensor* result);
+char* flodl_clamp_max(FlodlTensor t, double max_val, FlodlTensor* result);
+char* flodl_log1p(FlodlTensor t, FlodlTensor* result);
+char* flodl_expm1(FlodlTensor t, FlodlTensor* result);
+char* flodl_log2(FlodlTensor t, FlodlTensor* result);
+char* flodl_log10(FlodlTensor t, FlodlTensor* result);
 
 // --- Reductions ---
 
@@ -122,6 +128,18 @@ char* flodl_gt_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
 char* flodl_ge_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
 char* flodl_le_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
 char* flodl_lt_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
+char* flodl_eq_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
+char* flodl_ne_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
+
+// --- Boolean / detection (return float masks: 0.0 or 1.0) ---
+
+char* flodl_isnan(FlodlTensor t, FlodlTensor* result);
+char* flodl_isinf(FlodlTensor t, FlodlTensor* result);
+char* flodl_logical_and(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_logical_or(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_logical_not(FlodlTensor t, FlodlTensor* result);
+char* flodl_any(FlodlTensor t, FlodlTensor* result);
+char* flodl_all(FlodlTensor t, FlodlTensor* result);
 
 // --- Comparison (tensor-tensor, return float masks: 0.0 or 1.0) ---
 
@@ -131,6 +149,12 @@ char* flodl_ge_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
 char* flodl_le_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
 char* flodl_eq_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
 char* flodl_ne_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+
+// --- Element-wise binary (differentiable) ---
+
+char* flodl_atan2(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_maximum(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_minimum(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
 
 // --- Additional reductions ---
 
@@ -183,6 +207,17 @@ char* flodl_repeat(FlodlTensor t, int64_t* repeats, int ndim,
                   FlodlTensor* result);
 char* flodl_pad(FlodlTensor t, int64_t* padding, int pad_len, double value,
                FlodlTensor* result);
+char* flodl_flip(FlodlTensor t, int64_t* dims, int ndim, FlodlTensor* result);
+char* flodl_roll(FlodlTensor t, int64_t shift, int dim, FlodlTensor* result);
+char* flodl_split(FlodlTensor t, int64_t split_size, int dim,
+                 FlodlTensor** results, int* count);
+char* flodl_unbind(FlodlTensor t, int dim,
+                  FlodlTensor** results, int* count);
+char* flodl_contiguous(FlodlTensor t, FlodlTensor* result);
+int flodl_is_contiguous(FlodlTensor t);
+char* flodl_argsort(FlodlTensor t, int dim, int descending, FlodlTensor* result);
+char* flodl_scatter(FlodlTensor t, int dim, FlodlTensor index,
+                   FlodlTensor src, FlodlTensor* result);
 
 // --- Shape operations ---
 
@@ -230,6 +265,19 @@ char* flodl_where(FlodlTensor condition, FlodlTensor x, FlodlTensor y,
 
 char* flodl_zeros_like(FlodlTensor t, FlodlTensor* result);
 char* flodl_ones_like(FlodlTensor t, FlodlTensor* result);
+char* flodl_full_like(FlodlTensor t, double value, FlodlTensor* result);
+char* flodl_rand_like(FlodlTensor t, FlodlTensor* result);
+char* flodl_randn_like(FlodlTensor t, FlodlTensor* result);
+
+// --- Tensor creation (additional) ---
+
+char* flodl_randint(int64_t low, int64_t high, int64_t* shape, int ndim,
+                   int dtype, int device_type, int device_index,
+                   FlodlTensor* result);
+char* flodl_empty(int64_t* shape, int ndim, int dtype, int device_type,
+                 int device_index, FlodlTensor* result);
+char* flodl_one_hot(FlodlTensor t, int64_t num_classes, FlodlTensor* result);
+char* flodl_bernoulli(FlodlTensor t, FlodlTensor* result);
 
 // --- Convolution ---
 
@@ -366,6 +414,10 @@ char* flodl_sub_(FlodlTensor t, FlodlTensor other);
 char* flodl_mul_scalar_(FlodlTensor t, double scalar);
 char* flodl_add_scalar_(FlodlTensor t, double scalar);
 char* flodl_zero_(FlodlTensor t);
+char* flodl_mul_(FlodlTensor t, FlodlTensor other);
+char* flodl_div_scalar_(FlodlTensor t, double scalar);
+char* flodl_div_(FlodlTensor t, FlodlTensor other);
+char* flodl_fill_(FlodlTensor t, double value);
 
 // --- Meshgrid ---
 
