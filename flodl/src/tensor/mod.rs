@@ -553,6 +553,11 @@ impl Tensor {
         unsafe { ffi::flodl_numel(self.handle) }
     }
 
+    /// Total size in bytes of the tensor's data. Like `tensor.nbytes` in PyTorch.
+    pub fn nbytes(&self) -> usize {
+        self.numel() as usize * self.dtype().element_size()
+    }
+
     /// Element data type of this tensor. Like `tensor.dtype` in PyTorch.
     pub fn dtype(&self) -> DType {
         DType::from_raw(unsafe { ffi::flodl_dtype(self.handle) })
@@ -1463,6 +1468,18 @@ mod tests {
 
         let data = t.to_f32_vec().unwrap();
         assert_eq!(data, vec![0.0; 6]);
+    }
+
+    #[test]
+    fn test_nbytes() {
+        let f32_t = Tensor::zeros(&[2, 3], test_opts()).unwrap();
+        assert_eq!(f32_t.nbytes(), 6 * 4); // 6 elements * 4 bytes
+
+        let f64_t = Tensor::zeros(&[2, 3], TensorOptions { dtype: DType::Float64, device: test_device() }).unwrap();
+        assert_eq!(f64_t.nbytes(), 6 * 8); // 6 elements * 8 bytes
+
+        let i64_t = Tensor::from_i64(&[1, 2, 3], &[3], test_device()).unwrap();
+        assert_eq!(i64_t.nbytes(), 3 * 8); // 3 elements * 8 bytes
     }
 
     #[test]
