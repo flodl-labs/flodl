@@ -825,6 +825,279 @@ impl Stateful for RMSprop {
     }
 }
 
+/// Adagrad optimizer (Duchi et al., 2011).
+///
+/// Adapts learning rate per-parameter based on historical gradient magnitude.
+/// Good for sparse gradients (NLP embeddings).
+///
+/// Update rule:
+///   state_sum += grad^2
+///   param -= lr * grad / (sqrt(state_sum) + eps)
+pub struct Adagrad {
+    params: Vec<Variable>,
+    lr: f64,
+    eps: f64,
+    weight_decay: f64,
+    lr_decay: f64,
+    state_sum: Vec<Option<crate::tensor::Tensor>>,
+    step_count: u64,
+}
+
+/// Builder for Adagrad optimizer.
+pub struct AdagradBuilder {
+    params: Vec<Parameter>,
+    lr: f64,
+    eps: f64,
+    weight_decay: f64,
+    lr_decay: f64,
+}
+
+impl AdagradBuilder {
+    pub fn eps(mut self, eps: f64) -> Self { self.eps = eps; self }
+    pub fn weight_decay(mut self, wd: f64) -> Self { self.weight_decay = wd; self }
+    pub fn lr_decay(mut self, lr_decay: f64) -> Self { self.lr_decay = lr_decay; self }
+
+    pub fn build(self) -> Adagrad {
+        let n = self.params.len();
+        Adagrad {
+            params: self.params.iter().map(|p| p.variable.clone()).collect(),
+            lr: self.lr, eps: self.eps,
+            weight_decay: self.weight_decay, lr_decay: self.lr_decay,
+            state_sum: vec![None; n],
+            step_count: 0,
+        }
+    }
+}
+
+impl Adagrad {
+    pub fn new(params: &[Parameter], lr: f64) -> Self {
+        let n = params.len();
+        Adagrad {
+            params: params.iter().map(|p| p.variable.clone()).collect(),
+            lr, eps: 1e-10, weight_decay: 0.0, lr_decay: 0.0,
+            state_sum: vec![None; n],
+            step_count: 0,
+        }
+    }
+
+    pub fn builder(params: &[Parameter], lr: f64) -> AdagradBuilder {
+        AdagradBuilder {
+            params: params.to_vec(), lr, eps: 1e-10, weight_decay: 0.0, lr_decay: 0.0,
+        }
+    }
+
+    pub fn lr(&self) -> f64 { self.lr }
+}
+
+impl Optimizer for Adagrad {
+    fn step(&mut self) -> Result<()> {
+        self.step_count += 1;
+        let clr = self.lr / (1.0 + (self.step_count - 1) as f64 * self.lr_decay);
+        no_grad(|| {
+            for (i, param) in self.params.iter().enumerate() {
+                if let Some(mut grad) = param.grad() {
+                    let data = param.data().detach()?;
+                    if self.weight_decay > 0.0 {
+                        grad = grad.add(&data.mul_scalar(self.weight_decay)?)?;
+                    }
+                    let grad2 = grad.mul(&grad)?;
+                    let ss = match self.state_sum[i].take() {
+                        Some(ss) => ss.add(&grad2)?,
+                        None => grad2,
+                    };
+                    let update = grad.div(&ss.sqrt()?.add_scalar(self.eps)?)?.mul_scalar(clr)?;
+                    data.sub_(&update)?;
+                    self.state_sum[i] = Some(ss);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn zero_grad(&self) {
+        for p in &self.params { p.zero_grad_set_to_none(); }
+    }
+
+    fn set_lr(&mut self, lr: f64) { self.lr = lr; }
+}
+
+/// RAdam optimizer (Liu et al., 2020).
+///
+/// Rectified Adam: uses a variance-rectification term to automatically
+/// switch between SGD-like updates (early training) and Adam updates.
+/// No warmup scheduler needed.
+pub struct RAdam {
+    params: Vec<Variable>,
+    lr: f64,
+    beta1: f64,
+    beta2: f64,
+    eps: f64,
+    weight_decay: f64,
+    m: Vec<Option<crate::tensor::Tensor>>,
+    v: Vec<Option<crate::tensor::Tensor>>,
+    step_count: u64,
+}
+
+impl RAdam {
+    pub fn new(params: &[Parameter], lr: f64) -> Self {
+        let n = params.len();
+        RAdam {
+            params: params.iter().map(|p| p.variable.clone()).collect(),
+            lr, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.0,
+            m: vec![None; n], v: vec![None; n], step_count: 0,
+        }
+    }
+
+    pub fn lr(&self) -> f64 { self.lr }
+}
+
+impl Optimizer for RAdam {
+    fn step(&mut self) -> Result<()> {
+        self.step_count += 1;
+        let t = self.step_count as f64;
+        let b1 = self.beta1;
+        let b2 = self.beta2;
+        let b1t = b1.powf(t);
+        let b2t = b2.powf(t);
+        // Maximum length of approximated SMA
+        let rho_inf = 2.0 / (1.0 - b2) - 1.0;
+        let rho_t = rho_inf - 2.0 * t * b2t / (1.0 - b2t);
+
+        no_grad(|| {
+            for (i, param) in self.params.iter().enumerate() {
+                if let Some(mut grad) = param.grad() {
+                    let data = param.data().detach()?;
+                    if self.weight_decay > 0.0 {
+                        grad = grad.add(&data.mul_scalar(self.weight_decay)?)?;
+                    }
+
+                    // Update biased first moment
+                    let m_new = match self.m[i].take() {
+                        Some(m) => m.mul_scalar(b1)?.add(&grad.mul_scalar(1.0 - b1)?)?,
+                        None => grad.mul_scalar(1.0 - b1)?,
+                    };
+                    // Update biased second moment
+                    let grad2 = grad.mul(&grad)?;
+                    let v_new = match self.v[i].take() {
+                        Some(v) => v.mul_scalar(b2)?.add(&grad2.mul_scalar(1.0 - b2)?)?,
+                        None => grad2.mul_scalar(1.0 - b2)?,
+                    };
+
+                    let m_hat = m_new.mul_scalar(1.0 / (1.0 - b1t))?;
+
+                    if rho_t > 5.0 {
+                        // Variance is tractable: use Adam-like update
+                        let v_hat = v_new.mul_scalar(1.0 / (1.0 - b2t))?;
+                        let rect = ((rho_t - 4.0) * (rho_t - 2.0) * rho_inf /
+                                    ((rho_inf - 4.0) * (rho_inf - 2.0) * rho_t)).sqrt();
+                        let update = m_hat.div(&v_hat.sqrt()?.add_scalar(self.eps)?)?.mul_scalar(self.lr * rect)?;
+                        data.sub_(&update)?;
+                    } else {
+                        // Variance is intractable: use SGD-like update
+                        let update = m_hat.mul_scalar(self.lr)?;
+                        data.sub_(&update)?;
+                    }
+                    self.m[i] = Some(m_new);
+                    self.v[i] = Some(v_new);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn zero_grad(&self) {
+        for p in &self.params { p.zero_grad_set_to_none(); }
+    }
+
+    fn set_lr(&mut self, lr: f64) { self.lr = lr; }
+}
+
+/// NAdam optimizer (Dozat, 2016).
+///
+/// Incorporates Nesterov momentum into Adam. Equivalent to Adam with
+/// a look-ahead gradient, providing faster convergence on some tasks.
+///
+/// Update rule:
+///   m = beta1 * m + (1 - beta1) * grad
+///   v = beta2 * v + (1 - beta2) * grad^2
+///   m_hat = beta1 * m / (1 - beta1^(t+1)) + (1 - beta1) * grad / (1 - beta1^t)
+///   param -= lr * m_hat / (sqrt(v / (1 - beta2^t)) + eps)
+pub struct NAdam {
+    params: Vec<Variable>,
+    lr: f64,
+    beta1: f64,
+    beta2: f64,
+    eps: f64,
+    weight_decay: f64,
+    m: Vec<Option<crate::tensor::Tensor>>,
+    v: Vec<Option<crate::tensor::Tensor>>,
+    step_count: u64,
+}
+
+impl NAdam {
+    pub fn new(params: &[Parameter], lr: f64) -> Self {
+        let n = params.len();
+        NAdam {
+            params: params.iter().map(|p| p.variable.clone()).collect(),
+            lr, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.0,
+            m: vec![None; n], v: vec![None; n], step_count: 0,
+        }
+    }
+
+    pub fn lr(&self) -> f64 { self.lr }
+}
+
+impl Optimizer for NAdam {
+    fn step(&mut self) -> Result<()> {
+        self.step_count += 1;
+        let t = self.step_count as f64;
+        let b1 = self.beta1;
+        let b2 = self.beta2;
+        let b1t = b1.powf(t);
+        let b2t = b2.powf(t);
+        let b1t1 = b1.powf(t + 1.0);
+
+        no_grad(|| {
+            for (i, param) in self.params.iter().enumerate() {
+                if let Some(mut grad) = param.grad() {
+                    let data = param.data().detach()?;
+                    if self.weight_decay > 0.0 {
+                        grad = grad.add(&data.mul_scalar(self.weight_decay)?)?;
+                    }
+
+                    let m_new = match self.m[i].take() {
+                        Some(m) => m.mul_scalar(b1)?.add(&grad.mul_scalar(1.0 - b1)?)?,
+                        None => grad.mul_scalar(1.0 - b1)?,
+                    };
+                    let grad2 = grad.mul(&grad)?;
+                    let v_new = match self.v[i].take() {
+                        Some(v) => v.mul_scalar(b2)?.add(&grad2.mul_scalar(1.0 - b2)?)?,
+                        None => grad2.mul_scalar(1.0 - b2)?,
+                    };
+
+                    // Nesterov-corrected first moment
+                    let m_hat = m_new.mul_scalar(b1 / (1.0 - b1t1))?
+                        .add(&grad.mul_scalar((1.0 - b1) / (1.0 - b1t))?)?;
+                    let v_hat = v_new.mul_scalar(1.0 / (1.0 - b2t))?;
+
+                    let update = m_hat.div(&v_hat.sqrt()?.add_scalar(self.eps)?)?.mul_scalar(self.lr)?;
+                    data.sub_(&update)?;
+
+                    self.m[i] = Some(m_new);
+                    self.v[i] = Some(v_new);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn zero_grad(&self) {
+        for p in &self.params { p.zero_grad_set_to_none(); }
+    }
+
+    fn set_lr(&mut self, lr: f64) { self.lr = lr; }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1259,5 +1532,51 @@ mod tests {
         // Should not crash with frozen param
         opt.step().unwrap();
         opt.zero_grad();
+    }
+
+    #[test]
+    fn test_adagrad_steps() {
+        let p = make_param("w", &[1]);
+        let before = p.variable.data().item().unwrap();
+        let mut opt = Adagrad::new(std::slice::from_ref(&p), 0.5);
+        let x = Variable::new(
+            Tensor::from_f32(&[2.0], &[1], crate::tensor::test_device()).unwrap(), false,
+        );
+        let loss = x.mul(&p.variable).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+        opt.step().unwrap();
+        let after = p.variable.data().item().unwrap();
+        // Parameter should change
+        assert!((after - before).abs() > 1e-6, "Adagrad step should change parameter");
+    }
+
+    #[test]
+    fn test_radam_steps() {
+        let p = make_param("w", &[1]);
+        let before = p.variable.data().item().unwrap();
+        let mut opt = RAdam::new(std::slice::from_ref(&p), 0.01);
+        let x = Variable::new(
+            Tensor::from_f32(&[2.0], &[1], crate::tensor::test_device()).unwrap(), false,
+        );
+        let loss = x.mul(&p.variable).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+        opt.step().unwrap();
+        let after = p.variable.data().item().unwrap();
+        assert!((after - before).abs() > 1e-6, "RAdam step should change parameter");
+    }
+
+    #[test]
+    fn test_nadam_steps() {
+        let p = make_param("w", &[1]);
+        let before = p.variable.data().item().unwrap();
+        let mut opt = NAdam::new(std::slice::from_ref(&p), 0.01);
+        let x = Variable::new(
+            Tensor::from_f32(&[2.0], &[1], crate::tensor::test_device()).unwrap(), false,
+        );
+        let loss = x.mul(&p.variable).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+        opt.step().unwrap();
+        let after = p.variable.data().item().unwrap();
+        assert!((after - before).abs() > 1e-6, "NAdam step should change parameter");
     }
 }

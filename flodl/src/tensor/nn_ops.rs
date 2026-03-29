@@ -360,6 +360,38 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Negative log likelihood loss.
+    /// `input`: log-probabilities `[N, C]` (output of log_softmax).
+    /// `target`: class indices `[N]` (Int64).
+    pub fn nll_loss(&self, target: &Tensor, reduction: i64, ignore_index: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_nll_loss(self.handle, target.handle, reduction, ignore_index, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// CTC (Connectionist Temporal Classification) loss for sequence-to-sequence.
+    /// `log_probs`: `[T, N, C]` (log-probabilities).
+    /// `targets`: `[N, S]` or concatenated 1D.
+    /// `input_lengths`/`target_lengths`: `[N]` (Int64).
+    pub fn ctc_loss(
+        &self, targets: &Tensor, input_lengths: &Tensor, target_lengths: &Tensor,
+        blank: i64, reduction: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_ctc_loss(
+                self.handle, targets.handle,
+                input_lengths.handle, target_lengths.handle,
+                blank, reduction, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Fused batch normalization ---
 
     /// Fused batch normalization: single libtorch kernel.
@@ -443,6 +475,153 @@ impl Tensor {
             ffi::flodl_interpolate(
                 self.handle, os.as_mut_ptr(), os.len() as i32,
                 mode, align_corners as i32, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// 3D convolution. Input: `[N, C, D, H, W]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv3d(
+        &self, weight: &Tensor, bias: Option<&Tensor>,
+        stride: [i64; 3], padding: [i64; 3], dilation: [i64; 3], groups: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let mut stride = stride;
+        let mut padding = padding;
+        let mut dilation = dilation;
+        let bias_handle = bias.map_or(ptr::null_mut(), |b| b.handle);
+        let err = unsafe {
+            ffi::flodl_conv3d(
+                self.handle, weight.handle, bias_handle,
+                stride.as_mut_ptr(), padding.as_mut_ptr(), dilation.as_mut_ptr(),
+                groups, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Transposed 3D convolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_transpose3d(
+        &self, weight: &Tensor, bias: Option<&Tensor>,
+        stride: [i64; 3], padding: [i64; 3], output_padding: [i64; 3],
+        dilation: [i64; 3], groups: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let mut stride = stride;
+        let mut padding = padding;
+        let mut output_padding = output_padding;
+        let mut dilation = dilation;
+        let bias_handle = bias.map_or(ptr::null_mut(), |b| b.handle);
+        let err = unsafe {
+            ffi::flodl_conv_transpose3d(
+                self.handle, weight.handle, bias_handle,
+                stride.as_mut_ptr(), padding.as_mut_ptr(),
+                output_padding.as_mut_ptr(), dilation.as_mut_ptr(),
+                groups, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// 1D max pooling.
+    pub fn max_pool1d(
+        &self, kernel_size: i64, stride: i64, padding: i64, dilation: i64, ceil_mode: bool,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_max_pool1d(
+                self.handle, kernel_size, stride, padding, dilation,
+                ceil_mode as i32, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// 1D average pooling.
+    pub fn avg_pool1d(
+        &self, kernel_size: i64, stride: i64, padding: i64,
+        ceil_mode: bool, count_include_pad: bool,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_avg_pool1d(
+                self.handle, kernel_size, stride, padding,
+                ceil_mode as i32, count_include_pad as i32, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Adaptive max pooling (returns values only, not indices).
+    pub fn adaptive_max_pool2d(&self, output_size: [i64; 2]) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let mut os = output_size;
+        let err = unsafe {
+            ffi::flodl_adaptive_max_pool2d(self.handle, os.as_mut_ptr(), &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Instance normalization.
+    #[allow(clippy::too_many_arguments)]
+    pub fn instance_norm(
+        &self, weight: Option<&Tensor>, bias: Option<&Tensor>,
+        running_mean: Option<&Tensor>, running_var: Option<&Tensor>,
+        use_input_stats: bool, momentum: f64, eps: f64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let w = weight.map_or(ptr::null_mut(), |t| t.handle);
+        let b = bias.map_or(ptr::null_mut(), |t| t.handle);
+        let rm = running_mean.map_or(ptr::null_mut(), |t| t.handle);
+        let rv = running_var.map_or(ptr::null_mut(), |t| t.handle);
+        let err = unsafe {
+            ffi::flodl_instance_norm(
+                self.handle, w, b, rm, rv,
+                use_input_stats as i32, momentum, eps, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Pixel shuffle: rearranges `[N, C*r^2, H, W]` to `[N, C, H*r, W*r]`.
+    pub fn pixel_shuffle(&self, upscale_factor: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_pixel_shuffle(self.handle, upscale_factor, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Pixel unshuffle: inverse of pixel_shuffle.
+    pub fn pixel_unshuffle(&self, downscale_factor: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_pixel_unshuffle(self.handle, downscale_factor, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Bilinear transformation: `x1^T A x2 + b`.
+    pub fn bilinear(
+        input1: &Tensor, input2: &Tensor, weight: &Tensor, bias: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let bias_handle = bias.map_or(ptr::null_mut(), |b| b.handle);
+        let err = unsafe {
+            ffi::flodl_bilinear(
+                input1.handle, input2.handle, weight.handle, bias_handle,
+                &mut handle,
             )
         };
         check_err(err)?;

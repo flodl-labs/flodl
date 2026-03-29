@@ -309,6 +309,54 @@ impl Scheduler for OneCycleLR {
     }
 }
 
+/// Cyclic learning rate scheduler (Smith, 2017).
+///
+/// Cycles the learning rate between `base_lr` and `max_lr` with a triangular
+/// policy. Each cycle has `step_size_up` steps going up and `step_size_down`
+/// steps going down (default: same as up).
+///
+/// ```ignore
+/// let sched = CyclicLR::new(0.001, 0.01, 2000); // half-cycle = 2000 steps
+/// optimizer.set_lr(sched.lr(step));
+/// ```
+pub struct CyclicLR {
+    base_lr: f64,
+    max_lr: f64,
+    step_size_up: usize,
+    step_size_down: usize,
+}
+
+impl CyclicLR {
+    /// Create a CyclicLR with symmetric up/down phases.
+    /// `step_size`: number of steps in each half-cycle.
+    pub fn new(base_lr: f64, max_lr: f64, step_size: usize) -> Self {
+        CyclicLR { base_lr, max_lr, step_size_up: step_size, step_size_down: step_size }
+    }
+
+    /// Create with asymmetric up/down phase lengths.
+    pub fn asymmetric(base_lr: f64, max_lr: f64, step_size_up: usize, step_size_down: usize) -> Self {
+        CyclicLR { base_lr, max_lr, step_size_up, step_size_down }
+    }
+
+    /// Compute learning rate at the given step.
+    pub fn lr(&self, step: usize) -> f64 {
+        let cycle_len = self.step_size_up + self.step_size_down;
+        let pos = step % cycle_len;
+        let scale = if pos <= self.step_size_up {
+            pos as f64 / self.step_size_up as f64
+        } else {
+            1.0 - (pos - self.step_size_up) as f64 / self.step_size_down as f64
+        };
+        self.base_lr + (self.max_lr - self.base_lr) * scale
+    }
+}
+
+impl Scheduler for CyclicLR {
+    fn lr(&self, step: usize) -> f64 {
+        CyclicLR::lr(self, step)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +495,20 @@ mod tests {
         assert!((sched.lr(9) - 0.1).abs() < 1e-5);
         // After warmup: delegates to cosine (step 0 of inner)
         assert!((sched.lr(10) - 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_cyclic_lr() {
+        let sched = CyclicLR::new(0.001, 0.01, 10);
+        // At step 0: base_lr
+        assert!((sched.lr(0) - 0.001).abs() < 1e-6);
+        // At step 5 (middle of up phase): midpoint
+        assert!((sched.lr(5) - 0.0055).abs() < 1e-4);
+        // At step 10: max_lr
+        assert!((sched.lr(10) - 0.01).abs() < 1e-6);
+        // At step 15 (middle of down phase)
+        assert!((sched.lr(15) - 0.0055).abs() < 1e-4);
+        // At step 20: back to base (full cycle)
+        assert!((sched.lr(20) - 0.001).abs() < 1e-6);
     }
 }

@@ -1,7 +1,7 @@
 use crate::autograd::Variable;
 use crate::tensor::Result;
 
-use super::Module;
+use super::{Module, Parameter};
 
 /// Identity pass-through module. Returns its input unchanged.
 ///
@@ -327,6 +327,118 @@ impl Module for Flatten {
     }
 }
 
+/// SELU: Self-Normalizing ELU.
+/// `lambda * (max(0, x) + min(0, alpha * (exp(x) - 1)))` with fixed constants.
+/// Designed for self-normalizing networks with `AlphaDropout`.
+pub struct SELU;
+
+impl Default for SELU {
+    fn default() -> Self {
+        SELU
+    }
+}
+
+impl SELU {
+    /// Create a SELU activation module.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Module for SELU {
+    fn name(&self) -> &str { "selu" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        input.selu()
+    }
+}
+
+/// Hardswish: `x * clamp(x + 3, 0, 6) / 6`.
+/// Efficient approximation of Swish for mobile architectures (MobileNetV3).
+pub struct Hardswish;
+
+impl Default for Hardswish {
+    fn default() -> Self {
+        Hardswish
+    }
+}
+
+impl Hardswish {
+    /// Create a Hardswish activation module.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Module for Hardswish {
+    fn name(&self) -> &str { "hardswish" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        input.hardswish()
+    }
+}
+
+/// Hardsigmoid: `clamp(x + 3, 0, 6) / 6`.
+/// Efficient piecewise-linear approximation of sigmoid.
+pub struct Hardsigmoid;
+
+impl Default for Hardsigmoid {
+    fn default() -> Self {
+        Hardsigmoid
+    }
+}
+
+impl Hardsigmoid {
+    /// Create a Hardsigmoid activation module.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Module for Hardsigmoid {
+    fn name(&self) -> &str { "hardsigmoid" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        input.hardsigmoid()
+    }
+}
+
+/// PReLU: Parametric ReLU with learnable weight.
+/// `max(0, x) + weight * min(0, x)` where weight is learned per-channel or shared.
+pub struct PReLU {
+    weight: Parameter,
+}
+
+impl PReLU {
+    /// Create a PReLU with `num_parameters` learnable weights (1 for shared, C for per-channel).
+    pub fn new(num_parameters: i64, device: crate::tensor::Device) -> Result<Self> {
+        let init = crate::tensor::Tensor::full(&[num_parameters], 0.25, crate::tensor::TensorOptions {
+            dtype: crate::tensor::DType::Float32,
+            device,
+        })?;
+        Ok(Self {
+            weight: Parameter::new(init, "weight"),
+        })
+    }
+
+    /// Create a PReLU on the given device.
+    pub fn on_device(num_parameters: i64, device: crate::tensor::Device) -> Result<Self> {
+        Self::new(num_parameters, device)
+    }
+}
+
+impl Module for PReLU {
+    fn name(&self) -> &str { "prelu" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        input.prelu(&self.weight.variable)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![self.weight.clone()]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +532,55 @@ mod tests {
         let x = Variable::new(t, false);
         let y = m.forward(&x).unwrap();
         assert_eq!(y.data().shape(), vec![4]);
+    }
+
+    #[test]
+    fn test_selu_module() {
+        let m = SELU::new();
+        let t = Tensor::from_f32(&[-1.0, 0.0, 1.0], &[3], test_device()).unwrap();
+        let x = Variable::new(t, false);
+        let y = m.forward(&x).unwrap().data().to_f32_vec().unwrap();
+        // SELU(0) = 0
+        assert!((y[1] - 0.0).abs() < 1e-5);
+        // SELU(1) = lambda * 1 ~ 1.0507
+        assert!((y[2] - 1.0507).abs() < 1e-3);
+        // SELU(-1) < 0
+        assert!(y[0] < 0.0);
+    }
+
+    #[test]
+    fn test_hardswish_module() {
+        let m = Hardswish::new();
+        let t = Tensor::from_f32(&[-4.0, 0.0, 4.0], &[3], test_device()).unwrap();
+        let x = Variable::new(t, false);
+        let y = m.forward(&x).unwrap().data().to_f32_vec().unwrap();
+        assert!((y[0] - 0.0).abs() < 1e-5); // x * 0 / 6 = 0 for x < -3
+        assert!((y[1] - 0.0).abs() < 1e-5); // 0 * 3/6 = 0
+        assert!((y[2] - 4.0).abs() < 1e-5); // x for x > 3
+    }
+
+    #[test]
+    fn test_hardsigmoid_module() {
+        let m = Hardsigmoid::new();
+        let t = Tensor::from_f32(&[-4.0, 0.0, 4.0], &[3], test_device()).unwrap();
+        let x = Variable::new(t, false);
+        let y = m.forward(&x).unwrap().data().to_f32_vec().unwrap();
+        assert!((y[0] - 0.0).abs() < 1e-5); // clamp to 0
+        assert!((y[1] - 0.5).abs() < 1e-5); // (0+3)/6 = 0.5
+        assert!((y[2] - 1.0).abs() < 1e-5); // clamp to 1
+    }
+
+    #[test]
+    fn test_prelu_module() {
+        let m = PReLU::new(1, test_device()).unwrap();
+        let t = Tensor::from_f32(&[-2.0, 0.0, 1.0], &[3], test_device()).unwrap();
+        let x = Variable::new(t, false);
+        let y = m.forward(&x).unwrap().data().to_f32_vec().unwrap();
+        // PReLU(-2) = 0.25 * -2 = -0.5 (default init is 0.25)
+        assert!((y[0] - (-0.5)).abs() < 1e-5);
+        assert!((y[1] - 0.0).abs() < 1e-5);
+        assert!((y[2] - 1.0).abs() < 1e-5);
+        // Has learnable parameters
+        assert_eq!(m.parameters().len(), 1);
     }
 }

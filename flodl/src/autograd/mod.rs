@@ -19,7 +19,16 @@ mod context;
 
 pub use variable::Variable;
 pub use context::{no_grad, is_grad_enabled, NoGradGuard};
-pub use ops::{linear, gru_cell, lstm_cell, layer_norm, conv2d, conv1d, conv_transpose2d, conv_transpose1d, group_norm, max_pool2d, avg_pool2d, adaptive_avg_pool2d, grid_sample, embedding_bag};
+pub use ops::{
+    linear, gru_cell, lstm_cell, layer_norm,
+    conv2d, conv1d, conv_transpose2d, conv_transpose1d,
+    conv3d, conv_transpose3d,
+    group_norm, instance_norm,
+    max_pool2d, avg_pool2d, max_pool1d, avg_pool1d,
+    adaptive_avg_pool2d, adaptive_max_pool2d,
+    pixel_shuffle, pixel_unshuffle, bilinear,
+    grid_sample, embedding_bag,
+};
 
 #[cfg(test)]
 mod tests {

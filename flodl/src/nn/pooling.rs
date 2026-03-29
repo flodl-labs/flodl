@@ -151,6 +151,227 @@ impl Module for AvgPool2d {
     }
 }
 
+/// 1D max pooling layer.
+///
+/// Applies max pooling over a 3D input `[B, C, L]`, equivalent to
+/// PyTorch's `nn.MaxPool1d`.
+pub struct MaxPool1d {
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    dilation: i64,
+    ceil_mode: bool,
+}
+
+impl MaxPool1d {
+    /// Create a MaxPool1d with the given kernel size. Stride defaults to kernel size.
+    pub fn new(kernel_size: i64) -> Self {
+        Self {
+            kernel_size,
+            stride: kernel_size,
+            padding: 0,
+            dilation: 1,
+            ceil_mode: false,
+        }
+    }
+
+    /// Create with explicit stride.
+    pub fn with_stride(kernel_size: i64, stride: i64) -> Self {
+        Self {
+            kernel_size,
+            stride,
+            padding: 0,
+            dilation: 1,
+            ceil_mode: false,
+        }
+    }
+
+    /// Set padding.
+    pub fn padding(mut self, padding: i64) -> Self {
+        self.padding = padding;
+        self
+    }
+}
+
+impl Module for MaxPool1d {
+    fn name(&self) -> &str { "maxpool1d" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::max_pool1d(input, self.kernel_size, self.stride, self.padding, self.dilation, self.ceil_mode)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
+/// 1D average pooling layer.
+pub struct AvgPool1d {
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    ceil_mode: bool,
+    count_include_pad: bool,
+}
+
+impl AvgPool1d {
+    /// Create an AvgPool1d with the given kernel size. Stride defaults to kernel size.
+    pub fn new(kernel_size: i64) -> Self {
+        Self {
+            kernel_size,
+            stride: kernel_size,
+            padding: 0,
+            ceil_mode: false,
+            count_include_pad: true,
+        }
+    }
+
+    /// Create with explicit stride.
+    pub fn with_stride(kernel_size: i64, stride: i64) -> Self {
+        Self {
+            kernel_size,
+            stride,
+            padding: 0,
+            ceil_mode: false,
+            count_include_pad: true,
+        }
+    }
+
+    /// Set padding.
+    pub fn padding(mut self, padding: i64) -> Self {
+        self.padding = padding;
+        self
+    }
+}
+
+impl Module for AvgPool1d {
+    fn name(&self) -> &str { "avgpool1d" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::avg_pool1d(
+            input, self.kernel_size, self.stride, self.padding,
+            self.ceil_mode, self.count_include_pad,
+        )
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
+/// Adaptive max pooling 2D. Outputs a fixed `[H, W]` regardless of input size.
+pub struct AdaptiveMaxPool2d {
+    output_size: [i64; 2],
+}
+
+impl AdaptiveMaxPool2d {
+    /// Create with target output size `[H, W]`.
+    pub fn new(output_h: i64, output_w: i64) -> Self {
+        Self { output_size: [output_h, output_w] }
+    }
+}
+
+impl Module for AdaptiveMaxPool2d {
+    fn name(&self) -> &str { "adaptive_maxpool2d" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::adaptive_max_pool2d(input, self.output_size)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
+/// Pixel shuffle: rearranges `[N, C*r^2, H, W]` to `[N, C, H*r, W*r]`.
+/// Used for efficient sub-pixel convolution upsampling (ESPCN).
+pub struct PixelShuffle {
+    upscale_factor: i64,
+}
+
+impl PixelShuffle {
+    /// Create a PixelShuffle with the given upscale factor.
+    pub fn new(upscale_factor: i64) -> Self {
+        Self { upscale_factor }
+    }
+}
+
+impl Module for PixelShuffle {
+    fn name(&self) -> &str { "pixel_shuffle" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::pixel_shuffle(input, self.upscale_factor)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
+/// Pixel unshuffle: inverse of PixelShuffle.
+/// Rearranges `[N, C, H*r, W*r]` to `[N, C*r^2, H, W]`.
+pub struct PixelUnshuffle {
+    downscale_factor: i64,
+}
+
+impl PixelUnshuffle {
+    /// Create a PixelUnshuffle with the given downscale factor.
+    pub fn new(downscale_factor: i64) -> Self {
+        Self { downscale_factor }
+    }
+}
+
+impl Module for PixelUnshuffle {
+    fn name(&self) -> &str { "pixel_unshuffle" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::pixel_unshuffle(input, self.downscale_factor)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
+/// Upsample module. Wraps `F.interpolate` as an `nn.Module`.
+///
+/// `mode`: 0=nearest, 1=bilinear, 2=bicubic, 3=trilinear.
+pub struct Upsample {
+    output_size: Vec<i64>,
+    mode: i32,
+    align_corners: bool,
+}
+
+impl Upsample {
+    /// Create an Upsample module with fixed output size.
+    pub fn new(output_size: &[i64], mode: i32) -> Self {
+        Self {
+            output_size: output_size.to_vec(),
+            mode,
+            align_corners: false,
+        }
+    }
+
+    /// Set align_corners flag (only used for bilinear/bicubic/trilinear).
+    pub fn align_corners(mut self, align: bool) -> Self {
+        self.align_corners = align;
+        self
+    }
+}
+
+impl Module for Upsample {
+    fn name(&self) -> &str { "upsample" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        let result = input.data().interpolate(&self.output_size, self.mode, self.align_corners)?;
+        Ok(Variable::wrap(result))
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +487,71 @@ mod tests {
 
         let grad = x.grad().unwrap();
         assert_eq!(grad.shape(), vec![2, 1, 4, 4]);
+    }
+
+    #[test]
+    fn test_max_pool1d() {
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 8], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let pool = MaxPool1d::new(2);
+        let y = pool.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 4]);
+    }
+
+    #[test]
+    fn test_avg_pool1d() {
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 8], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let pool = AvgPool1d::new(2);
+        let y = pool.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 4]);
+    }
+
+    #[test]
+    fn test_adaptive_max_pool2d() {
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 8, 8], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let pool = AdaptiveMaxPool2d::new(3, 3);
+        let y = pool.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 3, 3]);
+    }
+
+    #[test]
+    fn test_pixel_shuffle() {
+        let x = Variable::new(
+            Tensor::randn(&[1, 4, 2, 2], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let ps = PixelShuffle::new(2);
+        let y = ps.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 4, 4]);
+    }
+
+    #[test]
+    fn test_pixel_unshuffle() {
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 4, 4], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let pu = PixelUnshuffle::new(2);
+        let y = pu.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 4, 2, 2]);
+    }
+
+    #[test]
+    fn test_upsample() {
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 2, 2], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let up = Upsample::new(&[4, 4], 0); // nearest
+        let y = up.forward(&x).unwrap();
+        assert_eq!(y.shape(), vec![1, 1, 4, 4]);
     }
 }

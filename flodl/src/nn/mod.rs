@@ -39,9 +39,13 @@ pub mod conv1d;
 pub mod conv2d;
 pub mod conv_transpose1d;
 pub mod conv_transpose2d;
+pub mod conv3d;
+pub mod conv_transpose3d;
 pub mod groupnorm;
 pub mod batchnorm;
+pub mod instancenorm;
 pub mod pooling;
+pub mod bilinear;
 pub mod attention;
 pub mod checkpoint;
 pub mod amp;
@@ -54,10 +58,17 @@ pub use linear::Linear;
 pub use activation::{
     Identity, ReLU, Sigmoid, Tanh, GELU, SiLU,
     LeakyReLU, ELU, Softplus, Mish,
+    SELU, Hardswish, Hardsigmoid, PReLU,
     Softmax, LogSoftmax, Flatten,
 };
-pub use loss::{mse_loss, cross_entropy_loss, bce_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
-pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder, RMSprop, RMSpropBuilder};
+pub use loss::{
+    mse_loss, cross_entropy_loss, bce_loss, bce_with_logits_loss,
+    l1_loss, smooth_l1_loss, kl_div_loss,
+    nll_loss, ctc_loss, focal_loss,
+    triplet_margin_loss, cosine_embedding_loss,
+    hinge_embedding_loss, margin_ranking_loss, poisson_nll_loss,
+};
+pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder, RMSprop, RMSpropBuilder, Adagrad, AdagradBuilder, RAdam, NAdam};
 pub use checkpoint::{
     save_checkpoint, load_checkpoint, save_checkpoint_file, load_checkpoint_file,
     migrate_checkpoint, migrate_checkpoint_file, checkpoint_version,
@@ -65,7 +76,7 @@ pub use checkpoint::{
 };
 pub use amp::{GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled};
 pub use clip::{clip_grad_norm, clip_grad_value};
-pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler, ExponentialLR, MultiStepLR, OneCycleLR};
+pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler, ExponentialLR, MultiStepLR, OneCycleLR, CyclicLR};
 pub use dropout::{Dropout, Dropout2d};
 pub use layernorm::LayerNorm;
 pub use rmsnorm::RMSNorm;
@@ -78,9 +89,13 @@ pub use conv1d::{Conv1d, Conv1dBuilder};
 pub use conv2d::{Conv2d, Conv2dBuilder};
 pub use conv_transpose1d::ConvTranspose1d;
 pub use conv_transpose2d::ConvTranspose2d;
+pub use conv3d::{Conv3d, Conv3dBuilder};
+pub use conv_transpose3d::ConvTranspose3d;
 pub use groupnorm::GroupNorm;
 pub use batchnorm::{BatchNorm, BatchNorm2d};
-pub use pooling::{MaxPool2d, AvgPool2d};
+pub use instancenorm::InstanceNorm;
+pub use pooling::{MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d, PixelShuffle, PixelUnshuffle, Upsample};
+pub use bilinear::Bilinear;
 pub use attention::MultiheadAttention;
 pub use init::{xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal, uniform_bias, uniform, normal, orthogonal, trunc_normal};
 pub use functional::{gaussian_blur_2d, GaussianBlur};

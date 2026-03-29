@@ -224,6 +224,38 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Element-wise tangent.
+    pub fn tan(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_tan(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise arcsine (inverse sine).
+    pub fn asin(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_asin(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise arccosine (inverse cosine).
+    pub fn acos(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_acos(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise arctangent (inverse tangent).
+    pub fn atan(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_atan(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Element-wise sign (-1, 0, or +1).
     pub fn sign(&self) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
@@ -264,7 +296,152 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Element-wise Gauss error function.
+    pub fn erf(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_erf(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise complementary error function (1 - erf(x)).
+    pub fn erfc(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_erfc(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise truncation (round towards zero).
+    pub fn trunc(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_trunc(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise fractional part (x - trunc(x)).
+    pub fn frac(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_frac(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise floating-point remainder (C fmod semantics).
+    pub fn fmod(&self, divisor: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_fmod_scalar(self.handle, divisor, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise floating-point remainder with tensor divisor.
+    pub fn fmod_tensor(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_fmod_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise remainder (Python modulo semantics).
+    pub fn remainder(&self, divisor: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_remainder_scalar(self.handle, divisor, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise remainder with tensor divisor (Python modulo semantics).
+    pub fn remainder_tensor(&self, other: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_remainder_tensor(self.handle, other.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Linear interpolation: self + weight * (end - self).
+    pub fn lerp(&self, end: &Tensor, weight: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_lerp(self.handle, end.handle, weight, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Linear interpolation with per-element weight tensor.
+    pub fn lerp_tensor(&self, end: &Tensor, weight: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_lerp_tensor(self.handle, end.handle, weight.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Element-wise closeness check: |self - other| <= atol + rtol * |other|.
+    pub fn isclose(&self, other: &Tensor, rtol: f64, atol: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_isclose(self.handle, other.handle, rtol, atol, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused: beta * self + alpha * (mat1 @ mat2).
+    pub fn addmm(&self, mat1: &Tensor, mat2: &Tensor, beta: f64, alpha: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_addmm(self.handle, mat1.handle, mat2.handle, beta, alpha, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused: self + value * (tensor1 * tensor2).
+    pub fn addcmul(&self, tensor1: &Tensor, tensor2: &Tensor, value: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_addcmul(self.handle, tensor1.handle, tensor2.handle, value, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused: self + value * (tensor1 / tensor2).
+    pub fn addcdiv(&self, tensor1: &Tensor, tensor2: &Tensor, value: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_addcdiv(self.handle, tensor1.handle, tensor2.handle, value, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     // --- Activations ---
+
+    /// SELU: `lambda * (max(0, x) + min(0, alpha * (exp(x) - 1)))`.
+    /// Self-normalizing activation with fixed alpha and lambda.
+    pub fn selu(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_selu(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Hardswish: `x * clamp(x + 3, 0, 6) / 6`.
+    pub fn hardswish(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_hardswish(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Hardsigmoid: `clamp(x + 3, 0, 6) / 6`.
+    pub fn hardsigmoid(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_hardsigmoid(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// PReLU: `max(0, x) + weight * min(0, x)` (learnable weight).
+    pub fn prelu(&self, weight: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_prelu(self.handle, weight.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
 
     /// ReLU activation: max(0, x).
     pub fn relu(&self) -> Result<Tensor> {
@@ -449,6 +626,99 @@ impl Tensor {
     pub fn norm(&self) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
         let err = unsafe { ffi::flodl_norm(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// p-norm along a dimension.
+    pub fn norm_p(&self, p: f64, dim: i32, keepdim: bool) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_norm_p_dim(self.handle, p, dim, keepdim as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Sum over multiple dimensions at once.
+    pub fn sum_dims(&self, dims: &[i32], keepdim: bool) -> Result<Tensor> {
+        let mut dims64: Vec<i64> = dims.iter().map(|&d| d as i64).collect();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_sum_dims(self.handle, dims64.as_mut_ptr(), dims.len() as i32, keepdim as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Cumulative product along a dimension.
+    pub fn cumprod(&self, dim: i32) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_cumprod(self.handle, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Median of all elements (scalar).
+    pub fn median(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_median(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Median along a dimension, returns (values, indices).
+    pub fn median_dim(&self, dim: i32, keepdim: bool) -> Result<(Tensor, Tensor)> {
+        let mut vals: FlodlTensor = ptr::null_mut();
+        let mut idxs: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_median_dim(self.handle, dim, keepdim as i32, &mut vals, &mut idxs) };
+        check_err(err)?;
+        Ok((Tensor::from_raw(vals), Tensor::from_raw(idxs)))
+    }
+
+    /// Count of non-zero elements (scalar).
+    pub fn count_nonzero(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_count_nonzero(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Count of non-zero elements along a dimension.
+    pub fn count_nonzero_dim(&self, dim: i32) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_count_nonzero_dim(self.handle, dim, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Indices of non-zero elements (N x ndim tensor).
+    pub fn nonzero(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_nonzero(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Unique elements. Returns (output, inverse_indices).
+    /// If `return_inverse` is false, inverse_indices is empty.
+    pub fn unique(&self, sorted: bool, return_inverse: bool) -> Result<(Tensor, Tensor)> {
+        let mut output: FlodlTensor = ptr::null_mut();
+        let mut inverse: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_unique(self.handle, sorted as i32, return_inverse as i32, &mut output, &mut inverse)
+        };
+        check_err(err)?;
+        let inv = if inverse.is_null() {
+            Tensor::from_i64(&[], &[0], super::Device::CPU)?
+        } else {
+            Tensor::from_raw(inverse)
+        };
+        Ok((Tensor::from_raw(output), inv))
+    }
+
+    /// Binary search: find insertion indices in a sorted sequence.
+    pub fn searchsorted(&self, values: &Tensor) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_searchsorted(self.handle, values.handle, &mut handle) };
         check_err(err)?;
         Ok(Tensor::from_raw(handle))
     }
@@ -1388,5 +1658,197 @@ mod tests {
         let mut vals = p.to_i64_vec().unwrap();
         vals.sort();
         assert_eq!(vals, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_tan() {
+        let t = Tensor::from_f32(&[0.0, std::f32::consts::FRAC_PI_4], &[2], test_device()).unwrap();
+        let r = t.tan().unwrap().to_f32_vec().unwrap();
+        assert!((r[0] - 0.0).abs() < 1e-5);
+        assert!((r[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_asin_acos_atan() {
+        let t = Tensor::from_f32(&[0.0, 0.5, 1.0], &[3], test_device()).unwrap();
+        let as_ = t.asin().unwrap().to_f32_vec().unwrap();
+        assert!((as_[0] - 0.0).abs() < 1e-5);
+        assert!((as_[1] - 0.5236).abs() < 1e-3); // pi/6
+
+        let ac = t.acos().unwrap().to_f32_vec().unwrap();
+        assert!((ac[0] - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        assert!((ac[2] - 0.0).abs() < 1e-5);
+
+        let at = t.atan().unwrap().to_f32_vec().unwrap();
+        assert!((at[0] - 0.0).abs() < 1e-5);
+        assert!((at[2] - std::f32::consts::FRAC_PI_4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_erf_erfc() {
+        let t = Tensor::from_f32(&[0.0, 1.0], &[2], test_device()).unwrap();
+        let e = t.erf().unwrap().to_f32_vec().unwrap();
+        assert!((e[0] - 0.0).abs() < 1e-5);
+        assert!((e[1] - 0.8427).abs() < 1e-3);
+
+        let ec = t.erfc().unwrap().to_f32_vec().unwrap();
+        assert!((ec[0] - 1.0).abs() < 1e-5);
+        assert!((ec[1] - 0.1573).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_trunc_frac() {
+        let t = Tensor::from_f32(&[2.7, -1.3], &[2], test_device()).unwrap();
+        let tr = t.trunc().unwrap().to_f32_vec().unwrap();
+        assert!((tr[0] - 2.0).abs() < 1e-5);
+        assert!((tr[1] - (-1.0)).abs() < 1e-5);
+
+        let fr = t.frac().unwrap().to_f32_vec().unwrap();
+        assert!((fr[0] - 0.7).abs() < 1e-5);
+        assert!((fr[1] - (-0.3)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fmod() {
+        let t = Tensor::from_f32(&[5.0, -5.0, 7.5], &[3], test_device()).unwrap();
+        let r = t.fmod(3.0).unwrap().to_f32_vec().unwrap();
+        assert!((r[0] - 2.0).abs() < 1e-5);
+        assert!((r[1] - (-2.0)).abs() < 1e-5);
+        assert!((r[2] - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_remainder() {
+        let t = Tensor::from_f32(&[5.0, -5.0], &[2], test_device()).unwrap();
+        let r = t.remainder(3.0).unwrap().to_f32_vec().unwrap();
+        assert!((r[0] - 2.0).abs() < 1e-5);
+        assert!((r[1] - 1.0).abs() < 1e-5); // Python semantics: sign matches divisor
+    }
+
+    #[test]
+    fn test_lerp() {
+        let a = Tensor::from_f32(&[0.0, 10.0], &[2], test_device()).unwrap();
+        let b = Tensor::from_f32(&[10.0, 20.0], &[2], test_device()).unwrap();
+        let r = a.lerp(&b, 0.3).unwrap().to_f32_vec().unwrap();
+        assert!((r[0] - 3.0).abs() < 1e-5);
+        assert!((r[1] - 13.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_isclose() {
+        let a = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], test_device()).unwrap();
+        let b = Tensor::from_f32(&[1.0, 2.001, 5.0], &[3], test_device()).unwrap();
+        let r = a.isclose(&b, 1e-5, 1e-2).unwrap().to_f32_vec().unwrap();
+        assert!((r[0] - 1.0).abs() < 1e-5); // exact match
+        assert!((r[1] - 1.0).abs() < 1e-5); // within atol=0.01
+        assert!((r[2] - 0.0).abs() < 1e-5); // not close
+    }
+
+    #[test]
+    fn test_addmm() {
+        let bias = Tensor::from_f32(&[1.0, 2.0], &[2], test_device()).unwrap();
+        let m1 = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], test_device()).unwrap();
+        let m2 = Tensor::from_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2], test_device()).unwrap();
+        // 1.0 * bias + 1.0 * (m1 @ m2) = bias + m1 (identity)
+        let r = bias.addmm(&m1, &m2, 1.0, 1.0).unwrap().to_f32_vec().unwrap();
+        assert!((r[0] - 2.0).abs() < 1e-5); // 1 + 1
+        assert!((r[1] - 4.0).abs() < 1e-5); // 2 + 2
+        assert!((r[2] - 4.0).abs() < 1e-5); // 1 + 3
+        assert!((r[3] - 6.0).abs() < 1e-5); // 2 + 4
+    }
+
+    #[test]
+    fn test_addcmul_addcdiv() {
+        let s = Tensor::from_f32(&[1.0, 1.0], &[2], test_device()).unwrap();
+        let t1 = Tensor::from_f32(&[2.0, 3.0], &[2], test_device()).unwrap();
+        let t2 = Tensor::from_f32(&[4.0, 5.0], &[2], test_device()).unwrap();
+
+        // addcmul: 1 + 0.5 * (2*4) = 5, 1 + 0.5 * (3*5) = 8.5
+        let cm = s.addcmul(&t1, &t2, 0.5).unwrap().to_f32_vec().unwrap();
+        assert!((cm[0] - 5.0).abs() < 1e-5);
+        assert!((cm[1] - 8.5).abs() < 1e-5);
+
+        // addcdiv: 1 + 0.5 * (2/4) = 1.25, 1 + 0.5 * (3/5) = 1.3
+        let cd = s.addcdiv(&t1, &t2, 0.5).unwrap().to_f32_vec().unwrap();
+        assert!((cd[0] - 1.25).abs() < 1e-5);
+        assert!((cd[1] - 1.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_cumprod() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[4], test_device()).unwrap();
+        let r = t.cumprod(0).unwrap().to_f32_vec().unwrap();
+        assert_eq!(r, vec![1.0, 2.0, 6.0, 24.0]);
+    }
+
+    #[test]
+    fn test_norm_p_dim() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], test_device()).unwrap();
+        // L1 norm along dim 1: [3.0, 7.0]
+        let l1 = t.norm_p(1.0, 1, false).unwrap().to_f32_vec().unwrap();
+        assert!((l1[0] - 3.0).abs() < 1e-5);
+        assert!((l1[1] - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_sum_dims() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], test_device()).unwrap();
+        // Sum over both dims should give scalar 21
+        let s = t.sum_dims(&[0, 1], false).unwrap();
+        assert!((s.item().unwrap() - 21.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_median() {
+        let t = Tensor::from_f32(&[3.0, 1.0, 2.0], &[3], test_device()).unwrap();
+        let m = t.median().unwrap().item().unwrap();
+        assert!((m - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_median_dim() {
+        let t = Tensor::from_f32(&[3.0, 1.0, 2.0, 6.0, 4.0, 5.0], &[2, 3], test_device()).unwrap();
+        let (vals, idxs) = t.median_dim(1, false).unwrap();
+        let v = vals.to_f32_vec().unwrap();
+        let i = idxs.to_i64_vec().unwrap();
+        assert!((v[0] - 2.0).abs() < 1e-5);
+        assert!((v[1] - 5.0).abs() < 1e-5);
+        assert_eq!(i[0], 2);
+        assert_eq!(i[1], 2);
+    }
+
+    #[test]
+    fn test_count_nonzero() {
+        let t = Tensor::from_f32(&[0.0, 1.0, 0.0, 2.0, 3.0], &[5], test_device()).unwrap();
+        let c = t.count_nonzero().unwrap().to_i64_vec().unwrap();
+        assert_eq!(c[0], 3);
+    }
+
+    #[test]
+    fn test_nonzero() {
+        let t = Tensor::from_f32(&[0.0, 1.0, 0.0, 2.0], &[4], test_device()).unwrap();
+        let nz = t.nonzero().unwrap();
+        assert_eq!(nz.shape(), vec![2, 1]); // 2 non-zero entries, 1D
+        let vals = nz.to_i64_vec().unwrap();
+        assert_eq!(vals, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_unique() {
+        let t = Tensor::from_f32(&[3.0, 1.0, 2.0, 1.0, 3.0], &[5], test_device()).unwrap();
+        let (u, inv) = t.unique(true, true).unwrap();
+        let uv = u.to_f32_vec().unwrap();
+        assert_eq!(uv, vec![1.0, 2.0, 3.0]);
+        let iv = inv.to_i64_vec().unwrap();
+        // 3->2, 1->0, 2->1, 1->0, 3->2
+        assert_eq!(iv, vec![2, 0, 1, 0, 2]);
+    }
+
+    #[test]
+    fn test_searchsorted() {
+        let sorted = Tensor::from_f32(&[1.0, 3.0, 5.0, 7.0], &[4], test_device()).unwrap();
+        let vals = Tensor::from_f32(&[2.0, 4.0, 6.0], &[3], test_device()).unwrap();
+        let idx = sorted.searchsorted(&vals).unwrap().to_i64_vec().unwrap();
+        assert_eq!(idx, vec![1, 2, 3]);
     }
 }

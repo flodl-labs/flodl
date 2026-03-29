@@ -486,6 +486,43 @@ extern "C" char* flodl_mish(FlodlTensor t, FlodlTensor* result) {
     }
 }
 
+extern "C" char* flodl_selu(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::selu(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_hardswish(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::hardswish(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_hardsigmoid(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::hardsigmoid(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_prelu(FlodlTensor t, FlodlTensor weight,
+                              FlodlTensor* result) {
+    try {
+        *result = wrap(torch::prelu(unwrap(t), unwrap(weight)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Layer normalization ---
 
 extern "C" char* flodl_native_layer_norm(FlodlTensor input, FlodlTensor weight,
@@ -1389,6 +1426,147 @@ extern "C" char* flodl_adaptive_avg_pool2d(FlodlTensor input, int64_t* output_si
     }
 }
 
+extern "C" char* flodl_adaptive_max_pool2d(FlodlTensor input, int64_t* output_size,
+                                           FlodlTensor* result) {
+    try {
+        auto [out, _indices] = at::adaptive_max_pool2d(
+            unwrap(input), torch::IntArrayRef(output_size, 2));
+        *result = wrap(out);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- 3D convolution ---
+
+extern "C" char* flodl_conv3d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
+                              int64_t* stride, int64_t* padding, int64_t* dilation,
+                              int64_t groups, FlodlTensor* result) {
+    try {
+        auto b = bias ? torch::optional<torch::Tensor>(unwrap(bias))
+                      : torch::optional<torch::Tensor>();
+        *result = wrap(at::conv3d(unwrap(input), unwrap(weight), b,
+                                  torch::IntArrayRef(stride, 3),
+                                  torch::IntArrayRef(padding, 3),
+                                  torch::IntArrayRef(dilation, 3), groups));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_conv_transpose3d(FlodlTensor input, FlodlTensor weight,
+                                        FlodlTensor bias,
+                                        int64_t* stride, int64_t* padding,
+                                        int64_t* output_padding, int64_t* dilation,
+                                        int64_t groups, FlodlTensor* result) {
+    try {
+        auto b = bias ? torch::optional<torch::Tensor>(unwrap(bias))
+                      : torch::optional<torch::Tensor>();
+        *result = wrap(at::conv_transpose3d(unwrap(input), unwrap(weight), b,
+                                            torch::IntArrayRef(stride, 3),
+                                            torch::IntArrayRef(padding, 3),
+                                            torch::IntArrayRef(output_padding, 3),
+                                            groups,
+                                            torch::IntArrayRef(dilation, 3)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- 1D pooling ---
+
+extern "C" char* flodl_max_pool1d(FlodlTensor input, int64_t kernel_size,
+                                  int64_t stride, int64_t padding, int64_t dilation,
+                                  int ceil_mode, FlodlTensor* result) {
+    try {
+        *result = wrap(at::max_pool1d(unwrap(input), {kernel_size},
+                                      {stride}, {padding}, {dilation},
+                                      ceil_mode != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_avg_pool1d(FlodlTensor input, int64_t kernel_size,
+                                  int64_t stride, int64_t padding,
+                                  int ceil_mode, int count_include_pad,
+                                  FlodlTensor* result) {
+    try {
+        *result = wrap(at::avg_pool1d(unwrap(input), {kernel_size},
+                                      {stride}, {padding},
+                                      ceil_mode != 0, count_include_pad != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Instance normalization ---
+
+extern "C" char* flodl_instance_norm(FlodlTensor input, FlodlTensor weight,
+                                     FlodlTensor bias,
+                                     FlodlTensor running_mean, FlodlTensor running_var,
+                                     int use_input_stats, double momentum, double eps,
+                                     FlodlTensor* result) {
+    try {
+        auto w = weight ? torch::optional<torch::Tensor>(unwrap(weight))
+                        : torch::optional<torch::Tensor>();
+        auto b = bias ? torch::optional<torch::Tensor>(unwrap(bias))
+                      : torch::optional<torch::Tensor>();
+        auto rm = running_mean ? torch::optional<torch::Tensor>(unwrap(running_mean))
+                               : torch::optional<torch::Tensor>();
+        auto rv = running_var ? torch::optional<torch::Tensor>(unwrap(running_var))
+                              : torch::optional<torch::Tensor>();
+        *result = wrap(at::instance_norm(unwrap(input), w, b, rm, rv,
+                                         use_input_stats != 0, momentum, eps, false));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- PixelShuffle ---
+
+extern "C" char* flodl_pixel_shuffle(FlodlTensor input, int64_t upscale_factor,
+                                     FlodlTensor* result) {
+    try {
+        *result = wrap(at::pixel_shuffle(unwrap(input), upscale_factor));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_pixel_unshuffle(FlodlTensor input, int64_t downscale_factor,
+                                       FlodlTensor* result) {
+    try {
+        *result = wrap(at::pixel_unshuffle(unwrap(input), downscale_factor));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Bilinear ---
+
+extern "C" char* flodl_bilinear(FlodlTensor input1, FlodlTensor input2,
+                                FlodlTensor weight, FlodlTensor bias,
+                                FlodlTensor* result) {
+    try {
+        auto b = bias ? torch::optional<torch::Tensor>(unwrap(bias))
+                      : torch::optional<torch::Tensor>();
+        *result = wrap(at::bilinear(unwrap(input1), unwrap(input2),
+                                    unwrap(weight), b));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Grid sampling ---
 
 extern "C" char* flodl_grid_sample(FlodlTensor input, FlodlTensor grid,
@@ -1908,6 +2086,342 @@ extern "C" char* flodl_round(FlodlTensor t, FlodlTensor* result) {
 extern "C" char* flodl_reciprocal(FlodlTensor t, FlodlTensor* result) {
     try {
         *result = wrap(torch::reciprocal(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_tan(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::tan(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_asin(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::asin(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_acos(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::acos(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_atan(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::atan(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_erf(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::erf(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_erfc(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::erfc(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_trunc(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::trunc(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_frac(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::frac(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_fmod_scalar(FlodlTensor t, double scalar,
+                                   FlodlTensor* result) {
+    try {
+        *result = wrap(torch::fmod(unwrap(t), scalar));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_fmod_tensor(FlodlTensor a, FlodlTensor b,
+                                   FlodlTensor* result) {
+    try {
+        *result = wrap(torch::fmod(unwrap(a), unwrap(b)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_remainder_scalar(FlodlTensor t, double scalar,
+                                        FlodlTensor* result) {
+    try {
+        *result = wrap(torch::remainder(unwrap(t), scalar));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_remainder_tensor(FlodlTensor a, FlodlTensor b,
+                                        FlodlTensor* result) {
+    try {
+        *result = wrap(torch::remainder(unwrap(a), unwrap(b)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_lerp(FlodlTensor a, FlodlTensor b, double weight,
+                            FlodlTensor* result) {
+    try {
+        *result = wrap(torch::lerp(unwrap(a), unwrap(b), weight));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_lerp_tensor(FlodlTensor a, FlodlTensor b,
+                                   FlodlTensor weight, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::lerp(unwrap(a), unwrap(b), unwrap(weight)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_isclose(FlodlTensor a, FlodlTensor b,
+                               double rtol, double atol,
+                               FlodlTensor* result) {
+    try {
+        auto out = torch::isclose(unwrap(a), unwrap(b), rtol, atol);
+        *result = wrap(out.to(unwrap(a).dtype()));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Fused mul-add ---
+
+extern "C" char* flodl_addmm(FlodlTensor bias, FlodlTensor mat1,
+                              FlodlTensor mat2, double beta, double alpha,
+                              FlodlTensor* result) {
+    try {
+        *result = wrap(torch::addmm(unwrap(bias), unwrap(mat1), unwrap(mat2),
+                                    beta, alpha));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_addcmul(FlodlTensor self, FlodlTensor t1,
+                                FlodlTensor t2, double value,
+                                FlodlTensor* result) {
+    try {
+        *result = wrap(torch::addcmul(unwrap(self), unwrap(t1), unwrap(t2),
+                                      value));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_addcdiv(FlodlTensor self, FlodlTensor t1,
+                                FlodlTensor t2, double value,
+                                FlodlTensor* result) {
+    try {
+        *result = wrap(torch::addcdiv(unwrap(self), unwrap(t1), unwrap(t2),
+                                      value));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Additional reductions (Tier 3) ---
+
+extern "C" char* flodl_cumprod(FlodlTensor t, int dim, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::cumprod(unwrap(t), dim));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_norm_p_dim(FlodlTensor t, double p, int dim,
+                                  int keepdim, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::norm(unwrap(t), p, dim, keepdim != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_sum_dims(FlodlTensor t, int64_t* dims, int ndims,
+                                int keepdim, FlodlTensor* result) {
+    try {
+        std::vector<int64_t> dim_vec(dims, dims + ndims);
+        *result = wrap(torch::sum(unwrap(t), dim_vec, keepdim != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_median(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::median(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_median_dim(FlodlTensor t, int dim, int keepdim,
+                                  FlodlTensor* values, FlodlTensor* indices) {
+    try {
+        auto [v, i] = torch::median(unwrap(t), dim, keepdim != 0);
+        *values = wrap(v);
+        *indices = wrap(i);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_count_nonzero(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::count_nonzero(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_count_nonzero_dim(FlodlTensor t, int dim,
+                                         FlodlTensor* result) {
+    try {
+        std::optional<int64_t> d(static_cast<int64_t>(dim));
+        *result = wrap(torch::count_nonzero(unwrap(t), d));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Query ops ---
+
+extern "C" char* flodl_nonzero(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::nonzero(unwrap(t)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_unique(FlodlTensor t, int sorted, int return_inverse,
+                              FlodlTensor* output,
+                              FlodlTensor* inverse_indices) {
+    try {
+        auto [out, inv, _counts] = torch::unique_consecutive(
+            unwrap(t), return_inverse != 0, false);
+        if (sorted != 0) {
+            auto [sout, sinv, _sc] = at::_unique2(unwrap(t), sorted != 0,
+                                                   return_inverse != 0, false);
+            *output = wrap(sout);
+            if (return_inverse != 0)
+                *inverse_indices = wrap(sinv);
+            else
+                *inverse_indices = nullptr;
+        } else {
+            *output = wrap(out);
+            if (return_inverse != 0)
+                *inverse_indices = wrap(inv);
+            else
+                *inverse_indices = nullptr;
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_searchsorted(FlodlTensor sorted_seq, FlodlTensor values,
+                                    FlodlTensor* result) {
+    try {
+        *result = wrap(torch::searchsorted(unwrap(sorted_seq), unwrap(values)));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Shape ops (advanced) ---
+
+extern "C" char* flodl_diagonal(FlodlTensor t, int64_t offset, int dim1,
+                                int dim2, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::diagonal(unwrap(t), offset, dim1, dim2));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_movedim(FlodlTensor t, int64_t src, int64_t dst,
+                               FlodlTensor* result) {
+    try {
+        *result = wrap(torch::movedim(unwrap(t), src, dst));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_tile(FlodlTensor t, int64_t* reps, int ndim,
+                            FlodlTensor* result) {
+    try {
+        std::vector<int64_t> r(reps, reps + ndim);
+        *result = wrap(torch::tile(unwrap(t), r));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());
@@ -2986,6 +3500,32 @@ extern "C" char* flodl_kl_div_loss(FlodlTensor input, FlodlTensor target,
     try {
         *result = wrap(torch::kl_div(unwrap(input), unwrap(target),
                                       reduction, log_target != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_nll_loss(FlodlTensor input, FlodlTensor target,
+                                int64_t reduction, int64_t ignore_index,
+                                FlodlTensor* result) {
+    try {
+        *result = wrap(at::nll_loss(unwrap(input), unwrap(target),
+                                    {}, reduction, ignore_index));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_ctc_loss(FlodlTensor log_probs, FlodlTensor targets,
+                                FlodlTensor input_lengths, FlodlTensor target_lengths,
+                                int64_t blank, int64_t reduction,
+                                FlodlTensor* result) {
+    try {
+        *result = wrap(at::ctc_loss(unwrap(log_probs), unwrap(targets),
+                                    unwrap(input_lengths), unwrap(target_lengths),
+                                    blank, reduction, false));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());

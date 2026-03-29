@@ -81,6 +81,10 @@ char* flodl_elu(FlodlTensor t, double alpha, FlodlTensor* result);
 char* flodl_softplus(FlodlTensor t, double beta, double threshold,
                     FlodlTensor* result);
 char* flodl_mish(FlodlTensor t, FlodlTensor* result);
+char* flodl_selu(FlodlTensor t, FlodlTensor* result);
+char* flodl_hardswish(FlodlTensor t, FlodlTensor* result);
+char* flodl_hardsigmoid(FlodlTensor t, FlodlTensor* result);
+char* flodl_prelu(FlodlTensor t, FlodlTensor weight, FlodlTensor* result);
 
 // --- Layer normalization ---
 
@@ -127,6 +131,32 @@ char* flodl_norm(FlodlTensor t, FlodlTensor* result);
 char* flodl_min_dim(FlodlTensor t, int dim, int keepdim, FlodlTensor* result);
 char* flodl_max_dim(FlodlTensor t, int dim, int keepdim, FlodlTensor* result);
 char* flodl_argmax(FlodlTensor t, int dim, int keepdim, FlodlTensor* result);
+char* flodl_cumprod(FlodlTensor t, int dim, FlodlTensor* result);
+char* flodl_norm_p_dim(FlodlTensor t, double p, int dim, int keepdim,
+                      FlodlTensor* result);
+char* flodl_sum_dims(FlodlTensor t, int64_t* dims, int ndims, int keepdim,
+                    FlodlTensor* result);
+char* flodl_median(FlodlTensor t, FlodlTensor* result);
+char* flodl_median_dim(FlodlTensor t, int dim, int keepdim,
+                      FlodlTensor* values, FlodlTensor* indices);
+char* flodl_count_nonzero(FlodlTensor t, FlodlTensor* result);
+char* flodl_count_nonzero_dim(FlodlTensor t, int dim, FlodlTensor* result);
+
+// --- Query ops ---
+
+char* flodl_nonzero(FlodlTensor t, FlodlTensor* result);
+char* flodl_unique(FlodlTensor t, int sorted, int return_inverse,
+                  FlodlTensor* output, FlodlTensor* inverse_indices);
+char* flodl_searchsorted(FlodlTensor sorted_seq, FlodlTensor values,
+                        FlodlTensor* result);
+
+// --- Shape ops (advanced) ---
+
+char* flodl_diagonal(FlodlTensor t, int64_t offset, int dim1, int dim2,
+                    FlodlTensor* result);
+char* flodl_movedim(FlodlTensor t, int64_t src, int64_t dst,
+                   FlodlTensor* result);
+char* flodl_tile(FlodlTensor t, int64_t* reps, int ndim, FlodlTensor* result);
 
 // --- Comparison (return float masks: 0.0 or 1.0) ---
 
@@ -174,11 +204,37 @@ char* flodl_std_dim(FlodlTensor t, int dim, int keepdim, FlodlTensor* result);
 
 char* flodl_sin(FlodlTensor t, FlodlTensor* result);
 char* flodl_cos(FlodlTensor t, FlodlTensor* result);
+char* flodl_tan(FlodlTensor t, FlodlTensor* result);
+char* flodl_asin(FlodlTensor t, FlodlTensor* result);
+char* flodl_acos(FlodlTensor t, FlodlTensor* result);
+char* flodl_atan(FlodlTensor t, FlodlTensor* result);
 char* flodl_sign(FlodlTensor t, FlodlTensor* result);
 char* flodl_floor(FlodlTensor t, FlodlTensor* result);
 char* flodl_ceil(FlodlTensor t, FlodlTensor* result);
 char* flodl_round(FlodlTensor t, FlodlTensor* result);
 char* flodl_reciprocal(FlodlTensor t, FlodlTensor* result);
+char* flodl_erf(FlodlTensor t, FlodlTensor* result);
+char* flodl_erfc(FlodlTensor t, FlodlTensor* result);
+char* flodl_trunc(FlodlTensor t, FlodlTensor* result);
+char* flodl_frac(FlodlTensor t, FlodlTensor* result);
+char* flodl_fmod_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
+char* flodl_fmod_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_remainder_scalar(FlodlTensor t, double scalar, FlodlTensor* result);
+char* flodl_remainder_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result);
+char* flodl_lerp(FlodlTensor a, FlodlTensor b, double weight, FlodlTensor* result);
+char* flodl_lerp_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor weight,
+                       FlodlTensor* result);
+char* flodl_isclose(FlodlTensor a, FlodlTensor b, double rtol, double atol,
+                   FlodlTensor* result);
+
+// --- Fused mul-add ---
+
+char* flodl_addmm(FlodlTensor bias, FlodlTensor mat1, FlodlTensor mat2,
+                  double beta, double alpha, FlodlTensor* result);
+char* flodl_addcmul(FlodlTensor self, FlodlTensor t1, FlodlTensor t2,
+                   double value, FlodlTensor* result);
+char* flodl_addcdiv(FlodlTensor self, FlodlTensor t1, FlodlTensor t2,
+                   double value, FlodlTensor* result);
 
 // --- Advanced indexing ---
 
@@ -327,6 +383,49 @@ char* flodl_avg_pool2d(FlodlTensor input, int64_t* kernel_size,
                       FlodlTensor* result);
 char* flodl_adaptive_avg_pool2d(FlodlTensor input, int64_t* output_size,
                               FlodlTensor* result);
+char* flodl_adaptive_max_pool2d(FlodlTensor input, int64_t* output_size,
+                               FlodlTensor* result);
+
+// --- 3D convolution ---
+
+char* flodl_conv3d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
+                 int64_t* stride, int64_t* padding, int64_t* dilation,
+                 int64_t groups, FlodlTensor* result);
+char* flodl_conv_transpose3d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
+                            int64_t* stride, int64_t* padding,
+                            int64_t* output_padding, int64_t* dilation,
+                            int64_t groups, FlodlTensor* result);
+
+// --- 1D pooling ---
+
+char* flodl_max_pool1d(FlodlTensor input, int64_t kernel_size,
+                      int64_t stride, int64_t padding, int64_t dilation,
+                      int ceil_mode, FlodlTensor* result);
+char* flodl_avg_pool1d(FlodlTensor input, int64_t kernel_size,
+                      int64_t stride, int64_t padding,
+                      int ceil_mode, int count_include_pad,
+                      FlodlTensor* result);
+
+// --- Instance normalization ---
+
+char* flodl_instance_norm(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
+                         FlodlTensor running_mean, FlodlTensor running_var,
+                         int use_input_stats, double momentum, double eps,
+                         FlodlTensor* result);
+
+// --- PixelShuffle ---
+
+char* flodl_pixel_shuffle(FlodlTensor input, int64_t upscale_factor,
+                         FlodlTensor* result);
+char* flodl_pixel_unshuffle(FlodlTensor input, int64_t downscale_factor,
+                           FlodlTensor* result);
+
+// --- Bilinear ---
+
+char* flodl_bilinear(FlodlTensor input1, FlodlTensor input2,
+                    FlodlTensor weight, FlodlTensor bias,
+                    FlodlTensor* result);
+
 // --- Grid sampling ---
 
 char* flodl_grid_sample(FlodlTensor input, FlodlTensor grid,
@@ -592,6 +691,12 @@ char* flodl_smooth_l1_loss(FlodlTensor pred, FlodlTensor target,
 char* flodl_kl_div_loss(FlodlTensor input, FlodlTensor target,
                         int64_t reduction, int log_target,
                         FlodlTensor* result);
+char* flodl_nll_loss(FlodlTensor input, FlodlTensor target,
+                    int64_t reduction, int64_t ignore_index,
+                    FlodlTensor* result);
+char* flodl_ctc_loss(FlodlTensor log_probs, FlodlTensor targets,
+                    FlodlTensor input_lengths, FlodlTensor target_lengths,
+                    int64_t blank, int64_t reduction, FlodlTensor* result);
 
 // --- Fused batch normalization ---
 

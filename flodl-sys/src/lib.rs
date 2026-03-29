@@ -132,6 +132,10 @@ unsafe extern "C" {
         t: FlodlTensor, beta: f64, threshold: f64, result: *mut FlodlTensor,
     ) -> *mut i8;
     pub fn flodl_mish(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_selu(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_hardswish(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_hardsigmoid(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_prelu(t: FlodlTensor, weight: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
 
     // --- Layer normalization ---
 
@@ -434,6 +438,67 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    pub fn flodl_adaptive_max_pool2d(
+        input: FlodlTensor, output_size: *mut i64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- 3D convolution ---
+
+    pub fn flodl_conv3d(
+        input: FlodlTensor, weight: FlodlTensor, bias: FlodlTensor,
+        stride: *mut i64, padding: *mut i64, dilation: *mut i64,
+        groups: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_conv_transpose3d(
+        input: FlodlTensor, weight: FlodlTensor, bias: FlodlTensor,
+        stride: *mut i64, padding: *mut i64, output_padding: *mut i64,
+        dilation: *mut i64, groups: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- 1D pooling ---
+
+    pub fn flodl_max_pool1d(
+        input: FlodlTensor, kernel_size: i64,
+        stride: i64, padding: i64, dilation: i64,
+        ceil_mode: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_avg_pool1d(
+        input: FlodlTensor, kernel_size: i64,
+        stride: i64, padding: i64,
+        ceil_mode: i32, count_include_pad: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Instance normalization ---
+
+    pub fn flodl_instance_norm(
+        input: FlodlTensor, weight: FlodlTensor, bias: FlodlTensor,
+        running_mean: FlodlTensor, running_var: FlodlTensor,
+        use_input_stats: i32, momentum: f64, eps: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- PixelShuffle ---
+
+    pub fn flodl_pixel_shuffle(
+        input: FlodlTensor, upscale_factor: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_pixel_unshuffle(
+        input: FlodlTensor, downscale_factor: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Bilinear ---
+
+    pub fn flodl_bilinear(
+        input1: FlodlTensor, input2: FlodlTensor,
+        weight: FlodlTensor, bias: FlodlTensor,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Grid sampling ---
 
     pub fn flodl_grid_sample(
@@ -558,15 +623,88 @@ unsafe extern "C" {
         t: FlodlTensor, dim: i32, keepdim: i32, result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    pub fn flodl_cumprod(t: FlodlTensor, dim: i32, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_norm_p_dim(
+        t: FlodlTensor, p: f64, dim: i32, keepdim: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_sum_dims(
+        t: FlodlTensor, dims: *mut i64, ndims: i32, keepdim: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_median(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_median_dim(
+        t: FlodlTensor, dim: i32, keepdim: i32,
+        values: *mut FlodlTensor, indices: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_count_nonzero(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_count_nonzero_dim(
+        t: FlodlTensor, dim: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Query ops ---
+
+    pub fn flodl_nonzero(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_unique(
+        t: FlodlTensor, sorted: i32, return_inverse: i32,
+        output: *mut FlodlTensor, inverse_indices: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_searchsorted(
+        sorted_seq: FlodlTensor, values: FlodlTensor,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Shape ops (advanced) ---
+
+    pub fn flodl_diagonal(
+        t: FlodlTensor, offset: i64, dim1: i32, dim2: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_movedim(
+        t: FlodlTensor, src: i64, dst: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_tile(
+        t: FlodlTensor, reps: *mut i64, ndim: i32, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Element-wise math (trig, rounding, sign) ---
 
     pub fn flodl_sin(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_cos(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_tan(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_asin(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_acos(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_atan(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_sign(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_floor(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_ceil(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_round(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_reciprocal(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_erf(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_erfc(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_trunc(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_frac(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_fmod_scalar(t: FlodlTensor, scalar: f64, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_fmod_tensor(a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_remainder_scalar(t: FlodlTensor, scalar: f64, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_remainder_tensor(a: FlodlTensor, b: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_lerp(a: FlodlTensor, b: FlodlTensor, weight: f64, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_lerp_tensor(a: FlodlTensor, b: FlodlTensor, weight: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_isclose(a: FlodlTensor, b: FlodlTensor, rtol: f64, atol: f64, result: *mut FlodlTensor) -> *mut i8;
+
+    // --- Fused mul-add ---
+
+    pub fn flodl_addmm(
+        bias: FlodlTensor, mat1: FlodlTensor, mat2: FlodlTensor,
+        beta: f64, alpha: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_addcmul(
+        self_: FlodlTensor, t1: FlodlTensor, t2: FlodlTensor,
+        value: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_addcdiv(
+        self_: FlodlTensor, t1: FlodlTensor, t2: FlodlTensor,
+        value: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
 
     // --- Advanced indexing ---
 
@@ -916,6 +1054,19 @@ unsafe extern "C" {
     pub fn flodl_kl_div_loss(
         input: FlodlTensor, target: FlodlTensor,
         reduction: i64, log_target: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_nll_loss(
+        input: FlodlTensor, target: FlodlTensor,
+        reduction: i64, ignore_index: i64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_ctc_loss(
+        log_probs: FlodlTensor, targets: FlodlTensor,
+        input_lengths: FlodlTensor, target_lengths: FlodlTensor,
+        blank: i64, reduction: i64,
         result: *mut FlodlTensor,
     ) -> *mut i8;
 

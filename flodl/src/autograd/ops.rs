@@ -121,6 +121,30 @@ impl Variable {
         Ok(Variable::wrap(result))
     }
 
+    /// SELU: self-normalizing ELU with fixed alpha/lambda.
+    pub fn selu(&self) -> Result<Variable> {
+        let result = self.data().selu()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Hardswish: `x * clamp(x + 3, 0, 6) / 6`.
+    pub fn hardswish(&self) -> Result<Variable> {
+        let result = self.data().hardswish()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Hardsigmoid: `clamp(x + 3, 0, 6) / 6`.
+    pub fn hardsigmoid(&self) -> Result<Variable> {
+        let result = self.data().hardsigmoid()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// PReLU: `max(0, x) + weight * min(0, x)`.
+    pub fn prelu(&self, weight: &Variable) -> Result<Variable> {
+        let result = self.data().prelu(&weight.data())?;
+        Ok(Variable::wrap(result))
+    }
+
     // --- Reductions ---
 
     /// Sum of all elements, returning a scalar.
@@ -734,6 +758,131 @@ pub fn adaptive_avg_pool2d(
     output_size: [i64; 2],
 ) -> Result<Variable> {
     let result = input.data().adaptive_avg_pool2d(output_size)?;
+    Ok(Variable::wrap(result))
+}
+
+/// 3D convolution with autograd support (`F.conv3d`).
+/// `input` is `[N, C_in, D, H, W]`, `weight` is `[C_out, C_in/groups, kD, kH, kW]`.
+#[allow(clippy::too_many_arguments)]
+pub fn conv3d(
+    input: &Variable,
+    weight: &Variable,
+    bias: Option<&Variable>,
+    stride: [i64; 3],
+    padding: [i64; 3],
+    dilation: [i64; 3],
+    groups: i64,
+) -> Result<Variable> {
+    let bias_tensor = bias.map(|b| b.data());
+    let result = input.data().conv3d(
+        &weight.data(),
+        bias_tensor.as_ref(),
+        stride, padding, dilation, groups,
+    )?;
+    Ok(Variable::wrap(result))
+}
+
+/// Transposed 3D convolution with autograd support.
+#[allow(clippy::too_many_arguments)]
+pub fn conv_transpose3d(
+    input: &Variable,
+    weight: &Variable,
+    bias: Option<&Variable>,
+    stride: [i64; 3],
+    padding: [i64; 3],
+    output_padding: [i64; 3],
+    dilation: [i64; 3],
+    groups: i64,
+) -> Result<Variable> {
+    let bias_tensor = bias.map(|b| b.data());
+    let result = input.data().conv_transpose3d(
+        &weight.data(),
+        bias_tensor.as_ref(),
+        stride, padding, output_padding, dilation, groups,
+    )?;
+    Ok(Variable::wrap(result))
+}
+
+/// 1D max pooling with autograd support.
+pub fn max_pool1d(
+    input: &Variable,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    dilation: i64,
+    ceil_mode: bool,
+) -> Result<Variable> {
+    let result = input.data().max_pool1d(kernel_size, stride, padding, dilation, ceil_mode)?;
+    Ok(Variable::wrap(result))
+}
+
+/// 1D average pooling with autograd support.
+pub fn avg_pool1d(
+    input: &Variable,
+    kernel_size: i64,
+    stride: i64,
+    padding: i64,
+    ceil_mode: bool,
+    count_include_pad: bool,
+) -> Result<Variable> {
+    let result = input.data().avg_pool1d(kernel_size, stride, padding, ceil_mode, count_include_pad)?;
+    Ok(Variable::wrap(result))
+}
+
+/// Adaptive max pooling 2D with autograd support.
+pub fn adaptive_max_pool2d(
+    input: &Variable,
+    output_size: [i64; 2],
+) -> Result<Variable> {
+    let result = input.data().adaptive_max_pool2d(output_size)?;
+    Ok(Variable::wrap(result))
+}
+
+/// Instance normalization with autograd support.
+#[allow(clippy::too_many_arguments)]
+pub fn instance_norm(
+    input: &Variable,
+    weight: Option<&Variable>,
+    bias: Option<&Variable>,
+    running_mean: Option<&Tensor>,
+    running_var: Option<&Tensor>,
+    use_input_stats: bool,
+    momentum: f64,
+    eps: f64,
+) -> Result<Variable> {
+    let w = weight.map(|v| v.data());
+    let b = bias.map(|v| v.data());
+    let result = input.data().instance_norm(
+        w.as_ref(), b.as_ref(),
+        running_mean, running_var,
+        use_input_stats, momentum, eps,
+    )?;
+    Ok(Variable::wrap(result))
+}
+
+/// Pixel shuffle with autograd support.
+pub fn pixel_shuffle(input: &Variable, upscale_factor: i64) -> Result<Variable> {
+    let result = input.data().pixel_shuffle(upscale_factor)?;
+    Ok(Variable::wrap(result))
+}
+
+/// Pixel unshuffle with autograd support.
+pub fn pixel_unshuffle(input: &Variable, downscale_factor: i64) -> Result<Variable> {
+    let result = input.data().pixel_unshuffle(downscale_factor)?;
+    Ok(Variable::wrap(result))
+}
+
+/// Bilinear transformation with autograd support.
+pub fn bilinear(
+    input1: &Variable,
+    input2: &Variable,
+    weight: &Variable,
+    bias: Option<&Variable>,
+) -> Result<Variable> {
+    let b = bias.map(|v| v.data());
+    let result = Tensor::bilinear(
+        &input1.data(), &input2.data(), &weight.data(), b.as_ref(),
+    )?;
     Ok(Variable::wrap(result))
 }
 

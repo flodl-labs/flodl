@@ -222,6 +222,31 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Extract the diagonal of a 2D tensor, or a diagonal from a batch.
+    pub fn diagonal(&self, offset: i64, dim1: i32, dim2: i32) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_diagonal(self.handle, offset, dim1, dim2, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Move a dimension from `src` to `dst`.
+    pub fn movedim(&self, src: i64, dst: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_movedim(self.handle, src, dst, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Repeat tensor by tiling the given number of times per dimension.
+    pub fn tile(&self, reps: &[i64]) -> Result<Tensor> {
+        let mut reps_buf = reps.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_tile(self.handle, reps_buf.as_mut_ptr(), reps.len() as i32, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Split tensor into pieces of `split_size` along a dimension.
     /// The last piece may be smaller.
     pub fn split(&self, split_size: i64, dim: i32) -> Result<Vec<Tensor>> {
@@ -550,5 +575,33 @@ mod tests {
         assert_eq!(grids[0].to_f32_vec().unwrap(), vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
         // Grid 1: cols repeat b values
         assert_eq!(grids[1].to_f32_vec().unwrap(), vec![4.0, 5.0, 4.0, 5.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_diagonal() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[3, 3], test_device()).unwrap();
+        let d = t.diagonal(0, 0, 1).unwrap().to_f32_vec().unwrap();
+        assert_eq!(d, vec![1.0, 5.0, 9.0]);
+        // Super-diagonal
+        let d1 = t.diagonal(1, 0, 1).unwrap().to_f32_vec().unwrap();
+        assert_eq!(d1, vec![2.0, 6.0]);
+    }
+
+    #[test]
+    fn test_movedim() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], test_device()).unwrap();
+        let m = t.movedim(0, 1).unwrap();
+        assert_eq!(m.shape(), vec![3, 2]);
+    }
+
+    #[test]
+    fn test_tile() {
+        let t = Tensor::from_f32(&[1.0, 2.0], &[2], test_device()).unwrap();
+        let r = t.tile(&[3]).unwrap();
+        assert_eq!(r.to_f32_vec().unwrap(), vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
+
+        let t2 = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], test_device()).unwrap();
+        let r2 = t2.tile(&[2, 3]).unwrap();
+        assert_eq!(r2.shape(), vec![4, 6]);
     }
 }
