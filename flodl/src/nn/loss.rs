@@ -40,6 +40,19 @@ pub fn cross_entropy_loss(pred: &Variable, target: &Variable) -> Result<Variable
     Ok(Variable::wrap(result))
 }
 
+/// Binary cross-entropy loss from probabilities (NOT logits).
+///
+/// `pred`: probabilities in \[0, 1\] (e.g. after sigmoid). Any shape.
+/// `target`: binary labels (same shape, values 0 or 1).
+///
+/// For raw logits, prefer `bce_with_logits_loss` which is numerically stable.
+///
+/// Uses a single fused libtorch kernel (1 autograd node).
+pub fn bce_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
+    let result = pred.data().bce_loss(&target.data(), 1)?; // 1 = Mean
+    Ok(Variable::wrap(result))
+}
+
 /// Binary cross-entropy loss from raw logits (numerically stable).
 ///
 /// `pred`: raw logits (any shape).

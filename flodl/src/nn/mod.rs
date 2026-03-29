@@ -6,17 +6,17 @@
 //!
 //! # Features
 //!
-//! - **Layers**: Linear, Conv2d, ConvTranspose2d, LayerNorm, BatchNorm, Dropout, Embedding, GRUCell, LSTMCell, MaxPool2d
+//! - **Layers**: Linear, Conv1d, Conv2d, ConvTranspose1d, ConvTranspose2d, LayerNorm, GroupNorm, BatchNorm, Dropout, Embedding, EmbeddingBag, GRUCell, GRU, LSTMCell, LSTM, MaxPool2d
 //! - **Activations**: ReLU, Sigmoid, Tanh, GELU, SiLU (zero-sized types), GaussianBlur (fixed-sigma preprocessing)
 //! - **Losses**: MSE, CrossEntropy, BCE, L1, SmoothL1, KLDiv
-//! - **Optimizers**: SGD (momentum), Adam, AdamW -- fused Adam/AdamW uses `_fused_adamw_` on CUDA for single-kernel multi-tensor updates
-//! - **Schedulers**: StepDecay, Cosine, Warmup, Plateau
+//! - **Optimizers**: SGD (momentum), Adam, AdamW, RMSprop -- fused Adam/AdamW uses `_fused_adamw_` on CUDA for single-kernel multi-tensor updates
+//! - **Schedulers**: StepDecay, Cosine, Warmup, Plateau, ExponentialLR, MultiStepLR, OneCycleLR
 //! - **Gradient clipping**: `clip_grad_norm` / `clip_grad_value` -- fused clipping via foreach ops (2 kernels instead of 2N)
 //! - **Mixed precision**: [`AutocastGuard`] / [`autocast`] for automatic dtype casting, [`GradScaler`] for loss scaling, [`cast_parameters`] for dtype conversion
 //! - **CUDA Graphs**: [`CudaGraph`] capture/replay/reset via [`cuda_graph_capture`], memory pool handles, configurable capture modes
 //! - **Foreach operations**: 7 multi-tensor ops (`foreach_zero_`, `foreach_add_scalar_`, `foreach_mul_scalar_`, etc.) used internally by optimizers and gradient clipping
 //! - **Checkpointing**: save/load with named parameters, dtype-aware, partial loading
-//! - **Initialization**: Xavier uniform/normal, Kaiming
+//! - **Initialization**: Xavier uniform/normal, Kaiming uniform/normal, uniform, normal, orthogonal, truncated normal
 
 pub mod parameter;
 pub mod buffer;
@@ -32,9 +32,14 @@ pub mod layernorm;
 pub mod rmsnorm;
 pub mod embedding;
 pub mod grucell;
+pub mod gru;
 pub mod lstmcell;
+pub mod lstm;
+pub mod conv1d;
 pub mod conv2d;
+pub mod conv_transpose1d;
 pub mod conv_transpose2d;
+pub mod groupnorm;
 pub mod batchnorm;
 pub mod pooling;
 pub mod attention;
@@ -51,8 +56,8 @@ pub use activation::{
     LeakyReLU, ELU, Softplus, Mish,
     Softmax, LogSoftmax, Flatten,
 };
-pub use loss::{mse_loss, cross_entropy_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
-pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder};
+pub use loss::{mse_loss, cross_entropy_loss, bce_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss};
+pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder, RMSprop, RMSpropBuilder};
 pub use checkpoint::{
     save_checkpoint, load_checkpoint, save_checkpoint_file, load_checkpoint_file,
     migrate_checkpoint, migrate_checkpoint_file, checkpoint_version,
@@ -60,19 +65,24 @@ pub use checkpoint::{
 };
 pub use amp::{GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled};
 pub use clip::{clip_grad_norm, clip_grad_value};
-pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler};
+pub use scheduler::{Scheduler, StepDecay, CosineScheduler, WarmupScheduler, PlateauScheduler, ExponentialLR, MultiStepLR, OneCycleLR};
 pub use dropout::{Dropout, Dropout2d};
 pub use layernorm::LayerNorm;
 pub use rmsnorm::RMSNorm;
-pub use embedding::Embedding;
+pub use embedding::{Embedding, EmbeddingBag};
 pub use grucell::GRUCell;
+pub use gru::GRU;
 pub use lstmcell::LSTMCell;
+pub use lstm::LSTM;
+pub use conv1d::{Conv1d, Conv1dBuilder};
 pub use conv2d::{Conv2d, Conv2dBuilder};
+pub use conv_transpose1d::ConvTranspose1d;
 pub use conv_transpose2d::ConvTranspose2d;
+pub use groupnorm::GroupNorm;
 pub use batchnorm::{BatchNorm, BatchNorm2d};
 pub use pooling::{MaxPool2d, AvgPool2d};
 pub use attention::MultiheadAttention;
-pub use init::{xavier_uniform, xavier_normal};
+pub use init::{xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal, uniform_bias, uniform, normal, orthogonal, trunc_normal};
 pub use functional::{gaussian_blur_2d, GaussianBlur};
 pub use cuda_graph::{CudaGraph, MemPoolId, CaptureMode, cuda_graph_capture, cuda_graph_pool_handle};
 
@@ -1469,6 +1479,232 @@ mod tests {
         );
         let out = bn.forward(&x).unwrap();
         assert_eq!(out.shape(), vec![2, 4, 6, 6]);
+    }
+
+    // --- Conv1d tests ---
+
+    #[test]
+    fn test_conv1d() {
+        let conv = Conv1d::build(1, 2, 3, true, 1, 0, 1, 1, crate::tensor::test_device()).unwrap();
+        // Input: [batch=1, channels=1, length=10]
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 10], crate::tensor::test_opts()).unwrap(),
+            true,
+        );
+        let out = conv.forward(&x).unwrap();
+        // With kernel=3, no padding: output = 10-3+1 = 8
+        assert_eq!(out.shape(), vec![1, 2, 8]);
+
+        // Backward
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+
+        // weight + bias = 2 params
+        assert_eq!(conv.parameters().len(), 2);
+    }
+
+    #[test]
+    fn test_conv1d_no_bias() {
+        let conv = Conv1d::build(3, 8, 3, false, 1, 0, 1, 1, crate::tensor::test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[2, 3, 20], crate::tensor::test_opts()).unwrap(),
+            true,
+        );
+        let out = conv.forward(&x).unwrap();
+        assert_eq!(out.shape(), vec![2, 8, 18]);
+        assert_eq!(conv.parameters().len(), 1); // weight only
+    }
+
+    #[test]
+    fn test_conv1d_with_padding() {
+        let conv = Conv1d::build(1, 1, 3, true, 1, 1, 1, 1, crate::tensor::test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 1, 10], crate::tensor::test_opts()).unwrap(),
+            true,
+        );
+        let out = conv.forward(&x).unwrap();
+        // Same padding: output = input size
+        assert_eq!(out.shape(), vec![1, 1, 10]);
+    }
+
+    #[test]
+    fn test_conv1d_builder() {
+        let conv = Conv1d::configure(3, 16, 5)
+            .with_stride(2)
+            .with_padding(2)
+            .on_device(crate::tensor::test_device())
+            .done()
+            .unwrap();
+        let x = Variable::new(
+            Tensor::randn(&[1, 3, 100], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let out = conv.forward(&x).unwrap();
+        // L_out = (100 + 2*2 - 1*(5-1) - 1) / 2 + 1 = (100+4-4-1)/2+1 = 99/2+1 = 50
+        assert_eq!(out.shape(), vec![1, 16, 50]);
+    }
+
+    // --- ConvTranspose1d tests ---
+
+    #[test]
+    fn test_conv_transpose1d() {
+        let conv = ConvTranspose1d::build(2, 1, 3, true, 1, 0, 0, 1, 1, crate::tensor::test_device()).unwrap();
+        // Input: [batch=1, channels=2, length=5]
+        let x = Variable::new(
+            Tensor::randn(&[1, 2, 5], crate::tensor::test_opts()).unwrap(),
+            true,
+        );
+        let out = conv.forward(&x).unwrap();
+        // With kernel=3, no padding: output = 5+3-1 = 7
+        assert_eq!(out.shape(), vec![1, 1, 7]);
+
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+        assert_eq!(conv.parameters().len(), 2);
+    }
+
+    // --- GroupNorm tests ---
+
+    #[test]
+    fn test_groupnorm() {
+        let gn = GroupNorm::on_device(4, 8, crate::tensor::test_device()).unwrap();
+        // Input: [batch=2, channels=8, height=4, width=4]
+        let x = Variable::new(
+            Tensor::randn(&[2, 8, 4, 4], crate::tensor::test_opts()).unwrap(),
+            true,
+        );
+        let out = gn.forward(&x).unwrap();
+        assert_eq!(out.shape(), vec![2, 8, 4, 4]);
+
+        // Backward
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(x.grad().is_some());
+
+        // weight + bias = 2 params
+        assert_eq!(gn.parameters().len(), 2);
+    }
+
+    #[test]
+    fn test_groupnorm_1d() {
+        let gn = GroupNorm::on_device(2, 4, crate::tensor::test_device()).unwrap();
+        // GroupNorm also works on [B, C, L] input
+        let x = Variable::new(
+            Tensor::randn(&[3, 4, 10], crate::tensor::test_opts()).unwrap(),
+            false,
+        );
+        let out = gn.forward(&x).unwrap();
+        assert_eq!(out.shape(), vec![3, 4, 10]);
+    }
+
+    // --- Cosine similarity tests ---
+
+    #[test]
+    fn test_cosine_similarity() {
+        let a = Tensor::from_f32(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0], &[2, 3], crate::tensor::test_device()).unwrap();
+        let b = Tensor::from_f32(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0], &[2, 3], crate::tensor::test_device()).unwrap();
+        let sim = a.cosine_similarity(&b, 1, 1e-8).unwrap();
+        let data = sim.to_f32_vec().unwrap();
+        // First pair: identical -> cos_sim = 1.0
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        // Second pair: orthogonal -> cos_sim = 0.0
+        assert!(data[1].abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_cosine_similarity_autograd() {
+        let a = Variable::new(
+            Tensor::from_f32(&[1.0, 2.0, 3.0], &[1, 3], crate::tensor::test_device()).unwrap(),
+            true,
+        );
+        let b = Variable::new(
+            Tensor::from_f32(&[4.0, 5.0, 6.0], &[1, 3], crate::tensor::test_device()).unwrap(),
+            false,
+        );
+        let sim = a.cosine_similarity(&b, 1, 1e-8).unwrap();
+        let loss = sim.sum().unwrap();
+        loss.backward().unwrap();
+        assert!(a.grad().is_some());
+    }
+
+    // --- BCE loss tests ---
+
+    #[test]
+    fn test_bce_loss() {
+        // Probabilities (after sigmoid)
+        let pred = Variable::new(
+            Tensor::from_f32(&[0.8, 0.2, 0.9, 0.1], &[4], crate::tensor::test_device()).unwrap(),
+            true,
+        );
+        let target = Variable::new(
+            Tensor::from_f32(&[1.0, 0.0, 1.0, 0.0], &[4], crate::tensor::test_device()).unwrap(),
+            false,
+        );
+        let loss = bce_loss(&pred, &target).unwrap();
+        let val = loss.data().item().unwrap();
+        // BCE should be small for these good predictions
+        assert!(val > 0.0 && val < 1.0, "bce_loss = {}", val);
+
+        // Backward
+        loss.backward().unwrap();
+        assert!(pred.grad().is_some());
+    }
+
+    // --- Pad mode tests ---
+
+    #[test]
+    fn test_pad_mode_constant() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 1, 6], crate::tensor::test_device()).unwrap();
+        // Constant pad with value 0 (same as regular pad)
+        let padded = t.pad_mode(&[1, 1], 0, 0.0).unwrap();
+        assert_eq!(padded.shape(), vec![1, 1, 8]);
+    }
+
+    #[test]
+    fn test_pad_mode_reflect() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1, 1, 6], crate::tensor::test_device()).unwrap();
+        let padded = t.pad_mode(&[2, 2], 1, 0.0).unwrap();
+        assert_eq!(padded.shape(), vec![1, 1, 10]);
+        let data = padded.to_f32_vec().unwrap();
+        // Reflect padding: [3, 2, 1, 2, 3, 4, 5, 6, 5, 4]
+        assert!((data[0] - 3.0).abs() < 1e-5);
+        assert!((data[1] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_pad_mode_replicate() {
+        let t = Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4], crate::tensor::test_device()).unwrap();
+        let padded = t.pad_mode(&[1, 1], 2, 0.0).unwrap();
+        assert_eq!(padded.shape(), vec![1, 1, 6]);
+        let data = padded.to_f32_vec().unwrap();
+        // Replicate: first value replicated left, last value replicated right
+        assert!((data[0] - 1.0).abs() < 1e-5);
+        assert!((data[5] - 4.0).abs() < 1e-5);
+    }
+
+    // --- Interpolate tests ---
+
+    #[test]
+    fn test_interpolate_nearest() {
+        let t = Tensor::randn(&[1, 1, 4, 4], crate::tensor::test_opts()).unwrap();
+        let up = t.interpolate(&[8, 8], 0, false).unwrap();
+        assert_eq!(up.shape(), vec![1, 1, 8, 8]);
+    }
+
+    #[test]
+    fn test_interpolate_bilinear() {
+        let t = Tensor::randn(&[1, 3, 4, 4], crate::tensor::test_opts()).unwrap();
+        let up = t.interpolate(&[8, 8], 1, false).unwrap();
+        assert_eq!(up.shape(), vec![1, 3, 8, 8]);
+    }
+
+    #[test]
+    fn test_interpolate_bicubic() {
+        let t = Tensor::randn(&[1, 3, 8, 8], crate::tensor::test_opts()).unwrap();
+        let down = t.interpolate(&[4, 4], 2, false).unwrap();
+        assert_eq!(down.shape(), vec![1, 3, 4, 4]);
     }
 
     // --- Comparison ops with integer input ---

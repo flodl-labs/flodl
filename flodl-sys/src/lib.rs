@@ -141,6 +141,14 @@ unsafe extern "C" {
         output: *mut FlodlTensor, mean: *mut FlodlTensor, rstd: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // --- Group normalization ---
+
+    pub fn flodl_group_norm(
+        input: FlodlTensor, num_groups: i64,
+        weight: FlodlTensor, bias: FlodlTensor,
+        eps: f64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Element-wise math ---
 
     pub fn flodl_exp(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
@@ -380,12 +388,29 @@ unsafe extern "C" {
         groups: i64, result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // --- 1D convolution ---
+
+    pub fn flodl_conv1d(
+        input: FlodlTensor, weight: FlodlTensor, bias: FlodlTensor,
+        stride: i64, padding: i64, dilation: i64,
+        groups: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Transposed convolution ---
 
     pub fn flodl_conv_transpose2d(
         input: FlodlTensor, weight: FlodlTensor, bias: FlodlTensor,
         stride: *mut i64, padding: *mut i64,
         output_padding: *mut i64, dilation: *mut i64,
+        groups: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Transposed 1D convolution ---
+
+    pub fn flodl_conv_transpose1d(
+        input: FlodlTensor, weight: FlodlTensor, bias: FlodlTensor,
+        stride: i64, padding: i64,
+        output_padding: i64, dilation: i64,
         groups: i64, result: *mut FlodlTensor,
     ) -> *mut i8;
 
@@ -613,6 +638,20 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // mode: 0=constant, 1=reflect, 2=replicate, 3=circular
+    pub fn flodl_pad_mode(
+        t: FlodlTensor, padding: *mut i64, pad_len: i32,
+        mode: i32, value: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // mode: 0=nearest, 1=bilinear, 2=bicubic, 3=trilinear
+    pub fn flodl_interpolate(
+        input: FlodlTensor, output_size: *mut i64, ndim: i32,
+        mode: i32, align_corners: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     pub fn flodl_flip(
         t: FlodlTensor, dims: *mut i64, ndim: i32,
         result: *mut FlodlTensor,
@@ -691,6 +730,14 @@ unsafe extern "C" {
 
     pub fn flodl_cdist(
         x: FlodlTensor, y: FlodlTensor, p: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // --- Cosine similarity ---
+
+    pub fn flodl_cosine_similarity(
+        a: FlodlTensor, b: FlodlTensor,
+        dim: i64, eps: f64,
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
@@ -850,6 +897,11 @@ unsafe extern "C" {
         reduction: i64, result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    pub fn flodl_bce_loss(
+        pred: FlodlTensor, target: FlodlTensor,
+        reduction: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     pub fn flodl_l1_loss(
         pred: FlodlTensor, target: FlodlTensor,
         reduction: i64, result: *mut FlodlTensor,
@@ -897,6 +949,13 @@ unsafe extern "C" {
 
     pub fn flodl_to_channels_last(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_is_channels_last(t: FlodlTensor) -> i32;
+
+    // --- Embedding bag ---
+
+    pub fn flodl_embedding_bag(
+        weight: FlodlTensor, indices: FlodlTensor, offsets: FlodlTensor,
+        mode: i64, result: *mut FlodlTensor,
+    ) -> *mut i8;
 
     // --- CUDA Graphs ---
 

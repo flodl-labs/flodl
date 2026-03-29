@@ -859,6 +859,17 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Cosine similarity between two tensors along a dimension.
+    /// Default dim=1, eps=1e-8 (matches PyTorch).
+    pub fn cosine_similarity(&self, other: &Tensor, dim: i64, eps: f64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_cosine_similarity(self.handle, other.handle, dim, eps, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Cast to a different dtype.
     pub fn to_dtype(&self, dtype: super::DType) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();

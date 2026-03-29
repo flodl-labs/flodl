@@ -71,6 +71,63 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// 1D convolution. bias may be None for no bias.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv1d(
+        &self, weight: &Tensor, bias: Option<&Tensor>,
+        stride: i64, padding: i64, dilation: i64, groups: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let bias_handle = bias.map_or(ptr::null_mut(), |b| b.handle);
+        let err = unsafe {
+            ffi::flodl_conv1d(
+                self.handle, weight.handle, bias_handle,
+                stride, padding, dilation,
+                groups, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Transposed 1D convolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_transpose1d(
+        &self, weight: &Tensor, bias: Option<&Tensor>,
+        stride: i64, padding: i64, output_padding: i64,
+        dilation: i64, groups: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let bias_handle = bias.map_or(ptr::null_mut(), |b| b.handle);
+        let err = unsafe {
+            ffi::flodl_conv_transpose1d(
+                self.handle, weight.handle, bias_handle,
+                stride, padding, output_padding, dilation,
+                groups, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Group normalization. weight and bias are optional (shape `[num_channels]`).
+    pub fn group_norm(
+        &self, num_groups: i64,
+        weight: Option<&Tensor>, bias: Option<&Tensor>,
+        eps: f64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let w = weight.map_or(ptr::null_mut(), |t| t.handle);
+        let b = bias.map_or(ptr::null_mut(), |t| t.handle);
+        let err = unsafe {
+            ffi::flodl_group_norm(
+                self.handle, num_groups, w, b, eps, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Fused linear: `y = input @ weight^T + bias` (single ATen kernel).
     pub fn linear(&self, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
@@ -237,6 +294,20 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Binary cross-entropy loss from probabilities (NOT logits).
+    /// Input must be in \[0, 1\] (e.g. after sigmoid).
+    /// reduction: 0=None, 1=Mean, 2=Sum.
+    pub fn bce_loss(&self, target: &Tensor, reduction: i64) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_bce_loss(
+                self.handle, target.handle, reduction, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Fused BCE with logits loss: single libtorch kernel.
     /// Numerically stable binary cross-entropy from raw logits.
     /// reduction: 0=None, 1=Mean, 2=Sum.
@@ -331,6 +402,48 @@ impl Tensor {
         let mut handle: FlodlTensor = ptr::null_mut();
         let err = unsafe {
             ffi::flodl_feature_dropout(self.handle, p, training as i32, &mut handle)
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Fused embedding lookup + reduction (sum / mean / max).
+    ///
+    /// `weight`: `[num_embeddings, embedding_dim]` embedding table.
+    /// `indices`: 1-D i64 tensor of token indices.
+    /// `offsets`: 1-D i64 tensor marking the start of each bag.
+    /// `mode`: 0 = sum, 1 = mean, 2 = max.
+    ///
+    /// Returns one row per bag with shape `[num_bags, embedding_dim]`.
+    pub fn embedding_bag(
+        weight: &Tensor, indices: &Tensor, offsets: &Tensor, mode: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_embedding_bag(
+                weight.handle, indices.handle, offsets.handle,
+                mode, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Interpolate (resize) a tensor using nearest, bilinear, bicubic, or trilinear mode.
+    ///
+    /// `output_size`: target spatial dimensions (1D, 2D, or 3D depending on input).
+    /// `mode`: 0=nearest, 1=bilinear, 2=bicubic, 3=trilinear.
+    /// `align_corners`: whether to align corner pixels (ignored for nearest).
+    pub fn interpolate(
+        &self, output_size: &[i64], mode: i32, align_corners: bool,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let mut os = output_size.to_vec();
+        let err = unsafe {
+            ffi::flodl_interpolate(
+                self.handle, os.as_mut_ptr(), os.len() as i32,
+                mode, align_corners as i32, &mut handle,
+            )
         };
         check_err(err)?;
         Ok(Tensor::from_raw(handle))

@@ -186,6 +186,23 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Pad with configurable mode. Padding format matches PyTorch: [left, right, ...].
+    ///
+    /// `mode`: 0=constant, 1=reflect, 2=replicate, 3=circular.
+    /// `value`: fill value (only used when mode=constant).
+    pub fn pad_mode(&self, padding: &[i64], mode: i32, value: f64) -> Result<Tensor> {
+        let mut padding = padding.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_pad_mode(
+                self.handle, padding.as_mut_ptr(), padding.len() as i32,
+                mode, value, &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Reverse the order of elements along the given dimensions.
     pub fn flip(&self, dims: &[i64]) -> Result<Tensor> {
         let mut dims = dims.to_vec();

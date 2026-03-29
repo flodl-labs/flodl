@@ -391,6 +391,12 @@ impl Variable {
         Ok(Variable::wrap(result))
     }
 
+    /// Cosine similarity between two variables along a dimension.
+    pub fn cosine_similarity(&self, other: &Variable, dim: i64, eps: f64) -> Result<Variable> {
+        let result = self.data().cosine_similarity(&other.data(), dim, eps)?;
+        Ok(Variable::wrap(result))
+    }
+
     // --- Shape operations ---
 
     /// Return a view with a different shape. Use `-1` for one inferred dimension.
@@ -637,6 +643,65 @@ pub fn conv_transpose2d(
     Ok(Variable::wrap(result))
 }
 
+/// 1D convolution with autograd support (`F.conv1d`).
+/// `input` is `[N, C_in, L]`, `weight` is `[C_out, C_in/groups, K]`.
+pub fn conv1d(
+    input: &Variable,
+    weight: &Variable,
+    bias: Option<&Variable>,
+    stride: i64,
+    padding: i64,
+    dilation: i64,
+    groups: i64,
+) -> Result<Variable> {
+    let bias_tensor = bias.map(|b| b.data());
+    let result = input.data().conv1d(
+        &weight.data(),
+        bias_tensor.as_ref(),
+        stride, padding, dilation, groups,
+    )?;
+    Ok(Variable::wrap(result))
+}
+
+/// Transposed 1D convolution with autograd support (`F.conv_transpose1d`).
+#[allow(clippy::too_many_arguments)]
+pub fn conv_transpose1d(
+    input: &Variable,
+    weight: &Variable,
+    bias: Option<&Variable>,
+    stride: i64,
+    padding: i64,
+    output_padding: i64,
+    dilation: i64,
+    groups: i64,
+) -> Result<Variable> {
+    let bias_tensor = bias.map(|b| b.data());
+    let result = input.data().conv_transpose1d(
+        &weight.data(),
+        bias_tensor.as_ref(),
+        stride, padding, output_padding, dilation, groups,
+    )?;
+    Ok(Variable::wrap(result))
+}
+
+/// Group normalization with autograd support.
+/// `weight` (gamma) and `bias` (beta) are shape `[num_channels]`.
+pub fn group_norm(
+    input: &Variable,
+    num_groups: i64,
+    weight: &Variable,
+    bias: &Variable,
+    eps: f64,
+) -> Result<Variable> {
+    let result = input.data().group_norm(
+        num_groups,
+        Some(&weight.data()),
+        Some(&bias.data()),
+        eps,
+    )?;
+    Ok(Variable::wrap(result))
+}
+
 /// Max pooling over a 2D input with autograd support (`F.max_pool2d`).
 pub fn max_pool2d(
     input: &Variable,
@@ -684,5 +749,21 @@ pub fn grid_sample(
     let result = input.data().grid_sample(
         &grid.data(), mode, padding_mode, align_corners,
     )?;
+    Ok(Variable::wrap(result))
+}
+
+/// Fused embedding lookup + reduction with autograd support.
+///
+/// `weight`: learnable embedding table (Variable).
+/// `indices`: 1-D i64 index tensor.
+/// `offsets`: 1-D i64 tensor marking the start of each bag.
+/// `mode`: 0 = sum, 1 = mean, 2 = max.
+pub fn embedding_bag(
+    weight: &Variable,
+    indices: &Tensor,
+    offsets: &Tensor,
+    mode: i64,
+) -> Result<Variable> {
+    let result = Tensor::embedding_bag(&weight.data(), indices, offsets, mode)?;
     Ok(Variable::wrap(result))
 }

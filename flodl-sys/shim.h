@@ -87,6 +87,12 @@ char* flodl_mish(FlodlTensor t, FlodlTensor* result);
 char* flodl_native_layer_norm(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
                              int64_t normalized_size, double eps,
                              FlodlTensor* output, FlodlTensor* mean, FlodlTensor* rstd);
+// --- Group normalization ---
+
+char* flodl_group_norm(FlodlTensor input, int64_t num_groups,
+                      FlodlTensor weight, FlodlTensor bias,
+                      double eps, FlodlTensor* result);
+
 // --- Element-wise math ---
 
 char* flodl_exp(FlodlTensor t, FlodlTensor* result);
@@ -207,6 +213,15 @@ char* flodl_repeat(FlodlTensor t, int64_t* repeats, int ndim,
                   FlodlTensor* result);
 char* flodl_pad(FlodlTensor t, int64_t* padding, int pad_len, double value,
                FlodlTensor* result);
+// mode: 0=constant, 1=reflect, 2=replicate, 3=circular
+char* flodl_pad_mode(FlodlTensor t, int64_t* padding, int pad_len,
+                    int mode, double value, FlodlTensor* result);
+
+// --- Interpolation ---
+// mode: 0=nearest, 1=bilinear, 2=bicubic, 3=trilinear
+char* flodl_interpolate(FlodlTensor input, int64_t* output_size, int ndim,
+                       int mode, int align_corners, FlodlTensor* result);
+
 char* flodl_flip(FlodlTensor t, int64_t* dims, int ndim, FlodlTensor* result);
 char* flodl_roll(FlodlTensor t, int64_t shift, int dim, FlodlTensor* result);
 char* flodl_split(FlodlTensor t, int64_t split_size, int dim,
@@ -284,12 +299,23 @@ char* flodl_bernoulli(FlodlTensor t, FlodlTensor* result);
 char* flodl_conv2d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
                  int64_t* stride, int64_t* padding, int64_t* dilation,
                  int64_t groups, FlodlTensor* result);
+// --- 1D convolution ---
+
+char* flodl_conv1d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
+                 int64_t stride, int64_t padding, int64_t dilation,
+                 int64_t groups, FlodlTensor* result);
 // --- Transposed convolution ---
 
 char* flodl_conv_transpose2d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
                            int64_t* stride, int64_t* padding,
                            int64_t* output_padding, int64_t* dilation,
                            int64_t groups, FlodlTensor* result);
+// --- Transposed 1D convolution ---
+
+char* flodl_conv_transpose1d(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
+                            int64_t stride, int64_t padding,
+                            int64_t output_padding, int64_t dilation,
+                            int64_t groups, FlodlTensor* result);
 // --- Pooling ---
 
 char* flodl_max_pool2d(FlodlTensor input, int64_t* kernel_size,
@@ -428,6 +454,11 @@ char* flodl_meshgrid(FlodlTensor* tensors, int count,
 
 char* flodl_normalize(FlodlTensor t, double p, int dim, FlodlTensor* result);
 
+// --- Cosine similarity ---
+
+char* flodl_cosine_similarity(FlodlTensor a, FlodlTensor b,
+                             int64_t dim, double eps, FlodlTensor* result);
+
 // --- Pairwise distance ---
 
 char* flodl_cdist(FlodlTensor x, FlodlTensor y, double p,
@@ -551,6 +582,8 @@ char* flodl_cross_entropy_loss(FlodlTensor pred, FlodlTensor target,
                                double label_smoothing, FlodlTensor* result);
 char* flodl_bce_with_logits_loss(FlodlTensor pred, FlodlTensor target,
                                   int64_t reduction, FlodlTensor* result);
+char* flodl_bce_loss(FlodlTensor pred, FlodlTensor target,
+                     int64_t reduction, FlodlTensor* result);
 char* flodl_l1_loss(FlodlTensor pred, FlodlTensor target,
                     int64_t reduction, FlodlTensor* result);
 char* flodl_smooth_l1_loss(FlodlTensor pred, FlodlTensor target,
@@ -574,6 +607,13 @@ char* flodl_dropout(FlodlTensor input, double p, int training,
                     FlodlTensor* result);
 char* flodl_feature_dropout(FlodlTensor input, double p, int training,
                             FlodlTensor* result);
+
+// --- Embedding bag ---
+// Fused embedding lookup + reduction (sum / mean / max).
+// mode: 0=sum, 1=mean, 2=max.
+char* flodl_embedding_bag(FlodlTensor weight, FlodlTensor indices,
+                          FlodlTensor offsets, int64_t mode,
+                          FlodlTensor* result);
 
 // --- In-place copy ---
 
