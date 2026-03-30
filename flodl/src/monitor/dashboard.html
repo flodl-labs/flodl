@@ -285,6 +285,7 @@ if(typeof LIVE_LABEL!=='undefined'||typeof LIVE_HASH!=='undefined'){
   applyLabelHash(typeof LIVE_LABEL!=='undefined'?LIVE_LABEL:null,typeof LIVE_HASH!=='undefined'?LIVE_HASH:null);
 }
 if(typeof LIVE_HARDWARE!=='undefined'){showHardware(LIVE_HARDWARE)}
+if(typeof LIVE_META!=='undefined'&&LIVE_META!==null){showMeta(LIVE_META)}
 
 // --- Header ---
 function updateHeader(d){

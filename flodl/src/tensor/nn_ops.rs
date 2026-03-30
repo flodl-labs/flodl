@@ -185,10 +185,13 @@ impl Tensor {
     /// Fused LSTM sequence: processes all timesteps in a single cuDNN kernel call.
     ///
     /// `params` must be the flat weight list: `[w_ih, w_hh, b_ih, b_hh]` per layer.
+    /// When `flatten` is true, calls `_cudnn_rnn_flatten_weight` to pack params into
+    /// a contiguous cuDNN-aligned buffer (modifies TensorImpl in-place via `set_()`).
+    /// Pass `false` on subsequent calls if params are already flattened.
     /// Returns `(output, h_n, c_n)`.
     pub fn lstm_seq(
         &self, h_0: &Tensor, c_0: &Tensor,
-        params: &[Tensor], num_layers: i64, batch_first: bool,
+        params: &[Tensor], num_layers: i64, batch_first: bool, flatten: bool,
     ) -> Result<(Tensor, Tensor, Tensor)> {
         let handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
         let mut output: FlodlTensor = ptr::null_mut();
@@ -198,7 +201,7 @@ impl Tensor {
             ffi::flodl_lstm(
                 self.handle, h_0.handle, c_0.handle,
                 handles.as_ptr(), handles.len() as i64,
-                num_layers, batch_first,
+                num_layers, batch_first, flatten,
                 &mut output, &mut h_n, &mut c_n,
             )
         };
@@ -209,10 +212,12 @@ impl Tensor {
     /// Fused GRU sequence: processes all timesteps in a single cuDNN kernel call.
     ///
     /// `params` must be the flat weight list: `[w_ih, w_hh, b_ih, b_hh]` per layer.
+    /// When `flatten` is true, calls `_cudnn_rnn_flatten_weight` to pack params into
+    /// a contiguous cuDNN-aligned buffer. Pass `false` after the first call.
     /// Returns `(output, h_n)`.
     pub fn gru_seq(
         &self, h_0: &Tensor,
-        params: &[Tensor], num_layers: i64, batch_first: bool,
+        params: &[Tensor], num_layers: i64, batch_first: bool, flatten: bool,
     ) -> Result<(Tensor, Tensor)> {
         let handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
         let mut output: FlodlTensor = ptr::null_mut();
@@ -221,7 +226,7 @@ impl Tensor {
             ffi::flodl_gru(
                 self.handle, h_0.handle,
                 handles.as_ptr(), handles.len() as i64,
-                num_layers, batch_first,
+                num_layers, batch_first, flatten,
                 &mut output, &mut h_n,
             )
         };

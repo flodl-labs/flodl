@@ -917,14 +917,14 @@ unsafe extern "C" {
     pub fn flodl_lstm(
         input: FlodlTensor, h_0: FlodlTensor, c_0: FlodlTensor,
         params: *const FlodlTensor, num_params: i64,
-        num_layers: i64, batch_first: bool,
+        num_layers: i64, batch_first: bool, flatten: bool,
         output: *mut FlodlTensor, h_n: *mut FlodlTensor, c_n: *mut FlodlTensor,
     ) -> *mut i8;
 
     pub fn flodl_gru(
         input: FlodlTensor, h_0: FlodlTensor,
         params: *const FlodlTensor, num_params: i64,
-        num_layers: i64, batch_first: bool,
+        num_layers: i64, batch_first: bool, flatten: bool,
         output: *mut FlodlTensor, h_n: *mut FlodlTensor,
     ) -> *mut i8;
 

@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+
 use crate::autograd::Variable;
 use crate::tensor::{Device, DType, Result, Tensor, TensorOptions};
 
@@ -22,6 +24,9 @@ pub struct LSTM {
     hidden_size: i64,
     num_layers: usize,
     batch_first: bool,
+    /// Cached param tensors after cuDNN flatten (avoids per-forward collection + FFI).
+    flat_params: RefCell<Vec<Tensor>>,
+    params_flattened: Cell<bool>,
 }
 
 impl LSTM {
@@ -49,6 +54,8 @@ impl LSTM {
             hidden_size,
             num_layers,
             batch_first,
+            flat_params: RefCell::new(Vec::new()),
+            params_flattened: Cell::new(false),
         })
     }
 
@@ -91,14 +98,20 @@ impl LSTM {
             ),
         };
 
-        // Collect all weight tensors in order: [w_ih, w_hh, b_ih, b_hh] per layer
-        let params: Vec<Tensor> = self.cells.iter()
-            .flat_map(|cell| cell.parameters().into_iter().map(|p| p.variable.data()))
-            .collect();
+        // Cache params after first cuDNN flatten — avoids per-forward collection + FFI.
+        let flatten = !self.params_flattened.get();
+        if flatten {
+            let params: Vec<Tensor> = self.cells.iter()
+                .flat_map(|cell| cell.parameters().into_iter().map(|p| p.variable.data()))
+                .collect();
+            *self.flat_params.borrow_mut() = params;
+            self.params_flattened.set(true);
+        }
+        let cached = self.flat_params.borrow();
 
         // Fused at::lstm — single cuDNN kernel call for the full sequence
         let (output, h_n, c_n) = input.data().lstm_seq(
-            &h_0, &c_0, &params, nl, self.batch_first,
+            &h_0, &c_0, &cached, nl, self.batch_first, flatten,
         )?;
 
         Ok((Variable::wrap(output), (Variable::wrap(h_n), Variable::wrap(c_n))))

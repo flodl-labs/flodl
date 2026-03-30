@@ -26,8 +26,9 @@ frameworks saturate the GPU, proving they dispatch identical CUDA kernels.**
 
 - **Median epoch time** — median of the best run's 20 measured epochs, taken
   across 10 rounds. Lower is faster.
-- **σ** — standard deviation across rounds (one best-run median per round).
-  Lower means more predictable.
+- **σ** — scaled MAD (Median Absolute Deviation × 1.4826) across rounds,
+  σ-equivalent for normal data but robust to OS/GC outliers. Lower means
+  more predictable.
 - **alloc** — peak active tensor bytes (`torch.cuda.max_memory_allocated` /
   `cuda_peak_active_bytes`). This is the memory your tensors actually use.
 - **rsrvd** — peak allocator reservation (`torch.cuda.max_memory_reserved` /
@@ -128,10 +129,13 @@ The benchmark suite is designed for reproducibility and statistical rigor:
 For N rounds, each with best-of-K runs:
 
 - **Reported median** = median of N best-run medians (one per round)
-- **Reported σ** = stddev of N best-run medians
+- **Reported σ** = scaled MAD of N best-run medians (MAD × 1.4826, σ-equivalent
+  for normal distributions)
 
-This gives N independent samples (one per round) for robust statistics. With
-10 rounds, the σ values are meaningful — not just noise from a single run.
+This gives N independent samples (one per round) for robust statistics. Scaled
+MAD resists the outlier rounds that inflate stdev on shared-driver environments
+(WSL2, background OS scheduling), while remaining directly comparable to
+standard deviation for well-behaved data.
 
 ### Environment
 

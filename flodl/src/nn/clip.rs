@@ -56,7 +56,7 @@ mod tests {
     fn test_clip_grad_norm_scales_down() {
         let p = make_param_with_grad(&[1.0, 2.0], &[3.0, 4.0]);
         // L2 norm of [3,4] = 5.0, max_norm = 1.0 -> scale by 1/5
-        let original_norm = clip_grad_norm(&[p.clone()], 1.0).unwrap();
+        let original_norm = clip_grad_norm(std::slice::from_ref(&p), 1.0).unwrap();
         assert!((original_norm - 5.0).abs() < 1e-3);
         let g = p.variable.grad().unwrap().to_f32_vec().unwrap();
         let clipped_norm: f64 = g.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt();
@@ -67,7 +67,7 @@ mod tests {
     fn test_clip_grad_norm_no_op_when_small() {
         let p = make_param_with_grad(&[1.0], &[0.5]);
         // L2 norm = 0.5, max_norm = 10.0 -> no clipping
-        let norm = clip_grad_norm(&[p.clone()], 10.0).unwrap();
+        let norm = clip_grad_norm(std::slice::from_ref(&p), 10.0).unwrap();
         assert!((norm - 0.5).abs() < 1e-3);
         let g = p.variable.grad().unwrap().to_f32_vec().unwrap();
         assert!((g[0] - 0.5).abs() < 1e-4);
@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn test_clip_grad_value_clamps() {
         let p = make_param_with_grad(&[1.0, 2.0], &[10.0, -5.0]);
-        let max_before = clip_grad_value(&[p.clone()], 2.0).unwrap();
+        let max_before = clip_grad_value(std::slice::from_ref(&p), 2.0).unwrap();
         assert!((max_before - 10.0).abs() < 1e-3);
         let g = p.variable.grad().unwrap().to_f32_vec().unwrap();
         assert!((g[0] - 2.0).abs() < 1e-4);  // clamped from 10
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn test_clip_grad_value_no_op_when_small() {
         let p = make_param_with_grad(&[1.0], &[0.3]);
-        let max = clip_grad_value(&[p.clone()], 1.0).unwrap();
+        let max = clip_grad_value(std::slice::from_ref(&p), 1.0).unwrap();
         assert!((max - 0.3).abs() < 1e-3);
         let g = p.variable.grad().unwrap().to_f32_vec().unwrap();
         assert!((g[0] - 0.3).abs() < 1e-4);
