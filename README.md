@@ -388,7 +388,7 @@ code for every op, module, and pattern.
 
 Same CUDA kernels as PyTorch — the difference comes from what happens
 *between* kernel launches. Ten models, ten interleaved rounds, locked GPU
-clocks (RTX 5060 Ti, v0.2.1 vs PyTorch 2.10.0):
+clocks (RTX 5060 Ti, v0.2.2 vs PyTorch 2.10.0):
 
 | Model | PyTorch | flodl | Delta |
 |---|---:|---:|---:|

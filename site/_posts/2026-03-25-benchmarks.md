@@ -6,7 +6,7 @@ description: "flodl vs PyTorch on 7 models with publication-grade methodology. U
 ---
 
 *Update: these v0.1.3 results have been superseded by the
-[v0.2.1 benchmarks](/2026/03/31/benchmark-update) -- 10 models, fused RNN
+[v0.2.2 benchmarks](/2026/03/31/benchmark-update) -- 10 models, fused RNN
 kernels, and improved statistical methodology.*
 
 When I published the [first benchmark](/benchmark) a week ago, the headline

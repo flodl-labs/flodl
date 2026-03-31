@@ -1,8 +1,8 @@
 ---
 title: "Ten models later, the answer hasn't changed"
-subtitle: "v0.2.1 benchmarks: fused RNN, honest variance, and still zero regressions against PyTorch"
+subtitle: "v0.2.2 benchmarks: fused RNN, honest variance, and still zero regressions against PyTorch"
 date: 2026-03-31
-description: "flodl v0.2.1 vs PyTorch 2.10.0 on 10 models. Up to 31% faster, wins 8 of 10, zero regressions. New: fused RNN kernels, scaled MAD variance, and a 30% smaller Docker image."
+description: "flodl v0.2.2 vs PyTorch 2.10.0 on 10 models. Up to 31% faster, wins 8 of 10, zero regressions. New: fused RNN kernels, scaled MAD variance, and a 30% smaller Docker image."
 ---
 
 The [first benchmark](/2026/03/25/benchmarks) measured seven models on
@@ -11,7 +11,7 @@ adds three models (transformer, lstm_seq, conv_autoenc), lands fused RNN
 kernels with C++-side parameter caching, and switches the variance metric
 to something more honest.
 
-## Results (v0.2.1 vs PyTorch 2.10.0)
+## Results (v0.2.2 vs PyTorch 2.10.0)
 
 | Model | PyTorch | flodl | Delta | Py σ | Rs σ |
 |---|---:|---:|---:|---:|---:|
@@ -147,7 +147,7 @@ compounds with the per-epoch speed advantage.
 | **Fused RNN** (`at::lstm()` / `at::gru()`) | Single cuDNN kernel for full sequence |
 | **RNN param caching** (C++ `RnnParams` handle) | Zero per-forward FFI overhead |
 | **flatten_parameters** | Eliminates cuDNN contiguous-weight warning |
-| **PyTorch parity** (v0.2.1) | 30+ modules, 15 losses, 7 optimizers, 769 tests |
+| **PyTorch parity** (v0.2.2) | 30+ modules, 15 losses, 7 optimizers, 769 tests |
 | **Scaled MAD variance** | Honest σ resistant to GC/scheduling outliers |
 | **PyTorch 2.10.0+cu128** | Updated baseline (was 2.6.0+cu126) |
 
