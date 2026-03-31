@@ -5,6 +5,10 @@ date: 2026-03-25
 description: "flodl vs PyTorch on 7 models with publication-grade methodology. Up to 30% faster, but the real story is 3-20x tighter variance from Rust's ownership model."
 ---
 
+*Update: these v0.1.3 results have been superseded by the
+[v0.2.2 benchmarks](/2026/03/31/benchmark-update) -- 10 models, fused RNN
+kernels, and improved statistical methodology.*
+
 When I published the [first benchmark](/benchmark) a week ago, the headline
 was 19% faster than PyTorch. A real model, a real workload, same GPU. People
 noticed. But one number bugged me: the epoch standard deviation. flodl was

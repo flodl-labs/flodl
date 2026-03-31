@@ -913,6 +913,39 @@ unsafe extern "C" {
         h_out: *mut FlodlTensor, c_out: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // Fused sequence ops (cuDNN-accelerated)
+    pub fn flodl_lstm(
+        input: FlodlTensor, h_0: FlodlTensor, c_0: FlodlTensor,
+        params: *const FlodlTensor, num_params: i64,
+        num_layers: i64, batch_first: bool, flatten: bool,
+        output: *mut FlodlTensor, h_n: *mut FlodlTensor, c_n: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    pub fn flodl_gru(
+        input: FlodlTensor, h_0: FlodlTensor,
+        params: *const FlodlTensor, num_params: i64,
+        num_layers: i64, batch_first: bool, flatten: bool,
+        output: *mut FlodlTensor, h_n: *mut FlodlTensor,
+    ) -> *mut i8;
+
+    // Cached RNN params (zero per-forward overhead)
+    pub fn flodl_rnn_params_create(
+        params: *const FlodlTensor, num_params: i64,
+        mode: i64, num_layers: i64, batch_first: bool, flatten: bool,
+        out: *mut *mut std::os::raw::c_void,
+    ) -> *mut i8;
+    pub fn flodl_rnn_params_free(rp: *mut std::os::raw::c_void);
+    pub fn flodl_lstm_cached(
+        input: FlodlTensor, h_0: FlodlTensor, c_0: FlodlTensor,
+        rp: *mut std::os::raw::c_void, num_layers: i64, batch_first: bool,
+        output: *mut FlodlTensor, h_n: *mut FlodlTensor, c_n: *mut FlodlTensor,
+    ) -> *mut i8;
+    pub fn flodl_gru_cached(
+        input: FlodlTensor, h_0: FlodlTensor,
+        rp: *mut std::os::raw::c_void, num_layers: i64, batch_first: bool,
+        output: *mut FlodlTensor, h_n: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- cuDNN benchmark ---
 
     pub fn flodl_set_cudnn_benchmark(enable: i32);

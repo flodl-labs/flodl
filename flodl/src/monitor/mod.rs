@@ -160,8 +160,11 @@ impl Monitor {
     }
 
     /// Attach arbitrary JSON metadata (hyperparameters, config, etc.)
-    /// that will be included in the HTML archive.
+    /// that will be included in the live dashboard and HTML archive.
     pub fn set_metadata(&mut self, meta: serde_json::Value) {
+        if let Some(ref srv) = self.server {
+            srv.set_metadata(meta.to_string());
+        }
         self.metadata = Some(meta);
     }
 
@@ -208,6 +211,50 @@ impl Monitor {
                 self.graph_hash.clone(),
             );
         }
+        self.capture_param_info(graph);
+    }
+
+    /// Build parameter summary and merge into metadata.
+    fn capture_param_info(&mut self, graph: &Graph) {
+        use crate::nn::Module;
+
+        let params = graph.parameters();
+        let total: i64 = params.iter()
+            .map(|p| p.variable.shape().iter().product::<i64>())
+            .sum();
+        let trainable: i64 = params.iter()
+            .filter(|p| !p.is_frozen())
+            .map(|p| p.variable.shape().iter().product::<i64>())
+            .sum();
+        let frozen = total - trainable;
+
+        let param_info = serde_json::json!({
+            "parameters": {
+                "total": total,
+                "trainable": trainable,
+                "frozen": frozen,
+            }
+        });
+
+        // Merge into existing metadata (user-set fields take precedence)
+        let merged = match &self.metadata {
+            Some(existing) => {
+                if let (serde_json::Value::Object(mut base), serde_json::Value::Object(extra)) =
+                    (param_info.clone(), existing.clone())
+                {
+                    base.extend(extra);
+                    serde_json::Value::Object(base)
+                } else {
+                    existing.clone()
+                }
+            }
+            None => param_info,
+        };
+
+        if let Some(ref srv) = self.server {
+            srv.set_metadata(merged.to_string());
+        }
+        self.metadata = Some(merged);
     }
 
     /// Log an epoch's results. Prints a one-line summary and pushes data

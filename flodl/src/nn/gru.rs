@@ -1,5 +1,7 @@
+use std::cell::RefCell;
+
 use crate::autograd::Variable;
-use crate::tensor::{Device, DType, Result, Tensor, TensorOptions};
+use crate::tensor::{Device, DType, Result, RnnParams, Tensor, TensorOptions};
 
 use super::grucell::GRUCell;
 use super::parameter::Parameter;
@@ -22,6 +24,8 @@ pub struct GRU {
     hidden_size: i64,
     num_layers: usize,
     batch_first: bool,
+    /// Cached cuDNN params — lives on C++ side, zero per-forward overhead.
+    rnn_params: RefCell<Option<RnnParams>>,
 }
 
 impl GRU {
@@ -49,6 +53,7 @@ impl GRU {
             hidden_size,
             num_layers,
             batch_first,
+            rnn_params: RefCell::new(None),
         })
     }
 
@@ -71,60 +76,38 @@ impl GRU {
         input: &Variable,
         h_0: Option<&Variable>,
     ) -> Result<(Variable, Variable)> {
-        // Normalize to [seq_len, batch, features]
-        let x = if self.batch_first {
-            input.transpose(0, 1)?
-        } else {
-            input.clone()
-        };
-
-        let seq_len = x.shape()[0];
-        let batch = x.shape()[1];
+        let shape = input.shape();
+        let batch = if self.batch_first { shape[0] } else { shape[1] };
+        let nl = self.num_layers as i64;
+        let hs = self.hidden_size;
         let opts = TensorOptions {
             dtype: DType::Float32,
             device: self.cells[0].parameters()[0].variable.device(),
         };
 
-        // Initialize hidden states per layer
-        let mut h: Vec<Variable> = if let Some(h0) = h_0 {
-            (0..self.num_layers)
-                .map(|l| h0.select(0, l as i64))
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            (0..self.num_layers)
-                .map(|_| {
-                    Ok(Variable::new(
-                        Tensor::zeros(&[batch, self.hidden_size], opts)?,
-                        false,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?
+        // Initial hidden state (zeros if not provided)
+        let h0 = match h_0 {
+            Some(h) => h.data(),
+            None => Tensor::zeros(&[nl, batch, hs], opts)?,
         };
 
-        // Run through timesteps and layers
-        let mut outputs = Vec::with_capacity(seq_len as usize);
-        for t in 0..seq_len {
-            let mut layer_input = x.select(0, t)?;
-            for (l, cell) in self.cells.iter().enumerate() {
-                let h_new = cell.forward_step(&layer_input, Some(&h[l]))?;
-                h[l] = h_new.clone();
-                layer_input = h_new;
+        // Lazily create C++ cached params on first forward (with cuDNN flatten).
+        // Subsequent forwards pass the opaque handle directly — zero overhead.
+        {
+            let mut cache = self.rnn_params.borrow_mut();
+            if cache.is_none() {
+                let params: Vec<Tensor> = self.cells.iter()
+                    .flat_map(|cell| cell.parameters().into_iter().map(|p| p.variable.data()))
+                    .collect();
+                *cache = Some(RnnParams::new(&params, 3, nl, self.batch_first, true)?);
             }
-            outputs.push(layer_input);
         }
+        let cache = self.rnn_params.borrow();
+        let (output, h_n) = input.data().gru_seq_cached(
+            &h0, cache.as_ref().unwrap(), nl, self.batch_first,
+        )?;
 
-        // Stack outputs: [seq_len, batch, hidden_size]
-        let output = Variable::stack(&outputs, 0)?;
-        let output = if self.batch_first {
-            output.transpose(0, 1)?
-        } else {
-            output
-        };
-
-        // Stack final hidden states: [num_layers, batch, hidden_size]
-        let h_n = Variable::stack(&h, 0)?;
-
-        Ok((output, h_n))
+        Ok((Variable::wrap(output), Variable::wrap(h_n)))
     }
 }
 

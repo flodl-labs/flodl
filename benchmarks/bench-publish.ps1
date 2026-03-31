@@ -23,13 +23,41 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# --- Locate nvidia-smi ---
+# nvidia-smi may not be in PATH depending on driver install method.
+# Search common locations if the bare command isn't found.
+$nvSmi = 'nvidia-smi'
+if (-not (Get-Command $nvSmi -ErrorAction SilentlyContinue)) {
+    $candidates = @(
+        "$env:SystemRoot\System32\nvidia-smi.exe",
+        "${env:ProgramFiles}\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+        "${env:ProgramW6432}\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    )
+    # Studio/newer drivers put nvidia-smi in the DriverStore — pick the newest.
+    $dsHit = Get-ChildItem -Path "$env:SystemRoot\System32\DriverStore\FileRepository" `
+        -Recurse -Filter 'nvidia-smi.exe' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($dsHit) { $candidates += $dsHit.FullName }
+
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $nvSmi = $c; break }
+    }
+    if (-not (Test-Path $nvSmi)) {
+        Write-Host 'ERROR: nvidia-smi not found.' -ForegroundColor Red
+        Write-Host 'Searched: PATH, System32, NVIDIA Corporation\NVSMI, DriverStore'
+        Write-Host 'Install the NVIDIA driver or add nvidia-smi to PATH.'
+        exit 1
+    }
+    Write-Host "=== Found nvidia-smi at: $nvSmi ===" -ForegroundColor Yellow
+}
+
 # --- Detect GPU name ---
-$gpuName = (nvidia-smi --query-gpu=name --format=csv,noheader).Trim()
+$gpuName = (& $nvSmi --query-gpu=name --format=csv,noheader).Trim()
 
 # --- Auto-detect base clock if not specified ---
 if ($Clock -eq 0) {
     # Try default applications clock first (works on most desktop GPUs).
-    $line = nvidia-smi --query-gpu=clocks.default_applications.graphics --format=csv,noheader 2>$null
+    $line = & $nvSmi --query-gpu=clocks.default_applications.graphics --format=csv,noheader 2>$null
     $match = [regex]::Match("$line", '(\d+)')
     if ($match.Success) {
         $Clock = [int]$match.Groups[1].Value
@@ -39,7 +67,7 @@ if ($Clock -eq 0) {
     # Fallback: parse "Default Applications Clocks" section from verbose output.
     if ($Clock -eq 0) {
         $section = $false
-        foreach ($l in (nvidia-smi -q -d CLOCK 2>$null)) {
+        foreach ($l in (& $nvSmi -q -d CLOCK 2>$null)) {
             if ($l -match 'Default Applications Clocks') { $section = $true; continue }
             if ($section -and $l -match 'Graphics\s*:\s*(\d+)') {
                 $Clock = [int]$Matches[1]
@@ -52,7 +80,7 @@ if ($Clock -eq 0) {
 
     # Last resort: use current clock as a reasonable default.
     if ($Clock -eq 0) {
-        $line = nvidia-smi --query-gpu=clocks.current.graphics --format=csv,noheader 2>$null
+        $line = & $nvSmi --query-gpu=clocks.current.graphics --format=csv,noheader 2>$null
         $match = [regex]::Match("$line", '(\d+)')
         if ($match.Success) {
             $Clock = [int]$match.Groups[1].Value
@@ -66,7 +94,7 @@ if ($Clock -eq 0) {
         Write-Host 'Specify manually:  .\bench-publish.ps1 -Clock 1800'
         Write-Host ''
         Write-Host 'Debug output:'
-        nvidia-smi -q -d CLOCK
+        & $nvSmi -q -d CLOCK
         exit 1
     }
 } else {
@@ -75,7 +103,7 @@ if ($Clock -eq 0) {
 
 # --- Lock GPU clocks ---
 Write-Host ('=== Locking GPU clocks to {0} MHz ===' -f $Clock) -ForegroundColor Cyan
-nvidia-smi -lgc ('{0},{0}' -f $Clock)
+& $nvSmi -lgc ('{0},{0}' -f $Clock)
 Write-Host ''
 
 try {
@@ -92,5 +120,5 @@ finally {
     # --- Always unlock clocks ---
     Write-Host ''
     Write-Host '=== Unlocking GPU clocks ===' -ForegroundColor Cyan
-    nvidia-smi -rgc
+    & $nvSmi -rgc
 }

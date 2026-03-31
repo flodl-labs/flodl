@@ -13,6 +13,8 @@ mod ops;
 mod shape;
 mod nn_ops;
 
+pub use nn_ops::RnnParams;
+
 use std::ffi::{c_void, CStr};
 use std::fmt;
 use std::ptr;

@@ -5,10 +5,31 @@ All notable changes to floDl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.2] - 2026-03-31
 
 ### Added
 - `Tensor::nbytes()` — total size in bytes (`numel() * element_size()`), matches `torch.Tensor.nbytes`
+
+#### Fused sequence RNN kernels
+- **`LSTM::forward_seq`** now calls `at::lstm()` — single cuDNN kernel for the entire sequence across all layers, replacing per-timestep cell unrolling. Eliminates N×L kernel launches (N=timesteps, L=layers) per forward pass.
+- **`GRU::forward_seq`** now calls `at::gru()` — same fused optimization. Also eliminates the cuDNN benchmark variance that caused ±270ms σ in per-cell dispatch.
+- **`flatten_rnn_params`** (shim) — packs per-cell RNN weight tensors into cuDNN's expected contiguous layout using `at::_cudnn_rnn_flatten_weight`, the same function PyTorch's `nn.LSTM.flatten_parameters()` uses internally. Eliminates the "RNN module weights are not part of single contiguous chunk" warning on CUDA. Uses `set_()` under `NoGradGuard` to redirect parameter storage in-place — persists across training steps, self-corrects after checkpoint load or dtype cast.
+- **Flatten cache** — LSTM and GRU cache the flattened param tensors after the first forward call, skipping both the per-forward param collection (8 tensors via `flat_map` + `collect`) and the cuDNN flatten FFI call on subsequent forwards. Same strategy as PyTorch's `flatten_parameters()` but without the pointer-validation overhead.
+- **`RnnParams` C++ cache** — persistent `std::vector<at::Tensor>` on the C++ side behind an opaque handle (`flodl_rnn_params_create` / `flodl_lstm_cached` / `flodl_gru_cached`). After the first forward, subsequent calls pass a single pointer to the pre-built param vector, eliminating per-forward handle collection, FFI array marshalling, and `std::vector` reconstruction. Matches PyTorch's single-call `at::lstm()`/`at::gru()` pattern exactly.
+- FFI chain: `flodl_lstm` / `flodl_gru` in shim → `Tensor::lstm_seq` / `Tensor::gru_seq` in nn_ops (new `flatten` flag skips redundant flatten calls). Cached path: `flodl_lstm_cached` / `flodl_gru_cached` → `Tensor::lstm_seq_cached` / `Tensor::gru_seq_cached`.
+- `LSTMCell::forward_step` and `GRUCell::forward_step` unchanged — still available for single-step / streaming use cases
+
+#### Benchmark suite extensions
+- **`transformer`** benchmark — 4-layer encoder (MultiheadAttention + FFN + LayerNorm + residual), Embedding, cross-entropy loss. B=32, seq=128, d_model=512, 8 heads.
+- **`lstm_seq`** benchmark — 2-layer LSTM + linear projection, directly comparable to gru_seq. B=128, seq=50.
+- **`conv_autoenc`** benchmark — Conv2d encoder + ConvTranspose2d decoder (DCGAN-style), reconstruction with MSE loss. B=64, 64×64 images.
+
+### Changed
+- **Benchmark σ uses scaled MAD** — variance column now reports Median Absolute Deviation × 1.4826 (σ-equivalent for normal distributions) instead of standard deviation. Robust to OS scheduling outliers, GC pauses, and WSL2 thermal transients that inflated stdev on long runs (e.g. gru_seq Py σ: ±143 stdev → ±27 MAD).
+
+### Fixed
+- **Benchmark report generation**: Fix silent `set -e` exit caused by `[ "$ROUNDS" -gt 1 ] && echo 's'` returning exit code 1 inside command substitution when ROUNDS=1. Reports were never written for single-round runs.
+- **Benchmark report rotation**: Previous report is now rotated to `report.YYYY-MM-DD-HH-MM-SS.txt` instead of being overwritten. All rotated reports are gitignored.
 
 ## [0.2.1] - 2026-03-29
 

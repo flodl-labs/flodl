@@ -3045,6 +3045,155 @@ extern "C" char* flodl_lstm_cell(FlodlTensor input, FlodlTensor hx,
     }
 }
 
+// --- Fused sequence ops (cuDNN-accelerated) ---
+
+// Persistent cache for RNN parameter vectors. After creation (with optional
+// cuDNN flatten), the std::vector<at::Tensor> lives here — forward calls
+// just dereference the pointer, matching PyTorch's single-call pattern.
+struct FlodlRnnParamsImpl {
+    std::vector<at::Tensor> params;
+};
+
+// Flatten RNN params into cuDNN's expected weight layout using
+// at::_cudnn_rnn_flatten_weight — the same function PyTorch's
+// nn.LSTM/GRU.flatten_parameters() calls internally. Handles
+// cuDNN-specific alignment/padding that simple contiguous packing
+// misses. Modifies the shared TensorImpl in-place via set_(), so
+// the original Parameter tensors in Rust also see the flat layout.
+// Persists across training steps (in-place optimizers keep the storage).
+// Self-corrects if the layout is broken (checkpoint load, cast, etc.).
+// mode: 2 = LSTM, 3 = GRU
+static void flatten_rnn_params(std::vector<at::Tensor>& params,
+                                int64_t mode, int64_t num_layers,
+                                bool batch_first) {
+    if (params.empty() || !params[0].is_cuda()) return;
+
+    int64_t weight_stride0 = 4; // w_ih, w_hh, b_ih, b_hh per layer
+    int64_t input_size = params[0].size(1);  // w_ih: [gates*hs, input_size]
+    int64_t hidden_size = params[1].size(1); // w_hh: [gates*hs, hidden_size]
+
+    at::NoGradGuard no_grad;
+    at::_cudnn_rnn_flatten_weight(
+        params, weight_stride0,
+        input_size, mode, hidden_size,
+        /*proj_size=*/0, num_layers,
+        batch_first, /*bidirectional=*/false);
+}
+
+extern "C" char* flodl_lstm(FlodlTensor input, FlodlTensor h_0, FlodlTensor c_0,
+                             const FlodlTensor* params, int64_t num_params,
+                             int64_t num_layers, bool batch_first, bool flatten,
+                             FlodlTensor* output, FlodlTensor* h_n, FlodlTensor* c_n) {
+    try {
+        std::vector<at::Tensor> params_vec;
+        params_vec.reserve(num_params);
+        for (int64_t i = 0; i < num_params; i++) {
+            params_vec.push_back(unwrap(params[i]));
+        }
+        if (flatten) {
+            flatten_rnn_params(params_vec, /*LSTM=*/2, num_layers, batch_first);
+        }
+        auto result = at::lstm(
+            unwrap(input), {unwrap(h_0), unwrap(c_0)}, params_vec,
+            /*has_biases=*/true, num_layers, /*dropout=*/0.0,
+            /*train=*/true, /*bidirectional=*/false, batch_first);
+        *output = wrap(std::get<0>(result));
+        *h_n = wrap(std::get<1>(result));
+        *c_n = wrap(std::get<2>(result));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_gru(FlodlTensor input, FlodlTensor h_0,
+                            const FlodlTensor* params, int64_t num_params,
+                            int64_t num_layers, bool batch_first, bool flatten,
+                            FlodlTensor* output, FlodlTensor* h_n) {
+    try {
+        std::vector<at::Tensor> params_vec;
+        params_vec.reserve(num_params);
+        for (int64_t i = 0; i < num_params; i++) {
+            params_vec.push_back(unwrap(params[i]));
+        }
+        if (flatten) {
+            flatten_rnn_params(params_vec, /*GRU=*/3, num_layers, batch_first);
+        }
+        auto result = at::gru(
+            unwrap(input), unwrap(h_0), params_vec,
+            /*has_biases=*/true, num_layers, /*dropout=*/0.0,
+            /*train=*/true, /*bidirectional=*/false, batch_first);
+        *output = wrap(std::get<0>(result));
+        *h_n = wrap(std::get<1>(result));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// --- Cached RNN params (zero per-forward overhead) ---
+
+extern "C" char* flodl_rnn_params_create(
+        const FlodlTensor* params, int64_t num_params,
+        int64_t mode, int64_t num_layers, bool batch_first,
+        bool flatten, void** out) {
+    auto rp = std::make_unique<FlodlRnnParamsImpl>();
+    try {
+        rp->params.reserve(num_params);
+        for (int64_t i = 0; i < num_params; i++) {
+            rp->params.push_back(unwrap(params[i]));
+        }
+        if (flatten) {
+            flatten_rnn_params(rp->params, mode, num_layers, batch_first);
+        }
+        *out = rp.release();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" void flodl_rnn_params_free(void* rp) {
+    delete static_cast<FlodlRnnParamsImpl*>(rp);
+}
+
+extern "C" char* flodl_lstm_cached(
+        FlodlTensor input, FlodlTensor h_0, FlodlTensor c_0,
+        void* rp, int64_t num_layers, bool batch_first,
+        FlodlTensor* output, FlodlTensor* h_n, FlodlTensor* c_n) {
+    try {
+        auto& params = static_cast<FlodlRnnParamsImpl*>(rp)->params;
+        auto result = at::lstm(
+            unwrap(input), {unwrap(h_0), unwrap(c_0)}, params,
+            /*has_biases=*/true, num_layers, /*dropout=*/0.0,
+            /*train=*/true, /*bidirectional=*/false, batch_first);
+        *output = wrap(std::get<0>(result));
+        *h_n = wrap(std::get<1>(result));
+        *c_n = wrap(std::get<2>(result));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_gru_cached(
+        FlodlTensor input, FlodlTensor h_0,
+        void* rp, int64_t num_layers, bool batch_first,
+        FlodlTensor* output, FlodlTensor* h_n) {
+    try {
+        auto& params = static_cast<FlodlRnnParamsImpl*>(rp)->params;
+        auto result = at::gru(
+            unwrap(input), unwrap(h_0), params,
+            /*has_biases=*/true, num_layers, /*dropout=*/0.0,
+            /*train=*/true, /*bidirectional=*/false, batch_first);
+        *output = wrap(std::get<0>(result));
+        *h_n = wrap(std::get<1>(result));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- cuDNN benchmark ---
 
 extern "C" void flodl_set_cudnn_benchmark(int enable) {

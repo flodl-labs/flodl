@@ -387,22 +387,27 @@ code for every op, module, and pattern.
 ## Performance
 
 Same CUDA kernels as PyTorch — the difference comes from what happens
-*between* kernel launches. Seven models, ten interleaved rounds, locked GPU
-clocks (RTX 5060 Ti, v0.1.3 vs PyTorch 2.6.0):
+*between* kernel launches. Ten models, ten interleaved rounds, locked GPU
+clocks (RTX 5060 Ti, v0.2.2 vs PyTorch 2.10.0):
 
-| Model | PyTorch | flodl | Delta | Py σ | Rs σ |
-|---|---:|---:|---:|---:|---:|
-| mlp | 271.0 ms | 188.5 ms | **-30%** | ±10.1 | ±2.9 |
-| convnet | 1189.4 ms | 1190.5 ms | +0% | ±2.7 | ±1.0 |
-| gru_seq | 1015.3 ms | 949.7 ms | **-6%** | ±222.4 | ±10.8 |
-| residual_tower | 371.3 ms | 278.6 ms | **-25%** | ±25.9 | ±3.6 |
-| gated_routing | 222.6 ms | 196.9 ms | **-12%** | ±13.8 | ±2.6 |
-| iterative_refine | 208.7 ms | 186.7 ms | **-11%** | ±27.2 | ±5.6 |
-| feedback_fixed | 250.2 ms | 207.2 ms | **-17%** | ±27.3 | ±8.7 |
+| Model | PyTorch | flodl | Delta |
+|---|---:|---:|---:|
+| transformer | 3183.0 ms | 2199.8 ms | **-31%** |
+| mlp | 291.1 ms | 207.0 ms | **-29%** |
+| residual_tower | 406.9 ms | 309.7 ms | **-24%** |
+| feedback_fixed | 275.3 ms | 231.3 ms | **-16%** |
+| gated_routing | 248.0 ms | 217.3 ms | **-12%** |
+| iterative_refine | 230.7 ms | 206.0 ms | **-11%** |
+| gru_seq | 1105.1 ms | 1057.5 ms | **-4%** |
+| conv_autoenc | 398.2 ms | 395.3 ms | -1% |
+| lstm_seq | 692.3 ms | 692.3 ms | 0% |
+| convnet | 1298.0 ms | 1298.2 ms | 0% |
 
-Wins 6 of 7 on speed, 3-20x tighter variance across every model. The
-convnet tie proves both frameworks dispatch identical CUDA kernels — the
-gap comes from Rust eliminating Python's per-op dispatch overhead.
+Wins 8 of 10, ties 2, zero regressions. The ties (convnet, lstm_seq) are
+compute-bound -- both frameworks saturate the GPU, confirming identical
+CUDA kernels. The gap appears where framework overhead matters:
+dispatch-bound architectures (transformer -31%, mlp -29%), graph routing
+(residual_tower -24%), and recurrent loops (feedback_fixed -16%).
 
 **[Benchmark Report](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md)** |
 [Interactive dashboard](https://flodl.dev/benchmark)

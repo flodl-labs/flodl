@@ -23,7 +23,8 @@
 # Each benchmark internally runs 1 warmup + 3 measured runs (each with
 # 3 warmup + 20 measured epochs). The best run's median is reported.
 # With --rounds N, results are merged across rounds for robust statistics:
-# σ is computed from N best-run medians (one per round).
+# σ = scaled MAD (Median Absolute Deviation × 1.4826) of the N best-run
+# medians — σ-equivalent for normal data, robust to OS/GC outliers.
 #
 # For publication: --rounds 10 --lock-clocks <base_freq>
 # Expects to run inside the bench Docker container.
@@ -39,6 +40,7 @@ ROUNDS=1
 LOCK_CLOCKS=""
 WARMUP_SECS=10
 OUTPUT_FILE="$WORKSPACE/benchmarks/report.txt"
+[ -f "$OUTPUT_FILE" ] && mv "$OUTPUT_FILE" "${OUTPUT_FILE%.txt}.$(date +%Y-%m-%d-%H-%M-%S).txt"
 PASS_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -254,7 +256,7 @@ else
 fi
 
 # --- Compare ---
-COMPARISON_HEADER="=== Comparison ($MODE, $ROUNDS round$([ "$ROUNDS" -gt 1 ] && echo 's')) ==="
+COMPARISON_HEADER="=== Comparison ($MODE, $ROUNDS round$([ "$ROUNDS" -gt 1 ] && echo 's' || true)) ==="
 
 if [ -n "$OUTPUT_FILE" ]; then
     # Collect metadata for the report header.

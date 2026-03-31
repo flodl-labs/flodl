@@ -210,27 +210,28 @@ model.<span class="fn">set_training</span>(<span class="kw">true</span>);
 
 <!-- Benchmark highlights -->
 <section class="section" style="text-align: center;">
-  <h2 class="section-title">Up to 30% faster than PyTorch</h2>
+  <h2 class="section-title">Up to 31% faster than PyTorch</h2>
   <p class="section-sub">
-    7 models, 10 interleaved rounds, locked GPU clocks.
-    flodl wins 6 of 7 with 3&ndash;20x tighter variance.
+    10 models, 10 interleaved rounds, locked GPU clocks.
+    flodl wins 8 of 10, ties 2, zero regressions.
   </p>
 
   <div class="bench-table" style="max-width: 680px; margin: 1.5rem auto; text-align: left;">
     <table>
       <thead>
-        <tr><th>Model</th><th>PyTorch</th><th>flodl</th><th>Delta</th><th>&sigma; ratio</th></tr>
+        <tr><th>Model</th><th>PyTorch</th><th>flodl</th><th>Delta</th></tr>
       </thead>
       <tbody>
-        <tr><td>mlp</td><td>271.0 ms</td><td>188.5 ms</td><td><strong>-30%</strong></td><td>3.5x tighter</td></tr>
-        <tr><td>residual_tower</td><td>371.3 ms</td><td>278.6 ms</td><td><strong>-25%</strong></td><td>7.2x tighter</td></tr>
-        <tr><td>feedback_fixed</td><td>250.2 ms</td><td>207.2 ms</td><td><strong>-17%</strong></td><td>3.1x tighter</td></tr>
-        <tr><td>convnet</td><td>1189.4 ms</td><td>1190.5 ms</td><td>+0%</td><td>2.7x tighter</td></tr>
+        <tr><td>transformer</td><td>3183.0 ms</td><td>2199.8 ms</td><td><strong>-31%</strong></td></tr>
+        <tr><td>mlp</td><td>291.1 ms</td><td>207.0 ms</td><td><strong>-29%</strong></td></tr>
+        <tr><td>residual_tower</td><td>406.9 ms</td><td>309.7 ms</td><td><strong>-24%</strong></td></tr>
+        <tr><td>feedback_fixed</td><td>275.3 ms</td><td>231.3 ms</td><td><strong>-16%</strong></td></tr>
+        <tr><td>convnet</td><td>1298.0 ms</td><td>1298.2 ms</td><td>0%</td></tr>
       </tbody>
     </table>
     <p class="bench-note">
-      RTX 5060 Ti, GPU at 3090 MHz. The convnet tie proves both frameworks
-      dispatch identical CUDA kernels &mdash; the speed gap is pure framework overhead.
+      RTX 5060 Ti, GPU at 3090 MHz. v0.2.2 vs PyTorch 2.10.0. The convnet tie proves both
+      frameworks dispatch identical CUDA kernels &mdash; the speed gap is pure framework overhead.
     </p>
   </div>
 

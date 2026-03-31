@@ -322,7 +322,10 @@ let state = lstm.forward_step(&x2, Some(&state))?;    // subsequent steps
 ### GRU / LSTM
 
 Multi-layer sequence modules matching PyTorch's `nn.GRU` / `nn.LSTM`.
-Process entire sequences and stack multiple layers:
+Process entire sequences and stack multiple layers. `forward_seq` uses
+fused `at::lstm` / `at::gru` kernels (cuDNN-accelerated on CUDA) —
+the full sequence is processed in a single kernel call, no per-timestep
+dispatch overhead:
 
 ```rust
 let gru = GRU::new(128, 256, 2)?;  // input=128, hidden=256, 2 layers

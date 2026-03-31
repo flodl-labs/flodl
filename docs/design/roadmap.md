@@ -296,12 +296,20 @@ padding modules, `Unfold`/`Fold`
 - **Graph serialization**: save/load graph topology
 - **ONNX import/export**
 - **Multi-GPU**: data parallelism, model parallelism
+- **JEPA primitives**: EMA target encoder, latent-space prediction, masking
+  strategies. JEPA (Joint Embedding Predictive Architecture) trains by
+  predicting representations rather than reconstructing inputs. flodl's
+  graph tree is a natural fit: the target encoder is a frozen subgraph
+  updated via EMA, the predictor bridges context and target embeddings,
+  and the observation system can monitor representation collapse. Exploring
+  what reusable building blocks would make JEPA architectures (I-JEPA,
+  V-JEPA) easy to express in the graph builder.
 
 ---
 
 ## Test Coverage
 
-327 library tests + 15 showcase tests. Zero clippy warnings.
+769 library tests. Zero clippy warnings. All tests run on CPU and CUDA.
 All passing in Docker (CPU, libtorch 2.10.0).
 
 ---

@@ -22,6 +22,8 @@ pub(crate) enum ServerMsg {
     SetLabelHash(Option<String>, Option<String>),
     /// Hardware summary for dashboard header.
     SetHardware(String),
+    /// JSON metadata (training config, parameters, etc.).
+    SetMetadata(String),
     /// Clean shutdown.
     Shutdown,
 }
@@ -47,6 +49,8 @@ struct SharedState {
     hash: Mutex<Option<String>>,
     /// Hardware summary string.
     hardware: Mutex<Option<String>>,
+    /// JSON metadata string.
+    metadata: Mutex<Option<String>>,
 }
 
 impl DashboardServer {
@@ -62,6 +66,7 @@ impl DashboardServer {
             label: Mutex::new(None),
             hash: Mutex::new(None),
             hardware: Mutex::new(None),
+            metadata: Mutex::new(None),
         });
 
         // Message handler thread: receives from Monitor, broadcasts to SSE clients
@@ -109,6 +114,11 @@ impl DashboardServer {
         let _ = self.tx.send(ServerMsg::SetHardware(hw));
     }
 
+    /// Set JSON metadata for the dashboard.
+    pub fn set_metadata(&self, json: String) {
+        let _ = self.tx.send(ServerMsg::SetMetadata(json));
+    }
+
     /// Signal shutdown and wait for the message handler to finish.
     pub fn shutdown(&mut self) {
         let _ = self.tx.send(ServerMsg::Shutdown);
@@ -137,6 +147,9 @@ fn handle_messages(rx: Receiver<ServerMsg>, state: Arc<SharedState>) {
             }
             ServerMsg::SetHardware(hw) => {
                 *state.hardware.lock().unwrap() = Some(hw);
+            }
+            ServerMsg::SetMetadata(json) => {
+                *state.metadata.lock().unwrap() = Some(json);
             }
             ServerMsg::Shutdown => {
                 let event = "event: complete\ndata: {}\n\n".to_string();
@@ -181,13 +194,14 @@ fn parse_path(request: &str) -> &str {
         .unwrap_or("/")
 }
 
-/// Serve the dashboard HTML, injecting label/hash constants if set.
+/// Serve the dashboard HTML, injecting label/hash/metadata constants if set.
 fn serve_html(stream: &mut TcpStream, state: &SharedState) {
     let label = state.label.lock().unwrap();
     let hash = state.hash.lock().unwrap();
     let hardware = state.hardware.lock().unwrap();
+    let metadata = state.metadata.lock().unwrap();
 
-    let has_inject = label.is_some() || hash.is_some() || hardware.is_some();
+    let has_inject = label.is_some() || hash.is_some() || hardware.is_some() || metadata.is_some();
     let body = if has_inject {
         let label_js = match &*label {
             Some(l) => format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\"")),
@@ -201,9 +215,13 @@ fn serve_html(stream: &mut TcpStream, state: &SharedState) {
             Some(h) => format!("\"{}\"", h.replace('\\', "\\\\").replace('"', "\\\"")),
             None => "null".to_string(),
         };
+        let meta_js = match &*metadata {
+            Some(m) => m.clone(),
+            None => "null".to_string(),
+        };
         let inject = format!(
-            "<script>const LIVE_LABEL={};const LIVE_HASH={};const LIVE_HARDWARE={};</script>\n",
-            label_js, hash_js, hw_js,
+            "<script>const LIVE_LABEL={};const LIVE_HASH={};const LIVE_HARDWARE={};const LIVE_META={};</script>\n",
+            label_js, hash_js, hw_js, meta_js,
         );
         DASHBOARD_HTML.replace("<script>", &format!("{}<script>", inject))
     } else {

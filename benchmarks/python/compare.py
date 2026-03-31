@@ -5,12 +5,23 @@ Usage: compare.py <rust_results.json> <python_results.json>
 
 Each benchmark internally runs multiple passes (1 warmup + N measured).
 The JSON contains the best run's median and the per-run medians for
-stddev reporting.
+variance reporting.
+
+Variance is reported as scaled MAD (Median Absolute Deviation × 1.4826),
+which is σ-equivalent for normal distributions but robust to outliers
+caused by OS scheduling, GC pauses, or thermal transients.
 """
 
 import json
 import statistics
 import sys
+
+
+def scaled_mad(values):
+    """Median Absolute Deviation scaled to be σ-equivalent (× 1.4826)."""
+    med = statistics.median(values)
+    deviations = [abs(v - med) for v in values]
+    return statistics.median(deviations) * 1.4826
 
 
 def main():
@@ -80,9 +91,9 @@ def main():
             py_medians = py.get("run_medians_ms", []) if py else []
             rs_medians = rs.get("run_medians_ms", []) if rs else []
             if len(py_medians) > 1:
-                py_std = f"±{statistics.stdev(py_medians):.1f}"
+                py_std = f"±{scaled_mad(py_medians):.1f}"
             if len(rs_medians) > 1:
-                rs_std = f"±{statistics.stdev(rs_medians):.1f}"
+                rs_std = f"±{scaled_mad(rs_medians):.1f}"
             line += f"   {py_std:>8} {rs_std:>8}"
 
         print(line)

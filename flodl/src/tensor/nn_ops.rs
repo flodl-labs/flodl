@@ -5,6 +5,46 @@ use std::ptr;
 use flodl_sys::{self as ffi, FlodlTensor};
 use super::{Tensor, check_err, Result};
 
+/// Persistent cache of RNN parameter tensors on the C++ side.
+///
+/// After creation (with optional cuDNN weight flattening), the
+/// `std::vector<at::Tensor>` lives in C++ — forward calls pass just
+/// this handle, matching PyTorch's single-call `at::lstm()`/`at::gru()`
+/// pattern with zero per-forward param collection or FFI overhead.
+pub struct RnnParams {
+    handle: *mut std::os::raw::c_void,
+}
+
+impl RnnParams {
+    /// Create a cached parameter set.
+    ///
+    /// - `mode`: 2 = LSTM, 3 = GRU (cuDNN convention)
+    /// - When `flatten` is true, calls `_cudnn_rnn_flatten_weight` to pack
+    ///   params into cuDNN's contiguous layout (in-place via `set_()`).
+    pub fn new(
+        params: &[Tensor], mode: i64, num_layers: i64,
+        batch_first: bool, flatten: bool,
+    ) -> Result<Self> {
+        let handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
+        let mut out: *mut std::os::raw::c_void = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_rnn_params_create(
+                handles.as_ptr(), handles.len() as i64,
+                mode, num_layers, batch_first, flatten,
+                &mut out,
+            )
+        };
+        check_err(err)?;
+        Ok(RnnParams { handle: out })
+    }
+}
+
+impl Drop for RnnParams {
+    fn drop(&mut self) {
+        unsafe { ffi::flodl_rnn_params_free(self.handle) }
+    }
+}
+
 impl Tensor {
     /// Native layer normalization. Returns (output, mean, rstd).
     pub fn native_layer_norm(
@@ -180,6 +220,95 @@ impl Tensor {
         };
         check_err(err)?;
         Ok((Tensor::from_raw(h_out), Tensor::from_raw(c_out)))
+    }
+
+    /// Fused LSTM sequence: processes all timesteps in a single cuDNN kernel call.
+    ///
+    /// `params` must be the flat weight list: `[w_ih, w_hh, b_ih, b_hh]` per layer.
+    /// When `flatten` is true, calls `_cudnn_rnn_flatten_weight` to pack params into
+    /// a contiguous cuDNN-aligned buffer (modifies TensorImpl in-place via `set_()`).
+    /// Pass `false` on subsequent calls if params are already flattened.
+    /// Returns `(output, h_n, c_n)`.
+    pub fn lstm_seq(
+        &self, h_0: &Tensor, c_0: &Tensor,
+        params: &[Tensor], num_layers: i64, batch_first: bool, flatten: bool,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
+        let mut output: FlodlTensor = ptr::null_mut();
+        let mut h_n: FlodlTensor = ptr::null_mut();
+        let mut c_n: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_lstm(
+                self.handle, h_0.handle, c_0.handle,
+                handles.as_ptr(), handles.len() as i64,
+                num_layers, batch_first, flatten,
+                &mut output, &mut h_n, &mut c_n,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(output), Tensor::from_raw(h_n), Tensor::from_raw(c_n)))
+    }
+
+    /// Fused GRU sequence: processes all timesteps in a single cuDNN kernel call.
+    ///
+    /// `params` must be the flat weight list: `[w_ih, w_hh, b_ih, b_hh]` per layer.
+    /// When `flatten` is true, calls `_cudnn_rnn_flatten_weight` to pack params into
+    /// a contiguous cuDNN-aligned buffer. Pass `false` after the first call.
+    /// Returns `(output, h_n)`.
+    pub fn gru_seq(
+        &self, h_0: &Tensor,
+        params: &[Tensor], num_layers: i64, batch_first: bool, flatten: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
+        let mut output: FlodlTensor = ptr::null_mut();
+        let mut h_n: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_gru(
+                self.handle, h_0.handle,
+                handles.as_ptr(), handles.len() as i64,
+                num_layers, batch_first, flatten,
+                &mut output, &mut h_n,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(output), Tensor::from_raw(h_n)))
+    }
+
+    /// Fused LSTM using cached C++ params — zero per-forward overhead.
+    pub fn lstm_seq_cached(
+        &self, h_0: &Tensor, c_0: &Tensor,
+        params: &RnnParams, num_layers: i64, batch_first: bool,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let mut output: FlodlTensor = ptr::null_mut();
+        let mut h_n: FlodlTensor = ptr::null_mut();
+        let mut c_n: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_lstm_cached(
+                self.handle, h_0.handle, c_0.handle,
+                params.handle, num_layers, batch_first,
+                &mut output, &mut h_n, &mut c_n,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(output), Tensor::from_raw(h_n), Tensor::from_raw(c_n)))
+    }
+
+    /// Fused GRU using cached C++ params — zero per-forward overhead.
+    pub fn gru_seq_cached(
+        &self, h_0: &Tensor,
+        params: &RnnParams, num_layers: i64, batch_first: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let mut output: FlodlTensor = ptr::null_mut();
+        let mut h_n: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_gru_cached(
+                self.handle, h_0.handle,
+                params.handle, num_layers, batch_first,
+                &mut output, &mut h_n,
+            )
+        };
+        check_err(err)?;
+        Ok((Tensor::from_raw(output), Tensor::from_raw(h_n)))
     }
 
     /// Max pooling over a 2D input (`[B, C, H, W]`).

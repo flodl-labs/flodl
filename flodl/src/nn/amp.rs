@@ -246,7 +246,7 @@ mod tests {
             name: "w".into(),
         };
         assert_eq!(p.variable.data().dtype(), DType::Float32);
-        cast_parameters(&[p.clone()], DType::Float64);
+        cast_parameters(std::slice::from_ref(&p), DType::Float64);
         assert_eq!(p.variable.data().dtype(), DType::Float64);
     }
 
@@ -257,7 +257,7 @@ mod tests {
             variable: Variable::new(t, true),
             name: "w".into(),
         };
-        cast_parameters(&[p.clone()], DType::Float32);
+        cast_parameters(std::slice::from_ref(&p), DType::Float32);
         assert_eq!(p.variable.data().dtype(), DType::Float32);
     }
 
@@ -290,7 +290,7 @@ mod tests {
         p.variable.set_grad(grad);
 
         let mut stepped = false;
-        let ok = scaler.step(&[p.clone()], &mut || { stepped = true; Ok(()) }).unwrap();
+        let ok = scaler.step(std::slice::from_ref(&p), &mut || { stepped = true; Ok(()) }).unwrap();
         assert!(ok);
         assert!(stepped);
     }

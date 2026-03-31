@@ -55,6 +55,9 @@ fn main() {
         ("mlp",               Box::new(tier1::mlp::run)),
         ("convnet",           Box::new(tier1::convnet::run)),
         ("gru_seq",           Box::new(tier1::gru_seq::run)),
+        ("transformer",       Box::new(tier1::transformer::run)),
+        ("lstm_seq",          Box::new(tier1::lstm_seq::run)),
+        ("conv_autoenc",      Box::new(tier1::conv_autoencoder::run)),
         // Tier 2
         ("residual_tower",    Box::new(tier2::residual_tower::run)),
         ("gated_routing",     Box::new(tier2::gated_routing::run)),
@@ -62,7 +65,7 @@ fn main() {
         ("feedback_fixed",   Box::new(tier2::feedback_loop_fixed::run)),
     ];
 
-    let tier1_names = ["mlp", "convnet", "gru_seq"];
+    let tier1_names = ["mlp", "convnet", "gru_seq", "transformer", "lstm_seq", "conv_autoenc"];
 
     let mut results = Vec::new();
 

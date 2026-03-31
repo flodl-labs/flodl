@@ -224,6 +224,18 @@ learning strategies, composed into a single system.
 - A consistency module trained to detect contradictions in intermediate results
 - A meta-controller that learns when to invoke which module
 
+The usual framing is additive: combine the strengths of each specialist. But
+there is a sharper way to see it: **composition subtracts stupidity more than it
+adds intelligence.** Each strategy has blind spots. A supervised perception
+module misses what doesn't look like its training data. A reinforcement reasoner
+over-optimizes for reward signal. A contrastive memory confuses surface
+similarity with semantic similarity. But their blind spots don't overlap.
+Composition cancels errors; it doesn't combine strengths. This is the same
+mechanism that makes ensemble methods work. No single weak learner is smart,
+they are just wrong differently, and averaging over diverse errors leaves the
+signal. It is also why diverse teams outperform brilliant homogeneous ones: same
+stupidity doesn't subtract.
+
 Each component has its own loss function, learning rate, and update schedule.
 Some are frozen (pretrained knowledge bases), others are actively learning.
 Gradients flow between components where strategies should reinforce each other,
@@ -407,6 +419,98 @@ independent training contexts, selective gradient flow, and zero-overhead routin
 decisions. Not because the graph engine solves the research problems — but
 because it removes the engineering barriers that prevent the research from
 happening.
+
+---
+
+## Solved layers and composable intelligence
+
+There is a deeper consequence of modular architecture that becomes visible only
+when you build systems this way: **layers can be fully solved.**
+
+### What isolation reveals
+
+When a component has a bounded contract (defined inputs, defined outputs, a
+measurable success criterion), you can ask questions that monolithic
+architectures hide forever:
+
+- How much capacity does this capability actually need?
+- When is it fully learned?
+- What are its failure modes, independent of everything else?
+
+These questions have no meaning inside a monolithic 96-layer transformer. Layer
+47 has no independent contract, no bounded task, no measurable output. You scale
+everything together (parameters, data, compute) and measure aggregate loss.
+The per-component capacity story stays hidden.
+
+With isolated training, capacity reveals itself. A component either learns its
+contract or it doesn't. When it does, you know its minimum sufficient
+dimensionality, not from scaling laws, but from direct observation. In early
+FBRL experiments, a 256-dimensional latent space turned out to faithfully
+reconstruct 59 fonts × 52 letters, not classifying, but reproducing
+font-specific stroke details. That is a concrete, empirical answer to "how much
+capacity does letter reading need?". An answer monolithic training can never
+provide, because no single layer has an independent question to answer.
+
+### Solved components as permanent infrastructure
+
+A component that fully learns its bounded contract is *done*. Not "good enough",
+but done the way a font renderer is done. You freeze it. It becomes
+infrastructure that everything above can permanently depend on.
+
+This is not how current AI works. Every capability is entangled with every other
+capability. Improving math reasoning risks degrading language ability. You cannot
+"solve" math and move on, because math shares weights with everything else.
+Training never ends because nothing is ever independently stable.
+
+With isolated components, training terminates naturally. Each one either works or
+it doesn't, and when it works, you freeze it. It becomes a reliable building
+block that the layer above can depend on. Permanently.
+
+### Biological parallel
+
+This maps directly to how biological learning works. A child learns to see edges,
+then shapes, then letters, then words, then sentences, then meaning. Each level
+stabilizes through myelination and critical periods. Learning philosophy does
+not cost you re-learning the alphabet. The lower layers are frozen, not through
+regularization tricks, but through architecture.
+
+Catastrophic forgetting, the central unsolved problem of continuous learning in
+neural networks, is solved by architecture rather than by patches. Current
+approaches (replay buffers, elastic weight consolidation, progressive networks)
+are all compensating for the fact that monolithic architectures have no stable
+foundations. Frozen layers don't need any of these mechanisms. Old knowledge
+cannot be forgotten because it is not being trained.
+
+### Scaling through composition, not retraining
+
+In the current paradigm, adding a new capability means retraining the entire
+model. The cost of a new capability is proportional to everything the model
+already knows. This is why training runs cost millions and take months.
+
+With composable layers, the cost of a new capability is proportional to that
+capability alone. The letter reader is frozen. The word scanner builds on top of
+it. Adding sentence-level understanding trains only the sentence layer. the
+word scanner and letter reader are untouched. The cost scales with the new
+layer, not with the total system depth.
+
+Furthermore, solved layers are shareable. Every system can use the same letter
+reader. Different word scanners may be trained for different scripts or
+languages, but they all build on the same visual foundation. This is composable
+intelligence rather than monolithic intelligence, and it is how every other
+engineering discipline builds complex systems.
+
+### The unexplored middle ground
+
+The AI field sits at two extremes: tiny hand-crafted models that researchers
+fully understand, and massive models that nobody fully understands. The space
+between, medium-scale systems built from understood, independently-trained,
+composable layers, is almost entirely unexplored. Not because it's a bad idea,
+but because the tools and culture favor either extreme.
+
+The trajectory thesis suggests this middle ground is where the most important
+discoveries are hiding. Not in the next 10x scaling of a monolithic
+transformer, but in understanding what each layer of intelligence actually
+needs, and building accordingly.
 
 ---
 

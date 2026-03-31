@@ -1,13 +1,13 @@
 ---
 layout: default
 title: Benchmark
-description: "flodl vs PyTorch — 7 models, 10 interleaved rounds. Up to 30% faster with 3-20x tighter variance."
+description: "flodl vs PyTorch -- 10 models, 10 interleaved rounds. Up to 31% faster, wins 8 of 10, zero regressions."
 ---
 
 <section class="section">
   <h2 class="section-title">flodl vs PyTorch</h2>
   <p class="section-sub">
-    Seven models, ten interleaved rounds, idle machine.
+    Ten models, ten interleaved rounds, idle machine.
     Same architectures, same optimizer, same CUDA kernels &mdash;
     the only variable is the framework overhead.
   </p>
@@ -22,22 +22,25 @@ description: "flodl vs PyTorch — 7 models, 10 interleaved rounds. Up to 30% fa
           <th>Delta</th>
           <th>Py &sigma;</th>
           <th>Rs &sigma;</th>
-          <th>&sigma; ratio</th>
         </tr>
       </thead>
       <tbody>
-        <tr><td>mlp</td><td>271.0 ms</td><td>188.5 ms</td><td><strong>-30%</strong></td><td>&plusmn;10.1</td><td>&plusmn;2.9</td><td>3.5x tighter</td></tr>
-        <tr><td>convnet</td><td>1189.4 ms</td><td>1190.5 ms</td><td>+0%</td><td>&plusmn;2.7</td><td>&plusmn;1.0</td><td>2.7x tighter</td></tr>
-        <tr><td>gru_seq</td><td>1015.3 ms</td><td>949.7 ms</td><td><strong>-6%</strong></td><td>&plusmn;222.4</td><td>&plusmn;10.8</td><td>20.6x tighter</td></tr>
-        <tr><td>residual_tower</td><td>371.3 ms</td><td>278.6 ms</td><td><strong>-25%</strong></td><td>&plusmn;25.9</td><td>&plusmn;3.6</td><td>7.2x tighter</td></tr>
-        <tr><td>gated_routing</td><td>222.6 ms</td><td>196.9 ms</td><td><strong>-12%</strong></td><td>&plusmn;13.8</td><td>&plusmn;2.6</td><td>5.3x tighter</td></tr>
-        <tr><td>iterative_refine</td><td>208.7 ms</td><td>186.7 ms</td><td><strong>-11%</strong></td><td>&plusmn;27.2</td><td>&plusmn;5.6</td><td>4.9x tighter</td></tr>
-        <tr><td>feedback_fixed</td><td>250.2 ms</td><td>207.2 ms</td><td><strong>-17%</strong></td><td>&plusmn;27.3</td><td>&plusmn;8.7</td><td>3.1x tighter</td></tr>
+        <tr><td>transformer</td><td>3183.0 ms</td><td>2199.8 ms</td><td><strong>-31%</strong></td><td>&plusmn;0.8</td><td>&plusmn;1.0</td></tr>
+        <tr><td>mlp</td><td>291.1 ms</td><td>207.0 ms</td><td><strong>-29%</strong></td><td>&plusmn;4.0</td><td>&plusmn;1.3</td></tr>
+        <tr><td>residual_tower</td><td>406.9 ms</td><td>309.7 ms</td><td><strong>-24%</strong></td><td>&plusmn;6.0</td><td>&plusmn;3.3</td></tr>
+        <tr><td>feedback_fixed</td><td>275.3 ms</td><td>231.3 ms</td><td><strong>-16%</strong></td><td>&plusmn;10.0</td><td>&plusmn;6.0</td></tr>
+        <tr><td>gated_routing</td><td>248.0 ms</td><td>217.3 ms</td><td><strong>-12%</strong></td><td>&plusmn;9.7</td><td>&plusmn;2.8</td></tr>
+        <tr><td>iterative_refine</td><td>230.7 ms</td><td>206.0 ms</td><td><strong>-11%</strong></td><td>&plusmn;2.2</td><td>&plusmn;3.1</td></tr>
+        <tr><td>gru_seq</td><td>1105.1 ms</td><td>1057.5 ms</td><td><strong>-4%</strong></td><td>&plusmn;16.7</td><td>&plusmn;25.4</td></tr>
+        <tr><td>conv_autoenc</td><td>398.2 ms</td><td>395.3 ms</td><td>-1%</td><td>&plusmn;1.1</td><td>&plusmn;3.7</td></tr>
+        <tr><td>lstm_seq</td><td>692.3 ms</td><td>692.3 ms</td><td>0%</td><td>&plusmn;23.3</td><td>&plusmn;15.2</td></tr>
+        <tr><td>convnet</td><td>1298.0 ms</td><td>1298.2 ms</td><td>0%</td><td>&plusmn;0.3</td><td>&plusmn;0.1</td></tr>
       </tbody>
     </table>
     <p class="bench-note">
       Median epoch time (ms) across 10 interleaved rounds, best-of-3 runs per round.
-      RTX 5060 Ti, GPU at 3090 MHz default applications clock. flodl 0.1.3 vs PyTorch 2.6.0+cu126.
+      &sigma; = scaled MAD (robust to OS/GC outliers).
+      RTX 5060 Ti, GPU at 3090 MHz. flodl 0.2.2 vs PyTorch 2.10.0+cu128.
     </p>
   </div>
 </section>
@@ -45,27 +48,62 @@ description: "flodl vs PyTorch — 7 models, 10 interleaved rounds. Up to 30% fa
 <hr class="divider">
 
 <section class="section">
-  <h2 class="section-title">The variance story</h2>
+  <h2 class="section-title">The speed story</h2>
   <p class="section-sub">
-    Speed is one thing. Predictability is another.<br>
-    flodl's epoch-to-epoch variance is 3&ndash;20x tighter than PyTorch across every model.
+    8 wins, 2 ties, zero regressions.<br>
+    The ties prove both frameworks dispatch identical CUDA kernels.
+    The wins show what happens when you remove the overhead between them.
   </p>
 
   <div style="max-width: 720px; margin: 2rem auto;">
     <p style="color: var(--dim); font-size: 15px; line-height: 1.8;">
-      No garbage collector pauses. No Python interpreter jitter. Deterministic
-      <code>Drop</code> order. Predictable memory layout. These aren't features you
-      bolt on &mdash; they're properties of the language runtime.
+      <strong>Dispatch-bound models</strong> (transformer &minus;31%, mlp &minus;29%) make
+      many calls to small GPU kernels. PyTorch goes through Python &rarr; TorchScript
+      dispatch &rarr; C++. flodl calls libtorch directly via FFI. When a model
+      chains hundreds of ops per epoch, the overhead compounds.
     </p>
     <p style="color: var(--dim); font-size: 15px; line-height: 1.8; margin-top: 1rem;">
-      In distributed training, tight variance means synchronization barriers
-      spend less time waiting for the slowest worker. When every node finishes
-      within &plusmn;3ms instead of &plusmn;25ms, your effective throughput scales better.
+      <strong>Graph-builder architectures</strong> (residual_tower &minus;24%, feedback_fixed &minus;16%,
+      gated_routing &minus;12%) use pre-computed Vec-indexed routing &mdash;
+      no HashMap lookups, no dynamic allocation in the forward pass.
     </p>
     <p style="color: var(--dim); font-size: 15px; line-height: 1.8; margin-top: 1rem;">
-      Look at <code>gru_seq</code>: PyTorch's &sigma; of &plusmn;222ms on a 1-second epoch means
-      a ~22% swing between runs. flodl's &plusmn;10.8ms is a 1% swing. Same model.
-      Same GPU. Same CUDA kernels.
+      <strong>Compute-bound ties</strong> (convnet 0%, lstm_seq 0%) spend &gt;99% of
+      time inside cuDNN kernels. Framework overhead is invisible. This is the cleanest
+      evidence that the benchmark measures dispatch overhead, not CUDA kernel differences.
+    </p>
+  </div>
+</section>
+
+<hr class="divider">
+
+<section class="section">
+  <h2 class="section-title">Methodology: honest variance</h2>
+  <p class="section-sub">
+    Variance is reported as scaled MAD, not standard deviation.<br>
+    Here's why, and what difference it makes.
+  </p>
+
+  <div style="max-width: 720px; margin: 2rem auto;">
+    <p style="color: var(--dim); font-size: 15px; line-height: 1.8;">
+      Standard deviation treats every outlier as real variance. In GPU benchmarking,
+      that's wrong. Python's garbage collector fires at unpredictable intervals,
+      creating 50&ndash;170% timing spikes in individual rounds. CUDA scheduling
+      stalls cause similar (rarer, sometimes larger) spikes on the Rust side.
+    </p>
+    <p style="color: var(--dim); font-size: 15px; line-height: 1.8; margin-top: 1rem;">
+      Scaled MAD (Median Absolute Deviation &times; 1.4826) is &sigma;-equivalent for
+      normal distributions but ignores outlier rounds from either side. It reports
+      what each framework does in steady state, not what happens when the OS interferes.
+    </p>
+    <p style="color: var(--dim); font-size: 15px; line-height: 1.8; margin-top: 1rem;">
+      The raw per-round data is published in <code>benchmarks/rounds/</code>.
+      Anyone can compute both metrics and inspect the outliers directly.
+    </p>
+    <p style="color: var(--dim); font-size: 15px; line-height: 1.8; margin-top: 1rem;">
+      <strong>Deployment footprint:</strong> the flodl benchmark Docker image is 26.86 GB
+      vs PyTorch's 38.45 GB &mdash; 30% smaller. No Python, no pip, just the Rust binary
+      and libtorch. On clusters with cold starts, 12 GB less per node is real wall-clock savings.
     </p>
   </div>
 </section>
@@ -81,7 +119,7 @@ description: "flodl vs PyTorch — 7 models, 10 interleaved rounds. Up to 30% fa
   <div class="what-you-get" style="max-width: 920px;">
     <div class="wyg-card">
       <h3>Zero dispatch overhead</h3>
-      <p>Rust calls libtorch C++ directly via FFI. No Python interpreter, no TorchScript dispatch layer. For dispatch-bound models (MLP, residual tower), this alone is 25&ndash;30%.</p>
+      <p>Rust calls libtorch C++ directly via FFI. No Python interpreter, no TorchScript dispatch layer. For dispatch-bound models (transformer, MLP, residual tower), this alone is 24&ndash;31%.</p>
     </div>
     <div class="wyg-card">
       <h3>Fused optimizer kernels</h3>
@@ -91,11 +129,15 @@ description: "flodl vs PyTorch — 7 models, 10 interleaved rounds. Up to 30% fa
       <h3>Pre-computed graph routing</h3>
       <p>Forward pass dispatch is flat array indexing &mdash; no HashMap lookups, no dynamic allocation. Gate combination uses vectorized stack+broadcast+sum.</p>
     </div>
+    <div class="wyg-card">
+      <h3>Fused RNN with cached params</h3>
+      <p>LSTM and GRU call cuDNN's fused sequence kernels with C++-side cached parameter handles. Zero per-forward FFI overhead &mdash; same strategy as PyTorch's <code>flatten_parameters()</code>.</p>
+    </div>
   </div>
 
   <div style="max-width: 720px; margin: 1.5rem auto 0; text-align: center;">
     <p style="color: var(--dim); font-size: 14px;">
-      The convnet tie at +0% proves both frameworks saturate the GPU on compute-bound models.
+      The convnet and lstm_seq ties at 0% prove both frameworks saturate the GPU on compute-bound models.
       The speed advantage appears precisely where framework overhead dominates.
     </p>
   </div>
@@ -118,6 +160,8 @@ description: "flodl vs PyTorch — 7 models, 10 interleaved rounds. Up to 30% fa
         <tr><td>Fused Adam/AdamW</td><td>Single multi-tensor CUDA kernel for the full optimizer step</td></tr>
         <tr><td>Foreach ops (7 batched kernels)</td><td>One kernel for N parameters: zero, norm, scale, lerp, sqrt, add</td></tr>
         <tr><td>Fused gradient clipping</td><td>2 kernels instead of 2N via <code>foreach_norm</code> + <code>foreach_mul</code></td></tr>
+        <tr><td>Fused RNN sequences</td><td>Single cuDNN kernel for full LSTM/GRU sequence across all layers</td></tr>
+        <tr><td>RNN param caching</td><td>C++ <code>RnnParams</code> handle eliminates per-forward FFI overhead</td></tr>
         <tr><td>CUDA Graphs</td><td>Capture/replay kernel sequences &mdash; eliminate CPU dispatch overhead</td></tr>
         <tr><td>Automatic mixed precision</td><td>Autocast + GradScaler for fp16/bf16 on Tensor Core GPUs</td></tr>
         <tr><td>Channels-last memory</td><td>NHWC layout for Conv2d: 8&ndash;35% on Tensor Core hardware</td></tr>
@@ -157,8 +201,7 @@ description: "flodl vs PyTorch — 7 models, 10 interleaved rounds. Up to 30% fa
       </tbody>
     </table>
     <p class="bench-note">
-      flodl v0.1.1 on GTX 1060 6GB, March 2026. A re-run with v0.1.3 on the
-      RTX 5060 Ti is planned. Raw data at
+      flodl v0.1.1 on GTX 1060 6GB, March 2026. Raw data at
       <a href="https://github.com/fab2s/fbrl/tree/5c58d71">fbrl@5c58d71</a>.
     </p>
   </div>
