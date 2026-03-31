@@ -18,6 +18,32 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cuda
+      args:
+        CUDA_VARIANT: ${CUDA_VARIANT:-cu128}
+    image: flodl-cuda
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - .:/workspace
+      - ./.cargo-cache-cuda:/usr/local/cargo/registry
+      - ./.cargo-git-cuda:/usr/local/cargo/git
+      - ./.cargo-credentials.toml:/usr/local/cargo/credentials.toml
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  cuda-source:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda.source
+      args:
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-6.1;12.0}
     image: flodl-cuda
     user: "${UID:-1000}:${GID:-1000}"
     volumes:

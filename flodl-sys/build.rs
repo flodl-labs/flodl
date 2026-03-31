@@ -50,6 +50,9 @@ fn main() {
 
         // dlopen for NVML GPU utilization queries
         println!("cargo:rustc-link-lib=dylib=dl");
+
+        // NCCL for multi-GPU collective operations
+        println!("cargo:rustc-link-lib=dylib=nccl");
     }
 
     // Rerun if sources change

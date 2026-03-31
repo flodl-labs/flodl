@@ -1923,6 +1923,26 @@ extern "C" char* flodl_cuda_device_name(int device_index, char* buf, int buf_len
 #endif
 }
 
+extern "C" char* flodl_cuda_compute_capability(int device_index,
+                                                 int* major, int* minor) {
+#ifdef FLODL_BUILD_CUDA
+    if (!torch::cuda::is_available()) {
+        return make_error("CUDA not available");
+    }
+    cudaDeviceProp prop;
+    auto err = cudaGetDeviceProperties(&prop, device_index);
+    if (err != cudaSuccess) {
+        return make_error(cudaGetErrorString(err));
+    }
+    *major = prop.major;
+    *minor = prop.minor;
+    return nullptr;
+#else
+    (void)device_index; (void)major; (void)minor;
+    return make_error("CUDA not available (built without cuda feature)");
+#endif
+}
+
 // --- Comparison (tensor-tensor, return float masks: 0.0 or 1.0) ---
 
 extern "C" char* flodl_gt_tensor(FlodlTensor a, FlodlTensor b, FlodlTensor* result) {
@@ -3920,6 +3940,276 @@ extern "C" void flodl_cuda_graph_pool_handle(uint64_t* pool_hi, uint64_t* pool_l
     *pool_lo = pool.second;
 }
 
+// --- CUDA Events ---
+
+extern "C" char* flodl_cuda_event_new(int flags, void** event_out) {
+    try {
+        unsigned int cuda_flags = (flags == 1)
+            ? cudaEventDisableTiming
+            : cudaEventDefault;
+        auto* event = new at::cuda::CUDAEvent(cuda_flags);
+        *event_out = static_cast<void*>(event);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_event_record(void* event) {
+    try {
+        static_cast<at::cuda::CUDAEvent*>(event)->record();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_event_record_on_stream(void* event, void* stream) {
+    try {
+        auto* e = static_cast<at::cuda::CUDAEvent*>(event);
+        auto* s = static_cast<at::cuda::CUDAStream*>(stream);
+        e->record(*s);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_event_synchronize(void* event) {
+    try {
+        static_cast<at::cuda::CUDAEvent*>(event)->synchronize();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_event_elapsed_time(void* start, void* end,
+                                                 float* ms_out) {
+    try {
+        *ms_out = static_cast<at::cuda::CUDAEvent*>(start)->elapsed_time(
+            *static_cast<at::cuda::CUDAEvent*>(end));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" int flodl_cuda_event_query(void* event) {
+    return static_cast<at::cuda::CUDAEvent*>(event)->query() ? 1 : 0;
+}
+
+extern "C" void flodl_cuda_event_delete(void* event) {
+    delete static_cast<at::cuda::CUDAEvent*>(event);
+}
+
+// --- CUDA Streams ---
+
+extern "C" char* flodl_cuda_stream_new(int device_index, int high_priority,
+                                        void** stream_out) {
+    try {
+        auto stream = at::cuda::getStreamFromPool(
+            /*isHighPriority=*/high_priority != 0,
+            static_cast<c10::DeviceIndex>(device_index));
+        *stream_out = new at::cuda::CUDAStream(stream);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_stream_synchronize(void* stream) {
+    try {
+        static_cast<at::cuda::CUDAStream*>(stream)->synchronize();
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_cuda_stream_wait_event(void* stream, void* event) {
+    try {
+        auto* s = static_cast<at::cuda::CUDAStream*>(stream);
+        auto* e = static_cast<at::cuda::CUDAEvent*>(event);
+        e->block(*s);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" int flodl_cuda_stream_query(void* stream) {
+    return static_cast<at::cuda::CUDAStream*>(stream)->query() ? 1 : 0;
+}
+
+extern "C" void flodl_cuda_stream_set_current(void* stream) {
+    at::cuda::setCurrentCUDAStream(
+        *static_cast<at::cuda::CUDAStream*>(stream));
+}
+
+extern "C" void flodl_cuda_stream_restore_default(int device_index) {
+    at::cuda::setCurrentCUDAStream(
+        at::cuda::getDefaultCUDAStream(
+            static_cast<c10::DeviceIndex>(device_index)));
+}
+
+extern "C" void flodl_cuda_stream_delete(void* stream) {
+    delete static_cast<at::cuda::CUDAStream*>(stream);
+}
+
+// --- NCCL Collective Operations ---
+
+#include <nccl.h>
+
+static ncclDataType_t to_nccl_dtype(at::ScalarType dtype) {
+    switch (dtype) {
+        case at::kFloat:    return ncclFloat32;
+        case at::kDouble:   return ncclFloat64;
+        case at::kHalf:     return ncclFloat16;
+        case at::kBFloat16: return ncclBfloat16;
+        case at::kInt:      return ncclInt32;
+        case at::kLong:     return ncclInt64;
+        case at::kByte:     return ncclUint8;
+        case at::kChar:     return ncclInt8;
+        default:
+            throw std::runtime_error(
+                std::string("Unsupported dtype for NCCL: ") +
+                toString(dtype));
+    }
+}
+
+struct FlodlNcclComms {
+    std::vector<ncclComm_t> comms;
+    std::vector<int> devlist;
+    int ndev;
+
+    ~FlodlNcclComms() {
+        for (int i = 0; i < ndev; i++) {
+            if (comms[i]) {
+                ncclCommDestroy(comms[i]);
+            }
+        }
+    }
+};
+
+extern "C" char* flodl_nccl_init(int ndev, const int* devlist,
+                                   void** handle_out) {
+    try {
+        auto* h = new FlodlNcclComms();
+        h->ndev = ndev;
+        h->devlist.assign(devlist, devlist + ndev);
+        h->comms.resize(ndev);
+        ncclResult_t result = ncclCommInitAll(h->comms.data(), ndev, devlist);
+        if (result != ncclSuccess) {
+            std::string msg = std::string("ncclCommInitAll failed: ") +
+                              ncclGetErrorString(result);
+            delete h;
+            return make_error(msg);
+        }
+        *handle_out = static_cast<void*>(h);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" void flodl_nccl_destroy(void* handle) {
+    delete static_cast<FlodlNcclComms*>(handle);
+}
+
+extern "C" char* flodl_nccl_all_reduce(void* handle, FlodlTensor* tensors,
+                                         void** streams, int op) {
+    auto* h = static_cast<FlodlNcclComms*>(handle);
+    try {
+        ncclGroupStart();
+        for (int i = 0; i < h->ndev; i++) {
+            cudaSetDevice(h->devlist[i]);
+            auto& t = *reinterpret_cast<torch::Tensor*>(tensors[i]);
+            void* data = t.data_ptr();
+            size_t count = static_cast<size_t>(t.numel());
+            ncclDataType_t dtype = to_nccl_dtype(t.scalar_type());
+            auto nccl_op = static_cast<ncclRedOp_t>(op);
+
+            cudaStream_t cuda_stream;
+            if (streams && streams[i]) {
+                cuda_stream = static_cast<at::cuda::CUDAStream*>(streams[i])
+                    ->stream();
+            } else {
+                cuda_stream = at::cuda::getDefaultCUDAStream(
+                    static_cast<c10::DeviceIndex>(h->devlist[i])).stream();
+            }
+
+            ncclResult_t result = ncclAllReduce(
+                data, data, count, dtype, nccl_op,
+                h->comms[i], cuda_stream);
+            if (result != ncclSuccess) {
+                ncclGroupEnd();
+                return make_error(
+                    std::string("ncclAllReduce failed on device ") +
+                    std::to_string(h->devlist[i]) + ": " +
+                    ncclGetErrorString(result));
+            }
+        }
+        ncclResult_t result = ncclGroupEnd();
+        if (result != ncclSuccess) {
+            return make_error(
+                std::string("ncclGroupEnd failed: ") +
+                ncclGetErrorString(result));
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_nccl_broadcast(void* handle, FlodlTensor* tensors,
+                                        void** streams, int root) {
+    auto* h = static_cast<FlodlNcclComms*>(handle);
+    try {
+        ncclGroupStart();
+        for (int i = 0; i < h->ndev; i++) {
+            cudaSetDevice(h->devlist[i]);
+            auto& t = *reinterpret_cast<torch::Tensor*>(tensors[i]);
+            void* data = t.data_ptr();
+            size_t count = static_cast<size_t>(t.numel());
+            ncclDataType_t dtype = to_nccl_dtype(t.scalar_type());
+
+            cudaStream_t cuda_stream;
+            if (streams && streams[i]) {
+                cuda_stream = static_cast<at::cuda::CUDAStream*>(streams[i])
+                    ->stream();
+            } else {
+                cuda_stream = at::cuda::getDefaultCUDAStream(
+                    static_cast<c10::DeviceIndex>(h->devlist[i])).stream();
+            }
+
+            ncclResult_t result = ncclBroadcast(
+                data, data, count, dtype, root,
+                h->comms[i], cuda_stream);
+            if (result != ncclSuccess) {
+                ncclGroupEnd();
+                return make_error(
+                    std::string("ncclBroadcast failed on device ") +
+                    std::to_string(h->devlist[i]) + ": " +
+                    ncclGetErrorString(result));
+            }
+        }
+        ncclResult_t result = ncclGroupEnd();
+        if (result != ncclSuccess) {
+            return make_error(
+                std::string("ncclGroupEnd failed: ") +
+                ncclGetErrorString(result));
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" int flodl_nccl_size(void* handle) {
+    return static_cast<FlodlNcclComms*>(handle)->ndev;
+}
+
 #else // CPU-only stubs
 
 extern "C" char* flodl_cuda_graph_new(void** graph_out) {
@@ -3957,6 +4247,78 @@ extern "C" void flodl_cuda_graph_pool(void* graph, uint64_t* pool_hi, uint64_t* 
 extern "C" void flodl_cuda_graph_pool_handle(uint64_t* pool_hi, uint64_t* pool_lo) {
     *pool_hi = 0; *pool_lo = 0;
 }
+
+// --- CUDA Events (CPU stubs) ---
+
+extern "C" char* flodl_cuda_event_new(int flags, void** event_out) {
+    (void)flags; (void)event_out;
+    return make_error("CUDA Events require a CUDA build");
+}
+extern "C" char* flodl_cuda_event_record(void* event) {
+    (void)event;
+    return make_error("CUDA Events require a CUDA build");
+}
+extern "C" char* flodl_cuda_event_record_on_stream(void* event, void* stream) {
+    (void)event; (void)stream;
+    return make_error("CUDA Events require a CUDA build");
+}
+extern "C" char* flodl_cuda_event_synchronize(void* event) {
+    (void)event;
+    return make_error("CUDA Events require a CUDA build");
+}
+extern "C" char* flodl_cuda_event_elapsed_time(void* start, void* end,
+                                                 float* ms_out) {
+    (void)start; (void)end; (void)ms_out;
+    return make_error("CUDA Events require a CUDA build");
+}
+extern "C" int flodl_cuda_event_query(void* event) {
+    (void)event; return 1;
+}
+extern "C" void flodl_cuda_event_delete(void* event) { (void)event; }
+
+// --- CUDA Streams (CPU stubs) ---
+
+extern "C" char* flodl_cuda_stream_new(int device_index, int high_priority,
+                                        void** stream_out) {
+    (void)device_index; (void)high_priority; (void)stream_out;
+    return make_error("CUDA Streams require a CUDA build");
+}
+extern "C" char* flodl_cuda_stream_synchronize(void* stream) {
+    (void)stream;
+    return make_error("CUDA Streams require a CUDA build");
+}
+extern "C" char* flodl_cuda_stream_wait_event(void* stream, void* event) {
+    (void)stream; (void)event;
+    return make_error("CUDA Streams require a CUDA build");
+}
+extern "C" int flodl_cuda_stream_query(void* stream) {
+    (void)stream; return 1;
+}
+extern "C" void flodl_cuda_stream_set_current(void* stream) { (void)stream; }
+extern "C" void flodl_cuda_stream_restore_default(int device_index) {
+    (void)device_index;
+}
+extern "C" void flodl_cuda_stream_delete(void* stream) { (void)stream; }
+
+// --- NCCL (CPU stubs) ---
+
+extern "C" char* flodl_nccl_init(int ndev, const int* devlist,
+                                   void** handle_out) {
+    (void)ndev; (void)devlist; (void)handle_out;
+    return make_error("NCCL requires a CUDA build");
+}
+extern "C" void flodl_nccl_destroy(void* handle) { (void)handle; }
+extern "C" char* flodl_nccl_all_reduce(void* handle, FlodlTensor* tensors,
+                                         void** streams, int op) {
+    (void)handle; (void)tensors; (void)streams; (void)op;
+    return make_error("NCCL requires a CUDA build");
+}
+extern "C" char* flodl_nccl_broadcast(void* handle, FlodlTensor* tensors,
+                                        void** streams, int root) {
+    (void)handle; (void)tensors; (void)streams; (void)root;
+    return make_error("NCCL requires a CUDA build");
+}
+extern "C" int flodl_nccl_size(void* handle) { (void)handle; return 0; }
 
 #endif // FLODL_BUILD_CUDA
 

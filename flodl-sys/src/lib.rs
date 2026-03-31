@@ -571,6 +571,10 @@ unsafe extern "C" {
         device_index: i32, buf: *mut i8, buf_len: i32,
     ) -> *mut i8;
 
+    pub fn flodl_cuda_compute_capability(
+        device_index: i32, major: *mut i32, minor: *mut i32,
+    ) -> *mut i8;
+
     // --- Dtype casting ---
 
     pub fn flodl_to_dtype(
@@ -1168,6 +1172,50 @@ unsafe extern "C" {
         graph: *mut c_void, pool_hi: *mut u64, pool_lo: *mut u64,
     );
     pub fn flodl_cuda_graph_pool_handle(pool_hi: *mut u64, pool_lo: *mut u64);
+
+    // --- CUDA Events ---
+
+    pub fn flodl_cuda_event_new(flags: i32, event_out: *mut *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_event_record(event: *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_event_record_on_stream(
+        event: *mut c_void, stream: *mut c_void,
+    ) -> *mut i8;
+    pub fn flodl_cuda_event_synchronize(event: *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_event_elapsed_time(
+        start: *mut c_void, end: *mut c_void, ms_out: *mut f32,
+    ) -> *mut i8;
+    pub fn flodl_cuda_event_query(event: *mut c_void) -> i32;
+    pub fn flodl_cuda_event_delete(event: *mut c_void);
+
+    // --- CUDA Streams ---
+
+    pub fn flodl_cuda_stream_new(
+        device_index: i32, high_priority: i32, stream_out: *mut *mut c_void,
+    ) -> *mut i8;
+    pub fn flodl_cuda_stream_synchronize(stream: *mut c_void) -> *mut i8;
+    pub fn flodl_cuda_stream_wait_event(
+        stream: *mut c_void, event: *mut c_void,
+    ) -> *mut i8;
+    pub fn flodl_cuda_stream_query(stream: *mut c_void) -> i32;
+    pub fn flodl_cuda_stream_set_current(stream: *mut c_void);
+    pub fn flodl_cuda_stream_restore_default(device_index: i32);
+    pub fn flodl_cuda_stream_delete(stream: *mut c_void);
+
+    // --- NCCL Collective Operations ---
+
+    pub fn flodl_nccl_init(
+        ndev: i32, devlist: *const i32, handle_out: *mut *mut c_void,
+    ) -> *mut i8;
+    pub fn flodl_nccl_destroy(handle: *mut c_void);
+    pub fn flodl_nccl_all_reduce(
+        handle: *mut c_void, tensors: *mut FlodlTensor,
+        streams: *mut *mut c_void, op: i32,
+    ) -> *mut i8;
+    pub fn flodl_nccl_broadcast(
+        handle: *mut c_void, tensors: *mut FlodlTensor,
+        streams: *mut *mut c_void, root: i32,
+    ) -> *mut i8;
+    pub fn flodl_nccl_size(handle: *mut c_void) -> i32;
 
     // --- Utility ---
 

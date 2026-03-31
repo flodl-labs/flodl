@@ -530,6 +530,10 @@ int flodl_cuda_utilization(int device_index);
 // Writes into caller-provided buffer. Returns error string on failure.
 char* flodl_cuda_device_name(int device_index, char* buf, int buf_len);
 
+// Query GPU compute capability (e.g. major=6, minor=1 for sm_61).
+// Returns error string on failure, NULL on success.
+char* flodl_cuda_compute_capability(int device_index, int* major, int* minor);
+
 // --- Dtype casting ---
 
 char* flodl_to_dtype(FlodlTensor t, int dtype, FlodlTensor* result);
@@ -778,6 +782,60 @@ char* flodl_cuda_graph_reset(void* graph);
 void  flodl_cuda_graph_delete(void* graph);
 void  flodl_cuda_graph_pool(void* graph, uint64_t* pool_hi, uint64_t* pool_lo);
 void  flodl_cuda_graph_pool_handle(uint64_t* pool_hi, uint64_t* pool_lo);
+
+// --- CUDA Events ---
+// All CUDA Event functions require CUDA builds. On CPU builds, they
+// return an error string.
+
+// flags: 0 = Default (timing enabled), 1 = DisableTiming (lower overhead)
+char* flodl_cuda_event_new(int flags, void** event_out);
+char* flodl_cuda_event_record(void* event);
+char* flodl_cuda_event_record_on_stream(void* event, void* stream);
+char* flodl_cuda_event_synchronize(void* event);
+char* flodl_cuda_event_elapsed_time(void* start, void* end, float* ms_out);
+int   flodl_cuda_event_query(void* event);
+void  flodl_cuda_event_delete(void* event);
+
+// --- CUDA Streams ---
+// All CUDA Stream functions require CUDA builds. On CPU builds, they
+// return an error string.
+
+char* flodl_cuda_stream_new(int device_index, int high_priority, void** stream_out);
+char* flodl_cuda_stream_synchronize(void* stream);
+char* flodl_cuda_stream_wait_event(void* stream, void* event);
+int   flodl_cuda_stream_query(void* stream);
+void  flodl_cuda_stream_set_current(void* stream);
+void  flodl_cuda_stream_restore_default(int device_index);
+void  flodl_cuda_stream_delete(void* stream);
+
+// --- NCCL Collective Operations ---
+// All NCCL functions require CUDA builds with 2+ GPUs at runtime.
+// On CPU builds, they return an error string.
+
+// Initialize NCCL communicators for ndev devices.
+// devlist: array of CUDA device indices (length ndev).
+// Returns an opaque handle to the communicator group.
+char* flodl_nccl_init(int ndev, const int* devlist, void** handle_out);
+
+// Destroy NCCL communicators.
+void flodl_nccl_destroy(void* handle);
+
+// In-place AllReduce across all devices.
+// tensors: array of ndev FlodlTensors, one per device (same shape/dtype).
+// streams: array of ndev stream handles, or NULL for default streams.
+// op: 0=Sum, 1=Prod, 2=Max, 3=Min, 4=Avg
+char* flodl_nccl_all_reduce(void* handle, FlodlTensor* tensors,
+                             void** streams, int op);
+
+// Broadcast tensor from root device to all others (in-place).
+// tensors: array of ndev FlodlTensors, one per device.
+// streams: array of ndev stream handles, or NULL for default streams.
+// root: rank index (0-based) within the communicator group.
+char* flodl_nccl_broadcast(void* handle, FlodlTensor* tensors,
+                            void** streams, int root);
+
+// Number of devices in the communicator group.
+int flodl_nccl_size(void* handle);
 
 // --- Utility ---
 

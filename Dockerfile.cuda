@@ -26,12 +26,18 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
     && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
-# --- libtorch (CUDA 12.8) ---
+# --- libtorch ---
+# CUDA_VARIANT controls GPU architecture support:
+#   cu128 — sm_70+ (Volta and newer, best performance)
+#   cu126 — sm_50+ (Maxwell and newer, broadest compatibility)
+# Override at build time: docker build --build-arg CUDA_VARIANT=cu126
+# Or use `make setup` which auto-detects the best variant for your GPUs.
 ARG LIBTORCH_VERSION=2.10.0
+ARG CUDA_VARIANT=cu128
 RUN --mount=type=cache,target=/tmp/libtorch-cache \
-    ZIPFILE="libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu128.zip" && \
+    ZIPFILE="libtorch-shared-with-deps-${LIBTORCH_VERSION}+${CUDA_VARIANT}.zip" && \
     if [ ! -f "/tmp/libtorch-cache/${ZIPFILE}" ]; then \
-        wget -q "https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu128.zip" \
+        wget -q "https://download.pytorch.org/libtorch/${CUDA_VARIANT}/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2B${CUDA_VARIANT}.zip" \
             -O "/tmp/libtorch-cache/${ZIPFILE}"; \
     fi && \
     unzip -q "/tmp/libtorch-cache/${ZIPFILE}" -d /usr/local

@@ -1313,6 +1313,34 @@ pub struct DeviceInfo {
     pub name: String,
     /// Total device memory in bytes.
     pub total_memory: u64,
+    /// Compute capability major version (e.g. 6 for sm_61).
+    pub sm_major: u32,
+    /// Compute capability minor version (e.g. 1 for sm_61).
+    pub sm_minor: u32,
+}
+
+impl DeviceInfo {
+    /// Compute capability as a string (e.g. "sm_61").
+    pub fn sm_version(&self) -> String {
+        format!("sm_{}{}", self.sm_major, self.sm_minor)
+    }
+}
+
+/// Query compute capability (major, minor) for a CUDA device.
+///
+/// Returns `None` if CUDA is unavailable or the device index is invalid.
+pub fn cuda_compute_capability(device_index: i32) -> Option<(u32, u32)> {
+    let mut major: i32 = 0;
+    let mut minor: i32 = 0;
+    let err = unsafe {
+        ffi::flodl_cuda_compute_capability(device_index, &mut major, &mut minor)
+    };
+    if err.is_null() {
+        Some((major as u32, minor as u32))
+    } else {
+        unsafe { ffi::flodl_free_string(err) };
+        None
+    }
 }
 
 /// Enumerate all available CUDA devices.
@@ -1321,8 +1349,87 @@ pub fn cuda_devices() -> Vec<DeviceInfo> {
     (0..n).filter_map(|i| {
         let name = cuda_device_name_idx(i)?;
         let total_memory = cuda_memory_info_idx(i).map(|(_, t)| t).unwrap_or(0);
-        Some(DeviceInfo { index: i as u8, name, total_memory })
+        let (sm_major, sm_minor) = cuda_compute_capability(i).unwrap_or((0, 0));
+        Some(DeviceInfo { index: i as u8, name, total_memory, sm_major, sm_minor })
     }).collect()
+}
+
+/// Probe whether a CUDA device can execute compute kernels under the
+/// current libtorch build. Returns `Ok(())` if the device works, or an
+/// error describing why it cannot (e.g. missing kernel image for sm_61).
+pub fn probe_device(device: Device) -> Result<()> {
+    let idx = match device {
+        Device::CUDA(i) => i,
+        Device::CPU => return Ok(()),
+    };
+    let opts = TensorOptions { dtype: DType::Float32, device };
+    match Tensor::zeros(&[1], opts) {
+        Ok(t) => {
+            // Also try a simple op to verify kernels load
+            let _ = t.add(&t)?;
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("{}", e);
+            if msg.contains("no kernel image") {
+                let (sm_maj, sm_min) = cuda_compute_capability(idx as i32)
+                    .unwrap_or((0, 0));
+                let name = cuda_device_name_idx(idx as i32)
+                    .unwrap_or_else(|| format!("CUDA({})", idx));
+                let variant = recommended_cuda_variant(sm_maj);
+                Err(TensorError::new(&format!(
+                    "CUDA({}) {} (sm_{}{}) cannot run kernels in this libtorch build. \
+                     Recommended: switch to libtorch {} \
+                     (in Dockerfile, change the cu### variant)",
+                    idx, name, sm_maj, sm_min, variant
+                )))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Return all CUDA devices that can run compute kernels, with warnings
+/// for any excluded devices printed to stderr.
+///
+/// This is the primary entry point for multi-GPU setup. It probes each
+/// GPU and returns only the working ones, giving actionable diagnostics
+/// for any that fail.
+pub fn usable_cuda_devices() -> Vec<Device> {
+    if !cuda_available() {
+        return vec![];
+    }
+    let devices = cuda_devices();
+    let mut usable = Vec::new();
+
+    for info in &devices {
+        let dev = Device::CUDA(info.index);
+        match probe_device(dev) {
+            Ok(()) => usable.push(dev),
+            Err(e) => {
+                eprintln!("[flodl] WARNING: {}", e);
+            }
+        }
+    }
+
+    if usable.len() < devices.len() {
+        let names: Vec<String> = usable.iter().map(|d| format!("{}", d)).collect();
+        eprintln!(
+            "[flodl] Proceeding with {}/{} devices: [{}]",
+            usable.len(), devices.len(), names.join(", ")
+        );
+    }
+
+    usable
+}
+
+/// Recommend the best libtorch CUDA variant for a given compute capability.
+fn recommended_cuda_variant(sm_major: u32) -> &'static str {
+    match sm_major {
+        0..=6 => "cu126",  // Maxwell/Pascal (sm_50-sm_61): cu126 for broadest compat
+        _ => "cu128",      // Volta+ (sm_70+): cu128 for best performance
+    }
 }
 
 /// One-line hardware summary for dashboard headers.
@@ -1978,5 +2085,43 @@ mod tests {
         let t = Tensor::from_f32(&[1.0, 2.0, 3.0], &[3], test_device()).unwrap();
         t.fill_(42.0).unwrap();
         assert_eq!(t.to_f32_vec().unwrap(), vec![42.0, 42.0, 42.0]);
+    }
+
+    #[test]
+    fn test_probe_device_cpu() {
+        // CPU probe should always succeed
+        assert!(probe_device(Device::CPU).is_ok());
+    }
+
+    #[test]
+    #[ignore = "GPU probe needs CUDA; run with: make cuda-test"]
+    fn test_probe_device_cuda() {
+        if !test_device().is_cuda() { return; }
+        // Device 0 should always work in a CUDA build
+        assert!(probe_device(Device::CUDA(0)).is_ok());
+    }
+
+    #[test]
+    #[ignore = "GPU diagnostics need CUDA; run with: make cuda-test"]
+    fn test_cuda_devices_has_compute_capability() {
+        if !test_device().is_cuda() { return; }
+        let devices = cuda_devices();
+        assert!(!devices.is_empty());
+        for info in &devices {
+            assert!(info.sm_major > 0, "compute capability should be detected");
+            eprintln!("  CUDA({}) {} {} {:.1}GB",
+                info.index, info.name, info.sm_version(),
+                info.total_memory as f64 / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+
+    #[test]
+    #[ignore = "GPU diagnostics need CUDA; run with: make cuda-test"]
+    fn test_usable_cuda_devices() {
+        if !test_device().is_cuda() { return; }
+        let usable = usable_cuda_devices();
+        assert!(!usable.is_empty(), "at least one device should be usable");
+        // Device 0 should always be usable in a CUDA build
+        assert!(usable.contains(&Device::CUDA(0)));
     }
 }
