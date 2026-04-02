@@ -5,6 +5,21 @@
 
 use std::fs;
 
+/// Per-device GPU snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct GpuSnapshot {
+    /// CUDA device index.
+    pub device_index: u8,
+    /// Device name (e.g., "NVIDIA GeForce RTX 5060 Ti").
+    pub name: String,
+    /// GPU utilization percentage (0-100), None if NVML unavailable.
+    pub util_percent: Option<f32>,
+    /// Bytes reserved by the CUDA caching allocator.
+    pub vram_allocated_bytes: Option<u64>,
+    /// Total physical VRAM in bytes.
+    pub vram_total_bytes: Option<u64>,
+}
+
 /// A snapshot of system resource usage.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceSample {
@@ -15,13 +30,14 @@ pub struct ResourceSample {
     /// Total system RAM in bytes.
     pub ram_total_bytes: Option<u64>,
     /// GPU utilization percentage (0-100), None if NVML unavailable.
+    /// Aggregate: device 0 for backward compat.
     pub gpu_util_percent: Option<f32>,
-    /// Total physical VRAM in bytes.
+    /// Total physical VRAM in bytes (device 0).
     pub vram_total_bytes: Option<u64>,
-    /// Bytes reserved by the CUDA caching allocator (includes unified-memory
-    /// spill to host RAM).  When this exceeds `vram_total_bytes`, the excess
-    /// has spilled to host RAM.
+    /// Bytes reserved by the CUDA caching allocator (device 0).
     pub vram_allocated_bytes: Option<u64>,
+    /// Per-GPU snapshots (empty on CPU builds).
+    pub gpus: Vec<GpuSnapshot>,
 }
 
 impl ResourceSample {
@@ -41,19 +57,41 @@ impl ResourceSample {
                 super::format::format_bytes(total),
             ));
         }
-        if let Some(gpu) = self.gpu_util_percent {
-            parts.push(format!("GPU: {:.0}%", gpu));
-        }
-        if let Some(alloc) = self.vram_allocated_bytes {
-            let spill = match self.vram_total_bytes {
-                Some(total) if alloc > total => alloc - total,
-                _ => 0,
-            };
-            parts.push(format!(
-                "VRAM: {} / {}",
-                super::format::format_bytes(alloc),
-                super::format::format_bytes(spill),
-            ));
+
+        if self.gpus.len() > 1 {
+            // Multi-GPU: show per-device VRAM
+            for gpu in &self.gpus {
+                if let Some(alloc) = gpu.vram_allocated_bytes {
+                    let spill = match gpu.vram_total_bytes {
+                        Some(total) if alloc > total => alloc - total,
+                        _ => 0,
+                    };
+                    let util = gpu.util_percent.map(|u| format!(" ({:.0}%)", u)).unwrap_or_default();
+                    parts.push(format!(
+                        "GPU{}: {} / {}{}",
+                        gpu.device_index,
+                        super::format::format_bytes(alloc),
+                        super::format::format_bytes(spill),
+                        util,
+                    ));
+                }
+            }
+        } else {
+            // Single GPU or CPU
+            if let Some(gpu) = self.gpu_util_percent {
+                parts.push(format!("GPU: {:.0}%", gpu));
+            }
+            if let Some(alloc) = self.vram_allocated_bytes {
+                let spill = match self.vram_total_bytes {
+                    Some(total) if alloc > total => alloc - total,
+                    _ => 0,
+                };
+                parts.push(format!(
+                    "VRAM: {} / {}",
+                    super::format::format_bytes(alloc),
+                    super::format::format_bytes(spill),
+                ));
+            }
         }
 
         parts.join(" | ")
@@ -112,19 +150,33 @@ impl ResourceSampler {
             s.ram_total_bytes = Some(total);
         }
 
-        // Physical VRAM total via cudaMemGetInfo
-        if let Ok((_, total)) = crate::tensor::cuda_memory_info() {
-            s.vram_total_bytes = Some(total);
+        // Per-GPU snapshots
+        let n = crate::tensor::cuda_device_count();
+        for i in 0..n {
+            let mut gpu = GpuSnapshot {
+                device_index: i as u8,
+                ..Default::default()
+            };
+            if let Some(name) = crate::tensor::cuda_device_name_idx(i) {
+                gpu.name = name;
+            }
+            if let Ok((_, total)) = crate::tensor::cuda_memory_info_idx(i) {
+                gpu.vram_total_bytes = Some(total);
+            }
+            if let Ok(alloc) = crate::tensor::cuda_allocated_bytes_idx(i) {
+                gpu.vram_allocated_bytes = Some(alloc);
+            }
+            if let Some(util) = crate::tensor::cuda_utilization_idx(i) {
+                gpu.util_percent = Some(util as f32);
+            }
+            s.gpus.push(gpu);
         }
 
-        // Allocator stats (for spill detection)
-        if let Ok(alloc) = crate::tensor::cuda_allocated_bytes() {
-            s.vram_allocated_bytes = Some(alloc);
-        }
-
-        // GPU utilization via FFI (NVML)
-        if let Some(util) = crate::tensor::cuda_utilization() {
-            s.gpu_util_percent = Some(util as f32);
+        // Aggregate fields from device 0 for backward compat
+        if let Some(gpu0) = s.gpus.first() {
+            s.vram_total_bytes = gpu0.vram_total_bytes;
+            s.vram_allocated_bytes = gpu0.vram_allocated_bytes;
+            s.gpu_util_percent = gpu0.util_percent;
         }
 
         s

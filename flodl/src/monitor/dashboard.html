@@ -81,6 +81,37 @@ border:1px solid var(--border);white-space:nowrap;backdrop-filter:blur(8px)}
 animation:pulse 2s ease-in-out infinite}
 .status-dot.done{background:var(--dim);animation:none}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+
+/* Tab bar */
+.tab-bar{display:none;background:var(--card);border-bottom:1px solid var(--border);
+padding:0 24px;gap:0;overflow-x:auto;white-space:nowrap}
+.tab-bar.visible{display:flex}
+.tab{padding:10px 18px;font-size:12px;color:var(--dim);cursor:pointer;
+border-bottom:2px solid transparent;transition:color 0.15s,border-color 0.15s;
+user-select:none;font-weight:500}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-view{display:none}
+.tab-view.active{display:block}
+
+/* GPU summary (Home tab) */
+.gpu-summary{display:grid;gap:10px}
+.gpu-row{display:flex;align-items:center;gap:12px;padding:8px 12px;
+background:rgba(42,45,58,0.4);border-radius:6px;font-size:12px}
+.gpu-row .gpu-name{min-width:100px;color:var(--dim);font-size:11px;white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis;max-width:180px}
+.gpu-row .gpu-stat{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:64px}
+.gpu-row .gpu-stat-label{font-size:9px;text-transform:uppercase;color:var(--dim);letter-spacing:0.3px}
+.gpu-row .gpu-stat-value{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.gpu-row .gpu-vram-bar{flex:1;height:8px;background:var(--border);border-radius:4px;
+overflow:hidden;min-width:80px}
+.gpu-row .gpu-vram-fill{height:100%;border-radius:4px;transition:width 0.5s}
+.gpu-row.fastest .gpu-stat-value{color:var(--green)}
+.gpu-row.slowest .gpu-stat-value.throughput-val{color:var(--yellow)}
+
+/* Per-GPU tab layout */
+.gpu-tab-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px}
+@media(max-width:900px){.gpu-tab-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -109,6 +140,11 @@ animation:pulse 2s ease-in-out infinite}
   <div class="hw-info" id="hwInfo" style="display:none"></div>
 </div>
 
+<div class="tab-bar" id="tabBar">
+  <div class="tab active" data-tab="home" onclick="switchTab('home')">Home</div>
+</div>
+
+<div id="homeView" class="tab-view active">
 <div class="grid">
   <div class="card">
     <h2>Training Metrics</h2>
@@ -149,6 +185,11 @@ animation:pulse 2s ease-in-out infinite}
     </details>
   </div>
 
+  <div class="card full-width" id="gpuSummaryCard" style="display:none">
+    <h2>GPU Overview</h2>
+    <div class="gpu-summary" id="gpuSummary"></div>
+  </div>
+
   <div class="card full-width" id="svgCard" style="display:none">
     <div class="svg-toggle" id="svgToggle" onclick="toggleSvg()">
       <span class="arrow">&#9654;</span>
@@ -157,6 +198,9 @@ animation:pulse 2s ease-in-out infinite}
     <div class="svg-container" id="svgContainer"></div>
   </div>
 </div>
+</div><!-- /homeView -->
+
+<div id="gpuTabContainer"></div>
 
 <div class="tooltip" id="tooltip"></div>
 
@@ -176,6 +220,11 @@ let elapsedTimer=null;
 const soloState={metricsChart:null,resourceChart:null};
 let _skipDraw=false;
 
+// Multi-GPU state
+const gpuSeries={};   // deviceIndex -> {vram:[], throughput:[], chunk:[], util:[], name:''}
+let gpuCount=0;
+let activeTab='home';
+
 // --- Epoch processing (shared by live SSE and archive replay) ---
 function processEpoch(d){
   epochs.push(d);
@@ -194,10 +243,25 @@ function processEpoch(d){
   resourceRaw.ram_total.push(r.ram_total||null);
   resourceRaw.vram_alloc.push(r.vram_alloc||null);
   resourceRaw.vram_total.push(r.vram_total||null);
+  // GPU data extraction
+  if(d.gpus&&d.gpus.length>0){
+    if(gpuCount===0)initGpuTabs(d.gpus);
+    d.gpus.forEach(g=>{
+      const idx=g.dev!=null?g.dev:0;
+      const s=gpuSeries[idx];
+      if(!s)return;
+      s.vram.push(g.vram_alloc||null);
+      s.throughput.push(g.throughput||null);
+      s.chunk.push(g.chunk!=null?g.chunk*100:null);
+      s.util.push(g.util!=null?g.util:null);
+      if(g.name&&!s.name)s.name=g.name;
+      s.vram_total=g.vram_total||s.vram_total||null;
+    });
+  }
   updateHeader(d);
   updateResources(r);
   updateLog(d);
-  if(!_skipDraw){drawMetrics();drawResources()}
+  if(!_skipDraw){drawMetrics();drawResources();updateGpuSummary();drawGpuTabs()}
   ensureLogHeaders();
 }
 function markComplete(msg){
@@ -214,6 +278,107 @@ function showSvg(svg){
   }
 }
 
+// --- Tab switching ---
+function switchTab(id){
+  activeTab=id;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===id));
+  document.getElementById('homeView').classList.toggle('active',id==='home');
+  document.querySelectorAll('.gpu-tab-view').forEach(v=>v.classList.toggle('active',v.id==='gpu-view-'+id));
+  if(id==='home'){drawMetrics();drawResources()}
+  else{drawGpuTabs()}
+}
+
+// --- GPU tab initialization (called once on first epoch with gpus) ---
+function initGpuTabs(gpus){
+  gpuCount=gpus.length;
+  if(gpuCount<2)return; // single GPU: no tabs needed
+  const bar=document.getElementById('tabBar');
+  bar.classList.add('visible');
+  const container=document.getElementById('gpuTabContainer');
+  gpus.forEach((g,i)=>{
+    const idx=g.dev!=null?g.dev:i;
+    gpuSeries[idx]={vram:[],throughput:[],chunk:[],util:[],name:g.name||'GPU '+idx,vram_total:g.vram_total||null};
+    // Tab button
+    const tab=document.createElement('div');
+    tab.className='tab';
+    tab.dataset.tab='gpu'+idx;
+    tab.textContent=g.name?shortGpuName(g.name):'GPU '+idx;
+    tab.onclick=()=>switchTab('gpu'+idx);
+    bar.appendChild(tab);
+    // Tab view with 4 charts
+    const view=document.createElement('div');
+    view.id='gpu-view-gpu'+idx;
+    view.className='gpu-tab-view tab-view';
+    view.innerHTML=
+      '<div class="gpu-tab-grid">'+
+      '<div class="card"><h2>VRAM Usage</h2><canvas id="gpuVram'+idx+'" style="width:100%;height:260px"></canvas></div>'+
+      '<div class="card"><h2>Utilization</h2><canvas id="gpuUtil'+idx+'" style="width:100%;height:260px"></canvas></div>'+
+      '<div class="card"><h2>Throughput (samples/ms)</h2><canvas id="gpuThroughput'+idx+'" style="width:100%;height:260px"></canvas></div>'+
+      '<div class="card"><h2>Batch Share (%)</h2><canvas id="gpuChunk'+idx+'" style="width:100%;height:260px"></canvas></div>'+
+      '</div>';
+    container.appendChild(view);
+  });
+  document.getElementById('gpuSummaryCard').style.display='block';
+}
+
+function shortGpuName(name){
+  return name.replace(/^NVIDIA\s+/i,'').replace(/GeForce\s+/i,'');
+}
+
+// --- GPU summary bar (Home tab) ---
+function updateGpuSummary(){
+  if(gpuCount<2)return;
+  const el=document.getElementById('gpuSummary');
+  // Find fastest/slowest by throughput
+  let maxT=-1,minT=Infinity,maxIdx=-1,minIdx=-1;
+  for(const idx in gpuSeries){
+    const s=gpuSeries[idx];
+    const last=s.throughput.length>0?s.throughput[s.throughput.length-1]:null;
+    if(last!=null&&last>maxT){maxT=last;maxIdx=+idx}
+    if(last!=null&&last<minT){minT=last;minIdx=+idx}
+  }
+  let html='';
+  for(const idx in gpuSeries){
+    const s=gpuSeries[idx];
+    const lastVram=s.vram.length>0?s.vram[s.vram.length-1]:null;
+    const lastThru=s.throughput.length>0?s.throughput[s.throughput.length-1]:null;
+    const lastChunk=s.chunk.length>0?s.chunk[s.chunk.length-1]:null;
+    const lastUtil=s.util.length>0?s.util[s.util.length-1]:null;
+    const vramPct=lastVram!=null&&s.vram_total?(lastVram/s.vram_total*100):0;
+    const vramColor=vramPct>95?'var(--red)':vramPct>80?'var(--yellow)':'var(--green)';
+    const isFastest=+idx===maxIdx&&gpuCount>1;
+    const isSlowest=+idx===minIdx&&gpuCount>1&&minIdx!==maxIdx;
+    html+='<div class="gpu-row'+(isFastest?' fastest':'')+(isSlowest?' slowest':'')+'">';
+    html+='<span class="gpu-name" title="'+s.name+'">GPU '+idx+'</span>';
+    html+='<div class="gpu-vram-bar"><div class="gpu-vram-fill" style="width:'+vramPct.toFixed(1)+'%;background:'+vramColor+'"></div></div>';
+    html+='<div class="gpu-stat"><span class="gpu-stat-label">VRAM</span><span class="gpu-stat-value">'+(lastVram!=null?fmtBytes(lastVram):'\u2014')+'</span></div>';
+    html+='<div class="gpu-stat"><span class="gpu-stat-label">Util</span><span class="gpu-stat-value">'+(lastUtil!=null?lastUtil.toFixed(0)+'%':'\u2014')+'</span></div>';
+    html+='<div class="gpu-stat"><span class="gpu-stat-label">Throughput</span><span class="gpu-stat-value throughput-val">'+(lastThru!=null?lastThru.toFixed(2):'\u2014')+'</span></div>';
+    html+='<div class="gpu-stat"><span class="gpu-stat-label">Share</span><span class="gpu-stat-value">'+(lastChunk!=null?lastChunk.toFixed(1)+'%':'\u2014')+'</span></div>';
+    html+='</div>';
+  }
+  el.innerHTML=html;
+}
+
+// --- Per-GPU tab charts ---
+function drawGpuTabs(){
+  if(gpuCount<2)return;
+  for(const idx in gpuSeries){
+    const tabId='gpu'+idx;
+    if(activeTab!==tabId)continue;
+    const s=gpuSeries[idx];
+    // VRAM chart (bytes)
+    const vramRef=s.vram_total?{value:s.vram_total,dotted:false,color:'rgba(248,113,113,0.7)',label:'Physical VRAM'}:null;
+    drawChart('gpuVram'+idx,{vram:s.vram},[RES_COLORS.vram],['vram'],false,fmtBytes,vramRef);
+    // Utilization chart (%)
+    drawChart('gpuUtil'+idx,{util:s.util},[RES_COLORS.gpu],['util'],true,v=>v.toFixed(0)+'%');
+    // Throughput chart
+    drawChart('gpuThroughput'+idx,{throughput:s.throughput},[COLORS[0]],['throughput'],false);
+    // Chunk ratio chart (%)
+    drawChart('gpuChunk'+idx,{share:s.chunk},[COLORS[4]],['share'],true,v=>v.toFixed(1)+'%');
+  }
+}
+
 // --- Data source: live SSE or archive replay ---
 // ARCHIVE_DATA is injected by monitor.save_html(); if absent, connect live.
 if(typeof ARCHIVE_DATA!=='undefined'){
@@ -224,14 +389,14 @@ if(typeof ARCHIVE_DATA!=='undefined'){
     catch(e){archiveErr=e;console.error('processEpoch failed at index '+i+':',e);break}
   }
   _skipDraw=false;
-  try{drawMetrics();drawResources()}catch(e){console.error('drawMetrics/drawResources:',e);archiveErr=archiveErr||e}
+  try{drawMetrics();drawResources();updateGpuSummary();drawGpuTabs()}catch(e){console.error('drawMetrics/drawResources:',e);archiveErr=archiveErr||e}
   // Set elapsed from sum of epoch durations (wall-clock startTime is meaningless in archive)
   const totalElapsed=ARCHIVE_DATA.reduce((s,d)=>s+(d.duration||0),0);
   document.getElementById('elapsedDisplay').textContent=fmtDur(totalElapsed);
   markComplete(archiveErr?'Archive error — see console':(ARCHIVE_COMPLETE||'Complete'));
   if(typeof ARCHIVE_SVG==='string'){try{showSvg(ARCHIVE_SVG)}catch(e){console.error('showSvg:',e)}}
   // Re-render after layout to ensure correct canvas dimensions
-  requestAnimationFrame(()=>{try{drawMetrics();drawResources()}catch(e){console.error('rAF redraw:',e)}});
+  requestAnimationFrame(()=>{try{drawMetrics();drawResources();updateGpuSummary();drawGpuTabs()}catch(e){console.error('rAF redraw:',e)}});
   if(archiveErr){
     const d=document.createElement('div');
     d.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1d27;color:#f87171;padding:24px;border-radius:8px;border:1px solid #f87171;z-index:999;font-family:monospace;max-width:80%;white-space:pre-wrap';
@@ -588,7 +753,10 @@ function fmtVal(v){
 }
 
 // --- Resize ---
-window.addEventListener('resize',()=>{drawMetrics();drawResources()});
+window.addEventListener('resize',()=>{
+  if(activeTab==='home'){drawMetrics();drawResources()}
+  else{drawGpuTabs()}
+});
 </script>
 </body>
 </html>

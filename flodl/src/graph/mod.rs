@@ -1092,6 +1092,9 @@ impl Graph {
     /// input across devices and gathers output. [`step`](Graph::step) handles
     /// AllReduce + optimizer step + zero_grad.
     ///
+    /// For a one-liner that also sets the optimizer and training mode, see
+    /// [`Ddp::auto()`](crate::nn::Ddp::auto).
+    ///
     /// ```ignore
     /// model.distribute(|dev| build_model(dev))?;
     /// ```
@@ -1183,6 +1186,25 @@ impl Graph {
 
         *self.distributed.borrow_mut() = Some(state);
         Ok(())
+    }
+
+    /// Auto-detect usable CUDA devices and distribute the model.
+    ///
+    /// The builder closure receives a Device and must return a fresh model.
+    /// No-op if fewer than 2 usable GPUs are found.
+    ///
+    /// ```ignore
+    /// model.auto_distribute(|dev| build_model(dev))?;
+    /// ```
+    pub fn auto_distribute<F>(&self, builder: F) -> Result<()>
+    where
+        F: Fn(crate::tensor::Device) -> Result<Graph>,
+    {
+        let devices = crate::tensor::usable_cuda_devices();
+        if devices.len() < 2 {
+            return Ok(());
+        }
+        self.distribute(builder)
     }
 
     /// Set the optimizer for training. When distributed, creates one optimizer
@@ -1294,6 +1316,25 @@ impl Graph {
             .borrow()
             .as_ref()
             .map_or_else(Vec::new, |d| d.ema_throughput.clone())
+    }
+
+    /// Per-device shard sizes from the last forward pass.
+    ///
+    /// Returns the actual number of samples each device processed.
+    /// Empty if not distributed.
+    pub fn shard_sizes(&self) -> Vec<i64> {
+        self.distributed
+            .borrow()
+            .as_ref()
+            .map_or_else(Vec::new, |d| d.last_shard_sizes.clone())
+    }
+
+    /// Devices used for distributed training. Empty if not distributed.
+    pub fn devices(&self) -> Vec<crate::tensor::Device> {
+        self.distributed
+            .borrow()
+            .as_ref()
+            .map_or_else(Vec::new, |d| d.devices.clone())
     }
 
     /// Set learning rate on all optimizers (distributed and single-GPU).

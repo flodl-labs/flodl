@@ -1,27 +1,23 @@
 //! Distributed Data Parallel (DDP) for transparent multi-GPU training.
 //!
-//! Two usage modes:
+//! Three usage levels:
 //!
-//! **Transparent (via Graph)**: Call `model.distribute()` once, then train
-//! normally. Forward scatters across GPUs, backward flows gradients through
-//! cross-device autograd, and `model.step()` handles AllReduce + optimizer
-//! step + zero_grad.
+//! **One-liner (recommended)**: [`Ddp::auto()`] detects GPUs, distributes the
+//! model, sets the optimizer, and enables training mode in a single call.
+//! Works transparently with 1 or N GPUs.
+//!
+//! **Transparent (via Graph)**: Call `model.distribute()`, `set_optimizer()`,
+//! and `set_training()` separately for finer control over setup.
 //!
 //! **Manual (via Ddp)**: For complex training patterns (GAN, RL, progressive).
 //! Explicit control over gradient sync and parameter broadcast.
 //!
-//! # Transparent mode
+//! # One-liner setup
 //!
 //! ```ignore
-//! let model = FlowBuilder::from(Linear::on_device(784, 256, dev))
-//!     .through(ReLU::new())
-//!     .through(Linear::on_device(256, 10, dev))
-//!     .build()?;
+//! Ddp::auto(&model, |dev| build_model(dev), |p| Adam::new(&p, 0.001))?;
 //!
-//! model.distribute(|dev| build_model(dev))?;
-//! model.set_optimizer(|p| Adam::new(&p, 0.001));
-//! model.set_training(true);
-//!
+//! // Training loop is identical for 1 or N GPUs:
 //! for (x, y) in &train_loader {
 //!     let out = model.forward(&x)?;
 //!     let loss = cross_entropy_loss(&out, &y)?;
@@ -30,16 +26,25 @@
 //! }
 //! ```
 //!
+//! # Transparent mode (separate calls)
+//!
+//! ```ignore
+//! model.distribute(|dev| build_model(dev))?;
+//! model.set_optimizer(|p| Adam::new(&p, 0.001));
+//! model.set_training(true);
+//! ```
+//!
 //! # Manual mode
 //!
 //! ```ignore
-//! let ddp = Ddp::wrap(&[&model0, &model1])?;
+//! let ddp = Ddp::wrap(&[&model0, &model1], &devices)?;
 //! ddp.sync_params()?;
 //! // ... custom forward/backward ...
 //! ddp.all_reduce_gradients()?;
 //! ```
 
 use crate::autograd::Variable;
+use crate::graph::Graph;
 use crate::nn::{Buffer, Module, Optimizer, Parameter};
 use crate::nn::cuda_event::CudaEvent;
 use crate::nn::nccl::{NcclComms, ReduceOp};
@@ -418,6 +423,92 @@ impl Ddp {
     /// Devices in use.
     pub fn devices(&self) -> &[Device] {
         &self.devices
+    }
+
+    // --- One-liner DDP setup (operates on Graph) ---
+
+    /// One-call setup: auto-detect GPUs, distribute the model, set the
+    /// optimizer, and enable training mode.
+    ///
+    /// - **Multi-GPU** (2+ usable CUDA devices): replicates via
+    ///   [`Graph::distribute`], creates per-replica optimizers, enables training.
+    /// - **Single-GPU / CPU**: sets optimizer and training mode only (no DDP
+    ///   overhead).
+    ///
+    /// Always prints a diagnostic summary to stderr showing detected hardware.
+    ///
+    /// ```ignore
+    /// Ddp::auto(&model, |dev| build_model(dev), |p| Adam::new(&p, 0.001))?;
+    ///
+    /// // Training loop is identical for 1 or N GPUs:
+    /// for batch in model.epoch(epoch).activate() {
+    ///     let out = model.forward_batch(&batch?)?;
+    ///     loss.backward()?;
+    ///     model.step()?;
+    /// }
+    /// ```
+    pub fn auto<F, M, G, O>(
+        model: &Graph,
+        builder: F,
+        optimizer: G,
+    ) -> Result<()>
+    where
+        F: Fn(Device) -> Result<M>,
+        M: Module + 'static,
+        G: Fn(Vec<Parameter>) -> O,
+        O: Optimizer + 'static,
+    {
+        Self::print_device_summary();
+        model.distribute(builder)?;
+        model.set_optimizer(optimizer);
+        model.set_training(true);
+        Ok(())
+    }
+
+    /// Print a diagnostic summary of detected CUDA devices to stderr.
+    fn print_device_summary() {
+        use crate::tensor::{
+            cuda_available, cuda_device_count,
+            cuda_device_name_idx, cuda_memory_info_idx,
+        };
+        use crate::monitor::format_bytes;
+
+        if !cuda_available() || cuda_device_count() == 0 {
+            eprintln!("  ddp: no CUDA available | CPU mode");
+            return;
+        }
+
+        let n = cuda_device_count();
+        let mut names = Vec::with_capacity(n as usize);
+        let mut parts = Vec::with_capacity(n as usize);
+
+        for i in 0..n {
+            let raw_name = cuda_device_name_idx(i)
+                .unwrap_or_else(|| format!("CUDA({})", i));
+            let short = raw_name
+                .strip_prefix("NVIDIA ")
+                .unwrap_or(&raw_name)
+                .to_string();
+            let vram = cuda_memory_info_idx(i)
+                .map(|(_, total)| format!(" ({})", format_bytes(total)))
+                .unwrap_or_default();
+            parts.push(format!("{}{}", short, vram));
+            names.push(raw_name);
+        }
+
+        let heterogeneous = names.windows(2).any(|w| w[0] != w[1]);
+
+        if n == 1 {
+            eprintln!("  ddp: 1 GPU | {} | single-device mode", parts[0]);
+        } else if heterogeneous {
+            eprintln!(
+                "  ddp: {} GPUs (heterogeneous) | {}",
+                n,
+                parts.join(" | "),
+            );
+        } else {
+            eprintln!("  ddp: {} GPUs | {}", n, parts.join(" | "));
+        }
     }
 }
 
@@ -899,6 +990,109 @@ mod tests {
             assert!(!model.is_distributed());
             assert_eq!(model.world_size(), 1);
         }
+    }
+
+    #[test]
+    fn test_ddp_auto_single_gpu() {
+        // On multi-GPU hardware Ddp::auto would initialize NCCL,
+        // which poisons CUBLAS for concurrent tests. Skip here;
+        // multi-GPU path is validated in test_ddp_auto_multi_gpu.
+        if cuda_device_count() >= 2 {
+            return;
+        }
+
+        use crate::graph::FlowBuilder;
+        use crate::nn::{Adam, Linear, ReLU, mse_loss};
+
+        let model = FlowBuilder::from(Linear::new(4, 8).unwrap())
+            .through(ReLU::new())
+            .through(Linear::new(8, 2).unwrap())
+            .build()
+            .unwrap();
+
+        Ddp::auto(
+            &model,
+            |dev| {
+                FlowBuilder::from(Linear::on_device(4, 8, dev)?)
+                    .through(ReLU::new())
+                    .through(Linear::on_device(8, 2, dev)?)
+                    .build()
+            },
+            |p| Adam::new(&p, 0.001),
+        )
+        .unwrap();
+
+        // Optimizer should be set: step() works
+        let x = Variable::new(
+            Tensor::randn(&[4, 4], Default::default()).unwrap(),
+            false,
+        );
+        let target = Variable::new(
+            Tensor::randn(&[4, 2], Default::default()).unwrap(),
+            false,
+        );
+        let out = model.forward(&x).unwrap();
+        let loss = mse_loss(&out, &target).unwrap();
+        loss.backward().unwrap();
+        model.step().unwrap();
+
+        assert!(!model.is_distributed());
+    }
+
+    #[test]
+    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+    fn test_ddp_auto_multi_gpu() {
+        if !require_multi_gpu() {
+            return;
+        }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        use crate::graph::FlowBuilder;
+        use crate::nn::{Adam, Linear, ReLU, mse_loss};
+
+        let model = FlowBuilder::from(
+            Linear::on_device(4, 8, Device::CUDA(0)).unwrap(),
+        )
+        .through(ReLU::new())
+        .through(Linear::on_device(8, 2, Device::CUDA(0)).unwrap())
+        .build()
+        .unwrap();
+
+        Ddp::auto(
+            &model,
+            |dev| {
+                FlowBuilder::from(Linear::on_device(4, 8, dev)?)
+                    .through(ReLU::new())
+                    .through(Linear::on_device(8, 2, dev)?)
+                    .build()
+            },
+            |p| Adam::new(&p, 0.001),
+        )
+        .unwrap();
+
+        assert!(model.is_distributed());
+        assert_eq!(model.world_size(), 2);
+
+        // Full training step
+        let opts = TensorOptions {
+            dtype: DType::Float32,
+            device: Device::CUDA(0),
+        };
+        let x = Variable::new(
+            Tensor::randn(&[8, 4], opts).unwrap(),
+            false,
+        );
+        let target = Variable::new(
+            Tensor::randn(&[8, 2], opts).unwrap(),
+            false,
+        );
+        let out = model.forward(&x).unwrap();
+        let loss = mse_loss(&out, &target).unwrap();
+        loss.backward().unwrap();
+        model.step().unwrap();
+
+        cuda_synchronize(0);
+        cuda_synchronize(1);
     }
 
     #[test]

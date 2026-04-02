@@ -1196,7 +1196,7 @@ fn compute_shard_sizes_from_ratios(batch_size: i64, ratios: &[f64]) -> Vec<i64> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{DType, TensorOptions, test_device, test_opts};
+    use crate::tensor::{DType, TensorOptions, test_device};
 
     struct SimpleData {
         x: Tensor,

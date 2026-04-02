@@ -61,6 +61,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Auto-balancing integration**: Epoch iterator reads chunk_ratios fresh per batch. Shard sizes adapt as ratios change every 50 steps. Mixed resident/streaming backends handle dynamic ratios correctly.
 - Training loop identical for 1 or N GPUs. `distribute()` + `set_data_loader()` are the only differences.
 
+#### `Ddp::auto()` — One-Liner DDP Setup
+- **`Ddp::auto(&model, builder, optimizer)`**: Single call to auto-detect GPUs, distribute the model, set per-replica optimizers, and enable training mode. No-op distribute for single GPU/CPU (still sets optimizer + training). Training loop identical for 1 or N GPUs.
+- **Hardware diagnostics**: Always prints detected hardware to stderr on call:
+  - `ddp: 2 GPUs (heterogeneous) | RTX 5060 Ti (16.0 GB) | GTX 1060 (6.0 GB)`
+  - `ddp: 1 GPU | RTX 5060 Ti (16.0 GB) | single-device mode`
+  - `ddp: no CUDA available | CPU mode`
+
+#### Multi-GPU Dashboard
+- **Per-GPU tabs**: Tab bar appears when 2+ GPUs detected (hidden for single-GPU, zero visual regression). Each GPU tab shows 4 time-series charts: VRAM usage (bytes, with physical limit reference line), utilization (%), throughput (samples/ms), batch share (%).
+- **GPU Overview card** (Home tab): Compact row per GPU with VRAM bar, utilization, throughput, and batch share. Fastest GPU highlighted green, slowest yellow.
+- **JS data model**: `gpuSeries[deviceIndex]` with per-device VRAM, throughput, chunk, and utilization arrays. Populated from `d.gpus` in `processEpoch()`. Works in both live SSE and archive replay modes.
+
+#### Multi-GPU Dashboard Data Pipeline
+- **`GpuSnapshot`**: Per-device resource sampling (VRAM allocated/total, utilization, device name). `ResourceSampler` iterates all CUDA devices on each sample. Aggregate fields kept for backward compat with single-GPU dashboards.
+- **`GpuMetrics`**: DDP metrics per device (EMA throughput, chunk_ratio, shard_size). Exposed via `Metrics::gpu_metrics()` trait method with default empty impl.
+- **Per-GPU JSON in epoch records**: `"gpus":[...]` array merges hardware snapshots (from `GpuSnapshot`) with DDP metrics (from `GpuMetrics`). Flows through SSE live updates and HTML archives.
+- **`Graph::auto_distribute()`**: Auto-detect usable CUDA devices and distribute. No-op on single GPU. Keeps the builder closure for user-controlled model construction.
+- **`Graph::shard_sizes()`** / **`Graph::devices()`**: Public accessors for per-rank shard sizes and device list.
+
 #### Auto-Balancing
 - **Per-GPU throughput measurement**: CudaEvent-based timing around each replica's forward pass in `forward_distributed()`. Zero overhead (async GPU recording, no CPU sync).
 - **EMA throughput tracking**: Exponentially smoothed samples/ms per device (alpha=0.3). First measurement initializes directly, subsequent measurements blend.
