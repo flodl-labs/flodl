@@ -9,20 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-#### DDP Phase 1: Async GPU-CPU Foundation
+#### Async GPU-CPU Foundation
 - **`CudaEvent`**: Record/synchronize/elapsed_time on CUDA streams. `CudaEventFlags` (Default for timing, DisableTiming for pure sync). RAII Drop, Send. 14 FFI functions (7 event + 7 stream).
 - **`CudaStream`**: Pool-managed streams per device. Synchronize, wait_event, is_complete. RAII Drop, Send.
 - **`StreamGuard`**: RAII stream switching (sets on create, restores default on drop). Async copy pattern: `let _guard = StreamGuard::new(&stream); tensor.to_device_async(Device::CPU)?;`
 - Enables zero-stall GPU-to-CPU pipeline: `training stream -> CudaEvent -> copy stream -> CPU`
 
-#### DDP Phase 2: NCCL Collective Operations
+#### NCCL Collective Operations
 - **`NcclComms`**: RAII communicator group for multi-GPU collectives. 5 FFI functions wrapping raw NCCL (ncclCommInitAll, AllReduce, Broadcast via GroupStart/End).
 - **`ReduceOp`**: Sum, Prod, Max, Min, Avg.
 - **`all_reduce()`** / **`all_reduce_on_streams()`**: In-place AllReduce across all devices (default or explicit streams).
 - **`broadcast()`** / **`broadcast_on_streams()`**: Broadcast from root rank to all devices.
 - Raw NCCL (not c10d) for minimal overhead in single-process multi-GPU.
 
-#### DDP Phase 3: Transparent Multi-GPU Training
+#### Transparent Multi-GPU Training
 - **`Graph::distribute()`**: Auto-detect GPUs, create replicas, broadcast params. Single line to enable multi-GPU. No-op on single GPU.
 - **`Graph::set_optimizer()`**: Creates per-replica optimizers when distributed.
 - **`Graph::step()`**: AllReduce gradients + sync buffers + optimizer step + zero_grad. One call replaces the manual loop.
@@ -31,7 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`Ddp`**: Manual DDP coordinator for complex training patterns (GAN, RL, progressive). Explicit sync_params, all_reduce_gradients, sync_buffers.
 - Training loop is identical for 1 or N GPUs; `distribute()` is the only difference.
 
-#### DDP Phase 4: Auto-Balancing
+#### Async Data Loading Pipeline
+- **`DataSet` trait**: Per-item dataset (`get(index) -> Vec<Tensor>`). `Send + Sync` for background prefetch. Automatic batching via `DataSetAdapter` (pre-allocate + copy, O(1 sample) peak memory).
+- **`BatchDataSet` trait**: Per-batch dataset (`get_batch(indices) -> Vec<Tensor>`) for bulk-efficient sources (mmap, database). `Send + Sync`.
+- **`Sampler` trait**: Index ordering per epoch. Built-in: `RandomSampler` (deterministic per seed+epoch), `SequentialSampler`.
+- **`Batch`**: Wrapper with `Index<usize>` for clean destructuring (`let (images, labels) = (&b[0], &b[1])`). Owns its tensors.
+- **`DataLoader`**: Builder pattern with auto-detection of resident vs streaming mode.
+  - **Resident mode**: Dataset fits in VRAM (75% headroom). Loaded once via `pin_memory()` + `to_device()`. Per-epoch: GPU-side `index_select` with shuffled permutation. Zero CPU-GPU transfer after warmup.
+  - **Streaming mode**: Persistent worker thread with dedicated `CudaStream`. Per-epoch fresh batch channel (no deadlock on mid-epoch drop). Worker: `get_batch` -> `pin_memory` -> `StreamGuard` + `to_device_async` -> `CudaEvent`. Consumer: `event.synchronize()` (typically instant due to prefetch depth).
+  - **CUDA OOM fallback**: If resident load fails with OOM, automatically retries with streaming mode.
+  - **Auto prefetch depth**: `clamp(free_vram * 10% / batch_bytes, 2, 4)`. Override with `.prefetch(n)` for high-latency cloud/NFS storage.
+  - `.streaming()` to force streaming mode (preserve VRAM headroom, benchmarking).
+  - `drop_last` defaults to `true` (BatchNorm safety: size-1 batches cause NaN variance).
+  - `EpochIterator` implements `Iterator<Item = Result<Batch>>` + `ExactSizeIterator`.
+- **`TensorError::is_cuda_oom()`**: Detect CUDA out-of-memory errors for graceful fallback.
+- DDP-aware: loader yields pinned CPU data, `forward_distributed` scatters to devices efficiently.
+- 37 tests covering both modes, multi-target datasets, drop-mid-epoch cleanup, reproducibility.
+
+#### Auto-Balancing
 - **Per-GPU throughput measurement**: CudaEvent-based timing around each replica's forward pass in `forward_distributed()`. Zero overhead (async GPU recording, no CPU sync).
 - **EMA throughput tracking**: Exponentially smoothed samples/ms per device (alpha=0.3). First measurement initializes directly, subsequent measurements blend.
 - **Adaptive batch sharding**: After 10 calibration steps with equal splits, `chunk_ratios` are recomputed proportional to measured throughput. Re-evaluated every 50 steps. `MIN_CHUNK_RATIO` (5%) prevents starving any GPU.

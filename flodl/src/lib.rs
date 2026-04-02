@@ -33,6 +33,8 @@ pub mod monitor;
 pub mod worker;
 #[cfg(feature = "rng")]
 pub mod rng;
+#[cfg(feature = "rng")]
+pub mod data;
 
 /// Shorthand for building `Vec<Box<dyn Module>>` from a list of modules.
 /// Use with `split`, `gate`, and `switch` to avoid manual `Box::new()` wrapping.
@@ -95,3 +97,5 @@ pub use graph::{
     PathKind,
 };
 pub use worker::CpuWorker;
+#[cfg(feature = "rng")]
+pub use data::{DataSet, BatchDataSet, Sampler, RandomSampler, SequentialSampler, DataLoader, DataLoaderBuilder, EpochIterator, Batch};

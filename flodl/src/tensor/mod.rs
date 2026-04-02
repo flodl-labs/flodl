@@ -125,6 +125,11 @@ impl TensorError {
     pub fn new(msg: &str) -> Self {
         TensorError(msg.to_string())
     }
+
+    /// Whether this error indicates a CUDA out-of-memory condition.
+    pub fn is_cuda_oom(&self) -> bool {
+        self.0.contains("out of memory")
+    }
 }
 
 impl fmt::Display for TensorError {
