@@ -797,6 +797,10 @@ pub struct ElChe {
     min_anchor: usize,
     /// Maximum anchor (gradient staleness limit).
     max_anchor: usize,
+    /// Maximum allowed batch difference between fastest and slowest worker.
+    /// When set, workers that exceed this lead are throttled until the
+    /// slowest catches up. `Some(0)` = strict lockstep (sync DDP behavior).
+    max_batch_diff: Option<usize>,
 }
 
 impl ElChe {
@@ -820,6 +824,7 @@ impl ElChe {
             overhead_target: 0.10,
             min_anchor: anchor,
             max_anchor: 200,
+            max_batch_diff: None,
         }
     }
 
@@ -846,6 +851,25 @@ impl ElChe {
             self.anchor = self.anchor.clamp(self.min_anchor, self.max_anchor);
         }
         self
+    }
+
+    /// Set the maximum batch difference between fastest and slowest worker.
+    ///
+    /// When the fastest worker leads the slowest by more than this many
+    /// batches, it is throttled (paused) until the gap closes. This prevents
+    /// catastrophic divergence with large batches or extreme speed ratios.
+    ///
+    /// - `None` (default): no limit, workers run freely.
+    /// - `Some(0)`: strict lockstep, equivalent to synchronous DDP.
+    /// - `Some(n)`: fast workers may lead by at most `n` batches.
+    pub fn with_max_batch_diff(mut self, max: usize) -> Self {
+        self.max_batch_diff = Some(max);
+        self
+    }
+
+    /// Current max batch diff setting.
+    pub fn max_batch_diff(&self) -> Option<usize> {
+        self.max_batch_diff
     }
 
     /// Set initial speed estimate before the first timing measurement.
@@ -926,11 +950,19 @@ impl ElChe {
             "wall_ms length must match world_size",
         );
 
-        // Compute per-batch timing for each device.
+        // Compute per-batch timing for each device with EMA smoothing.
+        // α = 0.3: damps measurement noise, converges in ~3 reports.
+        // First measurement (uncalibrated) is taken raw so initial
+        // calibration isn't delayed.
+        const EMA_ALPHA: f64 = 0.3;
         for (rank, &wall) in wall_ms.iter().enumerate() {
             if self.batch_counts[rank] > 0 && wall > 0.0 {
-                self.ms_per_batch[rank] =
-                    wall / self.batch_counts[rank] as f64;
+                let new_ms = wall / self.batch_counts[rank] as f64;
+                self.ms_per_batch[rank] = if self.calibrated {
+                    EMA_ALPHA * new_ms + (1.0 - EMA_ALPHA) * self.ms_per_batch[rank]
+                } else {
+                    new_ms
+                };
             }
         }
 
@@ -1810,6 +1842,15 @@ mod tests {
             .with_overhead_target(0.001); // below min 0.01
         // Would be clamped to 0.01 internally
         let _ = c2;
+    }
+
+    #[test]
+    fn test_cadence_max_batch_diff() {
+        let c = ElChe::new(2, 10).with_max_batch_diff(5);
+        assert_eq!(c.max_batch_diff(), Some(5));
+
+        let c2 = ElChe::new(2, 10);
+        assert_eq!(c2.max_batch_diff(), None);
     }
 
     #[test]

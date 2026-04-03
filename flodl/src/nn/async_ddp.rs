@@ -13,7 +13,7 @@
 //! Coordinator:   collect timing/metrics -> trigger param averaging -> monitor divergence
 //! ```
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -77,6 +77,9 @@ pub struct AsyncDdpConfig {
     pub anchor: Option<usize>,
     /// Divergence threshold for Async mode. Default: 0.05.
     pub divergence_threshold: Option<f64>,
+    /// Maximum batch lead of fastest over slowest worker.
+    /// `Some(0)` = strict lockstep. `None` = unlimited. Default: `None`.
+    pub max_batch_diff: Option<usize>,
 }
 
 impl Default for AsyncDdpConfig {
@@ -93,6 +96,7 @@ impl AsyncDdpConfig {
             max_anchor: None,
             anchor: None,
             divergence_threshold: None,
+            max_batch_diff: None,
         }
     }
 
@@ -119,23 +123,43 @@ impl AsyncDdpConfig {
         self.divergence_threshold = Some(threshold);
         self
     }
+
+    /// Set the maximum batch lead of fastest over slowest worker.
+    ///
+    /// `0` = strict lockstep (sync DDP behavior). Workers that exceed
+    /// this lead are paused until the slowest catches up.
+    pub fn with_max_batch_diff(mut self, max: usize) -> Self {
+        self.max_batch_diff = Some(max);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Worker -> Coordinator messages
 // ---------------------------------------------------------------------------
 
-/// Timing report sent from a GPU worker to the coordinator after each batch.
+/// Message from a GPU worker to the coordinator on the timing channel.
 ///
-/// Lightweight (3 fields, all Copy). Sent every batch for ElChe throughput tracking.
+/// Batch reports are lightweight (sent every batch for ElChe throughput tracking).
+/// Exiting is sent exactly once, before the worker thread terminates, so the
+/// coordinator never sends NCCL collectives to a dead worker.
 #[derive(Clone, Debug)]
-pub struct TimingMsg {
-    /// Which GPU sent this.
-    pub rank: usize,
-    /// Wall-clock time for this batch (ms).
-    pub batch_ms: f64,
-    /// Worker's local step counter (monotonically increasing).
-    pub step_count: usize,
+pub enum TimingMsg {
+    /// Per-batch timing report.
+    Batch {
+        /// Which GPU sent this.
+        rank: usize,
+        /// Wall-clock time for this batch (ms).
+        batch_ms: f64,
+        /// Worker's local step counter (monotonically increasing).
+        step_count: usize,
+    },
+    /// Worker is about to exit. Coordinator must stop including this rank
+    /// in collectives before processing any further messages.
+    Exiting {
+        /// Which GPU is exiting.
+        rank: usize,
+    },
 }
 
 /// Epoch-end metrics sent from a GPU worker to the coordinator.
@@ -202,6 +226,9 @@ pub enum ControlMsg {
         /// Number of samples this worker should process per epoch.
         num_samples: usize,
     },
+    /// Worker is too far ahead: block until the next real command arrives.
+    /// Sent when the worker's batch lead exceeds [`ElChe::max_batch_diff`].
+    Throttle,
     /// Shut down this worker.
     Shutdown,
 }
@@ -598,34 +625,59 @@ impl<M: Module> GpuWorker<M> {
     /// Returns `true` if a Shutdown was received.
     pub fn handle_control(&mut self) -> Result<bool> {
         while let Ok(msg) = self.control_rx.try_recv() {
-            match msg {
-                ControlMsg::RequestParams => {
-                    let _ = self.param_tx.send(self.snapshot_params());
-                }
-                ControlMsg::Update(avg) => {
-                    self.load_averaged(&avg)?;
-                    self.steps_since_avg = 0;
-                }
-                ControlMsg::SyncNow => {
-                    self.sync_now_nccl()?;
-                    self.steps_since_avg = 0;
-                }
-                ControlMsg::PartitionHint { num_samples } => {
-                    self.pending_partition_size = Some(num_samples);
-                }
-                ControlMsg::Shutdown => return Ok(true),
+            if self.dispatch_control(msg)? {
+                return Ok(true);
             }
+        }
+        Ok(false)
+    }
+
+    /// Handle a single control message. Returns `true` on Shutdown.
+    fn dispatch_control(&mut self, msg: ControlMsg) -> Result<bool> {
+        match msg {
+            ControlMsg::RequestParams => {
+                let _ = self.param_tx.send(self.snapshot_params());
+            }
+            ControlMsg::Update(avg) => {
+                self.load_averaged(&avg)?;
+                self.steps_since_avg = 0;
+            }
+            ControlMsg::SyncNow => {
+                self.sync_now_nccl()?;
+                self.steps_since_avg = 0;
+            }
+            ControlMsg::PartitionHint { num_samples } => {
+                self.pending_partition_size = Some(num_samples);
+            }
+            ControlMsg::Throttle => {
+                // Worker is ahead of the slowest rank: block until the
+                // coordinator sends the next command (SyncNow/Update on
+                // averaging, or Shutdown). This prevents unbounded run-ahead
+                // with large batches or extreme speed ratios.
+                if let Ok(next) = self.control_rx.recv() {
+                    return self.dispatch_control(next);
+                }
+            }
+            ControlMsg::Shutdown => return Ok(true),
         }
         Ok(false)
     }
 
     /// Send a timing report to the coordinator.
     pub fn report_timing(&self, batch_ms: f64) -> Result<()> {
-        self.timing_tx.send(TimingMsg {
+        self.timing_tx.send(TimingMsg::Batch {
             rank: self.rank,
             batch_ms,
             step_count: self.local_step,
         }).map_err(|_| TensorError::new("timing channel disconnected"))
+    }
+
+    /// Notify the coordinator that this worker is about to exit.
+    ///
+    /// Must be called before the thread terminates so the coordinator
+    /// stops including this rank in NCCL collectives.
+    pub fn report_exiting(&self) {
+        let _ = self.timing_tx.send(TimingMsg::Exiting { rank: self.rank });
     }
 
     /// Send epoch-end metrics to the coordinator.
@@ -800,9 +852,10 @@ pub struct Coordinator {
     /// Has ElChe been calibrated (first timing report received)?
     calibrated: bool,
 
-    /// Number of workers still actively training. Shared with worker threads.
-    /// When < world_size, NCCL collective ops would deadlock; skip averaging.
-    active_workers: Arc<AtomicUsize>,
+    /// Number of workers still actively training. Decremented when the
+    /// coordinator drains a [`TimingMsg::Exiting`] message. Single-writer
+    /// (coordinator thread only), no race with NCCL collectives.
+    active_count: usize,
 
     // Timing accumulation for ElChe
     /// Accumulated wall-clock ms per rank since last averaging.
@@ -824,7 +877,6 @@ pub struct CoordinatorBuilder {
     total_samples: usize,
     el_che: super::ddp::ElChe,
     divergence_threshold: f64,
-    active_workers: Arc<AtomicUsize>,
 }
 
 impl CoordinatorBuilder {
@@ -867,7 +919,7 @@ impl CoordinatorBuilder {
             divergence_threshold: self.divergence_threshold,
             avg_interval: 1, // start conservative
             calibrated: false,
-            active_workers: self.active_workers,
+            active_count: self.world_size,
             wall_ms_accum: vec![0.0; self.world_size],
             last_batch_ms: vec![0.0; self.world_size],
         }
@@ -887,7 +939,6 @@ impl Coordinator {
         world_size: usize,
         total_samples: usize,
         el_che: super::ddp::ElChe,
-        active_workers: Arc<AtomicUsize>,
     ) -> CoordinatorBuilder {
         CoordinatorBuilder {
             timing_rx,
@@ -900,7 +951,6 @@ impl Coordinator {
             total_samples,
             el_che,
             divergence_threshold: 0.05,
-            active_workers,
         }
     }
 
@@ -927,11 +977,20 @@ impl Coordinator {
     /// Process all pending timing messages (non-blocking drain).
     ///
     /// Updates per-rank step counts and accumulates wall-clock time for ElChe.
+    /// When a worker sends [`TimingMsg::Exiting`], decrements `active_count`
+    /// so [`should_average`](Self::should_average) stops triggering collectives.
     pub fn drain_timing(&mut self) {
         while let Ok(msg) = self.timing_rx.try_recv() {
-            self.steps_since_avg[msg.rank] = self.steps_since_avg[msg.rank].saturating_add(1);
-            self.wall_ms_accum[msg.rank] += msg.batch_ms;
-            self.last_batch_ms[msg.rank] = msg.batch_ms;
+            match msg {
+                TimingMsg::Batch { rank, batch_ms, .. } => {
+                    self.steps_since_avg[rank] = self.steps_since_avg[rank].saturating_add(1);
+                    self.wall_ms_accum[rank] += batch_ms;
+                    self.last_batch_ms[rank] = batch_ms;
+                }
+                TimingMsg::Exiting { .. } => {
+                    self.active_count = self.active_count.saturating_sub(1);
+                }
+            }
         }
     }
 
@@ -950,7 +1009,7 @@ impl Coordinator {
     pub fn should_average(&self) -> bool {
         // Collectives require all ranks. If any worker has exited,
         // skip averaging to prevent NCCL deadlock or channel disconnect.
-        if self.active_workers.load(Ordering::Relaxed) < self.world_size {
+        if self.active_count < self.world_size {
             return false;
         }
         match self.policy {
@@ -984,11 +1043,15 @@ impl Coordinator {
                 for tx in &self.control_txs {
                     let _ = tx.send(ControlMsg::RequestParams);
                 }
-                // 2. Collect all snapshots (blocking)
+                // 2. Collect snapshots with timeout (worker may have died).
+                //    5s is generous: even a slow GPU snapshot is < 100ms.
+                let timeout = std::time::Duration::from_secs(5);
                 let mut snapshots = Vec::with_capacity(self.world_size);
                 for _ in 0..self.world_size {
-                    let snap = self.param_rx.recv()
-                        .map_err(|_| TensorError::new("param channel disconnected"))?;
+                    let snap = self.param_rx.recv_timeout(timeout)
+                        .map_err(|e| TensorError::new(
+                            &format!("param snapshot collection failed: {e}")
+                        ))?;
                     snapshots.push(snap);
                 }
                 // 3. Check divergence, adjust cadence (Async mode)
@@ -1122,12 +1185,37 @@ impl Coordinator {
         }
     }
 
+    /// Throttle workers that have run too far ahead of the slowest rank.
+    ///
+    /// Sends [`ControlMsg::Throttle`] to any worker whose `steps_since_avg`
+    /// exceeds the slowest rank's by more than `max_batch_diff`. The worker
+    /// blocks until the next real command (averaging or shutdown).
+    fn check_throttle(&self) {
+        let max_diff = match self.el_che.max_batch_diff() {
+            Some(d) => d,
+            None => return,
+        };
+
+        if self.active_count < self.world_size {
+            return; // some worker exited, don't throttle
+        }
+
+        let min_steps = self.steps_since_avg.iter().copied().min().unwrap_or(0);
+
+        for (rank, &steps) in self.steps_since_avg.iter().enumerate() {
+            if steps > min_steps + max_diff {
+                let _ = self.control_txs[rank].send(ControlMsg::Throttle);
+            }
+        }
+    }
+
     /// Run one tick of the coordinator loop.
     ///
-    /// Drains timing/metrics, checks if averaging is due, triggers if so.
+    /// Drains timing/metrics, throttles fast workers, checks averaging.
     /// Returns collected metrics (if any) for external logging.
     pub fn tick(&mut self) -> Result<Vec<MetricsMsg>> {
         self.drain_timing();
+        self.check_throttle();
         let metrics = self.drain_metrics();
 
         if self.should_average() {
@@ -1296,12 +1384,13 @@ impl AsyncDdp {
         if let Some(max) = config.max_anchor {
             el_che = el_che.with_max_anchor(max);
         }
+        if let Some(diff) = config.max_batch_diff {
+            el_che = el_che.with_max_batch_diff(diff);
+        }
 
         // Step 4: Spawn coordinator thread
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_coord = shutdown.clone();
-        let active_workers = Arc::new(AtomicUsize::new(world_size));
-        let active_coord = active_workers.clone();
         let div_threshold = config.divergence_threshold;
 
         let coordinator_handle = std::thread::Builder::new()
@@ -1312,19 +1401,23 @@ impl AsyncDdp {
                     coord_control_txs,
                     policy, backend,
                     world_size, total_samples, el_che,
-                    active_coord,
                 );
                 if let Some(dt) = div_threshold {
                     builder = builder.divergence_threshold(dt);
                 }
                 let mut coord = builder.build();
 
-                while !shutdown_coord.load(Ordering::Relaxed) {
-                    coord.tick()?;
+                loop {
+                    if shutdown_coord.load(Ordering::Relaxed) {
+                        break Ok(());
+                    }
+                    if let Err(e) = coord.tick() {
+                        // Signal all workers to stop so join() doesn't hang.
+                        shutdown_coord.store(true, Ordering::Relaxed);
+                        break Err(e);
+                    }
                     std::thread::sleep(std::time::Duration::from_micros(100));
                 }
-
-                Ok(())
             })
             .map_err(|e| TensorError::new(&format!("failed to spawn coordinator: {e}")))?;
 
@@ -1343,10 +1436,10 @@ impl AsyncDdp {
             let params = initial_params.clone();
             let buffers = initial_buffers.clone();
             let t_tx = timing_tx_main.clone();
+            let t_tx_err = timing_tx_main.clone();
             let m_tx = metrics_tx_main.clone();
             let p_tx = param_tx_main.clone();
             let shutdown_w = shutdown.clone();
-            let active_w = active_workers.clone();
 
             let worker_nccl = rank_comms[rank].take();
             let config = WorkerConfig {
@@ -1369,37 +1462,54 @@ impl AsyncDdp {
                         crate::tensor::set_current_cuda_device(idx);
                     }
 
-                    // Build worker inside this thread (model + optimizer are Rc-based, thread-local)
-                    // NCCL comm was pre-initialized on the main thread via NcclComms::split()
-                    // to avoid per-thread ncclCommInitRank issues with CUDA context corruption.
-                    let mut worker = GpuWorker::new(
-                        &config,
-                        |dev| (*mf)(dev),
-                        |params| (*of)(params),
-                        ds,
-                        worker_nccl,
-                        t_tx,
-                        m_tx,
-                        p_tx,
-                        control_rx,
-                    )?;
+                    // Inner closure so we can always run cleanup on exit.
+                    let result = (|| -> Result<()> {
+                        // Build worker inside this thread (model + optimizer are
+                        // Rc-based, thread-local). NCCL comm was pre-initialized
+                        // on the main thread via NcclComms::split() to avoid
+                        // per-thread ncclCommInitRank CUDA context corruption.
+                        let mut worker = GpuWorker::new(
+                            &config,
+                            |dev| (*mf)(dev),
+                            |params| (*of)(params),
+                            ds,
+                            worker_nccl,
+                            t_tx,
+                            m_tx,
+                            p_tx,
+                            control_rx,
+                        )?;
 
-                    // Training loop: self-managed epochs with actual data iteration
-                    for _epoch in 0..num_epochs {
-                        if shutdown_w.load(Ordering::Relaxed) {
-                            break;
+                        // Training loop: self-managed epochs with actual data
+                        for _epoch in 0..num_epochs {
+                            if shutdown_w.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            if worker.run_epoch(&*tf)? {
+                                break; // Shutdown received
+                            }
                         }
-                        if worker.run_epoch(&*tf)? {
-                            break; // Shutdown received
-                        }
+
+                        // Notify coordinator through the timing channel before
+                        // exiting. The coordinator drains this in tick() ->
+                        // drain_timing() and decrements its local active_count,
+                        // preventing NCCL collectives to a dead worker.
+                        worker.report_exiting();
+                        Ok(())
+                    })();
+
+                    if result.is_err() {
+                        // Ensure coordinator knows this rank is gone even on
+                        // error (prevents NCCL deadlock on surviving workers).
+                        // Send directly on the raw channel since the worker
+                        // may not exist (e.g. GpuWorker::new failed).
+                        let _ = t_tx_err.send(TimingMsg::Exiting { rank });
+                        // Signal all siblings to stop so they don't block in
+                        // an NCCL collective waiting for this dead rank.
+                        shutdown_w.store(true, Ordering::Relaxed);
                     }
 
-                    // Signal coordinator that this worker is done.
-                    // This prevents NCCL deadlock: coordinator won't send
-                    // SyncNow once any worker has exited.
-                    active_w.fetch_sub(1, Ordering::Relaxed);
-
-                    Ok(())
+                    result
                 })
                 .map_err(|e| TensorError::new(&format!("failed to spawn worker {rank}: {e}")))?;
 
@@ -1605,6 +1715,7 @@ mod tests {
         // Verify all variants are constructable
         let _req = ControlMsg::RequestParams;
         let _sync = ControlMsg::SyncNow;
+        let _throttle = ControlMsg::Throttle;
         let _hint = ControlMsg::PartitionHint { num_samples: 1000 };
         let _shutdown = ControlMsg::Shutdown;
         let _update = ControlMsg::Update(AveragedParams {
@@ -1863,9 +1974,14 @@ mod tests {
         worker.report_timing(12.5).unwrap();
 
         let msg = ch.timing_rx.recv().unwrap();
-        assert_eq!(msg.rank, 0);
-        assert!((msg.batch_ms - 12.5).abs() < 1e-10);
-        assert_eq!(msg.step_count, 0);
+        match msg {
+            TimingMsg::Batch { rank, batch_ms, step_count } => {
+                assert_eq!(rank, 0);
+                assert!((batch_ms - 12.5).abs() < 1e-10);
+                assert_eq!(step_count, 0);
+            }
+            _ => panic!("expected Batch"),
+        }
     }
 
     #[test]
@@ -2003,9 +2119,9 @@ mod tests {
             GpuWorker::<Linear>::channels();
 
         // Verify channel pairs work
-        timing_tx.send(TimingMsg { rank: 0, batch_ms: 1.0, step_count: 0 }).unwrap();
+        timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 1.0, step_count: 0 }).unwrap();
         let msg = ch.timing_rx.recv().unwrap();
-        assert_eq!(msg.rank, 0);
+        assert!(matches!(msg, TimingMsg::Batch { rank: 0, .. }));
 
         metrics_tx.send(MetricsMsg {
             rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 10, epoch_ms: 100.0,
@@ -2057,13 +2173,11 @@ mod tests {
         }
 
         let el_che = ElChe::new(n, 10);
-        let active = Arc::new(AtomicUsize::new(n));
         let coord = Coordinator::builder(
             timing_rx, metrics_rx, param_rx,
             control_txs,
             policy, backend,
             n, 10000, el_che,
-            active,
         ).build();
 
         CoordTestHarness { coord, timing_tx, metrics_tx, param_tx, control_rxs }
@@ -2082,8 +2196,8 @@ mod tests {
     fn test_coordinator_drain_timing() {
         let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
 
         h.coord.drain_timing();
 
@@ -2098,12 +2212,12 @@ mod tests {
         assert!(!h.coord.should_average());
 
         // One rank reports
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
         h.coord.drain_timing();
         assert!(!h.coord.should_average()); // rank 1 still at 0
 
         // Both ranks report
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
         h.coord.drain_timing();
         assert!(h.coord.should_average());
     }
@@ -2116,8 +2230,8 @@ mod tests {
         assert_eq!(h.coord.avg_interval(), 1);
 
         // Feed one step per rank
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
         h.coord.drain_timing();
 
         assert!(h.coord.should_average());
@@ -2128,8 +2242,8 @@ mod tests {
         let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
         // Feed timing and trigger
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
         h.coord.drain_timing();
         h.coord.trigger_averaging().unwrap();
 
@@ -2153,8 +2267,8 @@ mod tests {
         let opts = TensorOptions { dtype: DType::Float32, device: dev };
 
         // Feed timing
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
         h.coord.drain_timing();
 
         // Trigger averaging in a thread because it blocks waiting for snapshots
@@ -2243,8 +2357,8 @@ mod tests {
         assert_eq!(h.coord.version(), 0);
 
         // Feed steps from both ranks
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
 
         // Tick: should trigger averaging
         let metrics = h.coord.tick().unwrap();
@@ -2352,6 +2466,140 @@ mod tests {
         // Low divergence should have doubled the interval
         assert!(h.coord.avg_interval() > 4,
             "interval should increase, got {}", h.coord.avg_interval());
+    }
+
+    // -----------------------------------------------------------------------
+    // Throttle (max_batch_diff) tests
+    // -----------------------------------------------------------------------
+
+    fn make_throttle_harness(
+        n: usize,
+        max_batch_diff: usize,
+    ) -> CoordTestHarness {
+        let (timing_tx, timing_rx) = mpsc::channel();
+        let (metrics_tx, metrics_rx) = mpsc::channel();
+        let (param_tx, param_rx) = mpsc::channel();
+
+        let mut control_txs = Vec::new();
+        let mut control_rxs = Vec::new();
+        for _ in 0..n {
+            let (tx, rx) = mpsc::channel();
+            control_txs.push(tx);
+            control_rxs.push(rx);
+        }
+
+        let el_che = ElChe::new(n, 10).with_max_batch_diff(max_batch_diff);
+        let coord = Coordinator::builder(
+            timing_rx, metrics_rx, param_rx,
+            control_txs,
+            ApplyPolicy::Async, AverageBackend::Nccl,
+            n, 10000, el_che,
+        ).build();
+
+        CoordTestHarness { coord, timing_tx, metrics_tx, param_tx, control_rxs }
+    }
+
+    #[test]
+    fn test_throttle_sends_when_diff_exceeded() {
+        let mut h = make_throttle_harness(2, 3);
+
+        // Rank 0 is 5 steps ahead, rank 1 at 0 -> diff = 5 > 3
+        for i in 0..5 {
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i }).unwrap();
+        }
+        h.coord.drain_timing();
+        h.coord.check_throttle();
+
+        // Rank 0 should receive Throttle
+        match h.control_rxs[0].try_recv() {
+            Ok(ControlMsg::Throttle) => {}
+            _ => panic!("expected Throttle for rank 0"),
+        }
+
+        // Rank 1 should NOT receive Throttle
+        assert!(h.control_rxs[1].try_recv().is_err(), "rank 1 should not be throttled");
+    }
+
+    #[test]
+    fn test_throttle_no_send_within_limit() {
+        let mut h = make_throttle_harness(2, 5);
+
+        // Rank 0 is 3 steps ahead, rank 1 at 0 -> diff = 3 <= 5
+        for i in 0..3 {
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i }).unwrap();
+        }
+        h.coord.drain_timing();
+        h.coord.check_throttle();
+
+        // No throttle for either rank
+        assert!(h.control_rxs[0].try_recv().is_err());
+        assert!(h.control_rxs[1].try_recv().is_err());
+    }
+
+    #[test]
+    fn test_throttle_zero_is_strict_lockstep() {
+        let mut h = make_throttle_harness(2, 0);
+
+        // Rank 0 does 1 batch, rank 1 does 0 -> diff = 1 > 0
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+        h.coord.drain_timing();
+        h.coord.check_throttle();
+
+        // Rank 0 throttled immediately
+        match h.control_rxs[0].try_recv() {
+            Ok(ControlMsg::Throttle) => {}
+            _ => panic!("expected Throttle for rank 0"),
+        }
+    }
+
+    #[test]
+    fn test_throttle_disabled_when_none() {
+        // Default harness has no max_batch_diff
+        let mut h = make_coord_harness(2, ApplyPolicy::Async, AverageBackend::Nccl);
+
+        // Rank 0 far ahead
+        for i in 0..50 {
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i }).unwrap();
+        }
+        h.coord.drain_timing();
+        h.coord.check_throttle();
+
+        // No throttle (feature disabled)
+        assert!(h.control_rxs[0].try_recv().is_err());
+    }
+
+    #[test]
+    fn test_throttle_worker_unblocks_on_sync_now() {
+        // Simulate: worker receives Throttle, then SyncNow unblocks it.
+        let (mut worker, ch) = make_test_worker();
+
+        ch.control_tx.send(ControlMsg::Throttle).unwrap();
+        ch.control_tx.send(ControlMsg::SyncNow).unwrap();
+
+        // handle_control processes Throttle (blocks on recv), then
+        // SyncNow arrives and unblocks it.
+        let shutdown = worker.handle_control().unwrap();
+        assert!(!shutdown, "should not shutdown");
+    }
+
+    #[test]
+    fn test_throttle_worker_unblocks_on_shutdown() {
+        let (mut worker, ch) = make_test_worker();
+
+        ch.control_tx.send(ControlMsg::Throttle).unwrap();
+        ch.control_tx.send(ControlMsg::Shutdown).unwrap();
+
+        let shutdown = worker.handle_control().unwrap();
+        assert!(shutdown, "should signal shutdown");
+    }
+
+    #[test]
+    fn test_async_ddp_config_max_batch_diff() {
+        let config = AsyncDdpConfig::new().with_max_batch_diff(5);
+        assert_eq!(config.max_batch_diff, Some(5));
+
+        let config2 = AsyncDdpConfig::new();
+        assert_eq!(config2.max_batch_diff, None);
     }
 
     // -----------------------------------------------------------------------
@@ -2571,8 +2819,8 @@ mod tests {
         // Feed enough timing to calibrate ElChe.
         // First, trigger with equal steps so ElChe sees the timing.
         for _ in 0..10 {
-            h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-            h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
             h.coord.drain_timing();
             if h.coord.should_average() {
                 h.coord.trigger_averaging().unwrap();
@@ -2604,8 +2852,8 @@ mod tests {
 
         // Feed timing so trigger fires, with nearly identical params
         for _ in 0..5 {
-            h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-            h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 5.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 0 }).unwrap();
             h.coord.drain_timing();
 
             if h.coord.should_average() {
@@ -2646,8 +2894,8 @@ mod tests {
 
         // Feed heterogeneous timing to trigger ElChe calibration
         for _ in 0..5 {
-            h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-            h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
             h.coord.drain_timing();
             if h.coord.should_average() {
                 h.coord.trigger_averaging().unwrap();
@@ -2671,10 +2919,10 @@ mod tests {
         let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
         // Send multiple timing messages per rank
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 7.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 12.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 7.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 12.0, step_count: 1 }).unwrap();
         h.coord.drain_timing();
 
         // wall_ms_accum should have accumulated totals
@@ -2860,8 +3108,8 @@ mod tests {
 
         // Calibrate ElChe with 2:1 timing
         for _ in 0..3 {
-            h.timing_tx.send(TimingMsg { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-            h.timing_tx.send(TimingMsg { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
             h.coord.drain_timing();
             if h.coord.should_average() {
                 h.coord.trigger_averaging().unwrap();
