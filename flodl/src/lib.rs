@@ -85,7 +85,8 @@ pub use nn::{
     walk_modules, walk_modules_visited,
     CudaGraph, MemPoolId, CaptureMode, cuda_graph_capture, cuda_graph_pool_handle,
     CudaEvent, CudaEventFlags, CudaStream, StreamGuard,
-    NcclComms, ReduceOp, Ddp, DdpConfig, ElChe,
+    NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, ElChe,
+    ApplyPolicy, AsyncDdp, AsyncDdpConfig, AverageBackend,
     GaussianBlur, gaussian_blur_2d,
 };
 pub use graph::{

@@ -837,6 +837,52 @@ char* flodl_nccl_broadcast(void* handle, FlodlTensor* tensors,
 // Number of devices in the communicator group.
 int flodl_nccl_size(void* handle);
 
+// --- NCCL Per-Rank Operations (for multi-threaded DDP) ---
+//
+// IMPORTANT: ncclCommInitRank from worker threads corrupts the CUDA context
+// on heterogeneous GPU setups (observed: RTX 5060 Ti + GTX 1060). Subsequent
+// CUBLAS kernel launches fail with cudaErrorNoKernelImageForDevice.
+//
+// The safe pattern for multi-threaded DDP is:
+//   1. Main thread: flodl_nccl_init() with ncclCommInitAll (creates all comms)
+//   2. Main thread: flodl_nccl_split_rank() to extract individual comms
+//   3. Worker threads: use extracted comms for flodl_nccl_all_reduce_rank()
+//
+// The init_rank / get_unique_id functions below are provided for multi-process
+// DDP (one process per GPU) where this issue does not apply.
+
+// NCCL unique ID size in bytes.
+#define FLODL_NCCL_UNIQUE_ID_BYTES 128
+
+// Generate a unique ID for NCCL communicator initialization.
+// uid_out: pointer to at least FLODL_NCCL_UNIQUE_ID_BYTES bytes.
+// Called once on any thread; result shared with all ranks.
+char* flodl_nccl_get_unique_id(void* uid_out);
+
+// Initialize a single-rank NCCL communicator.
+// Caller must set the CUDA device for this rank before calling.
+// All ranks must call this concurrently with the same uid/nranks.
+char* flodl_nccl_init_rank(int rank, int nranks, const void* uid,
+                            void** handle_out);
+
+// Destroy a single-rank NCCL communicator.
+void flodl_nccl_destroy_rank(void* handle);
+
+// In-place AllReduce on a single rank's communicator.
+// All ranks must call this concurrently for the collective to complete.
+// tensors: array of ntensors FlodlTensors (all on this rank's device).
+// ntensors: number of tensors to reduce (batched with ncclGroupStart/End).
+// stream: CUDA stream handle, or NULL for default stream.
+// op: 0=Sum, 1=Prod, 2=Max, 3=Min, 4=Avg
+char* flodl_nccl_all_reduce_rank(void* handle, FlodlTensor* tensors,
+                                  int ntensors, void* stream, int op);
+
+// Extract a single-rank communicator from a group handle.
+// Moves ownership: the group's slot for this rank is nullified.
+// The returned handle must be freed with flodl_nccl_destroy_rank().
+char* flodl_nccl_split_rank(void* group_handle, int rank,
+                             void** rank_handle_out);
+
 // --- Utility ---
 
 void flodl_free_string(char* s);

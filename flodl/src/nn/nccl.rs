@@ -242,6 +242,48 @@ impl NcclComms {
         }
         Ok(())
     }
+
+    /// Split this communicator group into individual per-rank communicators.
+    ///
+    /// Returns one [`NcclRankComm`] per device. Ownership of each rank's
+    /// internal communicator is transferred; this group becomes empty and
+    /// should be dropped (its destructor is a no-op for extracted ranks).
+    ///
+    /// This is the **recommended way** to create per-thread communicators for
+    /// multi-threaded DDP. Calling `ncclCommInitRank` from worker threads
+    /// corrupts the CUDA context on heterogeneous GPU setups (e.g. mixing
+    /// GPU architectures), causing `cudaErrorNoKernelImageForDevice` on
+    /// subsequent kernel launches. The init-on-main + split pattern avoids this:
+    ///
+    /// ```ignore
+    /// // Main thread: safe single-thread init
+    /// let group = NcclComms::new(&[Device::CUDA(0), Device::CUDA(1)])?;
+    /// let rank_comms = group.split()?;
+    ///
+    /// // Distribute to worker threads
+    /// let comm0 = rank_comms.into_iter().nth(0).unwrap(); // -> thread 0
+    /// let comm1 = rank_comms.into_iter().nth(1).unwrap(); // -> thread 1
+    /// ```
+    pub fn split(self) -> Result<Vec<NcclRankComm>> {
+        let mut comms = Vec::with_capacity(self.devices.len());
+        for i in 0..self.devices.len() {
+            let mut rank_handle: *mut c_void = ptr::null_mut();
+            let err = unsafe {
+                ffi::flodl_nccl_split_rank(
+                    self.handle,
+                    i as i32,
+                    &mut rank_handle,
+                )
+            };
+            check_err(err)?;
+            comms.push(NcclRankComm {
+                handle: rank_handle,
+                rank: i,
+                world_size: self.devices.len(),
+            });
+        }
+        Ok(comms)
+    }
 }
 
 impl Drop for NcclComms {
@@ -250,6 +292,172 @@ impl Drop for NcclComms {
             unsafe { ffi::flodl_nccl_destroy(self.handle) };
             self.handle = ptr::null_mut();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-Rank NCCL (for multi-threaded DDP)
+// ---------------------------------------------------------------------------
+
+/// Size of an NCCL unique ID in bytes.
+pub const NCCL_UNIQUE_ID_BYTES: usize = 128;
+
+/// Opaque unique ID for NCCL communicator initialization.
+///
+/// Generated once on any thread, then shared (via clone) with all ranks.
+/// Each rank passes its copy to [`NcclRankComm::init_rank`].
+#[derive(Clone)]
+pub struct NcclUniqueId {
+    bytes: [u8; NCCL_UNIQUE_ID_BYTES],
+}
+
+// NcclUniqueId is just bytes, safe to send/share.
+unsafe impl Send for NcclUniqueId {}
+unsafe impl Sync for NcclUniqueId {}
+
+impl NcclUniqueId {
+    /// Generate a new unique ID for NCCL communicator initialization.
+    ///
+    /// Call once on any thread, then clone and distribute to all ranks.
+    pub fn new() -> Result<Self> {
+        let mut bytes = [0u8; NCCL_UNIQUE_ID_BYTES];
+        let err = unsafe { ffi::flodl_nccl_get_unique_id(bytes.as_mut_ptr()) };
+        check_err(err)?;
+        Ok(NcclUniqueId { bytes })
+    }
+
+    /// Raw bytes of the unique ID.
+    pub fn as_bytes(&self) -> &[u8; NCCL_UNIQUE_ID_BYTES] {
+        &self.bytes
+    }
+}
+
+impl std::fmt::Debug for NcclUniqueId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Don't dump 128 bytes; just show it exists
+        f.debug_struct("NcclUniqueId").finish()
+    }
+}
+
+/// Single-rank NCCL communicator for multi-threaded DDP.
+///
+/// **Preferred creation path:** [`NcclComms::new`] + [`NcclComms::split`].
+/// This initializes all communicators from a single thread via `ncclCommInitAll`,
+/// then splits them for distribution to worker threads. This avoids CUDA context
+/// corruption that occurs when `ncclCommInitRank` is called from multiple threads
+/// on heterogeneous GPU setups.
+///
+/// [`init_rank`](Self::init_rank) is provided for multi-process DDP (one process
+/// per GPU) where the CUDA context issue does not apply.
+///
+/// Collective operations (e.g. [`all_reduce`](Self::all_reduce)) must be called
+/// concurrently by all ranks in the communicator for the collective to complete.
+///
+/// RAII: the communicator is destroyed on drop.
+pub struct NcclRankComm {
+    handle: *mut c_void,
+    rank: usize,
+    world_size: usize,
+}
+
+// NcclRankComm can be sent between threads (though typically stays in its GPU thread).
+unsafe impl Send for NcclRankComm {}
+
+impl NcclRankComm {
+    /// Initialize this rank's communicator.
+    ///
+    /// The caller must set the CUDA device for this rank before calling
+    /// (via `set_current_cuda_device`). All ranks must call this concurrently.
+    pub fn init_rank(rank: usize, world_size: usize, uid: &NcclUniqueId) -> Result<Self> {
+        if rank >= world_size {
+            return Err(TensorError::new(&format!(
+                "NcclRankComm: rank {} >= world_size {}", rank, world_size
+            )));
+        }
+        if world_size < 2 {
+            return Err(TensorError::new(
+                "NcclRankComm requires world_size >= 2"
+            ));
+        }
+        let mut handle: *mut c_void = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_nccl_init_rank(
+                rank as i32,
+                world_size as i32,
+                uid.bytes.as_ptr(),
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(NcclRankComm { handle, rank, world_size })
+    }
+
+    /// This rank's index.
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// Total number of ranks in the communicator.
+    pub fn world_size(&self) -> usize {
+        self.world_size
+    }
+
+    /// In-place AllReduce on this rank's tensors using the default stream.
+    ///
+    /// All tensors must be on this rank's device. All ranks must call this
+    /// concurrently with the same number of tensors for the collective to complete.
+    pub fn all_reduce(&self, tensors: &[&Tensor], op: ReduceOp) -> Result<()> {
+        let mut handles: Vec<ffi::FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_nccl_all_reduce_rank(
+                self.handle,
+                handles.as_mut_ptr(),
+                handles.len() as i32,
+                ptr::null_mut(),
+                op as i32,
+            )
+        };
+        check_err(err)
+    }
+
+    /// In-place AllReduce on an explicit CUDA stream.
+    ///
+    /// The stream must belong to this rank's device.
+    pub fn all_reduce_on_stream(
+        &self,
+        tensors: &[&Tensor],
+        op: ReduceOp,
+        stream: &CudaStream,
+    ) -> Result<()> {
+        let mut handles: Vec<ffi::FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_nccl_all_reduce_rank(
+                self.handle,
+                handles.as_mut_ptr(),
+                handles.len() as i32,
+                stream.as_ptr(),
+                op as i32,
+            )
+        };
+        check_err(err)
+    }
+}
+
+impl Drop for NcclRankComm {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::flodl_nccl_destroy_rank(self.handle) };
+            self.handle = ptr::null_mut();
+        }
+    }
+}
+
+impl std::fmt::Debug for NcclRankComm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NcclRankComm")
+            .field("rank", &self.rank)
+            .field("world_size", &self.world_size)
+            .finish()
     }
 }
 
@@ -408,5 +616,201 @@ mod tests {
             "device 0 should have 12.0 after AllReduce Sum on streams");
         assert!(vals1.iter().all(|&v| (v - 12.0).abs() < 1e-5),
             "device 1 should have 12.0 after AllReduce Sum on streams");
+    }
+
+    // --- NcclRankComm tests ---
+
+    #[test]
+    fn test_nccl_rank_comm_rejects_invalid_rank() {
+        let result = NcclRankComm::init_rank(2, 2, &NcclUniqueId { bytes: [0; NCCL_UNIQUE_ID_BYTES] });
+        assert!(result.is_err(), "rank >= world_size should fail");
+    }
+
+    #[test]
+    fn test_nccl_rank_comm_rejects_world_size_one() {
+        let result = NcclRankComm::init_rank(0, 1, &NcclUniqueId { bytes: [0; NCCL_UNIQUE_ID_BYTES] });
+        assert!(result.is_err(), "world_size < 2 should fail");
+    }
+
+    #[test]
+    fn test_nccl_unique_id_clone() {
+        // NcclUniqueId must be cloneable for distribution to worker threads
+        fn assert_send_sync_clone<T: Send + Sync + Clone>() {}
+        assert_send_sync_clone::<NcclUniqueId>();
+    }
+
+    #[test]
+    fn test_nccl_rank_comm_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<NcclRankComm>();
+    }
+
+    #[test]
+    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    fn test_nccl_rank_comm_init_and_reduce() {
+        if !require_multi_gpu() { return; }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let uid = NcclUniqueId::new().unwrap();
+        let uid0 = uid.clone();
+        let uid1 = uid;
+
+        // Each rank must call init_rank concurrently. Use two threads.
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            NcclRankComm::init_rank(0, 2, &uid0).unwrap()
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            NcclRankComm::init_rank(1, 2, &uid1).unwrap()
+        });
+        let comm0 = h0.join().unwrap();
+        let comm1 = h1.join().unwrap();
+
+        assert_eq!(comm0.rank(), 0);
+        assert_eq!(comm0.world_size(), 2);
+        assert_eq!(comm1.rank(), 1);
+
+        // AllReduce Avg: 10.0 on dev0, 20.0 on dev1 -> 15.0 on both
+        let opts0 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(0) };
+        let opts1 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(1) };
+        let t0 = Tensor::full(&[64], 10.0, opts0).unwrap();
+        let t1 = Tensor::full(&[64], 20.0, opts1).unwrap();
+
+        // AllReduce must be called concurrently from different threads
+        let t0_clone = t0.clone();
+        let t1_clone = t1.clone();
+
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            comm0.all_reduce(&[&t0_clone], ReduceOp::Avg).unwrap();
+            cuda_synchronize(0);
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            comm1.all_reduce(&[&t1_clone], ReduceOp::Avg).unwrap();
+            cuda_synchronize(1);
+        });
+        h0.join().unwrap();
+        h1.join().unwrap();
+
+        let vals0 = t0.to_f32_vec().unwrap();
+        let vals1 = t1.to_f32_vec().unwrap();
+        assert!(vals0.iter().all(|&v| (v - 15.0).abs() < 1e-5),
+            "rank 0 should have 15.0 after AllReduce Avg, got {}", vals0[0]);
+        assert!(vals1.iter().all(|&v| (v - 15.0).abs() < 1e-5),
+            "rank 1 should have 15.0 after AllReduce Avg, got {}", vals1[0]);
+    }
+
+    #[test]
+    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    fn test_nccl_rank_comm_on_stream() {
+        if !require_multi_gpu() { return; }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let uid = NcclUniqueId::new().unwrap();
+        let uid0 = uid.clone();
+        let uid1 = uid;
+
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            NcclRankComm::init_rank(0, 2, &uid0).unwrap()
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            NcclRankComm::init_rank(1, 2, &uid1).unwrap()
+        });
+        let comm0 = h0.join().unwrap();
+        let comm1 = h1.join().unwrap();
+
+        let opts0 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(0) };
+        let opts1 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(1) };
+        let stream0 = CudaStream::new(Device::CUDA(0), false).unwrap();
+        let stream1 = CudaStream::new(Device::CUDA(1), false).unwrap();
+
+        let t0 = Tensor::full(&[32], 3.0, opts0).unwrap();
+        let t1 = Tensor::full(&[32], 7.0, opts1).unwrap();
+        let t0c = t0.clone();
+        let t1c = t1.clone();
+
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            comm0.all_reduce_on_stream(&[&t0c], ReduceOp::Sum, &stream0).unwrap();
+            stream0.synchronize().unwrap();
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            comm1.all_reduce_on_stream(&[&t1c], ReduceOp::Sum, &stream1).unwrap();
+            stream1.synchronize().unwrap();
+        });
+        h0.join().unwrap();
+        h1.join().unwrap();
+
+        let vals0 = t0.to_f32_vec().unwrap();
+        let vals1 = t1.to_f32_vec().unwrap();
+        assert!(vals0.iter().all(|&v| (v - 10.0).abs() < 1e-5),
+            "rank 0 should have 10.0 after Sum, got {}", vals0[0]);
+        assert!(vals1.iter().all(|&v| (v - 10.0).abs() < 1e-5),
+            "rank 1 should have 10.0 after Sum, got {}", vals1[0]);
+    }
+
+    #[test]
+    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    fn test_nccl_rank_comm_multi_tensor_batch() {
+        if !require_multi_gpu() { return; }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let uid = NcclUniqueId::new().unwrap();
+        let uid0 = uid.clone();
+        let uid1 = uid;
+
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            NcclRankComm::init_rank(0, 2, &uid0).unwrap()
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            NcclRankComm::init_rank(1, 2, &uid1).unwrap()
+        });
+        let comm0 = h0.join().unwrap();
+        let comm1 = h1.join().unwrap();
+
+        let opts0 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(0) };
+        let opts1 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(1) };
+
+        // Two tensors per rank (simulates multiple params)
+        let a0 = Tensor::full(&[16], 1.0, opts0).unwrap();
+        let b0 = Tensor::full(&[8], 100.0, opts0).unwrap();
+        let a1 = Tensor::full(&[16], 3.0, opts1).unwrap();
+        let b1 = Tensor::full(&[8], 200.0, opts1).unwrap();
+
+        let a0c = a0.clone();
+        let b0c = b0.clone();
+        let a1c = a1.clone();
+        let b1c = b1.clone();
+
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            comm0.all_reduce(&[&a0c, &b0c], ReduceOp::Avg).unwrap();
+            cuda_synchronize(0);
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            comm1.all_reduce(&[&a1c, &b1c], ReduceOp::Avg).unwrap();
+            cuda_synchronize(1);
+        });
+        h0.join().unwrap();
+        h1.join().unwrap();
+
+        // a: avg(1.0, 3.0) = 2.0, b: avg(100.0, 200.0) = 150.0
+        let va0 = a0.to_f32_vec().unwrap();
+        let vb0 = b0.to_f32_vec().unwrap();
+        assert!(va0.iter().all(|&v| (v - 2.0).abs() < 1e-5), "a0 should be 2.0");
+        assert!(vb0.iter().all(|&v| (v - 150.0).abs() < 1e-5), "b0 should be 150.0");
+
+        let va1 = a1.to_f32_vec().unwrap();
+        let vb1 = b1.to_f32_vec().unwrap();
+        assert!(va1.iter().all(|&v| (v - 2.0).abs() < 1e-5), "a1 should be 2.0");
+        assert!(vb1.iter().all(|&v| (v - 150.0).abs() < 1e-5), "b1 should be 150.0");
     }
 }

@@ -55,6 +55,7 @@ pub mod cuda_event;
 pub mod cuda_stream;
 pub mod nccl;
 pub mod ddp;
+pub mod async_ddp;
 pub mod functional;
 
 pub use parameter::Parameter;
@@ -108,8 +109,9 @@ pub use functional::{gaussian_blur_2d, GaussianBlur};
 pub use cuda_graph::{CudaGraph, MemPoolId, CaptureMode, cuda_graph_capture, cuda_graph_pool_handle};
 pub use cuda_event::{CudaEvent, CudaEventFlags};
 pub use cuda_stream::{CudaStream, StreamGuard};
-pub use nccl::{NcclComms, ReduceOp};
+pub use nccl::{NcclComms, NcclRankComm, NcclUniqueId, ReduceOp};
 pub use ddp::{Ddp, DdpConfig, ElChe};
+pub use async_ddp::{ApplyPolicy, AsyncDdp, AsyncDdpConfig, AverageBackend};
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;

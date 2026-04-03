@@ -1217,6 +1217,22 @@ unsafe extern "C" {
     ) -> *mut i8;
     pub fn flodl_nccl_size(handle: *mut c_void) -> i32;
 
+    // --- NCCL Per-Rank Operations ---
+
+    pub fn flodl_nccl_get_unique_id(uid_out: *mut u8) -> *mut i8;
+    pub fn flodl_nccl_init_rank(
+        rank: i32, nranks: i32, uid: *const u8, handle_out: *mut *mut c_void,
+    ) -> *mut i8;
+    pub fn flodl_nccl_destroy_rank(handle: *mut c_void);
+    pub fn flodl_nccl_all_reduce_rank(
+        handle: *mut c_void, tensors: *mut FlodlTensor, ntensors: i32,
+        stream: *mut c_void, op: i32,
+    ) -> *mut i8;
+    pub fn flodl_nccl_split_rank(
+        group_handle: *mut c_void, rank: i32,
+        rank_handle_out: *mut *mut c_void,
+    ) -> *mut i8;
+
     // --- Utility ---
 
     pub fn flodl_free_string(s: *mut i8);

@@ -4210,6 +4210,131 @@ extern "C" int flodl_nccl_size(void* handle) {
     return static_cast<FlodlNcclComms*>(handle)->ndev;
 }
 
+// --- NCCL Per-Rank Operations (for multi-threaded DDP) ---
+
+struct FlodlNcclRankComm {
+    ncclComm_t comm;
+
+    ~FlodlNcclRankComm() {
+        if (comm) {
+            ncclCommDestroy(comm);
+        }
+    }
+};
+
+extern "C" char* flodl_nccl_get_unique_id(void* uid_out) {
+    try {
+        ncclUniqueId id;
+        ncclResult_t result = ncclGetUniqueId(&id);
+        if (result != ncclSuccess) {
+            return make_error(
+                std::string("ncclGetUniqueId failed: ") +
+                ncclGetErrorString(result));
+        }
+        static_assert(sizeof(ncclUniqueId) == NCCL_UNIQUE_ID_BYTES,
+                      "ncclUniqueId size mismatch");
+        memcpy(uid_out, &id, sizeof(ncclUniqueId));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_nccl_init_rank(int rank, int nranks, const void* uid,
+                                        void** handle_out) {
+    try {
+        ncclUniqueId id;
+        memcpy(&id, uid, sizeof(ncclUniqueId));
+
+        auto* h = new FlodlNcclRankComm();
+        h->comm = nullptr;
+        ncclResult_t result = ncclCommInitRank(&h->comm, nranks, id, rank);
+        if (result != ncclSuccess) {
+            std::string msg = std::string("ncclCommInitRank failed (rank ") +
+                              std::to_string(rank) + "): " +
+                              ncclGetErrorString(result);
+            delete h;
+            return make_error(msg);
+        }
+        *handle_out = static_cast<void*>(h);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" void flodl_nccl_destroy_rank(void* handle) {
+    delete static_cast<FlodlNcclRankComm*>(handle);
+}
+
+extern "C" char* flodl_nccl_all_reduce_rank(void* handle, FlodlTensor* tensors,
+                                              int ntensors, void* stream,
+                                              int op) {
+    auto* h = static_cast<FlodlNcclRankComm*>(handle);
+    try {
+        auto nccl_op = static_cast<ncclRedOp_t>(op);
+        cudaStream_t cuda_stream;
+        if (stream) {
+            cuda_stream = static_cast<at::cuda::CUDAStream*>(stream)->stream();
+        } else {
+            cuda_stream = at::cuda::getCurrentCUDAStream().stream();
+        }
+
+        ncclGroupStart();
+        for (int i = 0; i < ntensors; i++) {
+            auto& t = *reinterpret_cast<torch::Tensor*>(tensors[i]);
+            void* data = t.data_ptr();
+            size_t count = static_cast<size_t>(t.numel());
+            ncclDataType_t dtype = to_nccl_dtype(t.scalar_type());
+
+            ncclResult_t result = ncclAllReduce(
+                data, data, count, dtype, nccl_op,
+                h->comm, cuda_stream);
+            if (result != ncclSuccess) {
+                ncclGroupEnd();
+                return make_error(
+                    std::string("ncclAllReduce (rank) failed on tensor ") +
+                    std::to_string(i) + ": " +
+                    ncclGetErrorString(result));
+            }
+        }
+        ncclResult_t result = ncclGroupEnd();
+        if (result != ncclSuccess) {
+            return make_error(
+                std::string("ncclGroupEnd (rank) failed: ") +
+                ncclGetErrorString(result));
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+extern "C" char* flodl_nccl_split_rank(void* group_handle, int rank,
+                                         void** rank_handle_out) {
+    auto* g = static_cast<FlodlNcclComms*>(group_handle);
+    try {
+        if (rank < 0 || rank >= g->ndev) {
+            return make_error(
+                std::string("flodl_nccl_split_rank: rank ") +
+                std::to_string(rank) + " out of range (ndev=" +
+                std::to_string(g->ndev) + ")");
+        }
+        if (!g->comms[rank]) {
+            return make_error(
+                std::string("flodl_nccl_split_rank: rank ") +
+                std::to_string(rank) + " already extracted");
+        }
+        auto* h = new FlodlNcclRankComm();
+        h->comm = g->comms[rank];
+        g->comms[rank] = nullptr;  // transfer ownership
+        *rank_handle_out = static_cast<void*>(h);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 #else // CPU-only stubs
 
 extern "C" char* flodl_cuda_graph_new(void** graph_out) {
@@ -4319,6 +4444,30 @@ extern "C" char* flodl_nccl_broadcast(void* handle, FlodlTensor* tensors,
     return make_error("NCCL requires a CUDA build");
 }
 extern "C" int flodl_nccl_size(void* handle) { (void)handle; return 0; }
+
+// --- NCCL Per-Rank (CPU stubs) ---
+
+extern "C" char* flodl_nccl_get_unique_id(void* uid_out) {
+    (void)uid_out;
+    return make_error("NCCL requires a CUDA build");
+}
+extern "C" char* flodl_nccl_init_rank(int rank, int nranks, const void* uid,
+                                        void** handle_out) {
+    (void)rank; (void)nranks; (void)uid; (void)handle_out;
+    return make_error("NCCL requires a CUDA build");
+}
+extern "C" void flodl_nccl_destroy_rank(void* handle) { (void)handle; }
+extern "C" char* flodl_nccl_all_reduce_rank(void* handle, FlodlTensor* tensors,
+                                              int ntensors, void* stream,
+                                              int op) {
+    (void)handle; (void)tensors; (void)ntensors; (void)stream; (void)op;
+    return make_error("NCCL requires a CUDA build");
+}
+extern "C" char* flodl_nccl_split_rank(void* group_handle, int rank,
+                                         void** rank_handle_out) {
+    (void)group_handle; (void)rank; (void)rank_handle_out;
+    return make_error("NCCL requires a CUDA build");
+}
 
 #endif // FLODL_BUILD_CUDA
 
