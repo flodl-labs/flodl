@@ -111,7 +111,7 @@ pub use cuda_event::{CudaEvent, CudaEventFlags};
 pub use cuda_stream::{CudaStream, StreamGuard};
 pub use nccl::{NcclAbortHandle, NcclComms, NcclRankComm, NcclUniqueId, ReduceOp};
 pub use ddp::{Ddp, DdpConfig, ElChe};
-pub use async_ddp::{ApplyPolicy, AsyncDdp, AsyncDdpConfig, AverageBackend};
+pub use async_ddp::{ApplyPolicy, AsyncDdp, AsyncDdpBuilder, AsyncDdpConfig, AverageBackend, TrainedState};
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;

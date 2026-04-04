@@ -5,6 +5,26 @@
 //! knobs control the behavior: [`ApplyPolicy`] (when to average) and [`AverageBackend`]
 //! (how to average).
 //!
+//! # Quick start
+//!
+//! ```ignore
+//! use flodl::*;
+//!
+//! let ddp = AsyncDdp::builder(model_factory, optim_factory, train_fn)
+//!     .dataset(dataset)
+//!     .batch_size(32)
+//!     .num_epochs(10)
+//!     .policy(ApplyPolicy::Cadence)
+//!     .backend(AverageBackend::Nccl)
+//!     .checkpoint_every(5)
+//!     .checkpoint_fn(|ver, g| g.save_checkpoint(&format!("ckpt_v{ver}.fdl")))
+//!     .run()?;
+//!
+//! let state = ddp.join()?;
+//! // state.params[i] corresponds to model.parameters()[i]
+//! // state.buffers[i] corresponds to model.buffers()[i]
+//! ```
+//!
 //! # Architecture
 //!
 //! ```text
@@ -41,6 +61,7 @@
 //! - NCCL abort handles: if a worker dies mid-collective, surviving workers are
 //!   unblocked via `ncclCommAbort` instead of hanging forever.
 
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -55,6 +76,36 @@ use crate::nn::nccl::{NcclRankComm, ReduceOp};
 use crate::nn::{Module, Optimizer, Parameter};
 use crate::rng::Rng;
 use crate::tensor::{Device, Result, Tensor, TensorError};
+
+/// Checkpoint callback type: `(version, &model) -> Result<()>`.
+///
+/// Called on rank 0 after averaging events (multi-GPU) or at epoch boundaries
+/// (single-GPU). Errors are logged but do not stop training.
+pub type CheckpointFn<M> = Arc<dyn Fn(u64, &M) -> Result<()> + Send + Sync>;
+
+// ---------------------------------------------------------------------------
+// Return type
+// ---------------------------------------------------------------------------
+
+/// Trained parameters and buffers returned by [`AsyncDdp::join`].
+///
+/// Contains the averaged final state from all workers. Parameters are on CPU.
+/// Buffers include running statistics (e.g. BatchNorm mean/var) needed for inference.
+///
+/// # Example
+///
+/// ```ignore
+/// let state = ddp.join()?;
+/// // state.params[i] corresponds to model.parameters()[i]
+/// // state.buffers[i] corresponds to model.buffers()[i]
+/// ```
+#[derive(Clone, Debug)]
+pub struct TrainedState {
+    /// Averaged parameter tensors (CPU). Same order as `Module::parameters()`.
+    pub params: Vec<Tensor>,
+    /// Averaged buffer tensors (CPU). Same order as `Module::buffers()`.
+    pub buffers: Vec<Tensor>,
+}
 
 // ---------------------------------------------------------------------------
 // Configuration enums
@@ -145,6 +196,9 @@ pub struct AsyncDdpConfig {
     /// Maximum batch lead of fastest over slowest worker.
     /// `Some(0)` = strict lockstep. `None` = unlimited. Default: `None`.
     pub max_batch_diff: Option<usize>,
+    /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
+    /// `None` = no checkpointing. Default: `None`.
+    pub checkpoint_every: Option<usize>,
 }
 
 impl Default for AsyncDdpConfig {
@@ -162,6 +216,7 @@ impl AsyncDdpConfig {
             anchor: None,
             divergence_threshold: None,
             max_batch_diff: None,
+            checkpoint_every: None,
         }
     }
 
@@ -195,6 +250,15 @@ impl AsyncDdpConfig {
     /// this lead are paused until the slowest catches up.
     pub fn with_max_batch_diff(mut self, max: usize) -> Self {
         self.max_batch_diff = Some(max);
+        self
+    }
+
+    /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
+    ///
+    /// Requires a `checkpoint_fn` to be provided via the builder or `auto_with`.
+    /// Errors from the checkpoint function are logged but do not stop training.
+    pub fn with_checkpoint_every(mut self, n: usize) -> Self {
+        self.checkpoint_every = Some(n);
         self
     }
 }
@@ -294,6 +358,11 @@ pub enum ControlMsg {
     /// Worker is too far ahead: block until the next real command arrives.
     /// Sent when the worker's batch lead exceeds [`ElChe::max_batch_diff`].
     Throttle,
+    /// Save a checkpoint from rank 0 after averaging.
+    Checkpoint {
+        /// Version number (averaging event count in multi-GPU, epoch in single-GPU).
+        version: u64,
+    },
     /// Shut down this worker.
     Shutdown,
 }
@@ -372,6 +441,8 @@ pub struct GpuWorker<M: Module> {
     metrics_tx: mpsc::Sender<MetricsMsg>,
     /// Used only with AverageBackend::Cpu.
     param_tx: mpsc::Sender<ParamSnapshot>,
+    /// Dedicated channel for the final snapshot (avoids race with CPU averaging param_tx).
+    final_param_tx: mpsc::Sender<ParamSnapshot>,
     control_rx: mpsc::Receiver<ControlMsg>,
 
     // -- Data iteration --
@@ -388,6 +459,10 @@ pub struct GpuWorker<M: Module> {
     current_version: u64,
     current_epoch: usize,
     pending_partition_size: Option<usize>,
+
+    // -- Checkpoint --
+    /// Called on rank 0 after averaging events. Log-and-continue on error.
+    checkpoint_fn: Option<CheckpointFn<M>>,
 }
 
 /// Channels bundle returned by [`GpuWorker::channels`] for wiring into the coordinator.
@@ -398,6 +473,8 @@ pub struct WorkerChannels {
     pub metrics_rx: mpsc::Receiver<MetricsMsg>,
     /// Receives parameter snapshots from this worker (CPU averaging path).
     pub param_rx: mpsc::Receiver<ParamSnapshot>,
+    /// Receives the final parameter snapshot from this worker (sent before exit).
+    pub final_param_rx: mpsc::Receiver<ParamSnapshot>,
     /// Sends control messages to this worker.
     pub control_tx: mpsc::Sender<ControlMsg>,
 }
@@ -408,6 +485,7 @@ pub type WorkerEndpoints = (
     mpsc::Sender<TimingMsg>,
     mpsc::Sender<MetricsMsg>,
     mpsc::Sender<ParamSnapshot>,
+    mpsc::Sender<ParamSnapshot>,  // final_param_tx
     mpsc::Receiver<ControlMsg>,
 );
 
@@ -421,10 +499,11 @@ impl<M: Module> GpuWorker<M> {
         let (timing_tx, timing_rx) = mpsc::channel();
         let (metrics_tx, metrics_rx) = mpsc::channel();
         let (param_tx, param_rx) = mpsc::channel();
+        let (final_param_tx, final_param_rx) = mpsc::channel();
         let (control_tx, control_rx) = mpsc::channel();
         (
-            (timing_tx, metrics_tx, param_tx, control_rx),
-            WorkerChannels { timing_rx, metrics_rx, param_rx, control_tx },
+            (timing_tx, metrics_tx, param_tx, final_param_tx, control_rx),
+            WorkerChannels { timing_rx, metrics_rx, param_rx, final_param_rx, control_tx },
         )
     }
 
@@ -441,9 +520,11 @@ impl<M: Module> GpuWorker<M> {
         optim_factory: G,
         dataset: Arc<dyn BatchDataSet>,
         nccl_comm: Option<NcclRankComm>,
+        checkpoint_fn: Option<CheckpointFn<M>>,
         timing_tx: mpsc::Sender<TimingMsg>,
         metrics_tx: mpsc::Sender<MetricsMsg>,
         param_tx: mpsc::Sender<ParamSnapshot>,
+        final_param_tx: mpsc::Sender<ParamSnapshot>,
         control_rx: mpsc::Receiver<ControlMsg>,
     ) -> Result<Self>
     where
@@ -521,6 +602,7 @@ impl<M: Module> GpuWorker<M> {
             timing_tx,
             metrics_tx,
             param_tx,
+            final_param_tx,
             control_rx,
             dataset,
             partition,
@@ -531,6 +613,7 @@ impl<M: Module> GpuWorker<M> {
             current_version: 0,
             current_epoch: 0,
             pending_partition_size: None,
+            checkpoint_fn,
         })
     }
 
@@ -740,6 +823,13 @@ impl<M: Module> GpuWorker<M> {
                     }
                 }
             }
+            ControlMsg::Checkpoint { version } => {
+                if let Some(ref f) = self.checkpoint_fn {
+                    if let Err(e) = f(version, &self.model) {
+                        eprintln!("  async-ddp: checkpoint failed (v{version}): {e}");
+                    }
+                }
+            }
             ControlMsg::Shutdown => return Ok(true),
         }
         Ok(false)
@@ -752,6 +842,14 @@ impl<M: Module> GpuWorker<M> {
             batch_ms,
             step_count: self.local_step,
         }).map_err(|_| TensorError::new("timing channel disconnected"))
+    }
+
+    /// Send the final parameter snapshot on the dedicated channel before exiting.
+    ///
+    /// This uses [`final_param_tx`] (not [`param_tx`]) to avoid racing with
+    /// CPU averaging snapshot collection on the same channel.
+    pub fn send_final_snapshot(&self) {
+        let _ = self.final_param_tx.send(self.snapshot_params());
     }
 
     /// Notify the coordinator that this worker is about to exit.
@@ -912,6 +1010,8 @@ pub struct Coordinator {
     metrics_rx: mpsc::Receiver<MetricsMsg>,
     /// Only used with [`AverageBackend::Cpu`].
     param_rx: mpsc::Receiver<ParamSnapshot>,
+    /// Dedicated receivers for final snapshots from each worker.
+    final_param_rxs: Vec<mpsc::Receiver<ParamSnapshot>>,
     control_txs: Vec<mpsc::Sender<ControlMsg>>,
 
     // Configuration
@@ -951,6 +1051,12 @@ pub struct Coordinator {
     /// Per-rank throttle state. Prevents sending duplicate Throttle messages
     /// to workers that are already blocked. Reset after averaging.
     throttled: Vec<bool>,
+
+    // Checkpointing
+    /// Number of averaging events completed.
+    avg_count: usize,
+    /// Save a checkpoint every N averaging events. None = disabled.
+    checkpoint_every: Option<usize>,
 }
 
 /// Builder for configuring a [`Coordinator`].
@@ -958,6 +1064,7 @@ pub struct CoordinatorBuilder {
     timing_rx: mpsc::Receiver<TimingMsg>,
     metrics_rx: mpsc::Receiver<MetricsMsg>,
     param_rx: mpsc::Receiver<ParamSnapshot>,
+    final_param_rxs: Vec<mpsc::Receiver<ParamSnapshot>>,
     control_txs: Vec<mpsc::Sender<ControlMsg>>,
     policy: ApplyPolicy,
     backend: AverageBackend,
@@ -965,6 +1072,7 @@ pub struct CoordinatorBuilder {
     total_samples: usize,
     el_che: super::ddp::ElChe,
     divergence_threshold: f64,
+    checkpoint_every: Option<usize>,
 }
 
 impl CoordinatorBuilder {
@@ -989,12 +1097,19 @@ impl CoordinatorBuilder {
         self
     }
 
+    /// Set the checkpoint interval (averaging events between checkpoints).
+    pub fn checkpoint_every(mut self, n: usize) -> Self {
+        self.checkpoint_every = Some(n);
+        self
+    }
+
     /// Build the coordinator.
     pub fn build(self) -> Coordinator {
         Coordinator {
             timing_rx: self.timing_rx,
             metrics_rx: self.metrics_rx,
             param_rx: self.param_rx,
+            final_param_rxs: self.final_param_rxs,
             control_txs: self.control_txs,
             policy: self.policy,
             backend: self.backend,
@@ -1012,6 +1127,8 @@ impl CoordinatorBuilder {
             last_batch_ms: vec![0.0; self.world_size],
             last_avg_ms: 0.0,
             throttled: vec![false; self.world_size],
+            avg_count: 0,
+            checkpoint_every: self.checkpoint_every,
         }
     }
 }
@@ -1023,6 +1140,7 @@ impl Coordinator {
         timing_rx: mpsc::Receiver<TimingMsg>,
         metrics_rx: mpsc::Receiver<MetricsMsg>,
         param_rx: mpsc::Receiver<ParamSnapshot>,
+        final_param_rxs: Vec<mpsc::Receiver<ParamSnapshot>>,
         control_txs: Vec<mpsc::Sender<ControlMsg>>,
         policy: ApplyPolicy,
         backend: AverageBackend,
@@ -1034,6 +1152,7 @@ impl Coordinator {
             timing_rx,
             metrics_rx,
             param_rx,
+            final_param_rxs,
             control_txs,
             policy,
             backend,
@@ -1041,6 +1160,7 @@ impl Coordinator {
             total_samples,
             el_che,
             divergence_threshold: 0.05,
+            checkpoint_every: None,
         }
     }
 
@@ -1064,6 +1184,21 @@ impl Coordinator {
         &self.steps_since_avg
     }
 
+    /// Process a single timing message. Shared by [`drain_timing`] and
+    /// [`drain_timing_blocking`].
+    fn process_timing_msg(&mut self, msg: TimingMsg) {
+        match msg {
+            TimingMsg::Batch { rank, batch_ms, .. } => {
+                self.steps_since_avg[rank] = self.steps_since_avg[rank].saturating_add(1);
+                self.wall_ms_accum[rank] += batch_ms;
+                self.last_batch_ms[rank] = batch_ms;
+            }
+            TimingMsg::Exiting { .. } => {
+                self.active_count = self.active_count.saturating_sub(1);
+            }
+        }
+    }
+
     /// Process all pending timing messages (non-blocking drain).
     ///
     /// Updates per-rank step counts and accumulates wall-clock time for ElChe.
@@ -1071,17 +1206,26 @@ impl Coordinator {
     /// so [`should_average`](Self::should_average) stops triggering collectives.
     pub fn drain_timing(&mut self) {
         while let Ok(msg) = self.timing_rx.try_recv() {
-            match msg {
-                TimingMsg::Batch { rank, batch_ms, .. } => {
-                    self.steps_since_avg[rank] = self.steps_since_avg[rank].saturating_add(1);
-                    self.wall_ms_accum[rank] += batch_ms;
-                    self.last_batch_ms[rank] = batch_ms;
-                }
-                TimingMsg::Exiting { .. } => {
-                    self.active_count = self.active_count.saturating_sub(1);
-                }
-            }
+            self.process_timing_msg(msg);
         }
+    }
+
+    /// Block until a timing message arrives or `timeout` elapses, then drain
+    /// all remaining messages non-blocking.
+    ///
+    /// Returns `false` if the channel is disconnected (all senders dropped),
+    /// meaning all workers have exited. The caller should break its loop.
+    pub fn drain_timing_blocking(&mut self, timeout: std::time::Duration) -> bool {
+        match self.timing_rx.recv_timeout(timeout) {
+            Ok(msg) => self.process_timing_msg(msg),
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+        // Drain remaining messages non-blocking
+        while let Ok(msg) = self.timing_rx.try_recv() {
+            self.process_timing_msg(msg);
+        }
+        true
     }
 
     /// Process all pending metrics messages (non-blocking drain).
@@ -1189,6 +1333,17 @@ impl Coordinator {
         }
 
         self.version += 1;
+        self.avg_count += 1;
+
+        // Checkpoint on rank 0 after averaging, if configured
+        if let Some(every) = self.checkpoint_every {
+            if every > 0 && self.avg_count % every == 0 {
+                if let Some(tx) = self.control_txs.first() {
+                    let _ = tx.send(ControlMsg::Checkpoint { version: self.version });
+                }
+            }
+        }
+
         for s in &mut self.steps_since_avg {
             *s = 0;
         }
@@ -1368,6 +1523,41 @@ impl Coordinator {
 
         Ok(metrics)
     }
+
+    /// Collect final parameter snapshots from all workers after the main loop exits.
+    ///
+    /// Drains the dedicated `final_param_rx` channels. Returns a [`TrainedState`]
+    /// averaged from whatever snapshots arrived (partial failure: survivors' params
+    /// are returned). Returns `None` if zero snapshots were collected.
+    pub fn collect_final_state(&self) -> Option<TrainedState> {
+        let mut snapshots = Vec::new();
+        for rx in &self.final_param_rxs {
+            if let Ok(snap) = rx.try_recv() {
+                snapshots.push(snap);
+            }
+        }
+        if snapshots.is_empty() {
+            return None;
+        }
+        // Average the final snapshots (reuse the existing averaging logic)
+        match Self::average_params(&snapshots, self.version) {
+            Ok(averaged) => Some(TrainedState {
+                params: averaged.params,
+                buffers: averaged.buffers,
+            }),
+            Err(_) => {
+                // Fallback: return the first snapshot's tensors on CPU
+                let snap = &snapshots[0];
+                let params = snap.params.iter()
+                    .filter_map(|t| t.to_device(Device::CPU).ok())
+                    .collect();
+                let buffers = snap.buffers.iter()
+                    .filter_map(|t| t.to_device(Device::CPU).ok())
+                    .collect();
+                Some(TrainedState { params, buffers })
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1380,24 +1570,22 @@ impl Coordinator {
 /// triggers periodic parameter averaging based on [`ApplyPolicy`] and
 /// [`AverageBackend`]. Workers self-manage their epochs.
 ///
+/// Use [`AsyncDdp::builder`] for the full configuration API, or [`AsyncDdp::auto`]
+/// for a quick start with defaults.
+///
 /// # Quick start
 ///
 /// ```ignore
 /// use flodl::*;
 ///
-/// let ddp = AsyncDdp::auto(
-///     |dev| Linear::on_device(784, 10, dev),
-///     |params| Adam::new(params, 0.001),
-///     |model, batch| { /* return loss Variable */ },
-///     dataset,
-///     32,         // batch_size
-///     10,         // num_epochs
-///     ApplyPolicy::Cadence,
-///     AverageBackend::Nccl,
-/// )?;
+/// let ddp = AsyncDdp::builder(model_factory, optim_factory, train_fn)
+///     .dataset(dataset)
+///     .batch_size(32)
+///     .num_epochs(10)
+///     .run()?;                // non-blocking: spawns threads, returns immediately
 ///
-/// // Training runs autonomously. Wait for completion:
-/// ddp.join()?;
+/// let state = ddp.join()?;   // blocks until training completes
+/// // state.params / state.buffers contain the averaged trained tensors (CPU)
 /// ```
 ///
 /// # Recommended configurations
@@ -1418,15 +1606,18 @@ impl Coordinator {
 /// # Single-GPU fallback
 ///
 /// With fewer than 2 CUDA devices, training runs on the main thread with no
-/// coordinator or averaging. The API is identical; `join()` is a no-op.
+/// coordinator or averaging. The API is identical; [`join`](Self::join) returns
+/// a [`TrainedState`] in both cases.
 pub struct AsyncDdp {
     worker_handles: Vec<std::thread::JoinHandle<Result<()>>>,
-    coordinator_handle: Option<std::thread::JoinHandle<Result<()>>>,
+    coordinator_handle: Option<std::thread::JoinHandle<Result<TrainedState>>>,
     devices: Vec<Device>,
     shutdown: Arc<AtomicBool>,
     /// Abort handles for NCCL communicators. Calling abort unblocks any
     /// worker stuck in an NCCL collective (e.g. AllReduce for a dead rank).
     nccl_abort_handles: Vec<Arc<super::nccl::NcclAbortHandle>>,
+    /// For single-GPU mode: final state captured inline during run_single().
+    final_state: Option<TrainedState>,
 }
 
 impl AsyncDdp {
@@ -1490,6 +1681,34 @@ impl AsyncDdp {
         O: Optimizer + 'static,
         T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
     {
+        Self::launch(
+            model_factory, optim_factory, train_fn,
+            dataset, batch_size, num_epochs,
+            policy, backend, config, None,
+        )
+    }
+
+    /// Internal launcher shared by `auto_with` and the builder.
+    #[allow(clippy::too_many_arguments)]
+    fn launch<F, M, G, O, T>(
+        model_factory: F,
+        optim_factory: G,
+        train_fn: T,
+        dataset: Arc<dyn BatchDataSet>,
+        batch_size: usize,
+        num_epochs: usize,
+        policy: ApplyPolicy,
+        backend: AverageBackend,
+        config: AsyncDdpConfig,
+        checkpoint_fn: Option<CheckpointFn<M>>,
+    ) -> Result<Self>
+    where
+        F: Fn(Device) -> Result<M> + Send + Sync + 'static,
+        M: Module + 'static,
+        G: Fn(&[Parameter]) -> O + Send + Sync + 'static,
+        O: Optimizer + 'static,
+        T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
+    {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let devices = crate::tensor::usable_cuda_devices();
@@ -1500,6 +1719,8 @@ impl AsyncDdp {
             return Self::run_single(
                 &model_factory, &optim_factory, &train_fn,
                 dataset, batch_size, num_epochs, dev,
+                checkpoint_fn.as_ref().cloned(),
+                config.checkpoint_every,
             );
         }
 
@@ -1527,10 +1748,15 @@ impl AsyncDdp {
 
         let mut coord_control_txs = Vec::new();
         let mut worker_control_rxs = Vec::new();
+        let mut worker_final_txs = Vec::new();
+        let mut coord_final_rxs = Vec::new();
         for _ in 0..world_size {
             let (tx, rx) = mpsc::channel();
             coord_control_txs.push(tx);
             worker_control_rxs.push(rx);
+            let (ftx, frx) = mpsc::channel();
+            worker_final_txs.push(ftx);
+            coord_final_rxs.push(frx);
         }
 
         // Step 2b: Init NCCL comms from main thread, then split into per-rank comms.
@@ -1564,12 +1790,14 @@ impl AsyncDdp {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_coord = shutdown.clone();
         let div_threshold = config.divergence_threshold;
+        let ckpt_every = config.checkpoint_every;
 
         let coordinator_handle = std::thread::Builder::new()
             .name("async-ddp-coordinator".into())
-            .spawn(move || {
+            .spawn(move || -> Result<TrainedState> {
                 let mut builder = Coordinator::builder(
                     timing_rx, metrics_rx, param_rx,
+                    coord_final_rxs,
                     coord_control_txs,
                     policy, backend,
                     world_size, total_samples, el_che,
@@ -1577,18 +1805,42 @@ impl AsyncDdp {
                 if let Some(dt) = div_threshold {
                     builder = builder.divergence_threshold(dt);
                 }
+                if let Some(n) = ckpt_every {
+                    builder = builder.checkpoint_every(n);
+                }
                 let mut coord = builder.build();
 
-                loop {
+                let poll_timeout = std::time::Duration::from_micros(100);
+                let loop_err = loop {
                     if shutdown_coord.load(Ordering::Relaxed) {
-                        break Ok(());
+                        break None;
                     }
-                    if let Err(e) = coord.tick() {
-                        // Signal all workers to stop so join() doesn't hang.
-                        shutdown_coord.store(true, Ordering::Relaxed);
-                        break Err(e);
+                    // Block until a timing message arrives or timeout.
+                    // Returns false when all senders disconnect (workers exited).
+                    if !coord.drain_timing_blocking(poll_timeout) {
+                        break None; // channel disconnected: all workers done
                     }
-                    std::thread::sleep(std::time::Duration::from_micros(100));
+                    coord.check_throttle();
+                    coord.drain_metrics();
+                    if coord.should_average() {
+                        if let Err(e) = coord.trigger_averaging() {
+                            shutdown_coord.store(true, Ordering::Relaxed);
+                            break Some(e);
+                        }
+                    }
+                };
+
+                // Workers may take a moment to send final snapshots after
+                // their last timing message. Short grace period.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                match coord.collect_final_state() {
+                    Some(state) => Ok(state),
+                    None => match loop_err {
+                        Some(e) => Err(e),
+                        None => Err(TensorError::new(
+                            "coordinator: no final snapshots received from workers"
+                        )),
+                    },
                 }
             })
             .map_err(|e| TensorError::new(&format!("failed to spawn coordinator: {e}")))?;
@@ -1597,6 +1849,7 @@ impl AsyncDdp {
         let model_factory = Arc::new(model_factory);
         let optim_factory = Arc::new(optim_factory);
         let train_fn = Arc::new(train_fn);
+        // checkpoint_fn is already Arc, clone for each worker
         let mut worker_handles = Vec::new();
 
         for (rank, control_rx) in worker_control_rxs.into_iter().enumerate() {
@@ -1611,6 +1864,8 @@ impl AsyncDdp {
             let t_tx_err = timing_tx_main.clone();
             let m_tx = metrics_tx_main.clone();
             let p_tx = param_tx_main.clone();
+            let fp_tx = worker_final_txs.remove(0);
+            let ckpt_fn = checkpoint_fn.clone();
             let shutdown_w = shutdown.clone();
 
             let worker_nccl = rank_comms[rank].take();
@@ -1646,9 +1901,11 @@ impl AsyncDdp {
                             |params| (*of)(params),
                             ds,
                             worker_nccl,
+                            ckpt_fn,
                             t_tx,
                             m_tx,
                             p_tx,
+                            fp_tx,
                             control_rx,
                         )?;
 
@@ -1662,10 +1919,10 @@ impl AsyncDdp {
                             }
                         }
 
-                        // Notify coordinator through the timing channel before
-                        // exiting. The coordinator drains this in tick() ->
-                        // drain_timing() and decrements its local active_count,
-                        // preventing NCCL collectives to a dead worker.
+                        // Send final snapshot on the dedicated channel before exiting.
+                        // Uses final_param_tx (not param_tx) to avoid racing with
+                        // CPU averaging snapshot collection.
+                        worker.send_final_snapshot();
                         worker.report_exiting();
                         Ok(())
                     })();
@@ -1700,6 +1957,7 @@ impl AsyncDdp {
             devices: devices.to_vec(),
             shutdown,
             nccl_abort_handles,
+            final_state: None,
         })
     }
 
@@ -1707,6 +1965,7 @@ impl AsyncDdp {
     ///
     /// No coordinator, no worker threads, no parameter averaging.
     /// Same training loop as multi-GPU workers.
+    #[allow(clippy::too_many_arguments)]
     fn run_single<F, M, G, O, T>(
         model_factory: &F,
         optim_factory: &G,
@@ -1715,6 +1974,8 @@ impl AsyncDdp {
         batch_size: usize,
         num_epochs: usize,
         device: Device,
+        checkpoint_fn: Option<CheckpointFn<M>>,
+        checkpoint_every: Option<usize>,
     ) -> Result<Self>
     where
         F: Fn(Device) -> Result<M>,
@@ -1750,7 +2011,7 @@ impl AsyncDdp {
         };
 
         // Channels (unused in single-GPU mode, but needed by GpuWorker)
-        let ((timing_tx, metrics_tx, param_tx, control_rx), _channels) =
+        let ((timing_tx, metrics_tx, param_tx, final_param_tx, control_rx), _channels) =
             GpuWorker::<M>::channels();
 
         let mut worker = GpuWorker::new(
@@ -1759,16 +2020,37 @@ impl AsyncDdp {
             optim_factory,
             dataset,
             None, // no NCCL for single-GPU
+            checkpoint_fn.clone(),
             timing_tx,
             metrics_tx,
             param_tx,
+            final_param_tx,
             control_rx,
         )?;
 
         // Train directly on this thread
-        for _epoch in 0..num_epochs {
+        for epoch in 0..num_epochs {
             worker.run_epoch(train_fn)?;
+            // Single-GPU checkpoint: version = epoch number (monotonic)
+            if let (Some(every), Some(f)) = (checkpoint_every, &checkpoint_fn) {
+                if every > 0 && (epoch + 1) % every == 0 {
+                    if let Err(e) = f((epoch + 1) as u64, worker.model()) {
+                        eprintln!("  async-ddp: checkpoint failed (epoch {}): {e}", epoch + 1);
+                    }
+                }
+            }
         }
+
+        // Capture final state before dropping the worker
+        let snap = worker.snapshot_params();
+        let final_state = TrainedState {
+            params: snap.params.iter()
+                .map(|t| t.to_device(Device::CPU))
+                .collect::<Result<Vec<_>>>()?,
+            buffers: snap.buffers.iter()
+                .map(|t| t.to_device(Device::CPU))
+                .collect::<Result<Vec<_>>>()?,
+        };
 
         Ok(AsyncDdp {
             worker_handles: Vec::new(),
@@ -1776,6 +2058,7 @@ impl AsyncDdp {
             devices: vec![device],
             shutdown: Arc::new(AtomicBool::new(true)),
             nccl_abort_handles: Vec::new(),
+            final_state: Some(final_state),
         })
     }
 
@@ -1799,13 +2082,23 @@ impl AsyncDdp {
         }
     }
 
-    /// Wait for all training to complete and shut down. Consumes self.
+    /// Wait for all training to complete and return the trained state.
     ///
-    /// Workers run their `num_epochs` and exit naturally. After all workers
-    /// finish, the coordinator is signalled to stop.
+    /// Workers run their `num_epochs` and exit naturally. Each sends a final
+    /// parameter snapshot before terminating. The coordinator collects and
+    /// averages these into a [`TrainedState`] (CPU tensors).
     ///
-    /// For single-GPU mode, this is a no-op (training already completed in `auto()`).
-    pub fn join(mut self) -> Result<()> {
+    /// For single-GPU mode, the state was captured inline during training.
+    ///
+    /// On partial failure (some workers died), returns the average of
+    /// surviving workers' final snapshots. Returns an error only if
+    /// all workers failed.
+    pub fn join(mut self) -> Result<TrainedState> {
+        // Single-GPU: state was captured in run_single()
+        if let Some(state) = self.final_state.take() {
+            return Ok(state);
+        }
+
         // Join ALL workers, even if some fail. A failed worker already
         // set shutdown=true (see the error path in the spawn closure),
         // but we set it again on first error to cover panics.
@@ -1837,6 +2130,7 @@ impl AsyncDdp {
 
         if let Some(h) = self.coordinator_handle.take() {
             match h.join() {
+                Ok(Ok(state)) => return Ok(state),
                 Ok(Err(e)) if first_err.is_none() => first_err = Some(e),
                 Err(_) if first_err.is_none() => {
                     first_err = Some(TensorError::new("coordinator thread panicked"));
@@ -1845,10 +2139,7 @@ impl AsyncDdp {
             }
         }
 
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        Err(first_err.unwrap_or_else(|| TensorError::new("join: no trained state available")))
     }
 
     /// Print device summary to stderr (same style as Ddp::auto).
@@ -1895,6 +2186,204 @@ impl AsyncDdp {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AsyncDdpBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for configuring and launching async DDP training.
+///
+/// Created via [`AsyncDdp::builder`]. Required fields must be set before
+/// calling [`run`](Self::run); missing fields produce a clear panic message.
+///
+/// # Example
+///
+/// ```ignore
+/// use flodl::*;
+///
+/// let ddp = AsyncDdp::builder(
+///     |dev| model_factory(dev),
+///     |params| Adam::new(params, 0.001),
+///     |model, batch| { /* return loss Variable */ },
+/// )
+/// .dataset(dataset)
+/// .batch_size(32)
+/// .num_epochs(10)
+/// .policy(ApplyPolicy::Cadence)
+/// .backend(AverageBackend::Nccl)
+/// .run()?;
+///
+/// let state = ddp.join()?; // blocks until training completes
+/// ```
+pub struct AsyncDdpBuilder<F, M, G, O, T>
+where
+    F: Fn(Device) -> Result<M> + Send + Sync + 'static,
+    M: Module + 'static,
+    G: Fn(&[Parameter]) -> O + Send + Sync + 'static,
+    O: Optimizer + 'static,
+    T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
+{
+    model_factory: F,
+    optim_factory: G,
+    train_fn: T,
+    dataset: Option<Arc<dyn BatchDataSet>>,
+    batch_size: Option<usize>,
+    num_epochs: Option<usize>,
+    policy: ApplyPolicy,
+    backend: AverageBackend,
+    config: AsyncDdpConfig,
+    checkpoint_fn: Option<CheckpointFn<M>>,
+    _phantom: PhantomData<(M, O)>,
+}
+
+impl<F, M, G, O, T> AsyncDdpBuilder<F, M, G, O, T>
+where
+    F: Fn(Device) -> Result<M> + Send + Sync + 'static,
+    M: Module + 'static,
+    G: Fn(&[Parameter]) -> O + Send + Sync + 'static,
+    O: Optimizer + 'static,
+    T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
+{
+    /// Set the training dataset (required).
+    pub fn dataset(mut self, dataset: Arc<dyn BatchDataSet>) -> Self {
+        self.dataset = Some(dataset);
+        self
+    }
+
+    /// Set the batch size (required).
+    pub fn batch_size(mut self, size: usize) -> Self {
+        self.batch_size = Some(size);
+        self
+    }
+
+    /// Set the number of epochs (required).
+    pub fn num_epochs(mut self, n: usize) -> Self {
+        self.num_epochs = Some(n);
+        self
+    }
+
+    /// Set the averaging policy. Default: [`ApplyPolicy::Cadence`].
+    pub fn policy(mut self, policy: ApplyPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Set the averaging backend. Default: [`AverageBackend::Nccl`].
+    pub fn backend(mut self, backend: AverageBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Set the AllReduce overhead target (fraction of compute time).
+    pub fn overhead_target(mut self, target: f64) -> Self {
+        self.config = self.config.with_overhead_target(target);
+        self
+    }
+
+    /// Set the maximum anchor count.
+    pub fn max_anchor(mut self, max: usize) -> Self {
+        self.config = self.config.with_max_anchor(max);
+        self
+    }
+
+    /// Set the initial anchor count.
+    pub fn anchor(mut self, anchor: usize) -> Self {
+        self.config = self.config.with_anchor(anchor);
+        self
+    }
+
+    /// Set the divergence threshold for Async mode.
+    pub fn divergence_threshold(mut self, threshold: f64) -> Self {
+        self.config = self.config.with_divergence_threshold(threshold);
+        self
+    }
+
+    /// Set the maximum batch lead of fastest over slowest worker.
+    /// `0` = strict lockstep.
+    pub fn max_batch_diff(mut self, max: usize) -> Self {
+        self.config = self.config.with_max_batch_diff(max);
+        self
+    }
+
+    /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
+    pub fn checkpoint_every(mut self, n: usize) -> Self {
+        self.config = self.config.with_checkpoint_every(n);
+        self
+    }
+
+    /// Set the checkpoint function called on rank 0 after averaging.
+    ///
+    /// Receives `(version, &model)`. Errors are logged but do not stop training.
+    ///
+    /// For Graph models: `.checkpoint_fn(|ver, g| g.save_checkpoint(&format!("ckpt_v{ver}.fdl")))`
+    pub fn checkpoint_fn<C>(mut self, f: C) -> Self
+    where
+        C: Fn(u64, &M) -> Result<()> + Send + Sync + 'static,
+    {
+        self.checkpoint_fn = Some(Arc::new(f));
+        self
+    }
+
+    /// Launch training. Non-blocking: spawns threads and returns immediately.
+    ///
+    /// Call [`AsyncDdp::join`] to block until training completes and retrieve
+    /// the trained parameters and buffers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dataset`, `batch_size`, or `num_epochs` were not set.
+    pub fn run(self) -> Result<AsyncDdp> {
+        let dataset = self.dataset.expect("AsyncDdpBuilder: dataset is required");
+        let batch_size = self.batch_size.expect("AsyncDdpBuilder: batch_size is required");
+        let num_epochs = self.num_epochs.expect("AsyncDdpBuilder: num_epochs is required");
+
+        AsyncDdp::launch(
+            self.model_factory,
+            self.optim_factory,
+            self.train_fn,
+            dataset,
+            batch_size,
+            num_epochs,
+            self.policy,
+            self.backend,
+            self.config,
+            self.checkpoint_fn,
+        )
+    }
+}
+
+impl AsyncDdp {
+    /// Create a builder for configuring async DDP training.
+    ///
+    /// The three required closures are provided here. Dataset, batch size,
+    /// and epoch count must be set on the builder before calling [`run`](AsyncDdpBuilder::run).
+    pub fn builder<F, M, G, O, T>(
+        model_factory: F,
+        optim_factory: G,
+        train_fn: T,
+    ) -> AsyncDdpBuilder<F, M, G, O, T>
+    where
+        F: Fn(Device) -> Result<M> + Send + Sync + 'static,
+        M: Module + 'static,
+        G: Fn(&[Parameter]) -> O + Send + Sync + 'static,
+        O: Optimizer + 'static,
+        T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
+    {
+        AsyncDdpBuilder {
+            model_factory,
+            optim_factory,
+            train_fn,
+            dataset: None,
+            batch_size: None,
+            num_epochs: None,
+            policy: ApplyPolicy::Cadence,
+            backend: AverageBackend::Nccl,
+            config: AsyncDdpConfig::new(),
+            checkpoint_fn: None,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl Drop for AsyncDdp {
     fn drop(&mut self) {
         // Signal shutdown if not already joined
@@ -1931,6 +2420,7 @@ mod tests {
         let _sync = ControlMsg::SyncNow;
         let _throttle = ControlMsg::Throttle;
         let _hint = ControlMsg::PartitionHint { num_samples: 1000 };
+        let _ckpt = ControlMsg::Checkpoint { version: 42 };
         let _shutdown = ControlMsg::Shutdown;
         let _update = ControlMsg::Update(AveragedParams {
             params: vec![],
@@ -2064,7 +2554,7 @@ mod tests {
             seed: 42,
         };
 
-        let ((timing_tx, metrics_tx, param_tx, control_rx), channels) =
+        let ((timing_tx, metrics_tx, param_tx, final_param_tx, control_rx), channels) =
             GpuWorker::<Linear>::channels();
 
         let dataset: Arc<dyn crate::data::BatchDataSet> =
@@ -2076,9 +2566,11 @@ mod tests {
             |params| crate::nn::SGD::new(params, 0.01, 0.0),
             dataset,
             None, // no NCCL in unit tests
+            None, // no checkpoint in unit tests
             timing_tx,
             metrics_tx,
             param_tx,
+            final_param_tx,
             control_rx,
         ).unwrap();
 
@@ -2336,7 +2828,7 @@ mod tests {
 
     #[test]
     fn test_worker_channels_create() {
-        let ((timing_tx, metrics_tx, param_tx, _control_rx), ch) =
+        let ((timing_tx, metrics_tx, param_tx, _final_param_tx, _control_rx), ch) =
             GpuWorker::<Linear>::channels();
 
         // Verify channel pairs work
@@ -2387,15 +2879,19 @@ mod tests {
 
         let mut control_txs = Vec::new();
         let mut control_rxs = Vec::new();
+        let mut final_param_rxs = Vec::new();
         for _ in 0..n {
             let (tx, rx) = mpsc::channel();
             control_txs.push(tx);
             control_rxs.push(rx);
+            let (_ftx, frx) = mpsc::channel();
+            final_param_rxs.push(frx);
         }
 
         let el_che = ElChe::new(n, 10);
         let coord = Coordinator::builder(
             timing_rx, metrics_rx, param_rx,
+            final_param_rxs,
             control_txs,
             policy, backend,
             n, 10000, el_che,
@@ -2703,15 +3199,19 @@ mod tests {
 
         let mut control_txs = Vec::new();
         let mut control_rxs = Vec::new();
+        let mut final_param_rxs = Vec::new();
         for _ in 0..n {
             let (tx, rx) = mpsc::channel();
             control_txs.push(tx);
             control_rxs.push(rx);
+            let (_ftx, frx) = mpsc::channel();
+            final_param_rxs.push(frx);
         }
 
         let el_che = ElChe::new(n, 10).with_max_batch_diff(max_batch_diff);
         let coord = Coordinator::builder(
             timing_rx, metrics_rx, param_rx,
+            final_param_rxs,
             control_txs,
             ApplyPolicy::Async, AverageBackend::Nccl,
             n, 10000, el_che,
@@ -2843,7 +3343,10 @@ mod tests {
         ).unwrap();
 
         assert!(ddp.world_size() >= 1);
-        ddp.join().unwrap();
+        let state = ddp.join().unwrap();
+        // Linear(4,2): weight [2,4] + bias [2] = 2 params, 0 buffers
+        assert_eq!(state.params.len(), 2);
+        assert_eq!(state.buffers.len(), 0);
     }
 
     #[test]
@@ -2866,14 +3369,267 @@ mod tests {
 
         assert!(ddp.world_size() >= 2);
 
-        // Workers train for 2 epochs then exit, join should succeed
-        ddp.join().unwrap();
+        // Workers train for 2 epochs then exit, join returns trained state
+        let state = ddp.join().unwrap();
+        assert_eq!(state.params.len(), 2);
     }
 
     #[test]
     fn test_async_ddp_send_sync() {
         fn assert_send<T: Send>() {}
         assert_send::<AsyncDdp>();
+        assert_send::<TrainedState>();
+    }
+
+    // -----------------------------------------------------------------------
+    // AsyncDdpBuilder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_builder_with_defaults() {
+        let ddp = AsyncDdp::builder(
+            |dev| Linear::on_device(4, 2, dev),
+            |params| crate::nn::SGD::new(params, 0.01, 0.0),
+            mse_train,
+        )
+        .dataset(Arc::new(TestDataset { n: 100 }))
+        .batch_size(4)
+        .num_epochs(2)
+        .backend(AverageBackend::Cpu)
+        .run()
+        .unwrap();
+
+        assert!(ddp.world_size() >= 1);
+        let state = ddp.join().unwrap();
+        assert_eq!(state.params.len(), 2);
+    }
+
+    #[test]
+    fn test_builder_with_all_options() {
+        let ddp = AsyncDdp::builder(
+            |dev| Linear::on_device(4, 2, dev),
+            |params| crate::nn::SGD::new(params, 0.01, 0.0),
+            mse_train,
+        )
+        .dataset(Arc::new(TestDataset { n: 100 }))
+        .batch_size(4)
+        .num_epochs(2)
+        .policy(ApplyPolicy::Sync)
+        .backend(AverageBackend::Cpu)
+        .overhead_target(0.15)
+        .max_anchor(100)
+        .anchor(5)
+        .divergence_threshold(0.1)
+        .max_batch_diff(10)
+        .run()
+        .unwrap();
+
+        let state = ddp.join().unwrap();
+        assert_eq!(state.params.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "dataset is required")]
+    fn test_builder_missing_dataset_panics() {
+        let _ = AsyncDdp::builder(
+            |dev| Linear::on_device(4, 2, dev),
+            |params| crate::nn::SGD::new(params, 0.01, 0.0),
+            mse_train,
+        )
+        .batch_size(4)
+        .num_epochs(2)
+        .run();
+    }
+
+    #[test]
+    #[should_panic(expected = "batch_size is required")]
+    fn test_builder_missing_batch_size_panics() {
+        let _ = AsyncDdp::builder(
+            |dev| Linear::on_device(4, 2, dev),
+            |params| crate::nn::SGD::new(params, 0.01, 0.0),
+            mse_train,
+        )
+        .dataset(Arc::new(TestDataset { n: 100 }))
+        .num_epochs(2)
+        .run();
+    }
+
+    #[test]
+    #[should_panic(expected = "num_epochs is required")]
+    fn test_builder_missing_num_epochs_panics() {
+        let _ = AsyncDdp::builder(
+            |dev| Linear::on_device(4, 2, dev),
+            |params| crate::nn::SGD::new(params, 0.01, 0.0),
+            mse_train,
+        )
+        .dataset(Arc::new(TestDataset { n: 100 }))
+        .batch_size(4)
+        .run();
+    }
+
+    #[test]
+    fn test_worker_send_final_snapshot() {
+        let (worker, ch) = make_test_worker();
+        worker.send_final_snapshot();
+        let snap = ch.final_param_rx.recv().unwrap();
+        assert_eq!(snap.params.len(), 2); // Linear(4,2): weight + bias
+        assert_eq!(snap.rank, 0);
+    }
+
+    #[test]
+    fn test_collect_final_state_averages() {
+        let (timing_tx, timing_rx) = mpsc::channel();
+        let (_metrics_tx, metrics_rx) = mpsc::channel();
+        let (_param_tx, param_rx) = mpsc::channel();
+
+        let mut control_txs = Vec::new();
+        let mut final_param_rxs = Vec::new();
+        let mut final_param_txs = Vec::new();
+        for _ in 0..2 {
+            let (ctx, _crx) = mpsc::channel();
+            control_txs.push(ctx);
+            let (ftx, frx) = mpsc::channel();
+            final_param_txs.push(ftx);
+            final_param_rxs.push(frx);
+        }
+
+        let el_che = ElChe::new(2, 10);
+        let coord = Coordinator::builder(
+            timing_rx, metrics_rx, param_rx,
+            final_param_rxs,
+            control_txs,
+            ApplyPolicy::Sync, AverageBackend::Cpu,
+            2, 1000, el_che,
+        ).build();
+
+        // Send final snapshots from both "workers"
+        let opts = crate::tensor::test_opts();
+        let t1 = Tensor::full(&[3], 2.0, opts).unwrap();
+        let t2 = Tensor::full(&[3], 4.0, opts).unwrap();
+        final_param_txs[0].send(ParamSnapshot {
+            rank: 0, params: vec![t1], buffers: vec![], batch_count: 1,
+        }).unwrap();
+        final_param_txs[1].send(ParamSnapshot {
+            rank: 1, params: vec![t2], buffers: vec![], batch_count: 1,
+        }).unwrap();
+
+        let state = coord.collect_final_state().unwrap();
+        assert_eq!(state.params.len(), 1);
+        // Average of 2.0 and 4.0 with equal weights = 3.0
+        let vals: Vec<f64> = state.params[0].to_f64_vec().unwrap();
+        assert!(vals.iter().all(|v| (v - 3.0).abs() < 1e-5), "expected all ~3.0, got {vals:?}");
+
+        // Also verify timing_tx keeps coordinator alive
+        drop(timing_tx);
+    }
+
+    #[test]
+    fn test_collect_final_state_single_survivor() {
+        let (_timing_tx, timing_rx) = mpsc::channel();
+        let (_metrics_tx, metrics_rx) = mpsc::channel();
+        let (_param_tx, param_rx) = mpsc::channel();
+
+        let mut control_txs = Vec::new();
+        let mut final_param_rxs = Vec::new();
+        let mut final_param_txs = Vec::new();
+        for _ in 0..2 {
+            let (ctx, _crx) = mpsc::channel();
+            control_txs.push(ctx);
+            let (ftx, frx) = mpsc::channel();
+            final_param_txs.push(ftx);
+            final_param_rxs.push(frx);
+        }
+
+        let el_che = ElChe::new(2, 10);
+        let coord = Coordinator::builder(
+            timing_rx, metrics_rx, param_rx,
+            final_param_rxs,
+            control_txs,
+            ApplyPolicy::Sync, AverageBackend::Cpu,
+            2, 1000, el_che,
+        ).build();
+
+        // Only one worker sends a final snapshot (the other "died")
+        let opts = crate::tensor::test_opts();
+        let t = Tensor::full(&[3], 7.0, opts).unwrap();
+        final_param_txs[0].send(ParamSnapshot {
+            rank: 0, params: vec![t], buffers: vec![], batch_count: 5,
+        }).unwrap();
+        // Worker 1 never sends
+
+        let state = coord.collect_final_state().unwrap();
+        assert_eq!(state.params.len(), 1);
+        let vals: Vec<f64> = state.params[0].to_f64_vec().unwrap();
+        assert!(vals.iter().all(|v| (v - 7.0).abs() < 1e-5), "single survivor should return its own params");
+    }
+
+    // -----------------------------------------------------------------------
+    // Checkpoint coordination tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_checkpoint_msg_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<ControlMsg>();
+    }
+
+    #[test]
+    fn test_checkpoint_fn_called_on_dispatch() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let (mut worker, ch) = make_test_worker();
+        let called_version = Arc::new(AtomicU64::new(0));
+        let cv = called_version.clone();
+        worker.checkpoint_fn = Some(Arc::new(move |ver, _model| {
+            cv.store(ver, Ordering::Relaxed);
+            Ok(())
+        }));
+
+        ch.control_tx.send(ControlMsg::Checkpoint { version: 7 }).unwrap();
+        worker.handle_control().unwrap();
+
+        assert_eq!(called_version.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn test_checkpoint_error_logged_not_propagated() {
+        let (mut worker, ch) = make_test_worker();
+        worker.checkpoint_fn = Some(Arc::new(|_ver, _model| {
+            Err(TensorError::new("disk full"))
+        }));
+
+        ch.control_tx.send(ControlMsg::Checkpoint { version: 1 }).unwrap();
+        // Should not return an error: log-and-continue
+        let shutdown = worker.handle_control().unwrap();
+        assert!(!shutdown);
+    }
+
+    #[test]
+    fn test_coordinator_sends_checkpoint_every_n() {
+        let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
+        h.coord.checkpoint_every = Some(2);
+
+        // Simulate 3 averaging events
+        for _ in 0..3 {
+            // Feed enough timing for should_average to trigger
+            h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 1.0, step_count: 1 }).unwrap();
+            h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 1.0, step_count: 1 }).unwrap();
+            h.coord.drain_timing();
+            assert!(h.coord.should_average());
+            h.coord.trigger_averaging().unwrap();
+        }
+
+        // avg_count=3, checkpoint_every=2, so checkpoint sent at avg_count=2
+        // Check rank 0's control channel for Checkpoint messages
+        let mut checkpoint_count = 0;
+        for rx in &h.control_rxs {
+            while let Ok(msg) = rx.try_recv() {
+                if matches!(msg, ControlMsg::Checkpoint { .. }) {
+                    checkpoint_count += 1;
+                }
+            }
+        }
+        assert_eq!(checkpoint_count, 1, "should send exactly 1 checkpoint after 3 averaging events with every=2");
     }
 
     // -----------------------------------------------------------------------
@@ -2929,7 +3685,7 @@ mod tests {
             backend,
         ).unwrap();
 
-        ddp.join().unwrap();
+        let _state = ddp.join().unwrap();
 
         let entries = log.lock().unwrap();
         let r0: Vec<f64> = entries.iter().filter(|(r, _, _)| *r == 0).map(|(_, _, l)| *l).collect();
