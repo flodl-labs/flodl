@@ -12,6 +12,34 @@
 //! GPU Thread 1:  create model+Adam+dataset -> [fwd -> bwd -> adam step -> repeat]
 //! Coordinator:   collect timing/metrics -> trigger param averaging -> monitor divergence
 //! ```
+//!
+//! # Choosing a policy
+//!
+//! | Policy | When to use | Tradeoff |
+//! |--------|-------------|----------|
+//! | [`ApplyPolicy::Sync`] | Correctness-first, small models, homogeneous GPUs | Identical to standard DDP. Fast GPU waits at every batch. |
+//! | [`ApplyPolicy::Cadence`] | Heterogeneous GPUs (e.g. Pascal + Blackwell) | Fast GPU runs ahead by ElChe-determined batches. Good throughput/convergence balance. |
+//! | [`ApplyPolicy::Async`] | Maximum throughput, large models, fault tolerance | Averaging interval auto-tunes from divergence monitoring. Best for experienced users. |
+//!
+//! # Choosing a backend
+//!
+//! | Backend | When to use | Tradeoff |
+//! |---------|-------------|----------|
+//! | [`AverageBackend::Nccl`] | Default choice. NVLink/PCIe peer-to-peer. | In-place AllReduce, zero extra memory, hard sync at averaging point. |
+//! | [`AverageBackend::Cpu`] | No NVLink, A/B testing, debugging, CPU-only setups | Params copied to CPU for averaging. No GPU blocks, but uses O(world_size * model_size) CPU RAM and adds latency from GPU-CPU-GPU round-trip. |
+//!
+//! Start with `Cadence` + `Nccl` for heterogeneous setups, `Sync` + `Nccl` for
+//! homogeneous. Use `Cpu` backend when debugging or when NCCL is unavailable.
+//!
+//! # Safety guards
+//!
+//! - [`AsyncDdpConfig::with_max_batch_diff`]: hard limit on how far any GPU can
+//!   run ahead. Set to `0` for strict lockstep. Prevents catastrophic divergence
+//!   with large batches or extreme speed ratios.
+//! - [`ElChe`](super::ddp::ElChe) adaptive speed tracking with dead-zone hysteresis:
+//!   tolerates thermal jitter while adapting quickly to sustained speed changes.
+//! - NCCL abort handles: if a worker dies mid-collective, surviving workers are
+//!   unblocked via `ncclCommAbort` instead of hanging forever.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -35,32 +63,69 @@ use crate::tensor::{Device, Result, Tensor, TensorError};
 /// Controls WHEN parameter averaging occurs (the interval K).
 ///
 /// All three modes run the same architecture; only the averaging trigger differs.
-/// - `Sync`: K=1 (every batch). Equivalent to standard DDP.
-/// - `Cadence`: K=N (ElChe anchor count). Moderate GPU independence.
-/// - `Async`: K=adaptive (ElChe auto-tunes based on divergence). Maximum independence.
+/// The interval K determines how many batches each GPU processes with its own
+/// local optimizer before parameters are synchronized across replicas.
+///
+/// - `Sync`: K=1 (every batch). Equivalent to standard DDP. Best convergence
+///   guarantees, but fast GPUs idle waiting for slow ones.
+/// - `Cadence`: K=N (ElChe anchor count). The slow GPU anchors the cadence,
+///   fast GPUs fill the wall time with extra batches. Recommended for
+///   heterogeneous hardware (e.g. mixing GPU generations).
+/// - `Async`: K=adaptive. ElChe starts conservative (K=1), then backs off
+///   as parameter divergence stays low. Maximizes GPU utilization at the
+///   cost of some gradient staleness. Best for large models where each
+///   batch is expensive and synchronization overhead matters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ApplyPolicy {
     /// Average after every batch (K=1). Equivalent to standard synchronous DDP.
+    /// Lowest risk of model divergence. Fast GPUs wait at the collective barrier.
     Sync,
-    /// Average every N batches where N = ElChe anchor count.
+    /// Average every N batches where N is determined by ElChe's cadence strategy.
+    /// The slow device sets the pace; fast devices process proportionally more
+    /// batches per averaging window. Good default for mixed GPU setups.
     Cadence,
-    /// ElChe auto-tunes averaging interval based on observed divergence.
-    /// Starts conservative (K=1), backs off as convergence stabilizes.
+    /// ElChe auto-tunes the averaging interval based on observed parameter
+    /// divergence. Starts conservative (K=1), backs off as convergence
+    /// stabilizes. Tightens again if replicas drift apart. Best throughput,
+    /// requires monitoring. Pair with [`AsyncDdpConfig::with_max_batch_diff`]
+    /// for a safety bound.
     Async,
 }
 
 /// Controls HOW parameter averaging is performed.
 ///
 /// Orthogonal to [`ApplyPolicy`]. All combinations are valid, enabling A/B testing:
-/// same model, same K, NCCL vs CPU -- if loss curves match, CPU async is validated.
+/// same model, same K, NCCL vs CPU. If loss curves match, the cheaper backend is
+/// validated for your workload.
+///
+/// # NCCL vs CPU tradeoffs
+///
+/// | | NCCL | CPU |
+/// |---|---|---|
+/// | **Memory** | Zero extra (in-place) | O(world_size * model_size) CPU RAM |
+/// | **Latency** | GPU-to-GPU DMA (NVLink or PCIe) | GPU->CPU->average->CPU->GPU round-trip |
+/// | **Blocking** | All GPUs sync at collective barrier | No GPU ever blocks |
+/// | **Fault tolerance** | Abort handles unblock stuck collectives | Coordinator timeout (5s) detects dead workers |
+/// | **Buffer averaging** | Natural (AllReduce averages everything) | Explicit (buffers averaged with equal weight) |
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AverageBackend {
-    /// NCCL AllReduce in-place on GPU params. Hard sync at averaging point.
-    /// Fast GPU waits for slow GPU at the collective barrier.
-    /// Simpler code path: no snapshot collection, no CPU tensors.
+    /// NCCL AllReduce in-place on GPU params. Default and recommended.
+    ///
+    /// GPU-to-GPU DMA via NVLink or PCIe peer-to-peer. Zero extra memory.
+    /// At the averaging point, all GPUs participate in a collective barrier:
+    /// the fast GPU waits for the slow GPU to arrive. If a worker dies
+    /// mid-collective, abort handles unblock the survivors.
     Nccl,
-    /// CPU-mediated async snapshots through coordinator.
-    /// No GPU ever blocks. Slight staleness window during transfer.
+    /// CPU-mediated parameter averaging through the coordinator.
+    ///
+    /// Workers send parameter snapshots to the coordinator, which computes
+    /// a weighted average on CPU, then distributes the result back. No GPU
+    /// ever blocks on another GPU. Useful when NVLink/PCIe peer access is
+    /// unavailable, for debugging, or for A/B comparison with the NCCL path.
+    ///
+    /// Uses O(world_size * model_size) CPU RAM for snapshot collection.
+    /// Averaging time is measured and fed to ElChe so the overhead auto-tune
+    /// accounts for the CPU round-trip cost.
     Cpu,
 }
 
@@ -655,9 +720,10 @@ impl<M: Module> GpuWorker<M> {
                 // Worker is ahead of the slowest rank: block until averaging
                 // completes (SyncNow/Update) or Shutdown. Intermediate messages
                 // (RequestParams, PartitionHint) are handled but don't release
-                // the throttle -- the worker stays blocked until the real sync.
+                // the throttle. Duplicate Throttle messages are ignored.
                 loop {
                     match self.control_rx.recv() {
+                        Ok(ControlMsg::Throttle) => continue, // already throttled
                         Ok(msg) => {
                             let releases = matches!(
                                 &msg,
@@ -669,7 +735,6 @@ impl<M: Module> GpuWorker<M> {
                             if shutdown || releases {
                                 return Ok(shutdown);
                             }
-                            // Non-sync message handled, stay throttled.
                         }
                         Err(_) => return Ok(true), // channel dead
                     }
@@ -880,6 +945,12 @@ pub struct Coordinator {
     wall_ms_accum: Vec<f64>,
     /// Most recent batch_ms per rank (for display/monitoring).
     last_batch_ms: Vec<f64>,
+    /// Most recent CPU averaging time (ms). Fed to ElChe as sync_ms so
+    /// the overhead auto-tune works for the CPU backend too.
+    last_avg_ms: f64,
+    /// Per-rank throttle state. Prevents sending duplicate Throttle messages
+    /// to workers that are already blocked. Reset after averaging.
+    throttled: Vec<bool>,
 }
 
 /// Builder for configuring a [`Coordinator`].
@@ -939,6 +1010,8 @@ impl CoordinatorBuilder {
             active_count: self.world_size,
             wall_ms_accum: vec![0.0; self.world_size],
             last_batch_ms: vec![0.0; self.world_size],
+            last_avg_ms: 0.0,
+            throttled: vec![false; self.world_size],
         }
     }
 }
@@ -1056,6 +1129,8 @@ impl Coordinator {
                 }
             }
             AverageBackend::Cpu => {
+                let avg_start = std::time::Instant::now();
+
                 // 1. Request snapshots from all workers
                 for tx in &self.control_txs {
                     let _ = tx.send(ControlMsg::RequestParams);
@@ -1064,11 +1139,22 @@ impl Coordinator {
                 //    5s is generous: even a slow GPU snapshot is < 100ms.
                 let timeout = std::time::Duration::from_secs(5);
                 let mut snapshots = Vec::with_capacity(self.world_size);
+                let mut received_ranks = vec![false; self.world_size];
                 for _ in 0..self.world_size {
                     let snap = self.param_rx.recv_timeout(timeout)
-                        .map_err(|e| TensorError::new(
-                            &format!("param snapshot collection failed: {e}")
-                        ))?;
+                        .map_err(|e| {
+                            let missing: Vec<usize> = received_ranks.iter().enumerate()
+                                .filter(|(_, got)| !**got)
+                                .map(|(r, _)| r)
+                                .collect();
+                            TensorError::new(&format!(
+                                "CPU averaging: snapshot collection failed ({e}), \
+                                 missing ranks: {missing:?}"
+                            ))
+                        })?;
+                    if snap.rank < self.world_size {
+                        received_ranks[snap.rank] = true;
+                    }
                     snapshots.push(snap);
                 }
                 // 3. Check divergence, adjust cadence (Async mode)
@@ -1081,6 +1167,10 @@ impl Coordinator {
                 for tx in &self.control_txs {
                     let _ = tx.send(ControlMsg::Update(averaged.clone()));
                 }
+
+                // Record CPU averaging time so ElChe overhead auto-tune
+                // accounts for it (same role as AllReduce time in NCCL path).
+                self.last_avg_ms = avg_start.elapsed().as_secs_f64() * 1000.0;
             }
         }
 
@@ -1088,8 +1178,10 @@ impl Coordinator {
         // wall_ms_accum[rank] = total wall-clock ms for all batches on that rank
         // since the last averaging event. ElChe divides by batch_counts to get ms/batch.
         if self.wall_ms_accum.iter().any(|&ms| ms > 0.0) {
-            let sync_ms = 0.0; // no separate sync measurement in async model
-            self.el_che.report_timing(&self.wall_ms_accum, sync_ms);
+            // For CPU backend, last_avg_ms captures the full snapshot-average-distribute
+            // cycle. For NCCL, it stays 0.0 (AllReduce overhead is part of wall_ms).
+            self.el_che.report_timing(&self.wall_ms_accum, self.last_avg_ms);
+            self.last_avg_ms = 0.0;
             if !self.calibrated && self.el_che.is_calibrated() {
                 self.calibrated = true;
                 self.rebalance_partitions();
@@ -1103,6 +1195,9 @@ impl Coordinator {
         for a in &mut self.wall_ms_accum {
             *a = 0.0;
         }
+        for t in &mut self.throttled {
+            *t = false;
+        }
         Ok(())
     }
 
@@ -1110,14 +1205,32 @@ impl Coordinator {
     ///
     /// Weight each rank's contribution by its `batch_count` (number of batches
     /// since last averaging). This ensures faster GPUs contribute more.
+    /// Buffers (e.g. BatchNorm running stats) are averaged with equal weight.
     fn average_params(snapshots: &[ParamSnapshot], version: u64) -> Result<AveragedParams> {
         if snapshots.is_empty() {
             return Err(TensorError::new("average_params: no snapshots"));
         }
 
-        let total_batches: usize = snapshots.iter().map(|s| s.batch_count.max(1)).sum();
         let n_params = snapshots[0].params.len();
         let n_buffers = snapshots[0].buffers.len();
+
+        // Validate all snapshots have the same structure.
+        for (i, snap) in snapshots.iter().enumerate() {
+            if snap.params.len() != n_params {
+                return Err(TensorError::new(&format!(
+                    "average_params: rank {} has {} params, expected {}",
+                    i, snap.params.len(), n_params
+                )));
+            }
+            if snap.buffers.len() != n_buffers {
+                return Err(TensorError::new(&format!(
+                    "average_params: rank {} has {} buffers, expected {}",
+                    i, snap.buffers.len(), n_buffers
+                )));
+            }
+        }
+
+        let total_batches: usize = snapshots.iter().map(|s| s.batch_count.max(1)).sum();
 
         // Weighted average of parameters on CPU (snapshots may be on different devices)
         let mut avg_params = Vec::with_capacity(n_params);
@@ -1133,10 +1246,19 @@ impl Coordinator {
             avg_params.push(acc);
         }
 
-        // Average buffers (unweighted, just use rank 0 on CPU)
-        let avg_buffers: Vec<Tensor> = (0..n_buffers)
-            .map(|bi| snapshots[0].buffers[bi].to_device(Device::CPU))
-            .collect::<Result<_>>()?;
+        // Average buffers (equal weight, e.g. BatchNorm running mean/var).
+        let inv_n = 1.0 / snapshots.len() as f64;
+        let mut avg_buffers = Vec::with_capacity(n_buffers);
+        for bi in 0..n_buffers {
+            let first = snapshots[0].buffers[bi].to_device(Device::CPU)?;
+            let acc = Tensor::zeros_like(&first)?;
+            for snap in snapshots {
+                let cpu_buf = snap.buffers[bi].to_device(Device::CPU)?;
+                let scaled = cpu_buf.mul_scalar(inv_n)?;
+                acc.add_(&scaled)?;
+            }
+            avg_buffers.push(acc);
+        }
 
         Ok(AveragedParams {
             params: avg_params,
@@ -1207,7 +1329,10 @@ impl Coordinator {
     /// Sends [`ControlMsg::Throttle`] to any worker whose `steps_since_avg`
     /// exceeds the slowest rank's by more than `max_batch_diff`. The worker
     /// blocks until the next real command (averaging or shutdown).
-    fn check_throttle(&self) {
+    ///
+    /// Tracks which ranks are already throttled to avoid sending duplicate
+    /// Throttle messages (which would nest blocking loops in the worker).
+    fn check_throttle(&mut self) {
         let max_diff = match self.el_che.max_batch_diff() {
             Some(d) => d,
             None => return,
@@ -1220,8 +1345,10 @@ impl Coordinator {
         let min_steps = self.steps_since_avg.iter().copied().min().unwrap_or(0);
 
         for (rank, &steps) in self.steps_since_avg.iter().enumerate() {
-            if steps > min_steps + max_diff {
+            let should_throttle = steps > min_steps + max_diff;
+            if should_throttle && !self.throttled[rank] {
                 let _ = self.control_txs[rank].send(ControlMsg::Throttle);
+                self.throttled[rank] = true;
             }
         }
     }
@@ -1253,23 +1380,45 @@ impl Coordinator {
 /// triggers periodic parameter averaging based on [`ApplyPolicy`] and
 /// [`AverageBackend`]. Workers self-manage their epochs.
 ///
-/// # Usage
+/// # Quick start
 ///
 /// ```ignore
 /// use flodl::*;
 ///
 /// let ddp = AsyncDdp::auto(
-///     |dev| Ok(Linear::on_device(784, 10, dev)?),
+///     |dev| Linear::on_device(784, 10, dev),
 ///     |params| Adam::new(params, 0.001),
+///     |model, batch| { /* return loss Variable */ },
 ///     dataset,
 ///     32,         // batch_size
-///     ApplyPolicy::Async,
+///     10,         // num_epochs
+///     ApplyPolicy::Cadence,
 ///     AverageBackend::Nccl,
 /// )?;
 ///
 /// // Training runs autonomously. Wait for completion:
 /// ddp.join()?;
 /// ```
+///
+/// # Recommended configurations
+///
+/// **Homogeneous GPUs (same model, same VRAM):**
+/// `Sync` + `Nccl`. Equivalent to PyTorch DDP. Simplest, best convergence.
+///
+/// **Heterogeneous GPUs (mixed generations, different VRAM):**
+/// `Cadence` + `Nccl`. ElChe assigns more batches to the fast GPU. Consider
+/// [`with_max_batch_diff`](AsyncDdpConfig::with_max_batch_diff) as a safety guard.
+///
+/// **Maximum throughput (large models, expensive batches):**
+/// `Async` + `Nccl`. Auto-tunes averaging interval. Monitor loss curves.
+///
+/// **Debugging / no NCCL:**
+/// Any policy + `Cpu`. Works everywhere, logs averaging time for comparison.
+///
+/// # Single-GPU fallback
+///
+/// With fewer than 2 CUDA devices, training runs on the main thread with no
+/// coordinator or averaging. The API is identical; `join()` is a no-op.
 pub struct AsyncDdp {
     worker_handles: Vec<std::thread::JoinHandle<Result<()>>>,
     coordinator_handle: Option<std::thread::JoinHandle<Result<()>>>,
@@ -1989,6 +2138,13 @@ mod tests {
         };
 
         worker.load_averaged(&update).unwrap();
+
+        // load_averaged uses non-blocking copy_ on comm_stream (CUDA).
+        // In the training loop, sync_before_forward() at the next train_step
+        // waits for the event. Here we read directly, so sync the device.
+        if let Device::CUDA(idx) = dev {
+            crate::tensor::cuda_synchronize(idx);
+        }
 
         // Verify version updated
         assert_eq!(worker.current_version(), 42);
