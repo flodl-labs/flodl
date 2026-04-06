@@ -469,7 +469,7 @@ impl<M: Module> GpuWorker<M> {
             ControlMsg::Checkpoint { version } => {
                 if let Some(ref f) = self.checkpoint_fn {
                     if let Err(e) = f(version, &self.model) {
-                        eprintln!("  async-ddp: checkpoint failed (v{version}): {e}");
+                        eprintln!("  ddp: checkpoint failed (v{version}): {e}");
                     }
                 }
             }

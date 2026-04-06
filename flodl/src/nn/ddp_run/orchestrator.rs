@@ -22,7 +22,7 @@ use super::coordinator::Coordinator;
 // DDP run-mode orchestrator
 // ---------------------------------------------------------------------------
 
-/// Async DDP orchestrator: spawns GPU worker threads and a coordinator thread.
+/// DDP run-mode handle: spawns GPU worker threads and a coordinator thread.
 ///
 /// Each GPU runs its own training loop with a local optimizer. The coordinator
 /// triggers periodic parameter averaging based on [`ApplyPolicy`] and
@@ -246,7 +246,7 @@ impl DdpHandle {
         let snap_timeout = config.snapshot_timeout_secs;
 
         let coordinator_handle = std::thread::Builder::new()
-            .name("async-ddp-coordinator".into())
+            .name("ddp-coordinator".into())
             .spawn(move || -> Result<TrainedState> {
                 let mut builder = Coordinator::builder(
                     timing_rx, metrics_rx, param_rx,
@@ -285,7 +285,7 @@ impl DdpHandle {
                     }
                     for m in coord.drain_metrics() {
                         eprintln!(
-                            "  async-ddp: rank {} epoch {} | loss={:.4} batches={} time={:.0}ms",
+                            "  ddp: rank {} epoch {} | loss={:.4} batches={} time={:.0}ms",
                             m.rank, m.epoch, m.avg_loss, m.batches_processed, m.epoch_ms
                         );
                     }
@@ -369,7 +369,7 @@ impl DdpHandle {
             };
 
             let handle = std::thread::Builder::new()
-                .name(format!("async-ddp-gpu-{rank}"))
+                .name(format!("ddp-gpu-{rank}"))
                 .spawn(move || {
                     // Set CUDA device for this thread
                     if let Device::CUDA(idx) = device {
@@ -484,7 +484,7 @@ impl DdpHandle {
     {
         use std::sync::atomic::AtomicBool;
 
-        eprintln!("  async-ddp: single device ({device:?}) | no coordination");
+        eprintln!("  ddp: single device ({device:?}) | no coordination");
 
         let total_samples = dataset.len();
         let tmp_model = model_factory(device)?;
@@ -536,7 +536,7 @@ impl DdpHandle {
             if let (Some(every), Some(f)) = (checkpoint_every, &checkpoint_fn) {
                 if every > 0 && (epoch + 1) % every == 0 {
                     if let Err(e) = f((epoch + 1) as u64, worker.model()) {
-                        eprintln!("  async-ddp: checkpoint failed (epoch {}): {e}", epoch + 1);
+                        eprintln!("  ddp: checkpoint failed (epoch {}): {e}", epoch + 1);
                     }
                 }
             }
@@ -681,7 +681,7 @@ impl DdpHandle {
         };
 
         eprintln!(
-            "  async-ddp: {} GPUs ({}) | {} | policy={} backend={}",
+            "  ddp: {} GPUs ({}) | {} | policy={} backend={}",
             devices.len(), mode, parts.join(" | "), policy_str, backend_str,
         );
     }

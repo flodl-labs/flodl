@@ -1,4 +1,4 @@
-//! Coordinator: lightweight scheduling thread for async DDP.
+//! Coordinator: lightweight scheduling thread for DDP run mode.
 
 use std::sync::mpsc;
 use std::time::Instant;
@@ -62,7 +62,7 @@ struct CpuAvgResult {
 // Coordinator
 // ---------------------------------------------------------------------------
 
-/// Lightweight scheduling coordinator for async DDP.
+/// Lightweight scheduling coordinator for DDP run mode.
 ///
 /// NOT an optimizer. Each GPU runs its own Adam. The coordinator:
 /// 1. Collects timing from workers (for ElChe throughput ratios)
@@ -440,7 +440,7 @@ impl Coordinator {
         self.avg_count += 1;
 
         eprintln!(
-            "  async-ddp: NCCL averaging #{} complete (v{})",
+            "  ddp: NCCL averaging #{} complete (v{})",
             self.avg_count, self.version
         );
 
@@ -495,7 +495,7 @@ impl Coordinator {
         self.avg_count += 1;
 
         eprintln!(
-            "  async-ddp: CPU averaging #{} complete (v{}, {:.1}ms)",
+            "  ddp: CPU averaging #{} complete (v{}, {:.1}ms)",
             self.avg_count, self.version, avg_ms
         );
 
@@ -540,7 +540,7 @@ impl Coordinator {
             CpuAvgState::Idle => {}
             CpuAvgState::Collecting { snapshots, .. } => {
                 eprintln!(
-                    "  async-ddp: discarding in-progress CPU averaging \
+                    "  ddp: discarding in-progress CPU averaging \
                      (Collecting, {}/{} snapshots received)",
                     snapshots.len(), self.world_size
                 );
@@ -552,13 +552,13 @@ impl Coordinator {
                 let status = match &result {
                     Ok(Ok(_)) => "completed result discarded",
                     Ok(Err(e)) => {
-                        eprintln!("  async-ddp: CPU averaging compute error: {e}");
+                        eprintln!("  ddp: CPU averaging compute error: {e}");
                         "errored"
                     }
                     Err(_) => "panicked",
                 };
                 eprintln!(
-                    "  async-ddp: discarding in-progress CPU averaging (Computing, {status})"
+                    "  ddp: discarding in-progress CPU averaging (Computing, {status})"
                 );
                 // Drain any snapshots it might have sent before we discard the result.
                 while self.param_rx.try_recv().is_ok() {}
@@ -637,7 +637,7 @@ impl Coordinator {
                         .collect();
                     self.abort_count += 1;
                     eprintln!(
-                        "  async-ddp: CPU averaging timeout, missing ranks: {missing:?} \
+                        "  ddp: CPU averaging timeout, missing ranks: {missing:?} \
                          (abort #{}, will retry)", self.abort_count
                     );
                     self.abort_cpu_averaging();
@@ -671,7 +671,7 @@ impl Coordinator {
                     for (rank, tx) in self.control_txs.iter().enumerate() {
                         if tx.send(ControlMsg::Update(result.averaged.clone())).is_err() {
                             eprintln!(
-                                "  async-ddp: failed to deliver Update to rank {rank} \
+                                "  ddp: failed to deliver Update to rank {rank} \
                                  (worker channel dead)"
                             );
                         }

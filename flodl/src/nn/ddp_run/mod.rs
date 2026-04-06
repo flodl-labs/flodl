@@ -283,7 +283,7 @@ impl DdpRunConfig {
 
     /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
     ///
-    /// Requires a `checkpoint_fn` to be provided via the builder or `auto_with`.
+    /// Requires a `checkpoint_fn` to be set on the builder.
     /// Errors from the checkpoint function are logged but do not stop training.
     pub fn with_checkpoint_every(mut self, n: usize) -> Self {
         self.checkpoint_every = Some(n);
@@ -1431,8 +1431,8 @@ mod tests {
 
     #[test]
     fn test_async_ddp_single_gpu_fallback() {
-        // With <2 GPUs, auto() falls back to single-device training.
-        // With 2+ GPUs, it uses all of them. Either way, join succeeds.
+        // With <2 GPUs, falls back to single-device training.
+        // With 2+ GPUs, uses all of them. Either way, join succeeds.
         let ddp = DdpHandle::auto(
             |dev| Linear::on_device(4, 2, dev),
             |params| crate::nn::SGD::new(params, 0.01, 0.0),
@@ -1842,7 +1842,7 @@ mod tests {
         Arc::new(std::sync::Mutex::new(Vec::new()))
     }
 
-    /// Run a 2-GPU async DDP session and return collected losses per rank.
+    /// Run a 2-GPU DDP session and return collected losses per rank.
     /// Returns (rank0_losses, rank1_losses) in chronological order.
     fn run_2gpu_training(
         backend: AverageBackend,
