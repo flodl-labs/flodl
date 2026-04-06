@@ -539,7 +539,11 @@ impl<M: Module> GpuWorker<M> {
             match self.control_rx.recv() {
                 Ok(ControlMsg::StartEpoch(plan)) => return Ok(Some(plan)),
                 Ok(ControlMsg::Shutdown) => return Ok(None),
-                Ok(msg) => { self.dispatch_control(msg)?; }
+                Ok(msg) => {
+                    if self.dispatch_control(msg)? {
+                        return Ok(None); // Shutdown consumed by handler (e.g. Throttle)
+                    }
+                }
                 Err(_) => return Ok(None), // disconnected
             }
         }

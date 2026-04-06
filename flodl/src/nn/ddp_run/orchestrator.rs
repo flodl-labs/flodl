@@ -336,9 +336,8 @@ impl DdpHandle {
                 // waiting for this signal before dropping their NcclRankComm.
                 coord.shutdown_workers();
 
-                // Workers may take a moment to send final snapshots after
-                // their last timing message. Short grace period.
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                // collect_final_state uses recv_timeout (blocking) so
+                // no sleep is needed: it waits for each worker's snapshot.
                 match coord.collect_final_state() {
                     Some(state) => Ok(state),
                     None => match loop_err {

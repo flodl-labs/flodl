@@ -577,6 +577,10 @@ impl Coordinator {
         if !matches!(self.avg_state, CpuAvgState::Idle) {
             return false;
         }
+        // Training complete: workers received Shutdown, skip stale averaging.
+        if self.all_epochs_done() {
+            return false;
+        }
         // Collectives require all ranks. If any worker has exited,
         // skip averaging to prevent NCCL deadlock or channel disconnect.
         if self.active_count < self.world_size {
@@ -1129,14 +1133,19 @@ impl Coordinator {
 
     /// Collect final parameter snapshots from all workers after the main loop exits.
     ///
-    /// Drains the dedicated `final_param_rx` channels. Returns a [`TrainedState`]
-    /// averaged from whatever snapshots arrived (partial failure: survivors' params
-    /// are returned). Returns `None` if zero snapshots were collected.
+    /// Blocks on each dedicated `final_param_rx` channel with a timeout.
+    /// Returns a [`TrainedState`] averaged from whatever snapshots arrived
+    /// (partial failure: survivors' params are returned). Returns `None` if
+    /// zero snapshots were collected.
     pub fn collect_final_state(&self) -> Option<TrainedState> {
+        let timeout = std::time::Duration::from_secs(10);
         let mut snapshots = Vec::new();
-        for rx in &self.final_param_rxs {
-            if let Ok(snap) = rx.try_recv() {
-                snapshots.push(snap);
+        for (rank, rx) in self.final_param_rxs.iter().enumerate() {
+            match rx.recv_timeout(timeout) {
+                Ok(snap) => snapshots.push(snap),
+                Err(_) => {
+                    eprintln!("  ddp: timeout waiting for final snapshot from rank {rank}");
+                }
             }
         }
         if snapshots.is_empty() {
