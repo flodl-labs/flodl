@@ -37,17 +37,23 @@ LINK_REWRITES = [
     (r"\(09-monitor\.md\)", "(/guide/monitor)"),
     (r"\(10-graph-tree\.md(#[^)]+)\)", r"(/guide/graph-tree\1)"),
     (r"\(10-graph-tree\.md\)", "(/guide/graph-tree)"),
+    (r"\(11-multi-gpu\.md\)", "(/guide/multi-gpu)"),
+    (r"\(12-async-ddp\.md\)", "(/guide/async-ddp)"),
     (r"\(\.\./design/graph-tree\.md\)", "(https://github.com/fab2s/floDl/blob/main/docs/design/graph-tree.md)"),
     (r"\(\.\./pytorch_migration\.md\)", "(/guide/migration)"),
+    (r"\(\.\./ddp\.md\)", "(/guide/ddp-reference)"),
     (r"\(\.\./troubleshooting\.md\)", "(/guide/troubleshooting)"),
     # Relative links to examples (from tutorials)
     (r"\(\.\./\.\./flodl/examples/([^)]+)\)", r"(https://github.com/fab2s/floDl/tree/main/flodl/examples/\1)"),
     # From docs/ root level (troubleshooting.md, pytorch_migration.md)
+    (r"\(ddp\.md\)", "(/guide/ddp-reference)"),
     (r"\(pytorch_migration\.md\)", "(/guide/migration)"),
     (r"\(troubleshooting\.md\)", "(/guide/troubleshooting)"),
     (r"\(tutorials/00-rust-primer\.md\)", "(/guide/rust-primer)"),
     (r"\(tutorials/01-tensors\.md\)", "(/guide/tensors)"),
     (r"\(tutorials/10-graph-tree\.md\)", "(/guide/graph-tree)"),
+    (r"\(tutorials/11-multi-gpu\.md\)", "(/guide/multi-gpu)"),
+    (r"\(tutorials/12-async-ddp\.md\)", "(/guide/async-ddp)"),
 ]
 
 NAV_LINE_RE = re.compile(

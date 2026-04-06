@@ -288,14 +288,24 @@ padding modules, `Unfold`/`Fold`
 - **`pin_memory`**
 - **`copy_` with non_blocking**
 
-## Phase 11: Future
+## Phase 11: Multi-GPU Training -- DONE
 
-- **Data loading**: Dataset trait, TensorDataset, Loader with batching/shuffle
+- **Data loading**: `DataSet` and `BatchDataSet` traits, `DataLoader` with resident/streaming/distributed modes, VRAM-aware prefetch, `Sampler` trait
+- **Graph DDP**: `Ddp::auto()` one-liner. Transparent scatter/gather, AllReduce, per-replica optimizers. `Graph::step()` handles the full sync cycle.
+- **Async DDP**: `AsyncDdp::builder()` for thread-per-GPU Local SGD. `ApplyPolicy` (Sync/Cadence/Async) x `AverageBackend` (Nccl/Cpu) for A/B testing.
+- **El Che**: heterogeneous GPU cadence strategy. Slow device anchors sync, fast device fills wall time. Auto-tunes from CudaEvent timing.
+- **NCCL bindings**: `NcclComms`, `NcclRankComm` (init-on-main + split), `NcclAbortHandle` for dead worker recovery.
+- **CUDA primitives**: `CudaEvent`, `CudaStream`, `StreamGuard` for async GPU-CPU pipeline.
+- **Auto-balancing**: EMA throughput tracking, adaptive chunk ratios, weighted gradient averaging.
+- **Per-device DataLoader backends**: each GPU independently selects resident or streaming.
+
+## Phase 12: Future
+
 - **Multi-threading**: rayon for parallel level execution
 - **Higher-order gradients**: differentiate through backward
 - **Graph serialization**: save/load graph topology
 - **ONNX import/export**
-- **Multi-GPU**: data parallelism, model parallelism
+- **Model parallelism**: tensor/pipeline parallelism for models that exceed single-GPU VRAM
 - **JEPA primitives**: EMA target encoder, latent-space prediction, masking
   strategies. JEPA (Joint Embedding Predictive Architecture) trains by
   predicting representations rather than reconstructing inputs. flodl's

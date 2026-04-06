@@ -23,6 +23,7 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
   <a href="#the-graph-builder">Graph Builder</a> &bull;
   <a href="#graph-tree-hierarchical-composition">Graph Tree</a> &bull;
   <a href="#the-training-experience">Training</a> &bull;
+  <a href="#multi-gpu-training">Multi-GPU</a> &bull;
   <a href="#pytorch-parity">Parity</a> &bull;
   <a href="#performance">Benchmarks</a> &bull;
   <a href="https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md">Migration Guide</a>
@@ -362,6 +363,52 @@ g.plot_html("training.html", &["loss", "head"])?;  // interactive curves
 See the **[Training Monitor Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/09-monitor.md)** and
 the **[Observation example](https://github.com/fab2s/floDl/tree/main/flodl/examples/observation/)**.
 
+## Multi-GPU Training
+
+Two approaches, one goal: scale to every GPU you have.
+
+**Graph DDP** -- one line to go from single-GPU to multi-GPU:
+
+```rust
+// Detect GPUs, replicate model, set optimizer, enable training
+Ddp::auto(&model, &builder, |p| Adam::new(p, 0.001))?;
+
+// Training loop is IDENTICAL for 1 or N GPUs
+for batch in model.epoch(0) {
+    let loss = model.forward_batch(&batch?)?;
+    model.step()?;  // AllReduce + sync + optimizer + zero_grad
+}
+```
+
+**Async DDP** -- thread-per-GPU, works with any `Module`:
+
+```rust
+let state = AsyncDdp::builder(model_factory, optim_factory, train_fn)
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(10)
+    .policy(ApplyPolicy::Cadence)       // ElChe for mixed GPUs
+    .backend(AverageBackend::Nccl)      // or Cpu for A/B testing
+    .run()?
+    .join()?;
+```
+
+| | Graph DDP | Async DDP |
+|---|---|---|
+| **Works with** | `Graph` builder | Any `Module` |
+| **GPU model** | Scatter per batch | Thread per GPU (Local SGD) |
+| **Mixed GPUs** | El Che auto-enabled | `ApplyPolicy` x `AverageBackend` |
+| **Setup** | One line (`Ddp::auto`) | Builder pattern |
+| **Dashboard** | Integrated | Stderr logging |
+
+**A/B testing**: swap `AverageBackend::Nccl` for `AverageBackend::Cpu`
+with one line. If loss curves match, you have validated the cheaper
+backend for your workload.
+
+See the **[Multi-GPU Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md)**,
+**[Async DDP Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md)**, and
+**[DDP Reference](https://github.com/fab2s/floDl/blob/main/docs/ddp.md)**.
+
 ## PyTorch Parity
 
 floDl covers the modules, losses, and optimizers you actually use:
@@ -485,6 +532,22 @@ codegen-units = 1
 
 </details>
 
+<details>
+<summary><strong>Multi-GPU (DDP)</strong></summary>
+
+| Component | What it does |
+|-----------|-------------|
+| `Ddp::auto` | One-liner: detect GPUs, distribute, set optimizer, train |
+| `AsyncDdp::builder` | Thread-per-GPU with Local SGD, any Module |
+| `ApplyPolicy` | Sync / Cadence / Async (when to average) |
+| `AverageBackend` | Nccl / Cpu (how to average, A/B testable) |
+| `ElChe` | Heterogeneous GPU cadence strategy |
+| `NcclComms` / `NcclRankComm` | NCCL AllReduce, Broadcast, abort handles |
+| `CudaEvent` / `CudaStream` | Async GPU-CPU pipeline, timing |
+| `DataLoader` | Resident/streaming/distributed, VRAM-aware prefetch |
+
+</details>
+
 ### Numerical Verification
 
 Every differentiable path is verified against finite-difference gradients:
@@ -509,6 +572,7 @@ supports. If `nvidia-smi` works, floDl trains on it.
 | **New to Rust** | [Rust for PyTorch Users](https://github.com/fab2s/floDl/blob/main/docs/tutorials/00-rust-primer.md) — 10 patterns in 15 minutes |
 | **Know Rust, new to DL** | [Tensors](https://github.com/fab2s/floDl/blob/main/docs/tutorials/01-tensors.md) then [Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/04-training.md) |
 | **Know PyTorch** | [Migration Guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md) then [Graph Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md) |
+| **Scaling to multi-GPU** | [Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md) then [Async DDP](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md) |
 | **Just show me code** | [`quickstart`](https://github.com/fab2s/floDl/tree/main/flodl/examples/quickstart/) or [`showcase`](https://github.com/fab2s/floDl/tree/main/flodl/examples/showcase/) |
 
 ### Tutorials
@@ -524,6 +588,8 @@ supports. If `nvidia-smi` works, floDl trains on it.
 8. **[Utilities](https://github.com/fab2s/floDl/blob/main/docs/tutorials/08-utilities.md)** — checkpoints, clipping, freezing, initialization, scheduling
 9. **[Training Monitor](https://github.com/fab2s/floDl/blob/main/docs/tutorials/09-monitor.md)** — ETA, resource tracking, live dashboard
 10. **[Graph Tree](https://github.com/fab2s/floDl/blob/main/docs/tutorials/10-graph-tree.md)** — hierarchical composition, freeze/thaw, subgraph checkpoints
+11. **[Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md)** — Ddp::auto, El Che, auto-balancing, DataLoader integration
+12. **[Async DDP](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md)** — thread-per-GPU, Local SGD, A/B testable backends
 
 ### Examples
 
@@ -545,7 +611,9 @@ supports. If `nvidia-smi` works, floDl trains on it.
 +-----------------------------------------------------------+
 |  graph/    Fluent builder, graph tree, execution, DOT/SVG |
 +-----------------------------------------------------------+
-|  nn/       Modules, losses, optimizers, checkpoints       |
+|  data/     DataLoader, resident/streaming, prefetch       |
++-----------------------------------------------------------+
+|  nn/       Modules, losses, optimizers, DDP, NCCL         |
 +-----------------------------------------------------------+
 |  autograd/ Reverse-mode AD, gradient tracking             |
 +-----------------------------------------------------------+
@@ -553,7 +621,7 @@ supports. If `nvidia-smi` works, floDl trains on it.
 +-----------------------------------------------------------+
 |  flodl-sys   FFI bindings to libtorch C++ shim            |
 +-----------------------------------------------------------+
-|  libtorch / CUDA / CPU                                    |
+|  libtorch / CUDA / NCCL                                   |
 +-----------------------------------------------------------+
 ```
 

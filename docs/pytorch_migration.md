@@ -1479,6 +1479,63 @@ cuda_reset_peak_stats();
 The monitor samples these automatically on every `log()` call — you don't need
 to query them manually during training.
 
+## Multi-GPU Training (DDP)
+
+PyTorch's DDP requires multi-process coordination, environment variables,
+and a launcher. floDl keeps everything in a single process.
+
+### Setup comparison
+
+```python
+# PyTorch: requires torchrun, process groups, env vars
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+
+dist.init_process_group("nccl")
+rank = dist.get_rank()
+model = DDP(MyModel().to(rank), device_ids=[rank])
+sampler = DistributedSampler(dataset)
+loader = DataLoader(dataset, sampler=sampler, batch_size=32)
+
+# Launch: torchrun --nproc_per_node=2 train.py
+```
+
+```rust
+// floDl (Graph DDP): one line, no process groups, no launcher
+Ddp::auto(&model, &builder, |p| Adam::new(p, 0.001))?;
+
+// Or (Async DDP): works with any Module
+let state = AsyncDdp::builder(model_factory, optim_factory, train_fn)
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(10)
+    .run()?
+    .join()?;
+```
+
+### Concept mapping
+
+| PyTorch | floDl | Notes |
+|---------|-------|-------|
+| `dist.init_process_group("nccl")` | Automatic | NCCL init handled internally |
+| `DistributedDataParallel(model)` | `Ddp::auto()` or `AsyncDdp::builder()` | Single process, multi-thread |
+| `DistributedSampler` | Automatic | DataLoader handles partitioning |
+| `torchrun --nproc_per_node=N` | Not needed | Single-process model |
+| `model.to(rank)` | `model_factory(device)` | Per-device model in closure |
+| Equal batch per GPU only | `ElChe` cadence | Heterogeneous GPU support |
+| `NCCL` or `Gloo` | `AverageBackend::Nccl` or `Cpu` | A/B testable backends |
+| No built-in A/B testing | `ApplyPolicy` x `AverageBackend` | 6 combinations, swap with one line |
+
+### Key differences
+
+- **Single process**: no `torchrun`, no `MASTER_ADDR`/`MASTER_PORT`, no rank calculation. floDl detects GPUs and spawns threads internally.
+- **Heterogeneous GPUs**: PyTorch DDP requires equal batch sizes across ranks. floDl's El Che assigns proportional work based on measured throughput.
+- **A/B testing**: swap `AverageBackend::Nccl` for `AverageBackend::Cpu` with one line. PyTorch has no equivalent mechanism.
+- **Single-GPU fallback**: both `Ddp::auto()` and `AsyncDdp::builder()` work identically on single GPU/CPU. No conditional code needed.
+
+See the [DDP Reference](ddp.md) for complete API documentation.
+
 ## Quick Reference Table
 
 | PyTorch | flodl | Notes |

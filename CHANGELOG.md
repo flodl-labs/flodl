@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`broadcast()`** / **`broadcast_on_streams()`**: Broadcast from root rank to all devices.
 - Raw NCCL (not c10d) for minimal overhead in single-process multi-GPU.
 
+#### NCCL Per-Rank Communication
+- **`NcclRankComm`**: Per-rank communicator for multi-threaded DDP. Each GPU thread owns one comm, runs collectives independently. `Send` so it can be moved into spawned threads.
+  - `init_rank(rank, world_size, &uid)`: Direct per-rank init from a shared `NcclUniqueId`.
+  - `all_reduce(&[&Tensor], ReduceOp)` / `all_reduce_on_stream(...)`: Rank-local AllReduce.
+  - `broadcast(&[&Tensor], root)`: Rank-local broadcast.
+- **`NcclComms::split()`**: Extracts per-rank `NcclRankComm` from a group-initialized `NcclComms`. Preferred over per-thread `init_rank` because `ncclCommInitRank` from worker threads corrupts CUDA context on heterogeneous GPUs. Init-on-main + split is the safe pattern.
+- **`NcclAbortHandle`**: Arc-shared handle to abort a stuck `NcclRankComm`. Calling `abort()` unblocks any thread stuck in an AllReduce/Broadcast and makes the comm's Drop a no-op. Used by `AsyncDdp` to recover from worker death without deadlocking surviving workers.
+- **`NcclUniqueId`**: 128-byte unique ID for coordinating per-rank init. `NcclUniqueId::new()` generates on rank 0, then shared to all ranks.
+- 7 per-rank FFI functions: `flodl_nccl_get_unique_id`, `flodl_nccl_init_rank`, `flodl_nccl_destroy_rank`, `flodl_nccl_all_reduce_rank`, `flodl_nccl_abort_rank`, `flodl_nccl_split_rank`.
+
 #### Transparent Multi-GPU Training
 - **`Graph::distribute()`**: Auto-detect GPUs, create replicas, broadcast params. Single line to enable multi-GPU. No-op on single GPU.
 - **`Graph::set_optimizer()`**: Creates per-replica optimizers when distributed.
@@ -121,6 +131,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`Graph::epoch()`** seeds initial batch counts from `ElChe::batch_counts()`. **`Graph::step()`** feeds updated counts back to the loader after `report_timing()`.
 - Training loop is identical for homogeneous and heterogeneous GPU setups. `Ddp::auto()` detects heterogeneous hardware and enables El Che automatically.
 
+#### Async DDP — Thread-Per-GPU Training
+- **`AsyncDdp`**: Thread-per-GPU training with Local SGD and adaptive parameter averaging. Each GPU runs its own training loop with a local optimizer. A lightweight coordinator thread triggers periodic parameter averaging. Two orthogonal knobs: [`ApplyPolicy`] (when to average) and [`AverageBackend`] (how to average).
+- **`AsyncDdpBuilder`** (recommended entry point): Fluent API for configuring and launching training. Required: `.dataset()`, `.batch_size()`, `.num_epochs()`. Optional: `.policy()`, `.backend()`, `.overhead_target()`, `.max_anchor()`, `.divergence_threshold()`, `.max_batch_diff()`, `.checkpoint_every()`, `.checkpoint_fn()`.
+  ```rust
+  let ddp = AsyncDdp::builder(model_factory, optim_factory, train_fn)
+      .dataset(dataset)
+      .batch_size(32)
+      .num_epochs(10)
+      .policy(ApplyPolicy::Cadence)
+      .backend(AverageBackend::Nccl)
+      .run()?;
+  let state = ddp.join()?;
+  ```
+- **`AsyncDdp::auto()`** / **`auto_with()`**: Quick-start alternatives that take all arguments directly.
+- **`ApplyPolicy`**: Controls WHEN averaging occurs.
+  - `Sync`: K=1 (every batch). Equivalent to standard DDP. Best convergence.
+  - `Cadence`: K=N (ElChe anchor count). Slow GPU anchors the cadence, fast GPUs fill wall time. Recommended for heterogeneous hardware.
+  - `Async`: K=adaptive. Auto-tunes averaging interval from divergence monitoring. Maximum throughput.
+- **`AverageBackend`**: Controls HOW averaging is performed. Orthogonal to policy, all combinations valid for A/B testing.
+  - `Nccl`: In-place AllReduce on GPU. Zero extra memory, GPU-to-GPU DMA. All GPUs sync at collective barrier.
+  - `Cpu`: Workers send parameter snapshots to coordinator, which averages on CPU and distributes. No GPU ever blocks. Uses O(world_size * model_size) CPU RAM. Non-blocking 3-phase state machine (Idle/Collecting/Computing) keeps coordinator responsive during averaging.
+- **`GpuWorker<M>`**: Generic worker bound to a single GPU. Thread-local model + optimizer (Rc-based, not Send). CUDA streams for overlapped compute/communication. Handles `SyncNow` (NCCL), `RequestParams`/`Update` (CPU), `Throttle`, `PartitionHint`, `Checkpoint`, `Shutdown`.
+- **`Coordinator`**: Lightweight scheduling thread. Collects timing from workers (for ElChe throughput ratios), triggers averaging, monitors divergence to auto-tune interval, rebalances data partitions. Builder pattern with configurable `divergence_threshold`, `overhead_target`, `max_anchor`, `checkpoint_every`, `snapshot_timeout_secs`.
+- **`TrainedState`**: Return type from `AsyncDdp::join()`. Contains averaged `params` and `buffers` as CPU tensors, ready for inference or checkpoint.
+- **`AsyncDdpConfig`**: Configuration struct with builder methods: `with_overhead_target()`, `with_max_anchor()`, `with_anchor()`, `with_divergence_threshold()`, `with_max_batch_diff()`, `with_checkpoint_every()`, `with_snapshot_timeout()`.
+- **Single-GPU fallback**: With fewer than 2 CUDA devices, training runs on the main thread with no coordinator or averaging. API is identical; `join()` returns `TrainedState` in both cases.
+
+#### Async DDP — Robustness
+- **`max_batch_diff`**: Hard limit on how far any GPU can run ahead of the slowest. Workers that exceed the limit are throttled (block on control channel) until the next averaging event. `Some(0)` = strict lockstep.
+- **`drain_until_shutdown`**: After training, workers keep handling control messages (especially `SyncNow`) until the coordinator sends `Shutdown`. Prevents NCCL deadlock when workers finish at different times.
+- **NCCL init-on-main + split()**: All NCCL communicators initialized from the main thread via `NcclComms::new()` then `split()` into per-rank `NcclRankComm`. Per-thread `ncclCommInitRank` corrupts CUDA context on heterogeneous GPUs.
+- **NCCL abort handles**: If a worker dies mid-collective, `AsyncDdp::abort_nccl()` calls `ncclCommAbort` on all communicators, unblocking surviving workers. Also triggered in `Drop`.
+- **Worker error propagation**: Failed workers set the shared shutdown flag and send `TimingMsg::Exiting` so the coordinator stops including that rank in collectives.
+- **CPU averaging timeout**: Configurable `snapshot_timeout_secs` (default 5s). If not all worker snapshots arrive in time, the round is soft-aborted (logged with missing rank IDs and abort count), stale snapshots drained, and retried on the next cycle.
+- **CPU Update delivery logging**: Failed Update deliveries to dead workers are logged with the affected rank.
+- **Shutdown cleanup**: `drain_avg_state()` logs and joins any in-progress CPU averaging (Collecting or Computing) before the coordinator exits, preventing detached threads from holding GPU resources.
+
+#### Async DDP — Observability
+- **Averaging success logging**: Both paths log on successful averaging. NCCL: `"NCCL averaging #N complete (vV)"`. CPU: `"CPU averaging #N complete (vV, X.Xms)"` with timing.
+- **Per-rank epoch metrics**: Worker epoch-end metrics (rank, epoch, loss, batches, wall time) forwarded to stderr from the coordinator loop.
+- **Coordinator accessors**: `avg_count()`, `abort_count()`, `last_batch_ms()`, `last_avg_ms()`, `is_cpu_averaging()`, `version()`, `avg_interval()`, `is_calibrated()`, `steps_since_avg()` for external monitoring.
+- **Divergence monitoring** (Async policy): Per-rank parameter L2 norms tracked. Relative norm difference triggers interval halving (diverging) or doubling (converging). Threshold configurable via `divergence_threshold` (default 0.05).
+- **Hardware summary**: Prints GPU count, heterogeneous/homogeneous detection, per-GPU name + VRAM, policy, and backend at launch.
+
+#### Async DDP — Checkpointing
+- **`CheckpointFn<M>`**: `Arc<dyn Fn(u64, &M) -> Result<()> + Send + Sync>`. Called on rank 0 after averaging events (multi-GPU) or epoch boundaries (single-GPU). Errors are logged but do not stop training.
+- **`checkpoint_every(n)`**: Save every N averaging events. Coordinated through `ControlMsg::Checkpoint` to rank 0's worker thread (which owns the model).
+- **`TrainedState`** on partial failure: If some workers died, `collect_final_state()` averages surviving workers' snapshots. If averaging fails, falls back to the first snapshot's tensors. Returns `None` only if zero snapshots arrived.
+
 #### Adaptive Data Pipeline
 - **VRAM-aware prefetch depth**: `prefetch_depth_from_vram()` computes channel depth from free VRAM, per-sample bytes, and batch size. No manual tuning needed.
 - **Bootstrap prefetch**: Initial depth of 4 batches during DataLoader construction. Real depth computed at `epoch(0)` after model is loaded and VRAM usage is stable.
@@ -128,6 +187,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`DataLoaderBuilder::vram_margin(f64)`**: Default 0.10 (10% coordination margin). Clamped to [0.01, 0.50]. User sets based on model activation overhead.
 - **Manual override**: `.prefetch(n)` or `set_prefetch_depth()` disables automatic adaptation (`user_set_depth` flag).
 - **`auto_resize()`**: Manual trigger for VRAM-based resize between epochs.
+
+#### Module Builders
+- **`ConvTranspose1dBuilder`**, **`ConvTranspose2dBuilder`**, **`ConvTranspose3dBuilder`**: Fluent builder APIs for transposed convolution layers (`with_stride`, `with_padding`, `with_output_padding`, `with_dilation`, `with_groups`, `with_bias`, `on_device`, `done`). Consistent with existing Conv1d/Conv2d/Conv3d builder pattern.
+
+#### Small Additions
+- **`Linear::no_bias_on_device()`**: Create a bias-free linear layer on a specific device. Previously `no_bias()` was CPU-only.
+- **`AdamBuilder::betas()` / `.eps()`**: Customize beta1, beta2, and epsilon in Adam per-group builder. Previously hardcoded to (0.9, 0.999) and 1e-8.
+- **`AdamWBuilder::betas()` / `.eps()`**: Same for AdamW per-group builder.
+- Improved doc comments on all loss functions (dtype requirements), conv builders, and optimizer constructors.
 
 ### Changed
 
