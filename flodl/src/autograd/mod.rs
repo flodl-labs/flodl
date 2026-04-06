@@ -1533,9 +1533,10 @@ mod tests {
 
     #[test]
     fn test_variable_to_device_same() {
+        let dev = crate::tensor::test_device();
         let x = Variable::new(from_f32(&[1.0], &[1]), true);
-        let y = x.to_device(Device::CPU).unwrap();
-        assert_eq!(y.device(), Device::CPU);
+        let y = x.to_device(dev).unwrap();
+        assert_eq!(y.device(), dev);
         assert!(y.requires_grad());
     }
 
@@ -1824,4 +1825,73 @@ mod tests {
         assert!(x.grad().is_some());
         assert!(grid.grad().is_some());
     }
+
+    // --- NoGradGuard / no_grad tests ---
+
+    #[test]
+    fn test_no_grad_guard_basic() {
+        assert!(is_grad_enabled());
+        {
+            let _guard = NoGradGuard::new();
+            assert!(!is_grad_enabled());
+        }
+        assert!(is_grad_enabled());
+    }
+
+    #[test]
+    fn test_no_grad_guard_nested() {
+        assert!(is_grad_enabled());
+        {
+            let _outer = NoGradGuard::new();
+            assert!(!is_grad_enabled());
+            {
+                let _inner = NoGradGuard::new();
+                assert!(!is_grad_enabled());
+            }
+            // Inner dropped, but outer still alive
+            assert!(!is_grad_enabled());
+        }
+        assert!(is_grad_enabled());
+    }
+
+    #[test]
+    fn test_no_grad_guard_default() {
+        let _guard: NoGradGuard = Default::default();
+        assert!(!is_grad_enabled());
+    }
+
+    #[test]
+    fn test_no_grad_closure_return() {
+        let result = no_grad(|| {
+            assert!(!is_grad_enabled());
+            42
+        });
+        assert_eq!(result, 42);
+        assert!(is_grad_enabled());
+    }
+
+    #[test]
+    fn test_no_grad_prevents_grad_tracking() {
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        let y = no_grad(|| x.mul_scalar(3.0).unwrap());
+        assert!(!y.requires_grad());
+        // The result tensor should NOT have a grad_fn
+        assert!(y.is_leaf() || !y.requires_grad());
+    }
+
+    #[test]
+    fn test_no_grad_leaves_existing_grads_intact() {
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[2]), true);
+        let y = x.mul_scalar(3.0).unwrap().sum().unwrap();
+        y.backward().unwrap();
+        let grad_before = x.grad().unwrap().to_f32_vec().unwrap();
+
+        // no_grad should not clear existing gradients
+        no_grad(|| {
+            let _ = x.mul_scalar(5.0).unwrap();
+        });
+        let grad_after = x.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(grad_before, grad_after);
+    }
+
 }

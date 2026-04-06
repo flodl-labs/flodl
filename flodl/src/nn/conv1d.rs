@@ -50,43 +50,43 @@ pub struct Conv1dBuilder {
 }
 
 impl Conv1dBuilder {
-    /// Set stride.
+    /// Set the convolution stride (default: 1). Controls output spatial size.
     pub fn with_stride(mut self, stride: i64) -> Self {
         self.stride = stride;
         self
     }
 
-    /// Set padding.
+    /// Set zero-padding added to input (default: 0).
     pub fn with_padding(mut self, padding: i64) -> Self {
         self.padding = padding;
         self
     }
 
-    /// Set dilation.
+    /// Set kernel dilation (default: 1). Increases receptive field without adding parameters.
     pub fn with_dilation(mut self, dilation: i64) -> Self {
         self.dilation = dilation;
         self
     }
 
-    /// Set the number of groups for grouped convolution.
+    /// Set grouped convolution (default: 1). Groups=in_channels gives depthwise convolution.
     pub fn with_groups(mut self, groups: i64) -> Self {
         self.groups = groups;
         self
     }
 
-    /// Disable bias.
+    /// Disable the bias term.
     pub fn without_bias(mut self) -> Self {
         self.with_bias = false;
         self
     }
 
-    /// Set the device for parameter allocation.
+    /// Set the target device (default: CPU).
     pub fn on_device(mut self, device: Device) -> Self {
         self.device = device;
         self
     }
 
-    /// Finalize and create the Conv1d layer.
+    /// Build the convolution layer with the configured parameters.
     pub fn done(self) -> Result<Conv1d> {
         Conv1d::build(
             self.in_channels, self.out_channels, self.kernel_size,

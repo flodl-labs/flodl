@@ -344,7 +344,7 @@ impl std::fmt::Debug for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tensor::{TensorOptions, DType, Device};
+    use crate::tensor::test_opts;
 
     struct SimplePairs {
         x: Tensor,
@@ -383,7 +383,7 @@ mod tests {
     }
 
     fn make_simple_data(n: usize) -> SimplePairs {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         SimplePairs {
             x: Tensor::randn(&[n as i64, 4], opts).unwrap(),
             y: Tensor::randn(&[n as i64, 2], opts).unwrap(),
@@ -391,7 +391,7 @@ mod tests {
     }
 
     fn make_multi_target(n: usize) -> MultiTarget {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         MultiTarget {
             images: Tensor::randn(&[n as i64, 3, 8, 8], opts).unwrap(),
             letters: Tensor::randn(&[n as i64, 26], opts).unwrap(),
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_batch_positional_indexing() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let t1 = Tensor::ones(&[2, 5], opts).unwrap();
         let b = Batch::new_unnamed(vec![t0, t1]);
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_batch_named_indexing() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let t1 = Tensor::ones(&[2, 5], opts).unwrap();
         let names = vec!["image".to_string(), "label".to_string()];
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_batch_has_and_names() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let t1 = Tensor::ones(&[2, 5], opts).unwrap();
         let names = vec!["image".to_string(), "label".to_string()];
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_batch_get_named() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let t1 = Tensor::ones(&[2, 5], opts).unwrap();
         let names = vec!["x".to_string(), "y".to_string()];
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_batch_auto_names() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let t1 = Tensor::ones(&[2, 5], opts).unwrap();
         let b = Batch::new_unnamed(vec![t0, t1]);
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unknown field 'missing'")]
     fn test_batch_named_index_panics_on_missing() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let b = Batch::new(vec![t0], vec!["image".to_string()]);
         let _ = &b["missing"];
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_batch_into_vec() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let t1 = Tensor::ones(&[2, 5], opts).unwrap();
         let b = Batch::new_unnamed(vec![t0, t1]);
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_batch_into_parts() {
-        let opts = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+        let opts = test_opts();
         let t0 = Tensor::zeros(&[2, 3], opts).unwrap();
         let t1 = Tensor::ones(&[2, 5], opts).unwrap();
         let names = vec!["a".to_string(), "b".to_string()];

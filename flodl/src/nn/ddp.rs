@@ -1060,7 +1060,22 @@ impl ElChe {
             // Dead zone: only update if change exceeds 10% of current count.
             // Always update on first calibration (current == anchor for all).
             if diff > current as f64 * 0.10 || !self.calibrated {
-                self.batch_counts[rank] = target;
+                // Clamp per-update change to max_batch_diff (if set).
+                // Without this, a sudden speed change (thermal throttle, power
+                // limit) can cause the batch count to jump far beyond the
+                // intended limit in a single update, and the reactive throttle
+                // in check_throttle() only catches it one tick later.
+                let clamped = match self.max_batch_diff {
+                    Some(max) if self.calibrated => {
+                        if target > current {
+                            current.saturating_add(max).min(target)
+                        } else {
+                            current.saturating_sub(max).max(target).max(1)
+                        }
+                    }
+                    _ => target,
+                };
+                self.batch_counts[rank] = clamped;
             }
         }
     }
@@ -1872,6 +1887,33 @@ mod tests {
 
         let c2 = ElChe::new(2, 10);
         assert_eq!(c2.max_batch_diff(), None);
+    }
+
+    #[test]
+    fn test_batch_count_clamped_to_max_diff() {
+        // Setup: 2 GPUs, anchor=10, max_batch_diff=3.
+        let mut c = ElChe::new(2, 10).with_max_batch_diff(3);
+
+        // First report (calibration): GPU 0 slow (10ms/batch), GPU 1 fast (2ms/batch).
+        // batch_counts are [10, 10] initially, so wall = ms_per_batch * count.
+        // GPU 0: 10 batches * 10ms = 100ms. GPU 1: 10 batches * 2ms = 20ms.
+        c.report_timing(&[100.0, 20.0], 0.0);
+        assert!(c.is_calibrated());
+        // Calibration pass: no clamping. GPU 1 gets 50 batches (ratio 10/2 * 10).
+        let counts_after_cal = c.batch_counts().to_vec();
+        assert_eq!(counts_after_cal[0], 10);
+        assert_eq!(counts_after_cal[1], 50);
+
+        // Second report: GPU 1 suddenly slows to near GPU 0 speed.
+        // batch_counts now [10, 50]. GPU 0: 10*10ms=100ms. GPU 1: 50*9ms=450ms.
+        // ms_per_batch[1] EMA: alpha=clamp(|9-2|/2, 0.1, 0.8)=0.8, new=0.8*9+0.2*2=7.6
+        // slow_ms = max(10, 7.6) = 10. target[1] = 10*(10/7.6)=13.
+        // Without clamping: 50 -> 13 (drop of 37). With max_batch_diff=3: 50 -> 47.
+        c.report_timing(&[100.0, 450.0], 0.0);
+        let counts = c.batch_counts();
+        assert!(counts[1] >= counts_after_cal[1] - 3,
+            "batch count drop should be clamped to 3, was {} now {}",
+            counts_after_cal[1], counts[1]);
     }
 
     #[test]

@@ -19,12 +19,117 @@ pub struct ConvTranspose2d {
     pub groups: i64,
 }
 
+/// Builder for configuring ConvTranspose2d layers with a fluent API.
+///
+/// ```ignore
+/// let conv = ConvTranspose2d::configure(8, 3, 3)
+///     .with_stride(2)
+///     .with_padding(1)
+///     .on_device(Device::CUDA(0))
+///     .done()?;
+/// ```
+pub struct ConvTranspose2dBuilder {
+    in_channels: i64,
+    out_channels: i64,
+    kernel_size: i64,
+    with_bias: bool,
+    stride: [i64; 2],
+    padding: [i64; 2],
+    output_padding: [i64; 2],
+    dilation: [i64; 2],
+    groups: i64,
+    device: Device,
+}
+
+impl ConvTranspose2dBuilder {
+    /// Set the convolution stride (default: 1). Applied to both H and W dimensions.
+    pub fn with_stride(mut self, stride: i64) -> Self {
+        self.stride = [stride, stride];
+        self
+    }
+
+    /// Set zero-padding applied to input (default: 0). Applied to both H and W dimensions.
+    pub fn with_padding(mut self, padding: i64) -> Self {
+        self.padding = [padding, padding];
+        self
+    }
+
+    /// Set output padding to resolve ambiguous output sizes (default: 0). Applied to both dimensions.
+    pub fn with_output_padding(mut self, output_padding: i64) -> Self {
+        self.output_padding = [output_padding, output_padding];
+        self
+    }
+
+    /// Set kernel dilation (default: 1). Increases receptive field without adding parameters.
+    pub fn with_dilation(mut self, dilation: i64) -> Self {
+        self.dilation = [dilation, dilation];
+        self
+    }
+
+    /// Set grouped convolution (default: 1). Groups=in_channels gives depthwise convolution.
+    pub fn with_groups(mut self, groups: i64) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    /// Disable the bias term.
+    pub fn without_bias(mut self) -> Self {
+        self.with_bias = false;
+        self
+    }
+
+    /// Set the target device (default: CPU).
+    pub fn on_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
+    }
+
+    /// Build the transposed convolution layer with the configured parameters.
+    pub fn done(self) -> Result<ConvTranspose2d> {
+        ConvTranspose2d::build(
+            self.in_channels, self.out_channels, self.kernel_size,
+            self.with_bias, self.stride, self.padding, self.output_padding,
+            self.dilation, self.groups, self.device,
+        )
+    }
+}
+
 impl ConvTranspose2d {
     /// Create a ConvTranspose2d layer with default settings and bias.
     pub fn new(
         in_channels: i64, out_channels: i64, kernel_size: i64,
     ) -> Result<Self> {
         Self::build(in_channels, out_channels, kernel_size, true, [1, 1], [0, 0], [0, 0], [1, 1], 1, Device::CPU)
+    }
+
+    /// Create a ConvTranspose2d layer on a specific device.
+    pub fn on_device(
+        in_channels: i64, out_channels: i64, kernel_size: i64, device: Device,
+    ) -> Result<Self> {
+        Self::build(in_channels, out_channels, kernel_size, true, [1, 1], [0, 0], [0, 0], [1, 1], 1, device)
+    }
+
+    /// Start a fluent builder for full configuration.
+    ///
+    /// ```ignore
+    /// let conv = ConvTranspose2d::configure(8, 3, 3)
+    ///     .with_stride(2)
+    ///     .with_padding(1)
+    ///     .done()?;
+    /// ```
+    pub fn configure(in_channels: i64, out_channels: i64, kernel_size: i64) -> ConvTranspose2dBuilder {
+        ConvTranspose2dBuilder {
+            in_channels,
+            out_channels,
+            kernel_size,
+            with_bias: true,
+            stride: [1, 1],
+            padding: [0, 0],
+            output_padding: [0, 0],
+            dilation: [1, 1],
+            groups: 1,
+            device: Device::CPU,
+        }
     }
 
     /// Fully configurable ConvTranspose2d constructor.

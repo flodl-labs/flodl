@@ -3,6 +3,8 @@ use crate::tensor::{Result, Tensor, TensorError};
 
 /// Mean Squared Error loss: mean((pred - target)²)
 ///
+/// Both `pred` and `target` must be Float (Float32 or Float64), same dtype.
+///
 /// Uses a single fused libtorch kernel (1 autograd node).
 pub fn mse_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
     let result = pred.data().mse_loss(&target.data(), 1)?; // 1 = Mean
@@ -45,7 +47,8 @@ pub fn cross_entropy_loss(pred: &Variable, target: &Variable) -> Result<Variable
 /// `pred`: probabilities in \[0, 1\] (e.g. after sigmoid). Any shape.
 /// `target`: binary labels (same shape, values 0 or 1).
 ///
-/// For raw logits, prefer `bce_with_logits_loss` which is numerically stable.
+/// Both must be Float (same dtype). For raw logits, prefer
+/// `bce_with_logits_loss` which is numerically stable.
 ///
 /// Uses a single fused libtorch kernel (1 autograd node).
 pub fn bce_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
@@ -58,6 +61,8 @@ pub fn bce_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
 /// `pred`: raw logits (any shape).
 /// `target`: binary labels (same shape, values 0 or 1).
 ///
+/// Both must be Float (same dtype).
+///
 /// Uses a single fused libtorch kernel (1 autograd node).
 pub fn bce_with_logits_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
     let result = pred.data().bce_with_logits_loss(&target.data(), 1)?; // 1 = Mean
@@ -65,6 +70,8 @@ pub fn bce_with_logits_loss(pred: &Variable, target: &Variable) -> Result<Variab
 }
 
 /// L1 (Mean Absolute Error) loss: mean(|pred - target|)
+///
+/// Both `pred` and `target` must be Float (Float32 or Float64), same dtype.
 ///
 /// Uses a single fused libtorch kernel (1 autograd node).
 pub fn l1_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
@@ -76,6 +83,8 @@ pub fn l1_loss(pred: &Variable, target: &Variable) -> Result<Variable> {
 ///
 /// For |x| < beta: 0.5 * x² / beta
 /// For |x| >= beta: |x| - 0.5 * beta
+///
+/// Both `pred` and `target` must be Float (Float32 or Float64), same dtype.
 ///
 /// Uses a single fused libtorch kernel (1 autograd node).
 pub fn smooth_l1_loss(pred: &Variable, target: &Variable, beta: f64) -> Result<Variable> {
@@ -92,6 +101,8 @@ pub fn smooth_l1_loss(pred: &Variable, target: &Variable, beta: f64) -> Result<V
 /// `target`: probabilities (true distribution).
 ///
 /// Computes: `sum(target * (log(target) - input)) / batch`
+///
+/// Both `input` and `target` must be Float (Float32 or Float64), same dtype.
 ///
 /// Uses a single fused libtorch kernel (1 autograd node).
 /// Follows PyTorch convention: target * (log(target) - input).
@@ -122,10 +133,13 @@ pub fn nll_loss(input: &Variable, target: &Variable) -> Result<Variable> {
 /// CTC loss for sequence-to-sequence tasks (speech recognition, OCR).
 ///
 /// `log_probs`: `[T, N, C]` — log-probabilities per timestep.
-/// `targets`: `[N, S]` or concatenated 1D target sequences.
-/// `input_lengths`: `[N]` (Int64) — actual sequence lengths in log_probs.
-/// `target_lengths`: `[N]` (Int64) — actual target lengths.
+/// `targets`: `[N, S]` or concatenated 1D target sequences (Int64).
+/// `input_lengths`: `[N]` (Int64) -- actual sequence lengths in log_probs.
+/// `target_lengths`: `[N]` (Int64) -- actual target lengths.
 /// `blank`: label index for the blank token (default: 0).
+///
+/// Dtype: `log_probs` must be Float. `targets`, `input_lengths`, and
+/// `target_lengths` must all be Int64.
 pub fn ctc_loss(
     log_probs: &Variable,
     targets: &Variable,
@@ -175,7 +189,7 @@ pub fn focal_loss(
 ///
 /// `loss = max(0, ||anchor - positive|| - ||anchor - negative|| + margin)`
 ///
-/// `anchor`, `positive`, `negative`: same shape embeddings.
+/// `anchor`, `positive`, `negative`: same shape embeddings (Float, same dtype).
 pub fn triplet_margin_loss(
     anchor: &Variable,
     positive: &Variable,
@@ -196,7 +210,7 @@ pub fn triplet_margin_loss(
 ///
 /// `loss = 1 - cos(x1, x2)` when label=1; `max(0, cos(x1, x2) - margin)` when label=-1.
 ///
-/// `x1`, `x2`: embeddings (same shape). `label`: +1 or -1 per sample.
+/// `x1`, `x2`: embeddings (same shape, Float). `label`: +1 or -1 per sample (Float).
 pub fn cosine_embedding_loss(
     x1: &Variable,
     x2: &Variable,
@@ -226,6 +240,8 @@ pub fn cosine_embedding_loss(
 /// Hinge embedding loss.
 ///
 /// `loss = x` when label=1; `max(0, margin - x)` when label=-1.
+///
+/// Both `input` and `label` must be Float (same dtype).
 pub fn hinge_embedding_loss(
     input: &Variable,
     label: &Variable,
@@ -246,6 +262,8 @@ pub fn hinge_embedding_loss(
 /// Margin ranking loss.
 ///
 /// `loss = max(0, -label * (x1 - x2) + margin)`
+///
+/// `x1`, `x2`, and `label` must all be Float (same dtype).
 pub fn margin_ranking_loss(
     x1: &Variable,
     x2: &Variable,
@@ -266,6 +284,7 @@ pub fn margin_ranking_loss(
 ///
 /// `loss = exp(input) - target * input`
 ///
+/// Both `input` and `target` must be Float (Float32 or Float64), same dtype.
 /// For count data modeled as Poisson distributions.
 pub fn poisson_nll_loss(input: &Variable, target: &Variable, log_input: bool) -> Result<Variable> {
     let loss = if log_input {

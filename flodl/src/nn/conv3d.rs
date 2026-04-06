@@ -35,13 +35,25 @@ pub struct Conv3dBuilder {
 }
 
 impl Conv3dBuilder {
+    /// Set the convolution stride (default: [1, 1, 1]). Controls output spatial size per dimension.
     pub fn with_stride(mut self, stride: [i64; 3]) -> Self { self.stride = stride; self }
+
+    /// Set zero-padding added to input (default: [0, 0, 0]). One value per spatial dimension.
     pub fn with_padding(mut self, padding: [i64; 3]) -> Self { self.padding = padding; self }
+
+    /// Set kernel dilation (default: [1, 1, 1]). Increases receptive field without adding parameters.
     pub fn with_dilation(mut self, dilation: [i64; 3]) -> Self { self.dilation = dilation; self }
+
+    /// Set grouped convolution (default: 1). Groups=in_channels gives depthwise convolution.
     pub fn with_groups(mut self, groups: i64) -> Self { self.groups = groups; self }
+
+    /// Disable the bias term.
     pub fn without_bias(mut self) -> Self { self.with_bias = false; self }
+
+    /// Set the target device (default: CPU).
     pub fn on_device(mut self, device: Device) -> Self { self.device = device; self }
 
+    /// Build the convolution layer with the configured parameters.
     pub fn done(self) -> Result<Conv3d> {
         Conv3d::build(
             self.in_channels, self.out_channels, self.kernel_size,
@@ -52,6 +64,7 @@ impl Conv3dBuilder {
 }
 
 impl Conv3d {
+    /// Create a Conv3d layer with default stride=1, padding=0, dilation=1, groups=1, with bias.
     pub fn new(
         in_channels: i64, out_channels: i64, kernel_size: [i64; 3],
     ) -> Result<Self> {
@@ -59,6 +72,7 @@ impl Conv3d {
                     [1, 1, 1], [0, 0, 0], [1, 1, 1], 1, Device::CPU)
     }
 
+    /// Create a Conv3d layer on a specific device.
     pub fn on_device(
         in_channels: i64, out_channels: i64, kernel_size: [i64; 3], device: Device,
     ) -> Result<Self> {
@@ -66,6 +80,13 @@ impl Conv3d {
                     [1, 1, 1], [0, 0, 0], [1, 1, 1], 1, device)
     }
 
+    /// Start a fluent builder for full configuration.
+    ///
+    /// ```ignore
+    /// let conv = Conv3d::configure(1, 4, [3, 3, 3])
+    ///     .with_padding([1, 1, 1])
+    ///     .done()?;
+    /// ```
     pub fn configure(in_channels: i64, out_channels: i64, kernel_size: [i64; 3]) -> Conv3dBuilder {
         Conv3dBuilder {
             in_channels, out_channels, kernel_size,
@@ -75,6 +96,7 @@ impl Conv3d {
         }
     }
 
+    /// Fully configurable Conv3d constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         in_channels: i64, out_channels: i64, kernel_size: [i64; 3],

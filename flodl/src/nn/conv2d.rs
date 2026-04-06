@@ -50,43 +50,43 @@ pub struct Conv2dBuilder {
 }
 
 impl Conv2dBuilder {
-    /// Set stride (applied to both dimensions).
+    /// Set the convolution stride (default: 1). Applied to both H and W dimensions.
     pub fn with_stride(mut self, stride: i64) -> Self {
         self.stride = [stride, stride];
         self
     }
 
-    /// Set padding (applied to both dimensions).
+    /// Set zero-padding added to input (default: 0). Applied to both H and W dimensions.
     pub fn with_padding(mut self, padding: i64) -> Self {
         self.padding = [padding, padding];
         self
     }
 
-    /// Set dilation (applied to both dimensions).
+    /// Set kernel dilation (default: 1). Increases receptive field without adding parameters.
     pub fn with_dilation(mut self, dilation: i64) -> Self {
         self.dilation = [dilation, dilation];
         self
     }
 
-    /// Set the number of groups for grouped convolution.
+    /// Set grouped convolution (default: 1). Groups=in_channels gives depthwise convolution.
     pub fn with_groups(mut self, groups: i64) -> Self {
         self.groups = groups;
         self
     }
 
-    /// Disable bias.
+    /// Disable the bias term.
     pub fn without_bias(mut self) -> Self {
         self.with_bias = false;
         self
     }
 
-    /// Set the device for parameter allocation.
+    /// Set the target device (default: CPU).
     pub fn on_device(mut self, device: Device) -> Self {
         self.device = device;
         self
     }
 
-    /// Finalize and create the Conv2d layer.
+    /// Build the convolution layer with the configured parameters.
     pub fn done(self) -> Result<Conv2d> {
         Conv2d::build(
             self.in_channels, self.out_channels, self.kernel_size,

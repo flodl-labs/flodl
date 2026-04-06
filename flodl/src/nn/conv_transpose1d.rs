@@ -19,6 +19,81 @@ pub struct ConvTranspose1d {
     pub groups: i64,
 }
 
+/// Builder for configuring ConvTranspose1d layers with a fluent API.
+///
+/// ```ignore
+/// let conv = ConvTranspose1d::configure(4, 2, 3)
+///     .with_stride(2)
+///     .with_padding(1)
+///     .on_device(Device::CUDA(0))
+///     .done()?;
+/// ```
+pub struct ConvTranspose1dBuilder {
+    in_channels: i64,
+    out_channels: i64,
+    kernel_size: i64,
+    with_bias: bool,
+    stride: i64,
+    padding: i64,
+    output_padding: i64,
+    dilation: i64,
+    groups: i64,
+    device: Device,
+}
+
+impl ConvTranspose1dBuilder {
+    /// Set the convolution stride (default: 1). Controls output spatial size.
+    pub fn with_stride(mut self, stride: i64) -> Self {
+        self.stride = stride;
+        self
+    }
+
+    /// Set zero-padding applied to input (default: 0).
+    pub fn with_padding(mut self, padding: i64) -> Self {
+        self.padding = padding;
+        self
+    }
+
+    /// Set output padding to resolve ambiguous output sizes (default: 0).
+    pub fn with_output_padding(mut self, output_padding: i64) -> Self {
+        self.output_padding = output_padding;
+        self
+    }
+
+    /// Set kernel dilation (default: 1). Increases receptive field without adding parameters.
+    pub fn with_dilation(mut self, dilation: i64) -> Self {
+        self.dilation = dilation;
+        self
+    }
+
+    /// Set grouped convolution (default: 1). Groups=in_channels gives depthwise convolution.
+    pub fn with_groups(mut self, groups: i64) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    /// Disable the bias term.
+    pub fn without_bias(mut self) -> Self {
+        self.with_bias = false;
+        self
+    }
+
+    /// Set the target device (default: CPU).
+    pub fn on_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
+    }
+
+    /// Build the transposed convolution layer with the configured parameters.
+    pub fn done(self) -> Result<ConvTranspose1d> {
+        ConvTranspose1d::build(
+            self.in_channels, self.out_channels, self.kernel_size,
+            self.with_bias, self.stride, self.padding, self.output_padding,
+            self.dilation, self.groups, self.device,
+        )
+    }
+}
+
 impl ConvTranspose1d {
     /// Create a ConvTranspose1d layer with default settings and bias.
     pub fn new(
@@ -32,6 +107,29 @@ impl ConvTranspose1d {
         in_channels: i64, out_channels: i64, kernel_size: i64, device: Device,
     ) -> Result<Self> {
         Self::build(in_channels, out_channels, kernel_size, true, 1, 0, 0, 1, 1, device)
+    }
+
+    /// Start a fluent builder for full configuration.
+    ///
+    /// ```ignore
+    /// let conv = ConvTranspose1d::configure(4, 2, 3)
+    ///     .with_stride(2)
+    ///     .with_output_padding(1)
+    ///     .done()?;
+    /// ```
+    pub fn configure(in_channels: i64, out_channels: i64, kernel_size: i64) -> ConvTranspose1dBuilder {
+        ConvTranspose1dBuilder {
+            in_channels,
+            out_channels,
+            kernel_size,
+            with_bias: true,
+            stride: 1,
+            padding: 0,
+            output_padding: 0,
+            dilation: 1,
+            groups: 1,
+            device: Device::CPU,
+        }
     }
 
     /// Fully configurable ConvTranspose1d constructor.

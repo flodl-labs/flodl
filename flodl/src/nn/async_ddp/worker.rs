@@ -1,0 +1,591 @@
+//! GPU worker: thread-local training loop bound to a single device.
+
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::Instant;
+
+use crate::autograd::{Variable, NoGradGuard};
+use crate::data::BatchDataSet;
+use crate::nn::buffer::Buffer;
+use crate::nn::cuda_event::{CudaEvent, CudaEventFlags};
+use crate::nn::cuda_stream::{CudaStream, StreamGuard};
+use crate::nn::nccl::{NcclRankComm, ReduceOp};
+use crate::nn::{Module, Optimizer, Parameter};
+use crate::tensor::{Device, Result, Tensor, TensorError};
+
+use super::{
+    CheckpointFn, WorkerConfig, TimingMsg, MetricsMsg,
+    ParamSnapshot, AveragedParams, ControlMsg, make_partition,
+};
+
+// ---------------------------------------------------------------------------
+// GpuWorker
+// ---------------------------------------------------------------------------
+
+/// A training worker bound to a single GPU device.
+///
+/// Generic over the model type `M` so training closures can access concrete
+/// model methods (graph tags, traces, etc.) beyond the [`Module`] trait.
+///
+/// NOT Send: contains `Rc<RefCell<...>>` types (Variable, Buffer, Module).
+/// Must be constructed *inside* the spawned thread from Send ingredients.
+///
+/// Each worker runs an independent training loop with its own optimizer.
+/// Communication with the coordinator is via channels (all messages are Send).
+pub struct GpuWorker<M: Module> {
+    // -- Thread-local model state (non-Send) --
+    model: M,
+    optimizer: Box<dyn Optimizer>,
+    /// Ordered parameter variables for gradient extraction and param loading.
+    pub(super) param_vars: Vec<Variable>,
+    /// Ordered buffers for buffer synchronization.
+    buffer_list: Vec<Buffer>,
+
+    // -- Worker identity --
+    rank: usize,
+    device: Device,
+    world_size: usize,
+
+    // -- CUDA streams for overlap (None on CPU) --
+    compute_stream: Option<CudaStream>,
+    comm_stream: Option<CudaStream>,
+    /// Recorded on comm_stream after param copy/AllReduce.
+    /// compute_stream waits on this before each forward.
+    copy_done: Option<CudaEvent>,
+
+    // -- NCCL per-rank communicator (None for CPU averaging or CPU device) --
+    nccl_comm: Option<NcclRankComm>,
+
+    // -- Channels --
+    timing_tx: mpsc::Sender<TimingMsg>,
+    metrics_tx: mpsc::Sender<MetricsMsg>,
+    /// Used only with AverageBackend::Cpu.
+    param_tx: mpsc::Sender<ParamSnapshot>,
+    /// Dedicated channel for the final snapshot (avoids race with CPU averaging param_tx).
+    final_param_tx: mpsc::Sender<ParamSnapshot>,
+    control_rx: mpsc::Receiver<ControlMsg>,
+
+    // -- Data iteration --
+    dataset: Arc<dyn BatchDataSet>,
+    /// Sample indices for this worker's current partition.
+    pub(super) partition: Vec<usize>,
+    batch_size: usize,
+    base_seed: u64,
+
+    // -- Training state --
+    local_step: usize,
+    /// Batches since last averaging (for snapshot weighting).
+    steps_since_avg: usize,
+    current_version: u64,
+    pub(super) current_epoch: usize,
+    pending_partition_size: Option<usize>,
+
+    // -- Checkpoint --
+    /// Called on rank 0 after averaging events. Log-and-continue on error.
+    pub(super) checkpoint_fn: Option<CheckpointFn<M>>,
+}
+
+/// Channels bundle returned by [`GpuWorker::channels`] for wiring into the coordinator.
+pub struct WorkerChannels {
+    /// Receives timing reports from this worker.
+    pub timing_rx: mpsc::Receiver<TimingMsg>,
+    /// Receives epoch-end metrics from this worker.
+    pub metrics_rx: mpsc::Receiver<MetricsMsg>,
+    /// Receives parameter snapshots from this worker (CPU averaging path).
+    pub param_rx: mpsc::Receiver<ParamSnapshot>,
+    /// Receives the final parameter snapshot from this worker (sent before exit).
+    pub final_param_rx: mpsc::Receiver<ParamSnapshot>,
+    /// Sends control messages to this worker.
+    pub control_tx: mpsc::Sender<ControlMsg>,
+}
+
+/// Worker-side channel endpoints for passing into [`GpuWorker::new`].
+#[allow(clippy::type_complexity)]
+pub type WorkerEndpoints = (
+    mpsc::Sender<TimingMsg>,
+    mpsc::Sender<MetricsMsg>,
+    mpsc::Sender<ParamSnapshot>,
+    mpsc::Sender<ParamSnapshot>,  // final_param_tx
+    mpsc::Receiver<ControlMsg>,
+);
+
+impl<M: Module> GpuWorker<M> {
+    /// Create the channel pairs for one worker.
+    ///
+    /// Returns (worker-side senders/receiver, coordinator-side receivers/sender).
+    /// Call this on the main thread, then pass the worker-side halves into
+    /// [`GpuWorker::new`] inside the spawned thread.
+    pub fn channels() -> (WorkerEndpoints, WorkerChannels) {
+        let (timing_tx, timing_rx) = mpsc::channel();
+        let (metrics_tx, metrics_rx) = mpsc::channel();
+        let (param_tx, param_rx) = mpsc::channel();
+        let (final_param_tx, final_param_rx) = mpsc::channel();
+        let (control_tx, control_rx) = mpsc::channel();
+        (
+            (timing_tx, metrics_tx, param_tx, final_param_tx, control_rx),
+            WorkerChannels { timing_rx, metrics_rx, param_rx, final_param_rx, control_tx },
+        )
+    }
+
+    /// Build a GpuWorker inside a spawned thread.
+    ///
+    /// `model_factory` creates the model on `config.device` (thread-local, Rc-based).
+    /// `optim_factory` creates the optimizer for the model's parameters.
+    /// `initial_params`/`initial_buffers` from `WorkerConfig` are copied into the
+    /// model's Variables to synchronize all workers to the same starting state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new<F, G, O>(
+        config: &WorkerConfig,
+        model_factory: F,
+        optim_factory: G,
+        dataset: Arc<dyn BatchDataSet>,
+        nccl_comm: Option<NcclRankComm>,
+        checkpoint_fn: Option<CheckpointFn<M>>,
+        timing_tx: mpsc::Sender<TimingMsg>,
+        metrics_tx: mpsc::Sender<MetricsMsg>,
+        param_tx: mpsc::Sender<ParamSnapshot>,
+        final_param_tx: mpsc::Sender<ParamSnapshot>,
+        control_rx: mpsc::Receiver<ControlMsg>,
+    ) -> Result<Self>
+    where
+        F: FnOnce(Device) -> Result<M>,
+        G: FnOnce(&[Parameter]) -> O,
+        O: Optimizer + 'static,
+    {
+        // Create model on the target device
+        let model = model_factory(config.device)?;
+        let params = model.parameters();
+        let buffers = model.buffers();
+
+        // Copy initial params into model variables (no_grad: leaf tensors with requires_grad)
+        if params.len() != config.initial_params.len() {
+            return Err(TensorError::new(&format!(
+                "GpuWorker rank {}: model has {} params but config has {}",
+                config.rank, params.len(), config.initial_params.len()
+            )));
+        }
+        {
+            let _no_grad = NoGradGuard::new();
+            for (p, src) in params.iter().zip(&config.initial_params) {
+                p.variable.data().copy_(src, false)?;
+            }
+        }
+
+        // Copy initial buffers into model buffers
+        if buffers.len() != config.initial_buffers.len() {
+            return Err(TensorError::new(&format!(
+                "GpuWorker rank {}: model has {} buffers but config has {}",
+                config.rank, buffers.len(), config.initial_buffers.len()
+            )));
+        }
+        for (b, src) in buffers.iter().zip(&config.initial_buffers) {
+            b.get().copy_(src, false)?;
+        }
+
+        // Create optimizer for this replica's parameters
+        let optimizer = optim_factory(&params);
+
+        // Extract variable handles (for snapshot/load)
+        let param_vars: Vec<Variable> = params.iter().map(|p| p.variable.clone()).collect();
+        let buffer_list = buffers;
+
+        // Create CUDA streams if on GPU
+        let (compute_stream, comm_stream, copy_done) = if config.device.is_cuda() {
+            let cs = CudaStream::new(config.device, false)?;
+            let ms = CudaStream::new(config.device, false)?;
+            let ev = CudaEvent::new(CudaEventFlags::DisableTiming)?;
+            // Record initial event so first wait_event is a no-op
+            ev.record_on(&ms)?;
+            (Some(cs), Some(ms), Some(ev))
+        } else {
+            (None, None, None)
+        };
+
+        // Generate initial partition for this rank
+        let partition = make_partition(
+            config.rank, config.world_size, config.total_samples,
+            config.partition_samples, 0, config.seed,
+        );
+
+        Ok(GpuWorker {
+            model,
+            optimizer: Box::new(optimizer),
+            param_vars,
+            buffer_list,
+            rank: config.rank,
+            device: config.device,
+            world_size: config.world_size,
+            compute_stream,
+            comm_stream,
+            copy_done,
+            nccl_comm,
+            timing_tx,
+            metrics_tx,
+            param_tx,
+            final_param_tx,
+            control_rx,
+            dataset,
+            partition,
+            batch_size: config.batch_size,
+            base_seed: config.seed,
+            local_step: 0,
+            steps_since_avg: 0,
+            current_version: 0,
+            current_epoch: 0,
+            pending_partition_size: None,
+            checkpoint_fn,
+        })
+    }
+
+    /// This worker's rank.
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// This worker's device.
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Current local step count.
+    pub fn local_step(&self) -> usize {
+        self.local_step
+    }
+
+    /// Current model version (updated after loading averaged params).
+    pub fn current_version(&self) -> u64 {
+        self.current_version
+    }
+
+    /// A reference to the concrete model.
+    pub fn model(&self) -> &M {
+        &self.model
+    }
+
+    /// Extract current parameter values as a [`ParamSnapshot`].
+    ///
+    /// The returned tensors are shallow clones (share storage with the model's
+    /// Variables). They are `Send` and can be passed through channels.
+    /// Called between batches (after optimizer.step completes on default stream),
+    /// so param data is consistent without explicit stream sync.
+    pub fn snapshot_params(&self) -> ParamSnapshot {
+        let params = self.param_vars.iter().map(|v| v.data()).collect();
+        let buffers = self.buffer_list.iter().map(|b| b.get()).collect();
+        ParamSnapshot {
+            rank: self.rank,
+            params,
+            buffers,
+            batch_count: self.steps_since_avg.max(1),
+        }
+    }
+
+    /// Load averaged parameters from the coordinator (CPU averaging path).
+    ///
+    /// Uses `copy_(non_blocking=true)` on the comm stream for GPU overlap.
+    /// Records a `CudaEvent` so the compute stream waits before the next forward.
+    pub fn load_averaged(&mut self, update: &AveragedParams) -> Result<()> {
+        if update.params.len() != self.param_vars.len() {
+            return Err(TensorError::new(&format!(
+                "load_averaged: expected {} params, got {}",
+                self.param_vars.len(), update.params.len()
+            )));
+        }
+
+        let non_blocking = self.comm_stream.is_some();
+        // Set comm stream as current if available (copy_ respects current stream)
+        let _guard = self.comm_stream.as_ref().map(StreamGuard::new);
+
+        // no_grad: parameters are leaf tensors with requires_grad=true
+        {
+            let _no_grad = NoGradGuard::new();
+            for (var, src) in self.param_vars.iter().zip(&update.params) {
+                var.data().copy_(src, non_blocking)?;
+            }
+        }
+        for (buf, src) in self.buffer_list.iter().zip(&update.buffers) {
+            buf.get().copy_(src, non_blocking)?;
+        }
+
+        // Record event on comm_stream so compute_stream can wait
+        if let (Some(ev), Some(stream)) = (&self.copy_done, &self.comm_stream) {
+            ev.record_on(stream)?;
+        }
+
+        self.current_version = update.version;
+        Ok(())
+    }
+
+    /// Perform in-place NCCL AllReduce(Avg) on this rank's parameters.
+    ///
+    /// All ranks must process SyncNow concurrently for the collective to complete.
+    /// Runs on `comm_stream` and records `copy_done` so the compute stream waits
+    /// before the next forward.
+    fn sync_now_nccl(&self) -> Result<()> {
+        let comm = match &self.nccl_comm {
+            Some(c) => c,
+            None => return Ok(()), // No NCCL comm (CPU backend or single-GPU): no-op
+        };
+
+        // Collect param data tensors (raw storage, no grad graph)
+        let param_tensors: Vec<_> = self.param_vars.iter().map(|v| v.data()).collect();
+        let param_refs: Vec<&Tensor> = param_tensors.iter().collect();
+
+        if let Some(stream) = &self.comm_stream {
+            // AllReduce on comm_stream (non-blocking on host)
+            comm.all_reduce_on_stream(&param_refs, ReduceOp::Avg, stream)?;
+            // Record event so compute_stream waits before next forward
+            if let Some(ev) = &self.copy_done {
+                ev.record_on(stream)?;
+            }
+        } else {
+            // CPU fallback (should not happen for NCCL backend, but handle gracefully)
+            comm.all_reduce(&param_refs, ReduceOp::Avg)?;
+        }
+
+        Ok(())
+    }
+
+    /// Wait for any pending parameter copy to complete on the compute stream.
+    ///
+    /// Must be called before each forward pass to prevent reading mid-copy params.
+    /// No-op on CPU (no streams).
+    fn sync_before_forward(&self) -> Result<()> {
+        if let (Some(ev), Some(stream)) = (&self.copy_done, &self.compute_stream) {
+            stream.wait_event(ev)?;
+        }
+        Ok(())
+    }
+
+    /// Run one forward + backward + optimizer step.
+    ///
+    /// `train_fn` receives a reference to the concrete model `M` and the batch
+    /// tensors, and must return the scalar loss [`Variable`]. The worker handles
+    /// stream sync, backward, optimizer step, and zero_grad.
+    ///
+    /// Returns `(loss_value, wall_ms)`.
+    pub fn train_step(
+        &mut self,
+        batch: &[Tensor],
+        train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
+    ) -> Result<(f64, f64)> {
+        self.sync_before_forward()?;
+
+        let start = Instant::now();
+
+        // User-provided forward + loss computation
+        let loss = train_fn(&self.model, batch)?;
+        let loss_val: f64 = loss.data().item()?;
+
+        // Backward
+        loss.backward()?;
+
+        // Optimizer step (GPU-local Adam, ~0.1ms fused kernel)
+        self.optimizer.step()?;
+        self.optimizer.zero_grad();
+
+        self.local_step += 1;
+        self.steps_since_avg += 1;
+
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        Ok((loss_val, elapsed_ms))
+    }
+
+    /// Process pending control messages (non-blocking).
+    ///
+    /// Returns `true` if a Shutdown was received.
+    pub fn handle_control(&mut self) -> Result<bool> {
+        while let Ok(msg) = self.control_rx.try_recv() {
+            if self.dispatch_control(msg)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Block on control messages until Shutdown or channel disconnect.
+    ///
+    /// Called after training is done and `report_exiting()` has been sent.
+    /// Keeps the worker alive to participate in any NCCL collectives that
+    /// the coordinator triggered before seeing our Exiting message.
+    pub fn drain_until_shutdown(&mut self) {
+        while let Ok(msg) = self.control_rx.recv() {
+            if self.dispatch_control(msg).unwrap_or(true) {
+                break; // Shutdown
+            }
+        }
+    }
+
+    /// Handle a single control message. Returns `true` on Shutdown.
+    fn dispatch_control(&mut self, msg: ControlMsg) -> Result<bool> {
+        match msg {
+            ControlMsg::RequestParams => {
+                let _ = self.param_tx.send(self.snapshot_params());
+            }
+            ControlMsg::Update(avg) => {
+                self.load_averaged(&avg)?;
+                self.steps_since_avg = 0;
+            }
+            ControlMsg::SyncNow => {
+                self.sync_now_nccl()?;
+                self.steps_since_avg = 0;
+            }
+            ControlMsg::PartitionHint { num_samples } => {
+                self.pending_partition_size = Some(num_samples);
+            }
+            ControlMsg::Throttle => {
+                // Worker is ahead of the slowest rank: block until averaging
+                // completes (SyncNow/Update) or Shutdown. Intermediate messages
+                // (RequestParams, PartitionHint) are handled but don't release
+                // the throttle. Duplicate Throttle messages are ignored.
+                loop {
+                    match self.control_rx.recv() {
+                        Ok(ControlMsg::Throttle) => continue, // already throttled
+                        Ok(msg) => {
+                            let releases = matches!(
+                                &msg,
+                                ControlMsg::SyncNow
+                                    | ControlMsg::Update(_)
+                                    | ControlMsg::Shutdown
+                            );
+                            let shutdown = self.dispatch_control(msg)?;
+                            if shutdown || releases {
+                                return Ok(shutdown);
+                            }
+                        }
+                        Err(_) => return Ok(true), // channel dead
+                    }
+                }
+            }
+            ControlMsg::Checkpoint { version } => {
+                if let Some(ref f) = self.checkpoint_fn {
+                    if let Err(e) = f(version, &self.model) {
+                        eprintln!("  async-ddp: checkpoint failed (v{version}): {e}");
+                    }
+                }
+            }
+            ControlMsg::Shutdown => return Ok(true),
+        }
+        Ok(false)
+    }
+
+    /// Send a timing report to the coordinator.
+    pub fn report_timing(&self, batch_ms: f64) -> Result<()> {
+        self.timing_tx.send(TimingMsg::Batch {
+            rank: self.rank,
+            batch_ms,
+            step_count: self.local_step,
+        }).map_err(|_| TensorError::new("timing channel disconnected"))
+    }
+
+    /// Send the final parameter snapshot on the dedicated channel before exiting.
+    ///
+    /// This uses [`final_param_tx`] (not [`param_tx`]) to avoid racing with
+    /// CPU averaging snapshot collection on the same channel.
+    pub fn send_final_snapshot(&self) {
+        let _ = self.final_param_tx.send(self.snapshot_params());
+    }
+
+    /// Notify the coordinator that this worker is about to exit.
+    ///
+    /// Must be called before the thread terminates so the coordinator
+    /// stops including this rank in NCCL collectives.
+    pub fn report_exiting(&self) {
+        let _ = self.timing_tx.send(TimingMsg::Exiting { rank: self.rank });
+    }
+
+    /// Send epoch-end metrics to the coordinator.
+    pub fn report_epoch(&self, avg_loss: f64, batches: usize, epoch_ms: f64) -> Result<()> {
+        self.metrics_tx.send(MetricsMsg {
+            rank: self.rank,
+            epoch: self.current_epoch,
+            avg_loss,
+            batches_processed: batches,
+            epoch_ms,
+        }).map_err(|_| TensorError::new("metrics channel disconnected"))
+    }
+
+    /// Consume the pending partition hint (if any) and return the new sample count.
+    ///
+    /// Called at epoch boundaries by the worker's training loop.
+    pub fn take_partition_hint(&mut self) -> Option<usize> {
+        self.pending_partition_size.take()
+    }
+
+    /// Advance to the next epoch.
+    pub fn advance_epoch(&mut self) {
+        self.current_epoch += 1;
+    }
+
+    /// Reshuffle this worker's partition for the current epoch.
+    ///
+    /// If a [`PartitionHint`](ControlMsg::PartitionHint) was received, the new
+    /// sample count is applied first.
+    pub fn shuffle_partition(&mut self) {
+        let partition_size = self.pending_partition_size.take()
+            .unwrap_or(self.partition.len());
+        self.partition = make_partition(
+            self.rank, self.world_size, self.dataset.len(),
+            partition_size, self.current_epoch, self.base_seed,
+        );
+    }
+
+    /// Run one epoch: iterate batches, train, report timing, handle control.
+    ///
+    /// Returns `true` if a Shutdown was received (caller should exit).
+    pub fn run_epoch(
+        &mut self,
+        train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
+    ) -> Result<bool> {
+        self.shuffle_partition();
+
+        let num_batches = self.partition.len() / self.batch_size;
+        if num_batches == 0 {
+            self.advance_epoch();
+            return Ok(false);
+        }
+
+        let epoch_start = Instant::now();
+        let mut total_loss = 0.0;
+
+        for batch_idx in 0..num_batches {
+            let start = batch_idx * self.batch_size;
+            let end = start + self.batch_size;
+            let indices = &self.partition[start..end];
+
+            // Fetch batch from dataset (returns CPU tensors)
+            let cpu_batch = self.dataset.get_batch(indices)?;
+
+            // Move to this worker's device
+            let batch: Vec<Tensor> = if self.device == Device::CPU {
+                cpu_batch
+            } else {
+                cpu_batch.into_iter()
+                    .map(|t| t.to_device(self.device))
+                    .collect::<Result<_>>()?
+            };
+
+            // Train step
+            let (loss, ms) = self.train_step(&batch, train_fn)?;
+            total_loss += loss;
+
+            // Report timing (fire-and-forget)
+            let _ = self.report_timing(ms);
+
+            // Check control messages between batches
+            if self.handle_control()? {
+                return Ok(true); // Shutdown
+            }
+        }
+
+        // Epoch done: fire metrics and advance
+        let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
+        let _ = self.report_epoch(
+            total_loss / num_batches as f64,
+            num_batches,
+            epoch_ms,
+        );
+        self.advance_epoch();
+
+        Ok(false)
+    }
+}
