@@ -213,8 +213,6 @@ Occasionally Rust needs a type hint:
 
 ```rust
 let data: Vec<f32> = t.to_f32_vec()?;
-// or equivalently:
-let data = t.to_f32_vec::<>()?;
 ```
 
 In floDl code, type annotations on `let` bindings are usually enough.

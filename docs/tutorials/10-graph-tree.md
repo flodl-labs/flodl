@@ -397,12 +397,5 @@ into larger models with fine-grained training control. See the
 
 ---
 
-Previous tutorials: [09-Training Monitor](09-monitor.md) |
-[08-Utilities](08-utilities.md) |
-[07-Visualization](07-visualization.md) |
-[06-Advanced Graphs](06-advanced-graphs.md) |
-[05-Graph Builder](05-graph-builder.md) |
-[04-Training](04-training.md) |
-[03-Modules](03-modules.md) |
-[02-Autograd](02-autograd.md) |
-[01-Tensors](01-tensors.md)
+Previous: [Tutorial 9: Training Monitor](09-monitor.md) |
+Next: [Tutorial 11: Multi-GPU Training](11-multi-gpu.md)

@@ -158,4 +158,5 @@ produces clearer error messages.
 
 ---
 
+Previous: [Tutorial 1: Tensors](01-tensors.md) |
 Next: [Tutorial 3: Modules](03-modules.md)

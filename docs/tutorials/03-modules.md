@@ -509,4 +509,5 @@ is more expressive and handles the wiring automatically.
 
 ---
 
+Previous: [Tutorial 2: Automatic Differentiation](02-autograd.md) |
 Next: [Tutorial 4: Training](04-training.md)

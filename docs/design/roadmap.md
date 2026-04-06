@@ -319,7 +319,7 @@ padding modules, `Unfold`/`Fold`
 
 ## Test Coverage
 
-769 library tests. Zero clippy warnings. All tests run on CPU and CUDA.
+1022 library tests. Zero clippy warnings. All tests run on CPU and CUDA.
 All passing in Docker (CPU, libtorch 2.10.0).
 
 ---

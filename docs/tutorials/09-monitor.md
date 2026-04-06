@@ -367,13 +367,5 @@ a runnable example with the monitor.
 
 ---
 
-Next: [10-Graph Tree](10-graph-tree.md)
-
-Previous tutorials: [08-Utilities](08-utilities.md) |
-[07-Visualization](07-visualization.md) |
-[06-Advanced Graphs](06-advanced-graphs.md) |
-[05-Graph Builder](05-graph-builder.md) |
-[04-Training](04-training.md) |
-[03-Modules](03-modules.md) |
-[02-Autograd](02-autograd.md) |
-[01-Tensors](01-tensors.md)
+Previous: [Tutorial 8: Utilities](08-utilities.md) |
+Next: [Tutorial 10: Graph Tree](10-graph-tree.md)

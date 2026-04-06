@@ -73,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 #### `Ddp::setup()` — One-Liner DDP Setup
 - **`Ddp::setup(&model, builder, optimizer)`**: Single call to auto-detect GPUs, distribute the model, set per-replica optimizers, and enable training mode. No-op distribute for single GPU/CPU (still sets optimizer + training). Training loop identical for 1 or N GPUs.
-- **`Ddp::setup_with(&model, builder, optimizer, config)`**: Same as `auto()` but accepts a `DdpConfig` for explicit El Che configuration (speed hints, overhead target, max anchor).
-- **`Ddp::is_heterogeneous()`**: Detects mixed GPU models. `auto()` auto-enables El Che when heterogeneous GPUs are detected.
+- **`Ddp::setup_with(&model, builder, optimizer, config)`**: Same as `setup()` but accepts a `DdpConfig` for explicit El Che configuration (speed hints, overhead target, max anchor).
+- **`Ddp::is_heterogeneous()`**: Detects mixed GPU models. `setup()` auto-enables El Che when heterogeneous GPUs are detected.
 - **Hardware diagnostics**: Always prints detected hardware to stderr on call:
   - `ddp: 2 GPUs (heterogeneous) | RTX 5060 Ti (16.0 GB) | GTX 1060 (6.0 GB)`
   - `ddp: 1 GPU | RTX 5060 Ti (16.0 GB) | single-device mode`
@@ -175,6 +175,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Divergence monitoring** (Async policy): Per-rank parameter L2 norms tracked. Relative norm difference triggers interval halving (diverging) or doubling (converging). Threshold configurable via `divergence_threshold` (default 0.05).
 - **Hardware summary**: Prints GPU count, heterogeneous/homogeneous detection, per-GPU name + VRAM, policy, and backend at launch.
 
+#### DDP Builder — Epoch Callback
+- **`EpochFn<M>`**: `Arc<dyn Fn(usize, &mut GpuWorker<M>) + Send + Sync>`. Called at the start of each epoch inside each worker thread, before `run_epoch()`.
+- **`.epoch_fn()`** on `DdpBuilder`: Set the callback. Typical uses: LR schedules, noise curricula, dynamic loss weights.
+- **`GpuWorker::set_lr(f64)`**: Delegate to the worker's optimizer.
+- **`GpuWorker::current_epoch()`**: Public accessor for the current epoch number.
+
 #### DDP Builder — Checkpointing
 - **`CheckpointFn<M>`**: `Arc<dyn Fn(u64, &M) -> Result<()> + Send + Sync>`. Called on rank 0 after averaging events (multi-GPU) or epoch boundaries (single-GPU). Errors are logged but do not stop training.
 - **`checkpoint_every(n)`**: Save every N averaging events. Coordinated through `ControlMsg::Checkpoint` to rank 0's worker thread (which owns the model).
@@ -198,6 +204,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Improved doc comments on all loss functions (dtype requirements), conv builders, and optimizer constructors.
 
 ### Changed
+
+#### Unified DDP API
+- **`Ddp` is now the single entry point** for all multi-GPU training modes: `setup()` (user owns the loop), `builder()` (framework owns the loop), `wrap()` (manual).
+- **Renamed**: `AsyncDdp` -> `DdpHandle`, `AsyncDdpBuilder` -> `DdpBuilder`, `AsyncDdpConfig` -> `DdpRunConfig`, `Ddp::auto()` -> `Ddp::setup()`, `Ddp::auto_with()` -> `Ddp::setup_with()`.
+- **Module renamed**: `nn::async_ddp` -> `nn::ddp_run`.
+- **Log prefix**: `async-ddp:` -> `ddp:` in all runtime output.
+- **Deprecated aliases** preserved for backward compatibility: `AsyncDdp`, `AsyncDdpBuilder`, `AsyncDdpConfig`, `Ddp::auto()`, `Ddp::auto_with()`.
 
 #### Unified libtorch Management
 - **`libtorch/` directory**: Single host-side directory for all libtorch variants.

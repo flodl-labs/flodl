@@ -16,11 +16,11 @@ gradient sync, and optimizer management transparently.
 use flodl::*;
 
 // Build your model as usual
-let model = FlowBuilder::new()
-    .from(Linear::new(784, 256)?)
+let model = FlowBuilder::from(Linear::new(784, 256)?)
     .through(ReLU::new())
     .through(Linear::new(256, 10)?)
-    .build("classifier")?;
+    .label("classifier")
+    .build()?;
 
 // One call: detect GPUs, replicate, set optimizer, enable training
 Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;

@@ -365,7 +365,10 @@ the **[Observation example](https://github.com/fab2s/floDl/tree/main/flodl/examp
 
 ## Multi-GPU Training
 
-Two approaches, one goal: scale to every GPU you have.
+`Ddp::setup()` gives you transparent heterogeneous multi-GPU training with
+zero changes to your training loop. floDl detects your GPUs, picks the best
+strategy, and balances work automatically: the slowest GPU anchors the pace
+while faster ones run ahead intelligently.
 
 **Graph DDP** -- one line to go from single-GPU to multi-GPU:
 
@@ -554,7 +557,7 @@ Every differentiable path is verified against finite-difference gradients:
 - 117 autograd op-level checks (every op + compositions)
 - Module-level checks (every NN module, input + parameter gradients)
 - Exact optimizer step verifications (SGD, Adam, AdamW, RMSprop, Adagrad, RAdam, NAdam)
-- 769 library tests, zero clippy warnings — all tests run on both CPU and CUDA
+- 1022 library tests, zero clippy warnings — all tests run on both CPU and CUDA
 
 ### Hardware Compatibility
 

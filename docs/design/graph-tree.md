@@ -8,15 +8,16 @@ described in the trajectory thesis -- trained graphs nested as modules inside
 parent graphs, with fine-grained control over which parts train, freeze, or
 share gradients.
 
-**Target release:** v0.2.0
+**Status:** Implemented in v0.2.0. See [Tutorial 10: Graph Tree](../tutorials/10-graph-tree.md)
+for the current API and usage examples.
 
 ---
 
 ## Motivation
 
-flodl already supports Graph-as-Module composition: a built `Graph` implements
-`Module` and can be placed inside another `FlowBuilder`. But training a composed
-system requires capabilities that don't yet exist:
+flodl supports Graph-as-Module composition: a built `Graph` implements
+`Module` and can be placed inside another `FlowBuilder`. Training a composed
+system requires these capabilities (all now implemented):
 
 1. **Selective freezing** -- freeze the read phase of a letter model while its
    scan phase adapts to word-level context.
@@ -92,7 +93,7 @@ they're proven on isolated letters. Step 3 doesn't touch subscan's letter
 spotting -- it's proven on letter-in-word data. The word model only needs to
 learn boundary detection and letter count estimation.
 
-**What the graph tree needs to support:**
+**What the graph tree supports:**
 
 - Load `letter_v1.fdl.gz` into `"letter"` subtree without touching `"subscan"`
 - Load `subscan_v1.fdl.gz` into `"subscan"` subtree (carrying its letter subgraph)
@@ -102,7 +103,7 @@ learn boundary detection and letter count estimation.
 - Assign per-layer LRs: `"meta"` at 0.001, `"subscan"` at 0.0005, `"letter.scan"` at 0.0001
 - `each` over N positions with shared weights and correct gradient flow
 
-None of this is possible today without manual parameter bookkeeping.
+Before graph tree, none of this was possible without manual parameter bookkeeping.
 
 ---
 

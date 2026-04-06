@@ -6,7 +6,10 @@ by keeping the entire dataset on the compute device alongside the model.
 Combined with CUDA Graphs, this enables **zero-dispatch training** -- the CPU
 does nothing during an epoch except launch pre-recorded GPU operations.
 
-**Target release:** v0.2.0
+**Status:** Partially implemented in v0.2.0. Resident and streaming DataLoader
+modes are shipped. CUDA Graph integration and double-buffering remain planned.
+See [Tutorial 12: DDP Builder](../tutorials/12-async-ddp.md) for the current
+data pipeline.
 
 ---
 
@@ -733,7 +736,7 @@ The per-batch index tensor creation (`Tensor::from_i64`) is a small CPU→GPU
 transfer (batch_size × 8 bytes). For batch_size=64, that's 512 bytes --
 invisible.
 
-### 5. Integration with training monitor
+### 7. Integration with training monitor
 
 `ResidentLoader` reports its memory usage to the monitor:
 
@@ -749,7 +752,7 @@ impl ResidentLoader {
 The monitor can display VRAM breakdown (data vs model vs overhead) in the
 dashboard. The budget struct provides all the numbers.
 
-### 6. Double-buffered async loading
+### 8. Double-buffered async loading
 
 Double-buffering serves two purposes: handling datasets larger than VRAM,
 and -- more importantly -- providing a **natural hook for progressive training
@@ -1048,10 +1051,10 @@ VRAM.
    could run on GPU, avoiding CPU→GPU round trips. This is orthogonal to
    ResidentLoader but composes well with it. Worth a separate design?
 
-5. **Multi-GPU data splitting.** For multi-GPU training (when it lands), each
-   device needs its shard of the dataset in its own VRAM. The loader could
-   partition automatically based on device count. Defer until multi-GPU is
-   designed.
+5. **Multi-GPU data splitting.** Multi-GPU training is now implemented via
+   `Ddp::setup()` and `Ddp::builder()`. The `DataLoader` supports distributed
+   mode with proportional epoch sharding across devices. See
+   [DDP Reference](../ddp.md) for details.
 
 6. **Double-buffer epoch boundary.** When `advance_epoch()` is called and
    the async prefetch hasn't finished, the CPU blocks. In practice the

@@ -611,6 +611,5 @@ fn main() -> Result<()> {
 
 ---
 
+Previous: [Tutorial 3: Modules](03-modules.md) |
 Next: [Tutorial 5: The Graph Builder](05-graph-builder.md)
-
-Previous: [01-Tensors](01-tensors.md) | [02-Autograd](02-autograd.md) | [03-Modules](03-modules.md)

@@ -355,3 +355,8 @@ checkpoints into subtrees, cross-boundary observation -- see the
 
 For DOT/SVG output of your graphs, see
 [Visualization](07-visualization.md).
+
+---
+
+Previous: [Tutorial 5: The Graph Builder](05-graph-builder.md) |
+Next: [Tutorial 7: Visualizing Graphs](07-visualization.md)

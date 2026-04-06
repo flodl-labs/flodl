@@ -210,3 +210,8 @@ This tutorial covered the core builder methods. The
 - **Loops** — fixed, while, and until with BPTT
 - **Gates** — soft routing with learned weights
 - **Switches** — hard routing with selectors
+
+---
+
+Previous: [Tutorial 4: Training](04-training.md) |
+Next: [Tutorial 6: Advanced Graphs](06-advanced-graphs.md)

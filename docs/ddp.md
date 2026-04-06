@@ -51,11 +51,11 @@ optimizers, and enable training mode.
 ```rust
 use flodl::*;
 
-let model = FlowBuilder::new()
-    .from(Linear::new(784, 256)?)
+let model = FlowBuilder::from(Linear::new(784, 256)?)
     .through(ReLU::new())
     .through(Linear::new(256, 10)?)
-    .build("classifier")?;
+    .label("classifier")
+    .build()?;
 
 // Single call: detect GPUs, replicate, set optimizer, training mode
 Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
@@ -99,11 +99,11 @@ manual setup:
 
 ```rust
 model.distribute(|dev| {
-    FlowBuilder::new()
-        .from(Linear::on_device(784, 256, dev)?)
+    FlowBuilder::from(Linear::on_device(784, 256, dev)?)
         .through(ReLU::new())
         .through(Linear::on_device(256, 10, dev)?)
-        .build("classifier")
+        .label("classifier")
+        .build()
 })?;
 ```
 
@@ -629,7 +629,7 @@ the large GPU can go resident while the small GPU streams.
 
 ### CPU averaging timeout
 
-**Error**: `ddp-run: CPU averaging timeout, missing ranks: [1]`
+**Error**: `ddp: CPU averaging timeout, missing ranks: [1]`
 
 **Cause**: A worker is not responding to `RequestParams` within the
 timeout window (default 5 seconds).

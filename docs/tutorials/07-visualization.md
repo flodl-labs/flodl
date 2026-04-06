@@ -2,7 +2,7 @@
 
 Every `Graph` can export its structure as Graphviz DOT or SVG. This is the
 fastest way to verify that your architecture is wired correctly, especially
-when using references, loops, and switches are involved.
+when references, loops, and switches are involved.
 
 > **Prerequisites**: [The Graph Builder](05-graph-builder.md) and
 > [Advanced Graphs](06-advanced-graphs.md) introduce the constructs
@@ -153,3 +153,8 @@ for epoch in 0..num_epochs {
 
 [Utilities](08-utilities.md) covers gradient clipping, checkpoints,
 parameter freezing, and weight initialization.
+
+---
+
+Previous: [Tutorial 6: Advanced Graphs](06-advanced-graphs.md) |
+Next: [Tutorial 8: Utilities](08-utilities.md)

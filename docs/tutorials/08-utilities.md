@@ -514,12 +514,5 @@ g.save_checkpoint("/tmp/model.fdl")?;
 
 ---
 
+Previous: [Tutorial 7: Visualizing Graphs](07-visualization.md) |
 Next: [Tutorial 9: Training Monitor](09-monitor.md)
-
-Previous tutorials: [07-Visualization](07-visualization.md) |
-[06-Advanced Graphs](06-advanced-graphs.md) |
-[05-Graph Builder](05-graph-builder.md) |
-[04-Training](04-training.md) |
-[03-Modules](03-modules.md) |
-[02-Autograd](02-autograd.md) |
-[01-Tensors](01-tensors.md)
