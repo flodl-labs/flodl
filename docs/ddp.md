@@ -294,6 +294,16 @@ let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
 | `.max_batch_diff(usize)` | No | None | Max batch lead (0 = lockstep) |
 | `.checkpoint_every(usize)` | No | None | Checkpoint interval |
 | `.checkpoint_fn(Fn)` | No | None | Checkpoint callback |
+| `.epoch_fn(Fn)` | No | None | Per-epoch callback (LR schedules, etc.) |
+
+### DdpRunConfig
+
+Advanced config via `DdpRunConfig` (passed through the builder methods above):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `partition_ratios` | None | Fixed per-rank data splits (e.g. `[0.7, 0.3]`). Disables auto-rebalancing. |
+| `snapshot_timeout_secs` | 5 | CPU averaging timeout before soft-abort |
 
 ### ApplyPolicy
 
@@ -323,19 +333,43 @@ testing: same model, same K, swap only the backend.
 2. NCCL comms initialized from main thread (`NcclComms::new()` + `split()`)
 3. One thread spawned per GPU
 4. Each thread: create model + optimizer from factories, copy initial params
-5. Training loop: `run_epoch()` calls `train_step()` per batch
-6. After all epochs: `send_final_snapshot()`, `report_exiting()`
+5. Training loop: `wait_for_epoch_plan()` blocks for coordinator's `EpochPlan`, then `run_epoch_plan()` calls `train_step()` per batch
+6. After all epochs (coordinator sends `Shutdown`): `send_final_snapshot()`, `report_exiting()`
 7. `drain_until_shutdown()`: keeps handling control messages until coordinator sends Shutdown
 8. Thread exits, NCCL comm dropped
 
 ### Coordinator lifecycle
 
 1. Spawned as a dedicated thread
-2. Main loop: `drain_timing_blocking()` with 100us timeout
-3. Each tick: `check_throttle()`, `poll_cpu_averaging()`, `drain_metrics()`
-4. When `should_average()`: `trigger_averaging()`
-5. On shutdown or all workers exited: `drain_avg_state()`, `shutdown_workers()`
-6. Collects final snapshots, returns `TrainedState`
+2. Sends initial epoch plans to all workers via `send_all_plans(0)`
+3. Main loop: `drain_timing_blocking()` with 100us timeout
+4. Each tick: `check_throttle()`, `poll_cpu_averaging()`, `drain_metrics()`
+5. `drain_metrics()` triggers `try_aggregate_epochs()`: when all ranks report for an epoch, `on_epoch_aggregated()` dispatches the next epoch's plans (or `Shutdown` after the last epoch)
+6. When `should_average()`: `trigger_averaging()`
+7. On shutdown or all workers exited: `drain_avg_state()`, `shutdown_workers()`
+8. Collects final snapshots, returns `TrainedState`
+
+### Global epoch management
+
+The coordinator owns epochs globally. Workers are mode-agnostic: they wait
+for an `EpochPlan` from the coordinator and process it. Policy lives
+entirely in the coordinator's dispatch timing.
+
+```
+EpochPlan { epoch, partition_offset, partition_size }
+```
+
+**Control flow:**
+
+1. Coordinator sends `send_all_plans(0)` at startup (throughput-proportional if ElChe has speed hints)
+2. Workers block in `wait_for_epoch_plan()`, receive `StartEpoch(plan)`, run their partition
+3. Workers send `MetricsMsg` at partition end
+4. Coordinator's `drain_metrics()` calls `on_rank_done()` (Auto per-rank dispatch) and `try_aggregate_epochs()` (sorted epoch processing)
+5. `on_epoch_aggregated()` sends next epoch's plans (Sync/Cadence) or unblocks waiting ranks (Auto), or sends `Shutdown` when the last epoch completes
+
+**Partition sizing:** throughput-proportional (faster GPUs get more samples) when ElChe is calibrated, equal sizes otherwise. Fixed ratios via `partition_ratios` override auto-sizing. Partitions are deterministic: all ranks share the same seed-based global permutation, with consecutive non-overlapping slices.
+
+**Auto lookahead:** in `Async` mode, fast ranks may run 1 epoch ahead of the last globally-aggregated epoch, keeping GPUs busy while the slow rank finishes.
 
 ### CPU averaging state machine
 

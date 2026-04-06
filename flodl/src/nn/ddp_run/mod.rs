@@ -125,11 +125,18 @@ pub type CheckpointFn<M> = Arc<dyn Fn(u64, &M) -> Result<()> + Send + Sync>;
 /// Epoch callback type: `(epoch, &mut worker)`.
 ///
 /// Called at the start of each epoch inside each worker thread, before
-/// [`run_epoch`](GpuWorker::run_epoch). Use this for epoch-level scheduling
-/// such as learning rate schedules, noise curricula, or dynamic loss weights.
+/// [`run_epoch_plan`](GpuWorker::run_epoch_plan). Use this for epoch-level
+/// scheduling such as learning rate schedules, noise curricula, or dynamic
+/// loss weights.
 ///
 /// The closure itself must be `Send + Sync` (its captures cross thread boundaries),
 /// but the `&mut GpuWorker<M>` reference stays thread-local.
+///
+/// **Note (Auto mode):** In [`ApplyPolicy::Async`] with heterogeneous GPUs, fast
+/// ranks may be up to 1 epoch ahead of slow ranks. If `epoch_fn` mutates shared
+/// state (e.g. noise schedule via atomics), the fast rank's write is visible to
+/// the slow rank before it reaches that epoch. The delta between adjacent epochs
+/// is typically negligible.
 pub type EpochFn<M> = Arc<dyn Fn(usize, &mut GpuWorker<M>) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
@@ -305,6 +312,12 @@ pub struct DdpRunConfig {
     /// Timeout for CPU averaging snapshot collection (seconds). Default: 5.
     /// Only applies to [`AverageBackend::Cpu`].
     pub snapshot_timeout_secs: u64,
+    /// Explicit per-rank partition ratios (e.g. `[0.7, 0.3]`).
+    ///
+    /// When set, disables automatic throughput-based rebalancing.
+    /// Ratios must sum to approximately 1.0. Length must match `world_size`.
+    /// Use this when you know your hardware and want fixed data splits.
+    pub partition_ratios: Option<Vec<f64>>,
 }
 
 impl Default for DdpRunConfig {
@@ -324,6 +337,7 @@ impl DdpRunConfig {
             max_batch_diff: None,
             checkpoint_every: None,
             snapshot_timeout_secs: 5,
+            partition_ratios: None,
         }
     }
 
@@ -376,6 +390,15 @@ impl DdpRunConfig {
     /// and retried on the next cycle.
     pub fn with_snapshot_timeout(mut self, secs: u64) -> Self {
         self.snapshot_timeout_secs = secs;
+        self
+    }
+
+    /// Set explicit per-rank partition ratios (e.g. `&[0.7, 0.3]`).
+    ///
+    /// Disables automatic throughput-based rebalancing. Ratios are normalized
+    /// so they sum to 1.0. Length must match `world_size` at launch time.
+    pub fn with_partition_ratios(mut self, ratios: &[f64]) -> Self {
+        self.partition_ratios = Some(ratios.to_vec());
         self
     }
 }
@@ -449,6 +472,21 @@ pub struct ParamSnapshot {
 // Coordinator -> Worker messages
 // ---------------------------------------------------------------------------
 
+/// Coordinator-computed epoch assignment for a single worker.
+///
+/// Contains the partition offset and size so the worker can deterministically
+/// reconstruct its sample indices from the global permutation. The coordinator
+/// computes consecutive offsets for all ranks, guaranteeing no gaps or overlaps.
+#[derive(Clone, Debug)]
+pub struct EpochPlan {
+    /// Global epoch number (0-based).
+    pub epoch: usize,
+    /// Start offset into the global permutation for this rank.
+    pub partition_offset: usize,
+    /// Number of samples assigned to this rank for this epoch.
+    pub partition_size: usize,
+}
+
 /// Averaged parameters sent from the coordinator to a GPU worker (CPU averaging path only).
 ///
 /// Contains pinned CPU tensors. Worker copies them into its Variables via `copy_(non_blocking=true)`.
@@ -471,12 +509,13 @@ pub enum ControlMsg {
     /// \[NCCL path\] Trigger in-place AllReduce on this worker's own params.
     /// Worker runs AllReduce on comm_stream and records CudaEvent.
     SyncNow,
-    /// ElChe rebalance: adjust this worker's sample count for next epoch.
-    /// Fire-and-forget from coordinator; worker applies at next `reshuffle_partition()`.
-    PartitionHint {
-        /// Number of samples this worker should process per epoch.
-        num_samples: usize,
-    },
+    /// Begin processing a new epoch with the given partition assignment.
+    ///
+    /// The coordinator computes partition sizes based on throughput ratios and
+    /// sends consecutive, non-overlapping assignments to each worker. Workers
+    /// reconstruct their sample indices from the global permutation using the
+    /// plan's offset and size.
+    StartEpoch(EpochPlan),
     /// Worker is too far ahead: block until the next real command arrives.
     /// Sent when the worker's batch lead exceeds [`ElChe::max_batch_diff`].
     Throttle,
@@ -514,8 +553,6 @@ pub struct WorkerConfig {
     pub total_samples: usize,
     /// Batch size.
     pub batch_size: usize,
-    /// Initial number of samples for this worker's partition.
-    pub partition_samples: usize,
     /// RNG seed for deterministic shuffling.
     pub seed: u64,
 }
@@ -524,21 +561,18 @@ pub struct WorkerConfig {
 // Partition generation
 // ---------------------------------------------------------------------------
 
-/// Generate a deterministic partition of sample indices for one rank.
+/// Generate a deterministic partition of sample indices from a global permutation.
 ///
-/// All ranks sharing the same `(epoch, seed)` produce the same global permutation,
-/// then each takes a slice from its own block of `total/world_size` items.
+/// All ranks sharing the same `(epoch, seed)` produce the same global permutation.
+/// The coordinator computes consecutive `(offset, size)` pairs for each rank so
+/// that slices are non-overlapping and cover the full dataset.
 ///
-/// **Non-overlapping guarantee:** when all ranks use the same epoch and seed, and
-/// `partition_size <= total/world_size`, slices are disjoint by construction.
-/// When `partition_size > total/world_size`, overflow enters adjacent blocks.
-/// During epoch transitions (ranks at different epochs), overlap is benign
-/// for Local SGD convergence.
+/// **Non-overlapping guarantee:** the coordinator assigns consecutive offsets
+/// that sum to `total`, so all slices are disjoint by construction.
 fn make_partition(
-    rank: usize,
-    world_size: usize,
+    offset: usize,
+    size: usize,
     total: usize,
-    partition_size: usize,
     epoch: usize,
     seed: u64,
 ) -> Vec<usize> {
@@ -547,10 +581,8 @@ fn make_partition(
     let mut all: Vec<usize> = (0..total).collect();
     rng.shuffle(&mut all);
 
-    // This rank's slice (non-overlapping when sizes sum to total)
-    let per_rank = total / world_size;
-    let offset = rank * per_rank;
-    let end = (offset + partition_size).min(total);
+    // This rank's consecutive slice
+    let end = (offset + size).min(total);
     all[offset..end].to_vec()
 }
 
@@ -583,7 +615,9 @@ mod tests {
         let _req = ControlMsg::RequestParams;
         let _sync = ControlMsg::SyncNow;
         let _throttle = ControlMsg::Throttle;
-        let _hint = ControlMsg::PartitionHint { num_samples: 1000 };
+        let _start = ControlMsg::StartEpoch(EpochPlan {
+            epoch: 0, partition_offset: 0, partition_size: 1000,
+        });
         let _ckpt = ControlMsg::Checkpoint { version: 42 };
         let _shutdown = ControlMsg::Shutdown;
         let _update = ControlMsg::Update(AveragedParams {
@@ -641,14 +675,12 @@ mod tests {
             initial_buffers: vec![],
             total_samples: 10000,
             batch_size: 32,
-            partition_samples: 5000,
             seed: 42,
         };
         let cfg2 = cfg.clone();
         assert_eq!(cfg2.rank, 0);
         assert_eq!(cfg2.world_size, 2);
         assert_eq!(cfg2.total_samples, 10000);
-        assert_eq!(cfg2.partition_samples, 5000);
     }
 
     // -----------------------------------------------------------------------
@@ -716,7 +748,6 @@ mod tests {
             initial_buffers: tmp_buffers,
             total_samples: dataset_size,
             batch_size: 4,
-            partition_samples: dataset_size / world_size,
             seed: 42,
         };
 
@@ -912,16 +943,20 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_handle_control_partition_hint() {
+    fn test_worker_handle_control_start_epoch() {
         let (mut worker, ch) = make_test_worker();
 
-        assert!(worker.take_partition_hint().is_none());
+        assert!(worker.pending_plan.is_none());
 
-        ch.control_tx.send(ControlMsg::PartitionHint { num_samples: 750 }).unwrap();
+        ch.control_tx.send(ControlMsg::StartEpoch(EpochPlan {
+            epoch: 1, partition_offset: 0, partition_size: 750,
+        })).unwrap();
         worker.handle_control().unwrap();
 
-        assert_eq!(worker.take_partition_hint(), Some(750));
-        assert!(worker.take_partition_hint().is_none()); // consumed
+        let plan = worker.pending_plan.take();
+        assert!(plan.is_some());
+        assert_eq!(plan.unwrap().partition_size, 750);
+        assert!(worker.pending_plan.is_none()); // consumed
     }
 
     #[test]
@@ -983,13 +1018,12 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_advance_epoch() {
+    fn test_worker_epoch_from_plan() {
         let (mut worker, _ch) = make_test_worker();
         assert_eq!(worker.current_epoch, 0);
-        worker.advance_epoch();
-        assert_eq!(worker.current_epoch, 1);
-        worker.advance_epoch();
-        assert_eq!(worker.current_epoch, 2);
+        // Epoch is set from EpochPlan in run_epoch_plan
+        worker.current_epoch = 3;
+        assert_eq!(worker.current_epoch, 3);
     }
 
     #[test]
@@ -1291,24 +1325,14 @@ mod tests {
     }
 
     #[test]
-    fn test_coordinator_rebalance_partitions() {
+    fn test_coordinator_compute_partition_sizes() {
         let h = make_coord_harness(2, ApplyPolicy::Cadence, AverageBackend::Nccl);
 
-        // Simulate ElChe calibration by reporting timing
-        // This won't actually calibrate (needs report_timing), but we can test
-        // the rebalance path directly
-        h.coord.rebalance_partitions();
-
-        // Workers should receive PartitionHint
-        for rx in &h.control_rxs {
-            match rx.recv().unwrap() {
-                ControlMsg::PartitionHint { num_samples } => {
-                    // ElChe not calibrated yet, so batch_counts are equal
-                    assert_eq!(num_samples, 5000); // 10000 / 2
-                }
-                other => panic!("expected PartitionHint, got {:?}", std::mem::discriminant(&other)),
-            }
-        }
+        // Before calibration, partition sizes should be equal
+        let sizes = h.coord.compute_partition_sizes();
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(sizes[0], 5000); // 10000 / 2
+        assert_eq!(sizes[1], 5000);
     }
 
     #[test]
@@ -1663,7 +1687,7 @@ mod tests {
     fn test_worker_current_epoch_accessor() {
         let (mut worker, _ch) = make_test_worker();
         assert_eq!(worker.current_epoch(), 0);
-        worker.advance_epoch();
+        worker.current_epoch = 1;
         assert_eq!(worker.current_epoch(), 1);
     }
 
@@ -2387,9 +2411,8 @@ mod tests {
     }
 
     #[test]
-    fn test_elche_calibration_triggers_rebalance() {
+    fn test_elche_calibration_produces_proportional_sizes() {
         let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
-        let mut hints_found = false;
 
         // Feed heterogeneous timing to trigger ElChe calibration
         for _ in 0..5 {
@@ -2398,19 +2421,18 @@ mod tests {
             h.coord.drain_timing();
             if h.coord.should_average() {
                 h.coord.trigger_averaging().unwrap();
-                // Check ALL control messages (SyncNow + possible PartitionHint)
                 for rx in &h.control_rxs {
-                    while let Ok(msg) = rx.try_recv() {
-                        if matches!(msg, ControlMsg::PartitionHint { .. }) {
-                            hints_found = true;
-                        }
-                    }
+                    while rx.try_recv().is_ok() {}
                 }
             }
         }
 
         assert!(h.coord.is_calibrated(), "ElChe should have calibrated");
-        assert!(hints_found, "calibration should trigger partition rebalance");
+        // After calibration, compute_partition_sizes should produce valid sizes
+        let sizes = h.coord.compute_partition_sizes();
+        assert_eq!(sizes.len(), 2);
+        let total: usize = sizes.iter().sum();
+        assert!(total <= 10000, "partitions should not exceed total: {total}");
     }
 
     #[test]
@@ -2457,12 +2479,12 @@ mod tests {
 
     #[test]
     fn test_make_partition_basic() {
-        let p0 = make_partition(0, 2, 100, 50, 0, 42);
-        let p1 = make_partition(1, 2, 100, 50, 0, 42);
+        let p0 = make_partition(0, 50, 100, 0, 42);
+        let p1 = make_partition(50, 50, 100, 0, 42);
         assert_eq!(p0.len(), 50);
         assert_eq!(p1.len(), 50);
 
-        // Non-overlapping (same epoch, same seed)
+        // Non-overlapping (consecutive offsets, same epoch, same seed)
         let mut all: Vec<usize> = p0.iter().chain(p1.iter()).copied().collect();
         all.sort();
         all.dedup();
@@ -2471,52 +2493,52 @@ mod tests {
 
     #[test]
     fn test_make_partition_different_epochs() {
-        let p_e0 = make_partition(0, 2, 100, 50, 0, 42);
-        let p_e1 = make_partition(0, 2, 100, 50, 1, 42);
+        let p_e0 = make_partition(0, 50, 100, 0, 42);
+        let p_e1 = make_partition(0, 50, 100, 1, 42);
         // Different epochs should produce different orderings
         assert_ne!(p_e0, p_e1);
     }
 
     #[test]
     fn test_make_partition_deterministic() {
-        let p1 = make_partition(0, 2, 100, 50, 5, 42);
-        let p2 = make_partition(0, 2, 100, 50, 5, 42);
+        let p1 = make_partition(0, 50, 100, 5, 42);
+        let p2 = make_partition(0, 50, 100, 5, 42);
         assert_eq!(p1, p2, "same params should produce same partition");
     }
 
     #[test]
-    fn test_worker_shuffle_partition() {
+    fn test_worker_partition_changes_with_epoch() {
         let (mut worker, _ch) = make_test_worker();
-        let initial = worker.partition.clone();
-        worker.advance_epoch();
-        worker.shuffle_partition();
-        // Different epoch should reshuffle
-        assert_ne!(worker.partition, initial);
+        // Run epoch 0
+        let plan0 = EpochPlan { epoch: 0, partition_offset: 0, partition_size: 1000 };
+        worker.run_epoch_plan(&plan0, &mse_train).unwrap();
+        let partition0 = worker.partition.clone();
+
+        // Run epoch 1 - different epoch produces different partition
+        let plan1 = EpochPlan { epoch: 1, partition_offset: 0, partition_size: 1000 };
+        worker.run_epoch_plan(&plan1, &mse_train).unwrap();
+        assert_ne!(worker.partition, partition0);
     }
 
     #[test]
-    fn test_worker_shuffle_partition_applies_hint() {
-        let (mut worker, ch) = make_test_worker();
-        let initial_len = worker.partition.len();
+    fn test_worker_epoch_plan_applies_partition_size() {
+        let (mut worker, _ch) = make_test_worker();
 
-        // Send a partition hint
-        ch.control_tx.send(ControlMsg::PartitionHint { num_samples: 200 }).unwrap();
-        worker.handle_control().unwrap();
-
-        // Shuffle should apply the hint
-        worker.shuffle_partition();
+        // Run with a smaller partition via EpochPlan
+        let plan = EpochPlan { epoch: 0, partition_offset: 0, partition_size: 200 };
+        worker.run_epoch_plan(&plan, &mse_train).unwrap();
         assert_eq!(worker.partition.len(), 200);
-        assert_ne!(worker.partition.len(), initial_len);
     }
 
     #[test]
-    fn test_worker_run_epoch() {
+    fn test_worker_run_epoch_plan() {
         // 40 samples, batch_size=4 -> 10 batches per epoch
         let (mut worker, ch) = make_test_worker_with(0, 1, 40);
 
-        let shutdown = worker.run_epoch(&mse_train).unwrap();
+        let plan = EpochPlan { epoch: 0, partition_offset: 0, partition_size: 40 };
+        let shutdown = worker.run_epoch_plan(&plan, &mse_train).unwrap();
         assert!(!shutdown);
-        assert_eq!(worker.current_epoch, 1);
+        assert_eq!(worker.current_epoch, 0);
 
         // Should have received timing messages (one per batch)
         let mut count = 0;
@@ -2533,12 +2555,13 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_run_epoch_loss_decreases() {
+    fn test_worker_run_epoch_plan_loss_decreases() {
         let (mut worker, _ch) = make_test_worker_with(0, 1, 80);
 
         // Run a few epochs, loss should decrease
-        for _ in 0..5 {
-            worker.run_epoch(&mse_train).unwrap();
+        for epoch in 0..5 {
+            let plan = EpochPlan { epoch, partition_offset: 0, partition_size: 80 };
+            worker.run_epoch_plan(&plan, &mse_train).unwrap();
         }
         // Snapshot and check loss on a fixed batch
         let opts = test_opts();
@@ -2552,13 +2575,14 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_run_epoch_shutdown_mid_epoch() {
+    fn test_worker_run_epoch_plan_shutdown_mid_epoch() {
         let (mut worker, ch) = make_test_worker_with(0, 1, 400);
 
         // Send shutdown after a short delay via the control channel
         ch.control_tx.send(ControlMsg::Shutdown).unwrap();
 
-        let shutdown = worker.run_epoch(&mse_train).unwrap();
+        let plan = EpochPlan { epoch: 0, partition_offset: 0, partition_size: 400 };
+        let shutdown = worker.run_epoch_plan(&plan, &mse_train).unwrap();
         assert!(shutdown, "should detect shutdown during epoch");
     }
 
@@ -2570,8 +2594,10 @@ mod tests {
         let (mut w1, _ch1) = make_test_worker_with(1, 2, 40);
 
         // Run one epoch on each worker
-        w0.run_epoch(&mse_train).unwrap();
-        w1.run_epoch(&mse_train).unwrap();
+        let plan0 = EpochPlan { epoch: 0, partition_offset: 0, partition_size: 20 };
+        let plan1 = EpochPlan { epoch: 0, partition_offset: 20, partition_size: 20 };
+        w0.run_epoch_plan(&plan0, &mse_train).unwrap();
+        w1.run_epoch_plan(&plan1, &mse_train).unwrap();
 
         // Snapshot params from both
         let snap0 = w0.snapshot_params();
@@ -2603,7 +2629,7 @@ mod tests {
     #[test]
     fn test_proportional_sharding() {
         // 2:1 speed ratio -> partition sizes should be 2:1
-        let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
+        let mut h = make_coord_harness(2, ApplyPolicy::Cadence, AverageBackend::Nccl);
 
         // Calibrate ElChe with 2:1 timing
         for _ in 0..3 {
@@ -2619,32 +2645,25 @@ mod tests {
         }
 
         if h.coord.is_calibrated() {
-            // Manually trigger rebalance and capture hints
-            h.coord.rebalance_partitions();
-            let mut hints = Vec::new();
-            for rx in &h.control_rxs {
-                if let Ok(ControlMsg::PartitionHint { num_samples }) = rx.recv() {
-                    hints.push(num_samples);
-                }
-            }
-            assert_eq!(hints.len(), 2);
+            let sizes = h.coord.compute_partition_sizes();
+            assert_eq!(sizes.len(), 2);
             // Fast rank (0) should get more samples than slow rank (1)
-            assert!(hints[0] > hints[1],
-                "fast rank should get more samples: {:?}", hints);
+            assert!(sizes[0] > sizes[1],
+                "fast rank should get more samples: {:?}", sizes);
             // Total should approximate dataset size (10000)
-            let total: usize = hints.iter().sum();
+            let total: usize = sizes.iter().sum();
             assert!(total <= 10000, "partitions should not exceed total: {total}");
         }
     }
 
     #[test]
     fn test_partition_non_overlapping_equal_sizes() {
-        // Equal partition sizes: guaranteed non-overlapping
+        // Equal partition sizes with consecutive offsets: guaranteed non-overlapping
         let total = 300;
         let per_rank = total / 3; // 100 each
-        let p0 = make_partition(0, 3, total, per_rank, 5, 42);
-        let p1 = make_partition(1, 3, total, per_rank, 5, 42);
-        let p2 = make_partition(2, 3, total, per_rank, 5, 42);
+        let p0 = make_partition(0, per_rank, total, 5, 42);
+        let p1 = make_partition(100, per_rank, total, 5, 42);
+        let p2 = make_partition(200, per_rank, total, 5, 42);
 
         assert_eq!(p0.len(), 100);
         assert_eq!(p1.len(), 100);
@@ -2660,11 +2679,11 @@ mod tests {
 
     #[test]
     fn test_partition_non_overlapping_smaller_sizes() {
-        // Sizes smaller than per_rank block: still non-overlapping
+        // Non-overlapping consecutive offsets with varying sizes
         let total = 300;
-        let p0 = make_partition(0, 3, total, 50, 5, 42); // takes 50 from block of 100
-        let p1 = make_partition(1, 3, total, 80, 5, 42); // takes 80 from block of 100
-        let p2 = make_partition(2, 3, total, 60, 5, 42); // takes 60 from block of 100
+        let p0 = make_partition(0, 50, total, 5, 42);   // offset 0, size 50
+        let p1 = make_partition(50, 80, total, 5, 42);   // offset 50, size 80
+        let p2 = make_partition(130, 60, total, 5, 42);  // offset 130, size 60
 
         let set0: std::collections::HashSet<usize> = p0.iter().copied().collect();
         let set1: std::collections::HashSet<usize> = p1.iter().copied().collect();
@@ -2677,8 +2696,8 @@ mod tests {
     #[test]
     fn test_partition_benign_overlap_different_epochs() {
         // Different epochs produce different permutations, so overlap is expected
-        let p0_e5 = make_partition(0, 2, 100, 50, 5, 42);
-        let p1_e6 = make_partition(1, 2, 100, 50, 6, 42);
+        let p0_e5 = make_partition(0, 50, 100, 5, 42);
+        let p1_e6 = make_partition(50, 50, 100, 6, 42);
         // These are from different epochs, so some overlap is expected and benign
         let set0: std::collections::HashSet<usize> = p0_e5.iter().copied().collect();
         let set1: std::collections::HashSet<usize> = p1_e6.iter().copied().collect();
@@ -2689,16 +2708,17 @@ mod tests {
 
     #[test]
     fn test_self_managed_epochs() {
-        // Worker should run multiple epochs independently, reporting metrics each time
+        // Worker should run multiple epochs via plans, reporting metrics each time
         let (mut worker, ch) = make_test_worker_with(0, 1, 40);
 
         // Run 3 epochs
-        for _ in 0..3 {
-            let shutdown = worker.run_epoch(&mse_train).unwrap();
+        for epoch in 0..3 {
+            let plan = EpochPlan { epoch, partition_offset: 0, partition_size: 40 };
+            let shutdown = worker.run_epoch_plan(&plan, &mse_train).unwrap();
             assert!(!shutdown);
         }
 
-        assert_eq!(worker.current_epoch, 3);
+        assert_eq!(worker.current_epoch, 2); // set to last plan's epoch
 
         // Should have received 3 epoch metrics
         let mut epoch_msgs = Vec::new();
@@ -2712,21 +2732,18 @@ mod tests {
     }
 
     #[test]
-    fn test_partition_hint_applied_at_epoch_boundary() {
-        let (mut worker, ch) = make_test_worker_with(0, 1, 80);
-        let initial_partition_len = worker.partition.len();
+    fn test_epoch_plan_partition_size_at_epoch_boundary() {
+        let (mut worker, _ch) = make_test_worker_with(0, 1, 80);
 
-        // Run one epoch
-        worker.run_epoch(&mse_train).unwrap();
+        // Run first epoch with full partition
+        let plan0 = EpochPlan { epoch: 0, partition_offset: 0, partition_size: 80 };
+        worker.run_epoch_plan(&plan0, &mse_train).unwrap();
+        assert_eq!(worker.partition.len(), 80);
 
-        // Send partition hint for smaller partition
-        ch.control_tx.send(ControlMsg::PartitionHint { num_samples: 20 }).unwrap();
-        worker.handle_control().unwrap();
-
-        // Next epoch should use the new partition size
-        worker.run_epoch(&mse_train).unwrap();
+        // Next epoch with a smaller partition from EpochPlan
+        let plan1 = EpochPlan { epoch: 1, partition_offset: 0, partition_size: 20 };
+        worker.run_epoch_plan(&plan1, &mse_train).unwrap();
         assert_eq!(worker.partition.len(), 20);
-        assert_ne!(worker.partition.len(), initial_partition_len);
     }
 
     // -----------------------------------------------------------------------

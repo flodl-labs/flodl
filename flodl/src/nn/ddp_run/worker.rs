@@ -15,7 +15,7 @@ use crate::tensor::{Device, Result, Tensor, TensorError};
 
 use super::{
     CheckpointFn, WorkerConfig, TimingMsg, MetricsMsg,
-    ParamSnapshot, AveragedParams, ControlMsg, make_partition,
+    ParamSnapshot, AveragedParams, ControlMsg, EpochPlan, make_partition,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,7 +44,6 @@ pub struct GpuWorker<M: Module> {
     // -- Worker identity --
     rank: usize,
     device: Device,
-    world_size: usize,
 
     // -- CUDA streams for overlap (None on CPU) --
     compute_stream: Option<CudaStream>,
@@ -78,7 +77,8 @@ pub struct GpuWorker<M: Module> {
     steps_since_avg: usize,
     current_version: u64,
     pub(super) current_epoch: usize,
-    pending_partition_size: Option<usize>,
+    /// Queued epoch plan from coordinator (set if StartEpoch arrives during run_epoch_plan).
+    pub(super) pending_plan: Option<EpochPlan>,
 
     // -- Checkpoint --
     /// Called on rank 0 after averaging events. Log-and-continue on error.
@@ -201,12 +201,6 @@ impl<M: Module> GpuWorker<M> {
             (None, None, None)
         };
 
-        // Generate initial partition for this rank
-        let partition = make_partition(
-            config.rank, config.world_size, config.total_samples,
-            config.partition_samples, 0, config.seed,
-        );
-
         Ok(GpuWorker {
             model,
             optimizer: Box::new(optimizer),
@@ -214,7 +208,6 @@ impl<M: Module> GpuWorker<M> {
             buffer_list,
             rank: config.rank,
             device: config.device,
-            world_size: config.world_size,
             compute_stream,
             comm_stream,
             copy_done,
@@ -225,14 +218,14 @@ impl<M: Module> GpuWorker<M> {
             final_param_tx,
             control_rx,
             dataset,
-            partition,
+            partition: Vec::new(), // filled by first StartEpoch from coordinator
             batch_size: config.batch_size,
             base_seed: config.seed,
             local_step: 0,
             steps_since_avg: 0,
             current_version: 0,
             current_epoch: 0,
-            pending_partition_size: None,
+            pending_plan: None,
             checkpoint_fn,
         })
     }
@@ -274,13 +267,25 @@ impl<M: Module> GpuWorker<M> {
 
     /// Extract current parameter values as a [`ParamSnapshot`].
     ///
-    /// The returned tensors are shallow clones (share storage with the model's
-    /// Variables). They are `Send` and can be passed through channels.
+    /// Tensors are copied to CPU so that the coordinator's compute thread
+    /// never needs CUDA access (avoiding slow CUDA context init on the
+    /// compute thread, which can deadlock with `drain_avg_state`).
+    ///
     /// Called between batches (after optimizer.step completes on default stream),
     /// so param data is consistent without explicit stream sync.
     pub fn snapshot_params(&self) -> ParamSnapshot {
-        let params = self.param_vars.iter().map(|v| v.data()).collect();
-        let buffers = self.buffer_list.iter().map(|b| b.get()).collect();
+        let params = self.param_vars.iter()
+            .map(|v| {
+                let t = v.data();
+                if t.device() == Device::CPU { t } else { t.to_device(Device::CPU).unwrap_or(t) }
+            })
+            .collect();
+        let buffers = self.buffer_list.iter()
+            .map(|b| {
+                let t = b.get();
+                if t.device() == Device::CPU { t } else { t.to_device(Device::CPU).unwrap_or(t) }
+            })
+            .collect();
         ParamSnapshot {
             rank: self.rank,
             params,
@@ -439,13 +444,13 @@ impl<M: Module> GpuWorker<M> {
                 self.sync_now_nccl()?;
                 self.steps_since_avg = 0;
             }
-            ControlMsg::PartitionHint { num_samples } => {
-                self.pending_partition_size = Some(num_samples);
+            ControlMsg::StartEpoch(plan) => {
+                self.pending_plan = Some(plan);
             }
             ControlMsg::Throttle => {
                 // Worker is ahead of the slowest rank: block until averaging
                 // completes (SyncNow/Update) or Shutdown. Intermediate messages
-                // (RequestParams, PartitionHint) are handled but don't release
+                // (RequestParams, StartEpoch) are handled but don't release
                 // the throttle. Duplicate Throttle messages are ignored.
                 loop {
                     match self.control_rx.recv() {
@@ -520,43 +525,48 @@ impl<M: Module> GpuWorker<M> {
         }).map_err(|_| TensorError::new("metrics channel disconnected"))
     }
 
-    /// Consume the pending partition hint (if any) and return the new sample count.
+    /// Block until the coordinator sends a StartEpoch or Shutdown.
     ///
-    /// Called at epoch boundaries by the worker's training loop.
-    pub fn take_partition_hint(&mut self) -> Option<usize> {
-        self.pending_partition_size.take()
+    /// Handles intermediate control messages (SyncNow, RequestParams, etc.)
+    /// to prevent NCCL deadlock while waiting between epochs.
+    /// Returns `Some(plan)` for the next epoch, or `None` on Shutdown/disconnect.
+    pub fn wait_for_epoch_plan(&mut self) -> Result<Option<EpochPlan>> {
+        // Check if a plan was queued during handle_control
+        if let Some(plan) = self.pending_plan.take() {
+            return Ok(Some(plan));
+        }
+        loop {
+            match self.control_rx.recv() {
+                Ok(ControlMsg::StartEpoch(plan)) => return Ok(Some(plan)),
+                Ok(ControlMsg::Shutdown) => return Ok(None),
+                Ok(msg) => { self.dispatch_control(msg)?; }
+                Err(_) => return Ok(None), // disconnected
+            }
+        }
     }
 
-    /// Advance to the next epoch.
-    pub fn advance_epoch(&mut self) {
-        self.current_epoch += 1;
-    }
-
-    /// Reshuffle this worker's partition for the current epoch.
+    /// Process one epoch's partition from the coordinator's plan.
     ///
-    /// If a [`PartitionHint`](ControlMsg::PartitionHint) was received, the new
-    /// sample count is applied first.
-    pub fn shuffle_partition(&mut self) {
-        let partition_size = self.pending_partition_size.take()
-            .unwrap_or(self.partition.len());
-        self.partition = make_partition(
-            self.rank, self.world_size, self.dataset.len(),
-            partition_size, self.current_epoch, self.base_seed,
-        );
-    }
-
-    /// Run one epoch: iterate batches, train, report timing, handle control.
+    /// Generates sample indices from the plan's offset and size using the
+    /// same deterministic shuffle as all other ranks. Reports metrics at
+    /// the end so the coordinator can track global epoch completion.
     ///
-    /// Returns `true` if a Shutdown was received (caller should exit).
-    pub fn run_epoch(
+    /// Returns `true` if a Shutdown was received mid-epoch.
+    pub fn run_epoch_plan(
         &mut self,
+        plan: &EpochPlan,
         train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
     ) -> Result<bool> {
-        self.shuffle_partition();
+        self.current_epoch = plan.epoch;
+        self.partition = make_partition(
+            plan.partition_offset, plan.partition_size,
+            self.dataset.len(), plan.epoch, self.base_seed,
+        );
 
         let num_batches = self.partition.len() / self.batch_size;
         if num_batches == 0 {
-            self.advance_epoch();
+            // Still report so coordinator gets the "done" signal.
+            let _ = self.report_epoch(0.0, 0, 0.0);
             return Ok(false);
         }
 
@@ -568,10 +578,8 @@ impl<M: Module> GpuWorker<M> {
             let end = start + self.batch_size;
             let indices = &self.partition[start..end];
 
-            // Fetch batch from dataset (returns CPU tensors)
             let cpu_batch = self.dataset.get_batch(indices)?;
 
-            // Move to this worker's device
             let batch: Vec<Tensor> = if self.device == Device::CPU {
                 cpu_batch
             } else {
@@ -580,27 +588,22 @@ impl<M: Module> GpuWorker<M> {
                     .collect::<Result<_>>()?
             };
 
-            // Train step
             let (loss, ms) = self.train_step(&batch, train_fn)?;
             total_loss += loss;
 
-            // Report timing (fire-and-forget)
             let _ = self.report_timing(ms);
 
-            // Check control messages between batches
             if self.handle_control()? {
                 return Ok(true); // Shutdown
             }
         }
 
-        // Epoch done: fire metrics and advance
         let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
         let _ = self.report_epoch(
             total_loss / num_batches as f64,
             num_batches,
             epoch_ms,
         );
-        self.advance_epoch();
 
         Ok(false)
     }

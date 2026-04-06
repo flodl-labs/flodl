@@ -193,7 +193,6 @@ impl DdpHandle {
 
         let world_size = devices.len();
         let total_samples = dataset.len();
-        let samples_per_worker = total_samples / world_size;
 
         // Step 2: Create channels
         let (timing_tx_main, timing_rx) = mpsc::channel();
@@ -255,6 +254,8 @@ impl DdpHandle {
         let div_threshold = config.divergence_threshold;
         let ckpt_every = config.checkpoint_every;
         let snap_timeout = config.snapshot_timeout_secs;
+        let partition_ratios = config.partition_ratios.clone();
+        let seed: u64 = 42;
 
         let coordinator_handle = std::thread::Builder::new()
             .name("ddp-coordinator".into())
@@ -268,7 +269,9 @@ impl DdpHandle {
                 )
                 .snapshot_timeout_secs(snap_timeout)
                 .epoch_metrics_tx(epoch_metrics_tx)
-                .device_indices(coord_device_indices);
+                .device_indices(coord_device_indices)
+                .num_epochs(num_epochs)
+                .partition_ratios(partition_ratios);
                 if let Some(dt) = div_threshold {
                     builder = builder.divergence_threshold(dt);
                 }
@@ -277,18 +280,24 @@ impl DdpHandle {
                 }
                 let mut coord = builder.build();
 
+                // Send first epoch plans to all workers.
+                // Uses speed_hint partition sizes if available.
+                coord.send_all_plans(0);
+
                 let poll_timeout = std::time::Duration::from_micros(100);
                 let loop_err = loop {
                     if shutdown_coord.load(Ordering::Relaxed) {
                         break None;
                     }
-                    // Block until a timing message arrives or timeout.
-                    // Returns false when all senders disconnect (workers exited).
                     if !coord.drain_timing_blocking(poll_timeout) {
-                        break None; // channel disconnected: all workers done
+                        break None;
                     }
-                    // All workers sent Exiting: no more collectives possible.
                     if coord.active_count == 0 {
+                        break None;
+                    }
+                    // on_epoch_aggregated sends Shutdown when last epoch completes.
+                    // Workers exit, channels disconnect, drain_timing_blocking returns false.
+                    if coord.all_epochs_done() {
                         break None;
                     }
                     coord.check_throttle();
@@ -296,6 +305,9 @@ impl DdpHandle {
                         shutdown_coord.store(true, Ordering::Relaxed);
                         break Some(e);
                     }
+                    // drain_metrics -> on_rank_done (Auto per-rank dispatch)
+                    //               -> try_aggregate_epochs -> on_epoch_aggregated
+                    //                  (Sync/Cadence broadcast or Auto unblock)
                     for m in coord.drain_metrics() {
                         eprintln!(
                             "  ddp: rank {} epoch {} | loss={:.4} batches={} time={:.0}ms",
@@ -303,11 +315,6 @@ impl DdpHandle {
                         );
                     }
                     if coord.should_average() {
-                        // Final drain to catch last-second Exiting messages.
-                        // Without this, a fast worker can send Exiting and
-                        // destroy its NcclRankComm between our drain and the
-                        // SyncNow send, leaving the slow worker's AllReduce
-                        // with no partner.
                         coord.drain_timing();
                         if coord.should_average() {
                             if let Err(e) = coord.trigger_averaging() {
@@ -377,8 +384,7 @@ impl DdpHandle {
                 initial_buffers: buffers,
                 total_samples,
                 batch_size,
-                partition_samples: samples_per_worker,
-                seed: 42,
+                seed,
             };
 
             let handle = std::thread::Builder::new()
@@ -409,16 +415,28 @@ impl DdpHandle {
                             control_rx,
                         )?;
 
-                        // Training loop: self-managed epochs with actual data
-                        for _epoch in 0..num_epochs {
+                        // Training loop: coordinator-driven epochs.
+                        // Workers are mode-agnostic: they wait for a plan,
+                        // fire epoch_fn, process the partition, and report.
+                        // In Sync/Cadence, wait_for_epoch_plan blocks until
+                        // the coordinator sends the next plan. In Auto, the
+                        // plan is already queued (pre-dispatched per-rank).
+                        loop {
                             if shutdown_w.load(Ordering::Relaxed) {
                                 break;
                             }
+                            let plan = match worker.wait_for_epoch_plan()? {
+                                Some(p) => p,
+                                None => break, // Shutdown or disconnect
+                            };
+                            // Set current_epoch before epoch_fn so
+                            // worker.current_epoch() is correct inside the callback.
+                            worker.current_epoch = plan.epoch;
                             if let Some(ref f) = epoch_fn_w {
-                                f(worker.current_epoch(), &mut worker);
+                                f(plan.epoch, &mut worker);
                             }
-                            if worker.run_epoch(&*tf)? {
-                                break; // Shutdown received
+                            if worker.run_epoch_plan(&plan, &*tf)? {
+                                break; // Shutdown received mid-epoch
                             }
                         }
 
@@ -518,7 +536,6 @@ impl DdpHandle {
             initial_buffers,
             total_samples,
             batch_size,
-            partition_samples: total_samples,
             seed: 42,
         };
 
@@ -540,12 +557,20 @@ impl DdpHandle {
             control_rx,
         )?;
 
-        // Train directly on this thread
+        // Train directly on this thread (no coordinator, local epoch management)
         for epoch in 0..num_epochs {
+            // Set current_epoch before epoch_fn so
+            // worker.current_epoch() is correct inside the callback.
+            worker.current_epoch = epoch;
             if let Some(ref f) = epoch_fn {
-                f(worker.current_epoch(), &mut worker);
+                f(epoch, &mut worker);
             }
-            worker.run_epoch(train_fn)?;
+            let plan = super::EpochPlan {
+                epoch,
+                partition_offset: 0,
+                partition_size: total_samples,
+            };
+            worker.run_epoch_plan(&plan, train_fn)?;
             // Single-GPU checkpoint: version = epoch number (monotonic)
             if let (Some(every), Some(f)) = (checkpoint_every, &checkpoint_fn) {
                 if every > 0 && (epoch + 1) % every == 0 {
@@ -868,7 +893,7 @@ where
 
     /// Set an epoch callback called at the start of each epoch inside each worker thread.
     ///
-    /// Receives `(epoch, &mut GpuWorker<M>)`. Runs before [`run_epoch`](GpuWorker::run_epoch),
+    /// Receives `(epoch, &mut GpuWorker<M>)`. Runs before [`run_epoch_plan`](GpuWorker::run_epoch_plan),
     /// so [`current_epoch()`](GpuWorker::current_epoch) is already correct.
     ///
     /// Typical uses: learning rate schedules, noise curricula, dynamic loss weights.

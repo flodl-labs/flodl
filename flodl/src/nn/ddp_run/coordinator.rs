@@ -5,9 +5,11 @@ use std::time::Instant;
 
 use crate::tensor::{Device, Result, Tensor, TensorError};
 
+use std::collections::HashMap;
+
 use super::{
     ApplyPolicy, AverageBackend, TimingMsg, MetricsMsg,
-    ParamSnapshot, AveragedParams, ControlMsg, TrainedState,
+    ParamSnapshot, AveragedParams, ControlMsg, EpochPlan, TrainedState,
 };
 
 // ---------------------------------------------------------------------------
@@ -137,9 +139,24 @@ pub struct Coordinator {
     /// Channel to send aggregated epoch metrics to DdpHandle.
     epoch_metrics_tx: Option<mpsc::Sender<super::EpochMetrics>>,
     /// Buffer for collecting per-rank metrics before aggregation.
-    epoch_buffer: std::collections::HashMap<usize, Vec<MetricsMsg>>,
+    epoch_buffer: HashMap<usize, Vec<MetricsMsg>>,
     /// CUDA device index per rank (for EpochMetrics GPU data).
     device_indices: Vec<u8>,
+
+    // Global epoch management
+    /// Total number of epochs to train.
+    num_epochs: usize,
+    /// What epoch each rank is currently working on (last dispatched).
+    rank_epoch: Vec<usize>,
+    /// True if rank finished its epoch but is blocked by lookahead (Auto mode).
+    rank_waiting: Vec<bool>,
+    /// Last globally-aggregated epoch (all ranks reported).
+    /// None = no epoch aggregated yet.
+    last_aggregated_epoch: Option<usize>,
+    /// User-specified partition ratios (disables auto-rebalancing).
+    partition_ratios: Option<Vec<f64>>,
+    /// Cached epoch plans: computed once per epoch, consistent across ranks.
+    epoch_plan_cache: HashMap<usize, Vec<EpochPlan>>,
 }
 
 /// Builder for configuring a [`Coordinator`].
@@ -159,6 +176,8 @@ pub struct CoordinatorBuilder {
     snapshot_timeout_secs: u64,
     epoch_metrics_tx: Option<mpsc::Sender<super::EpochMetrics>>,
     device_indices: Vec<u8>,
+    num_epochs: usize,
+    partition_ratios: Option<Vec<f64>>,
 }
 
 impl CoordinatorBuilder {
@@ -207,6 +226,18 @@ impl CoordinatorBuilder {
         self
     }
 
+    /// Set the total number of epochs to train.
+    pub fn num_epochs(mut self, n: usize) -> Self {
+        self.num_epochs = n;
+        self
+    }
+
+    /// Set explicit per-rank partition ratios.
+    pub fn partition_ratios(mut self, ratios: Option<Vec<f64>>) -> Self {
+        self.partition_ratios = ratios;
+        self
+    }
+
     /// Build the coordinator.
     pub fn build(self) -> Coordinator {
         Coordinator {
@@ -237,8 +268,14 @@ impl CoordinatorBuilder {
             snapshot_timeout_secs: self.snapshot_timeout_secs,
             abort_count: 0,
             epoch_metrics_tx: self.epoch_metrics_tx,
-            epoch_buffer: std::collections::HashMap::new(),
+            epoch_buffer: HashMap::new(),
             device_indices: self.device_indices,
+            num_epochs: self.num_epochs,
+            rank_epoch: vec![0; self.world_size],
+            rank_waiting: vec![false; self.world_size],
+            last_aggregated_epoch: None,
+            partition_ratios: self.partition_ratios,
+            epoch_plan_cache: HashMap::new(),
         }
     }
 }
@@ -274,6 +311,8 @@ impl Coordinator {
             snapshot_timeout_secs: 5,
             epoch_metrics_tx: None,
             device_indices: (0..world_size as u8).collect(),
+            num_epochs: 1,
+            partition_ratios: None,
         }
     }
 
@@ -320,6 +359,133 @@ impl Coordinator {
     /// Most recent CPU averaging time (ms). Zero for NCCL backend.
     pub fn last_avg_ms(&self) -> f64 {
         self.last_avg_ms
+    }
+
+    /// Whether all epochs have been aggregated (training is complete).
+    pub fn all_epochs_done(&self) -> bool {
+        self.last_aggregated_epoch.is_some_and(|e| e + 1 >= self.num_epochs)
+    }
+
+    // -----------------------------------------------------------------------
+    // Global epoch management
+    // -----------------------------------------------------------------------
+
+    /// Compute partition sizes per rank based on policy and throughput.
+    pub(super) fn compute_partition_sizes(&self) -> Vec<usize> {
+        if let Some(ratios) = &self.partition_ratios {
+            return ratio_to_sizes(ratios, self.total_samples);
+        }
+        match self.policy {
+            ApplyPolicy::Sync => {
+                equal_sizes(self.world_size, self.total_samples)
+            }
+            ApplyPolicy::Cadence | ApplyPolicy::Async => {
+                if self.el_che.is_calibrated() || self.el_che.has_speed_hint() {
+                    throughput_sizes(&self.el_che, self.total_samples)
+                } else {
+                    equal_sizes(self.world_size, self.total_samples)
+                }
+            }
+        }
+    }
+
+    /// Get (or lazily compute) the epoch plans for a given epoch.
+    ///
+    /// Partition sizes are computed once per epoch and cached, ensuring
+    /// consistent offsets across all ranks even when dispatched at different times.
+    fn plans_for_epoch(&mut self, epoch: usize) -> Vec<EpochPlan> {
+        if let Some(plans) = self.epoch_plan_cache.get(&epoch) {
+            return plans.clone();
+        }
+        let sizes = self.compute_partition_sizes();
+        let mut plans = Vec::with_capacity(self.world_size);
+        let mut offset = 0;
+        for &size in &sizes {
+            plans.push(EpochPlan { epoch, partition_offset: offset, partition_size: size });
+            offset += size;
+        }
+        eprintln!("  ddp: epoch {epoch} | partitions {sizes:?}");
+        self.epoch_plan_cache.insert(epoch, plans.clone());
+        plans
+    }
+
+    /// Send StartEpoch to all ranks (used for epoch 0 and Sync/Cadence dispatch).
+    pub fn send_all_plans(&mut self, epoch: usize) {
+        let plans = self.plans_for_epoch(epoch);
+        for (rank, plan) in plans.into_iter().enumerate() {
+            self.rank_epoch[rank] = epoch;
+            self.rank_waiting[rank] = false;
+            let _ = self.control_txs[rank].send(ControlMsg::StartEpoch(plan));
+        }
+    }
+
+    /// Send StartEpoch to a single rank (Auto per-rank dispatch).
+    fn send_rank_plan(&mut self, rank: usize, epoch: usize) {
+        let plans = self.plans_for_epoch(epoch);
+        if let Some(plan) = plans.into_iter().nth(rank) {
+            self.rank_epoch[rank] = epoch;
+            self.rank_waiting[rank] = false;
+            let _ = self.control_txs[rank].send(ControlMsg::StartEpoch(plan));
+        }
+    }
+
+    /// Called per-message when a rank's MetricsMsg arrives (epoch done for that rank).
+    ///
+    /// In Auto mode, immediately dispatches the next epoch if within lookahead.
+    fn on_rank_done(&mut self, rank: usize, finished_epoch: usize) {
+        if !matches!(self.policy, ApplyPolicy::Async) {
+            return;
+        }
+        let next = finished_epoch + 1;
+        if next >= self.num_epochs {
+            return;
+        }
+        let within_lookahead = match self.last_aggregated_epoch {
+            // Before any aggregation: allow epoch 0 and 1.
+            // Epoch 0 was sent at startup; epoch 1 is the first lookahead.
+            None => next <= 1,
+            Some(agg) => next.saturating_sub(agg) <= 1,
+        };
+        if within_lookahead {
+            self.send_rank_plan(rank, next);
+        } else {
+            self.rank_waiting[rank] = true;
+        }
+    }
+
+    /// Called when all ranks have reported for an epoch (aggregation complete).
+    ///
+    /// Dispatches next epoch or sends Shutdown based on policy.
+    fn on_epoch_aggregated(&mut self, epoch: usize) {
+        self.last_aggregated_epoch = Some(epoch);
+        self.epoch_plan_cache.remove(&epoch);
+
+        let next_global = epoch + 1;
+        if next_global >= self.num_epochs {
+            // All epochs done: tell all workers to exit.
+            for tx in &self.control_txs {
+                let _ = tx.send(ControlMsg::Shutdown);
+            }
+            return;
+        }
+
+        match self.policy {
+            ApplyPolicy::Sync | ApplyPolicy::Cadence => {
+                self.send_all_plans(next_global);
+            }
+            ApplyPolicy::Async => {
+                // Per-rank dispatch already happened in on_rank_done.
+                // Unblock ranks that were waiting due to lookahead.
+                for rank in 0..self.world_size {
+                    if self.rank_waiting[rank] {
+                        let next = self.rank_epoch[rank] + 1;
+                        if next < self.num_epochs {
+                            self.send_rank_plan(rank, next);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Process a single timing message. Shared by [`drain_timing`] and
@@ -374,29 +540,33 @@ impl Coordinator {
     pub fn drain_metrics(&mut self) -> Vec<MetricsMsg> {
         let mut msgs = Vec::new();
         while let Ok(msg) = self.metrics_rx.try_recv() {
+            // Auto dispatch: per-rank, before aggregation
+            self.on_rank_done(msg.rank, msg.epoch);
             self.epoch_buffer.entry(msg.epoch).or_default().push(msg.clone());
             msgs.push(msg);
         }
+        // Global aggregation + Sync/Cadence dispatch
         self.try_aggregate_epochs();
         msgs
     }
 
     /// Check if any buffered epoch has reports from all active ranks.
-    /// If so, aggregate and send to the main thread.
+    /// If so, aggregate, send metrics, and trigger epoch transitions.
     fn try_aggregate_epochs(&mut self) {
-        let tx = match &self.epoch_metrics_tx {
-            Some(tx) => tx,
-            None => return,
-        };
         let expected = self.active_count;
-        let complete: Vec<usize> = self.epoch_buffer.iter()
+        let mut complete: Vec<usize> = self.epoch_buffer.iter()
             .filter(|(_, msgs)| msgs.len() >= expected)
             .map(|(epoch, _)| *epoch)
             .collect();
+        // Process in order: dispatch/shutdown logic depends on sequence.
+        complete.sort_unstable();
         for epoch in complete {
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
-                let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
-                let _ = tx.send(metrics);
+                if let Some(tx) = &self.epoch_metrics_tx {
+                    let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                    let _ = tx.send(metrics);
+                }
+                self.on_epoch_aggregated(epoch);
             }
         }
     }
@@ -483,7 +653,6 @@ impl Coordinator {
             self.last_avg_ms = 0.0;
             if !self.calibrated && self.el_che.is_calibrated() {
                 self.calibrated = true;
-                self.rebalance_partitions();
             }
         }
 
@@ -532,7 +701,6 @@ impl Coordinator {
             self.last_avg_ms = 0.0;
             if !self.calibrated && self.el_che.is_calibrated() {
                 self.calibrated = true;
-                self.rebalance_partitions();
             }
         }
 
@@ -908,25 +1076,6 @@ impl Coordinator {
         Ok(CpuAvgResult { averaged, cadence_update })
     }
 
-    /// Send PartitionHint to each worker based on ElChe throughput ratios.
-    ///
-    /// Called after ElChe calibration stabilizes. Fire-and-forget.
-    pub fn rebalance_partitions(&self) {
-        let counts = self.el_che.batch_counts();
-        let total_ratio: usize = counts.iter().sum();
-        if total_ratio == 0 {
-            return;
-        }
-        for (rank, tx) in self.control_txs.iter().enumerate() {
-            let num_samples = if rank < counts.len() {
-                (self.total_samples * counts[rank]) / total_ratio
-            } else {
-                0
-            };
-            let _ = tx.send(ControlMsg::PartitionHint { num_samples });
-        }
-    }
-
     /// Throttle workers that have run too far ahead of the slowest rank.
     ///
     /// Sends [`ControlMsg::Throttle`] to any worker whose `steps_since_avg`
@@ -1020,6 +1169,78 @@ impl Coordinator {
             let _ = tx.send(ControlMsg::Shutdown);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Partition sizing helpers
+// ---------------------------------------------------------------------------
+
+/// Equal partition sizes with remainder distributed to the first ranks.
+fn equal_sizes(world_size: usize, total: usize) -> Vec<usize> {
+    let base = total / world_size;
+    let remainder = total % world_size;
+    (0..world_size)
+        .map(|r| base + if r < remainder { 1 } else { 0 })
+        .collect()
+}
+
+/// Throughput-proportional partition sizes from ElChe ms_per_batch.
+///
+/// Faster ranks (lower ms/batch) get more samples. Remainder distributed
+/// to the fastest ranks.
+fn throughput_sizes(el_che: &crate::nn::ddp::ElChe, total: usize) -> Vec<usize> {
+    let ms = el_che.ms_per_batch();
+    // Inverse of ms_per_batch = throughput (batches/ms). Guard against zero.
+    let throughputs: Vec<f64> = ms.iter().map(|&m| 1.0 / m.max(0.001)).collect();
+    let total_tp: f64 = throughputs.iter().sum();
+    if total_tp <= 0.0 {
+        return equal_sizes(ms.len(), total);
+    }
+    let mut sizes: Vec<usize> = throughputs.iter()
+        .map(|t| ((t / total_tp) * total as f64).floor() as usize)
+        .collect();
+    // Distribute remainder to fastest ranks (highest throughput first).
+    let assigned: usize = sizes.iter().sum();
+    let mut remaining = total.saturating_sub(assigned);
+    if remaining > 0 {
+        // Sort rank indices by throughput descending.
+        let mut rank_order: Vec<usize> = (0..ms.len()).collect();
+        rank_order.sort_by(|&a, &b| throughputs[b].partial_cmp(&throughputs[a]).unwrap_or(std::cmp::Ordering::Equal));
+        for &rank in &rank_order {
+            if remaining == 0 { break; }
+            sizes[rank] += 1;
+            remaining -= 1;
+        }
+    }
+    sizes
+}
+
+/// Convert user-specified ratios to absolute partition sizes.
+///
+/// Ratios are normalized to sum to 1.0. Remainder distributed to the
+/// ranks with the largest ratios.
+fn ratio_to_sizes(ratios: &[f64], total: usize) -> Vec<usize> {
+    let sum: f64 = ratios.iter().sum();
+    let norm: Vec<f64> = if sum > 0.0 {
+        ratios.iter().map(|r| r / sum).collect()
+    } else {
+        vec![1.0 / ratios.len() as f64; ratios.len()]
+    };
+    let mut sizes: Vec<usize> = norm.iter()
+        .map(|r| (r * total as f64).floor() as usize)
+        .collect();
+    let assigned: usize = sizes.iter().sum();
+    let mut remaining = total.saturating_sub(assigned);
+    if remaining > 0 {
+        let mut rank_order: Vec<usize> = (0..ratios.len()).collect();
+        rank_order.sort_by(|&a, &b| norm[b].partial_cmp(&norm[a]).unwrap_or(std::cmp::Ordering::Equal));
+        for &rank in &rank_order {
+            if remaining == 0 { break; }
+            sizes[rank] += 1;
+            remaining -= 1;
+        }
+    }
+    sizes
 }
 
 /// Aggregate per-rank [`MetricsMsg`] into a single [`EpochMetrics`].

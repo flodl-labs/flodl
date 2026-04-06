@@ -152,10 +152,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`AverageBackend`**: Controls HOW averaging is performed. Orthogonal to policy, all combinations valid for A/B testing.
   - `Nccl`: In-place AllReduce on GPU. Zero extra memory, GPU-to-GPU DMA. All GPUs sync at collective barrier.
   - `Cpu`: Workers send parameter snapshots to coordinator, which averages on CPU and distributes. No GPU ever blocks. Uses O(world_size * model_size) CPU RAM. Non-blocking 3-phase state machine (Idle/Collecting/Computing) keeps coordinator responsive during averaging.
-- **`GpuWorker<M>`**: Generic worker bound to a single GPU. Thread-local model + optimizer (Rc-based, not Send). CUDA streams for overlapped compute/communication. Handles `SyncNow` (NCCL), `RequestParams`/`Update` (CPU), `Throttle`, `PartitionHint`, `Checkpoint`, `Shutdown`.
+- **`GpuWorker<M>`**: Generic worker bound to a single GPU. Thread-local model + optimizer (Rc-based, not Send). CUDA streams for overlapped compute/communication. Handles `SyncNow` (NCCL), `RequestParams`/`Update` (CPU), `Throttle`, `StartEpoch`, `Checkpoint`, `Shutdown`.
 - **`Coordinator`**: Lightweight scheduling thread. Collects timing from workers (for ElChe throughput ratios), triggers averaging, monitors divergence to auto-tune interval, rebalances data partitions. Builder pattern with configurable `divergence_threshold`, `overhead_target`, `max_anchor`, `checkpoint_every`, `snapshot_timeout_secs`.
 - **`TrainedState`**: Return type from `DdpHandle::join()`. Contains averaged `params` and `buffers` as CPU tensors, ready for inference or checkpoint.
-- **`DdpRunConfig`**: Configuration struct with builder methods: `with_overhead_target()`, `with_max_anchor()`, `with_anchor()`, `with_divergence_threshold()`, `with_max_batch_diff()`, `with_checkpoint_every()`, `with_snapshot_timeout()`.
+- **`DdpRunConfig`**: Configuration struct with builder methods: `with_overhead_target()`, `with_max_anchor()`, `with_anchor()`, `with_divergence_threshold()`, `with_max_batch_diff()`, `with_checkpoint_every()`, `with_snapshot_timeout()`, `with_partition_ratios()`.
+- **Global epoch management**: Coordinator owns epochs globally. Workers are mode-agnostic (wait for `EpochPlan`, run partition, report metrics). `EpochPlan { epoch, partition_offset, partition_size }` ensures deterministic, non-overlapping sample coverage. Throughput-proportional partition sizing when ElChe is calibrated; `partition_ratios` for fixed splits. Auto lookahead in `Async` mode (fast ranks may run 1 epoch ahead).
 - **Single-GPU fallback**: With fewer than 2 CUDA devices, training runs on the main thread with no coordinator or averaging. API is identical; `join()` returns `TrainedState` in both cases.
 
 #### DDP Builder — Robustness
@@ -176,7 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Hardware summary**: Prints GPU count, heterogeneous/homogeneous detection, per-GPU name + VRAM, policy, and backend at launch.
 
 #### DDP Builder — Epoch Callback
-- **`EpochFn<M>`**: `Arc<dyn Fn(usize, &mut GpuWorker<M>) + Send + Sync>`. Called at the start of each epoch inside each worker thread, before `run_epoch()`.
+- **`EpochFn<M>`**: `Arc<dyn Fn(usize, &mut GpuWorker<M>) + Send + Sync>`. Called at the start of each epoch inside each worker thread, before `run_epoch_plan()`.
 - **`.epoch_fn()`** on `DdpBuilder`: Set the callback. Typical uses: LR schedules, noise curricula, dynamic loss weights.
 - **`GpuWorker::set_lr(f64)`**: Delegate to the worker's optimizer.
 - **`GpuWorker::current_epoch()`**: Public accessor for the current epoch number.

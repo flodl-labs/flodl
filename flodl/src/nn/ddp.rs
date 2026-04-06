@@ -1022,6 +1022,14 @@ impl ElChe {
         self.calibrated
     }
 
+    /// Whether a speed hint was applied (batch_counts are non-uniform).
+    ///
+    /// Used by the coordinator to decide if epoch 0 should use
+    /// throughput-proportional partitions before calibration.
+    pub fn has_speed_hint(&self) -> bool {
+        self.batch_counts.windows(2).any(|w| w[0] != w[1])
+    }
+
     /// Per-device milliseconds per batch from last measurement.
     pub fn ms_per_batch(&self) -> &[f64] {
         &self.ms_per_batch
