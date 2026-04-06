@@ -649,7 +649,7 @@ impl Coordinator {
     /// collective; zeroing is correct.
     fn finish_averaging_nccl(&mut self) {
         if self.wall_ms_accum.iter().any(|&ms| ms > 0.0) {
-            self.el_che.report_timing(&self.wall_ms_accum, self.last_avg_ms);
+            self.el_che.report_timing(&self.wall_ms_accum, &self.steps_since_avg, self.last_avg_ms);
             self.last_avg_ms = 0.0;
             if !self.calibrated && self.el_che.is_calibrated() {
                 self.calibrated = true;
@@ -697,7 +697,7 @@ impl Coordinator {
         // Report the snapshot values to ElChe (accurate for the period
         // that triggered averaging, not inflated by during-averaging batches).
         if wall_ms_snapshot.iter().any(|&ms| ms > 0.0) {
-            self.el_che.report_timing(wall_ms_snapshot, self.last_avg_ms);
+            self.el_che.report_timing(wall_ms_snapshot, steps_snapshot, self.last_avg_ms);
             self.last_avg_ms = 0.0;
             if !self.calibrated && self.el_che.is_calibrated() {
                 self.calibrated = true;

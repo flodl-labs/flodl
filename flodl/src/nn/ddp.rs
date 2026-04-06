@@ -869,7 +869,7 @@ impl Default for DdpConfig {
 ///     ddp.weighted_all_reduce_gradients(cadence.batch_counts())?;
 ///     let sync_ms = sync_start.elapsed().as_secs_f64() * 1000.0;
 ///
-///     cadence.report_timing(&wall_ms, sync_ms);
+///     cadence.report_timing(&wall_ms, cadence.batch_counts(), sync_ms);
 /// }
 /// ```
 pub struct ElChe {
@@ -1038,11 +1038,17 @@ impl ElChe {
     /// Report timing after a cadence step completes.
     ///
     /// `wall_ms[rank]`: wall-clock time for all batches on that device (ms).
+    /// `actual_batches[rank]`: number of batches each rank actually processed
+    /// since the last sync (i.e., `steps_since_avg`). In Cadence mode the fast
+    /// GPU may process more batches than its intended `batch_counts` while
+    /// waiting for the slow GPU to reach the trigger threshold. Using the
+    /// intended count as divisor would inflate the fast GPU's ms_per_batch,
+    /// inverting the throughput ratio.
     /// `sync_ms`: AllReduce overhead for this step (ms).
     ///
     /// Updates batch ratios based on measured throughput. If AllReduce
     /// overhead exceeds the target, anchor auto-tunes upward.
-    pub fn report_timing(&mut self, wall_ms: &[f64], sync_ms: f64) {
+    pub fn report_timing(&mut self, wall_ms: &[f64], actual_batches: &[usize], sync_ms: f64) {
         assert_eq!(
             wall_ms.len(),
             self.world_size,
@@ -1054,8 +1060,9 @@ impl ElChe {
         // gets nearly ignored, large shifts (throttle, workload change)
         // adapt within 1-2 reports. First measurement is taken raw.
         for (rank, &wall) in wall_ms.iter().enumerate() {
-            if self.batch_counts[rank] > 0 && wall > 0.0 {
-                let new_ms = wall / self.batch_counts[rank] as f64;
+            let n = actual_batches.get(rank).copied().unwrap_or(0);
+            if n > 0 && wall > 0.0 {
+                let new_ms = wall / n as f64;
                 self.ms_per_batch[rank] = if self.calibrated && self.ms_per_batch[rank] > 0.0 {
                     let error = (new_ms - self.ms_per_batch[rank]).abs()
                         / self.ms_per_batch[rank];
@@ -1821,7 +1828,7 @@ mod tests {
         // Equal counts (10:10), device 0 finishes in 500ms, device 1 in 1000ms.
         let mut c = ElChe::new(2, 10)
             .with_overhead_target(0.50); // high target to avoid anchor auto-tune
-        c.report_timing(&[500.0, 1000.0], 10.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[500.0, 1000.0], &bc, 10.0);
 
         assert!(c.is_calibrated());
         // Slow device (rank 1) keeps anchor=10, fast device (rank 0) gets ~20.
@@ -1837,7 +1844,7 @@ mod tests {
             .with_overhead_target(0.50); // no auto-tune
 
         // Both ran 10 batches; fast took 730ms (73ms/batch), slow took 1640ms (164ms/batch).
-        c.report_timing(&[730.0, 1640.0], 50.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[730.0, 1640.0], &bc, 50.0);
 
         assert!(c.is_calibrated());
         assert_eq!(c.batches(1), 10); // slow device: anchor
@@ -1857,7 +1864,7 @@ mod tests {
             .with_overhead_target(0.10);
 
         // Both devices equal speed, anchor=10.
-        c.report_timing(&[1000.0, 1000.0], 500.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[1000.0, 1000.0], &bc, 500.0);
 
         // overhead = 500/1000 = 0.50, target = 0.10
         // scale = 0.50/0.10 = 5.0 => new anchor = ceil(10 * 5) = 50
@@ -1873,7 +1880,7 @@ mod tests {
             .with_overhead_target(0.10);
 
         // Fast=500ms, slow=1000ms (equal initial counts), sync=400ms.
-        c.report_timing(&[500.0, 1000.0], 400.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[500.0, 1000.0], &bc, 400.0);
 
         // overhead = 400/1000 = 0.40, target = 0.10, scale = 4.0
         // new anchor = ceil(10 * 4) = 40
@@ -1890,7 +1897,7 @@ mod tests {
             .with_max_anchor(30);
 
         // Extreme overhead: sync dominates.
-        c.report_timing(&[100.0, 100.0], 500.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[100.0, 100.0], &bc, 500.0);
 
         // Would want anchor=500 but capped at 30.
         assert_eq!(c.anchor(), 30);
@@ -1903,7 +1910,7 @@ mod tests {
             .with_overhead_target(0.10);
 
         // sync=5ms on 1000ms compute => 0.5% overhead, well below 10%.
-        c.report_timing(&[1000.0, 1000.0], 5.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[1000.0, 1000.0], &bc, 5.0);
 
         assert_eq!(c.anchor(), 10); // no change
     }
@@ -1914,7 +1921,7 @@ mod tests {
             .with_overhead_target(0.50); // no auto-tune
 
         // Device 0: 3x fast (333ms), device 1: 2x fast (500ms), device 2: slow (1000ms).
-        c.report_timing(&[333.0, 500.0, 1000.0], 10.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[333.0, 500.0, 1000.0], &bc, 10.0);
 
         assert_eq!(c.batches(2), 10); // slow: anchor
         // Device 1: 100ms/batch vs 33.3ms/batch for device 0
@@ -1930,13 +1937,13 @@ mod tests {
             .with_overhead_target(0.50);
 
         // First report: 2x speed ratio.
-        c.report_timing(&[500.0, 1000.0], 10.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[500.0, 1000.0], &bc, 10.0);
         assert_eq!(c.batches(0), 20);
         assert_eq!(c.batches(1), 10);
 
         // Second report: new counts, faster device did 20 in 1000ms (50ms/batch),
         // slow did 10 in 1000ms (100ms/batch). Ratio stays 2:1.
-        c.report_timing(&[1000.0, 1000.0], 10.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[1000.0, 1000.0], &bc, 10.0);
         assert_eq!(c.batches(0), 20);
         assert_eq!(c.batches(1), 10);
     }
@@ -1947,7 +1954,7 @@ mod tests {
             .with_overhead_target(0.50);
 
         // Fast device gets 20, slow gets 10. Total = 30.
-        c.report_timing(&[500.0, 1000.0], 10.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[500.0, 1000.0], &bc, 10.0);
 
         // Only 15 batches remain in the epoch.
         let clamped = c.clamp_total(15);
@@ -1996,7 +2003,7 @@ mod tests {
         // First report (calibration): GPU 0 slow (10ms/batch), GPU 1 fast (2ms/batch).
         // batch_counts are [10, 10] initially, so wall = ms_per_batch * count.
         // GPU 0: 10 batches * 10ms = 100ms. GPU 1: 10 batches * 2ms = 20ms.
-        c.report_timing(&[100.0, 20.0], 0.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[100.0, 20.0], &bc, 0.0);
         assert!(c.is_calibrated());
         // Calibration pass: no clamping. GPU 1 gets 50 batches (ratio 10/2 * 10).
         let counts_after_cal = c.batch_counts().to_vec();
@@ -2008,7 +2015,7 @@ mod tests {
         // ms_per_batch[1] EMA: alpha=clamp(|9-2|/2, 0.1, 0.8)=0.8, new=0.8*9+0.2*2=7.6
         // slow_ms = max(10, 7.6) = 10. target[1] = 10*(10/7.6)=13.
         // Without clamping: 50 -> 13 (drop of 37). With max_batch_diff=3: 50 -> 47.
-        c.report_timing(&[100.0, 450.0], 0.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[100.0, 450.0], &bc, 0.0);
         let counts = c.batch_counts();
         assert!(counts[1] >= counts_after_cal[1] - 3,
             "batch count drop should be clamped to 3, was {} now {}",
@@ -2096,7 +2103,7 @@ mod tests {
         assert_eq!(c.batches(1), 1);
 
         // High overhead won't increase anchor past 1
-        c.report_timing(&[100.0, 200.0], 500.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[100.0, 200.0], &bc, 500.0);
         assert_eq!(c.anchor(), 1);
     }
 
@@ -2112,7 +2119,7 @@ mod tests {
         assert_eq!(c.batches(1), 20);
 
         // After timing: rank 0 is actually 2x faster (500ms for 10 vs 2000ms for 20)
-        c.report_timing(&[500.0, 2000.0], 10.0);
+        let bc = c.batch_counts().to_vec(); c.report_timing(&[500.0, 2000.0], &bc, 10.0);
 
         // Self-corrected: rank 1 is slow (anchor), rank 0 gets more
         assert_eq!(c.batches(1), c.anchor());

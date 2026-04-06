@@ -1293,7 +1293,7 @@ impl Graph {
 
                     let updated_counts = if let Some(ref mut el_che) = state.el_che {
                         if !wall_ms.is_empty() {
-                            el_che.report_timing(&wall_ms, sync_ms);
+                            el_che.report_timing(&wall_ms, &counts, sync_ms);
                         }
                         Some(el_che.batch_counts().to_vec())
                     } else {
