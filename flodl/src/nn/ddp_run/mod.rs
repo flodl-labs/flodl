@@ -318,6 +318,14 @@ pub struct DdpRunConfig {
     /// Ratios must sum to approximately 1.0. Length must match `world_size`.
     /// Use this when you know your hardware and want fixed data splits.
     pub partition_ratios: Option<Vec<f64>>,
+    /// Enable progressive chunk dispatch for cold-start calibration.
+    ///
+    /// Instead of sending the full epoch partition upfront, the coordinator
+    /// streams work in small chunks, adapting sizes to measured throughput.
+    /// This eliminates the idle time on fast GPUs during epoch 0.
+    ///
+    /// Default: `None` (auto: true for Cadence/Async, false for Sync).
+    pub progressive_dispatch: Option<bool>,
 }
 
 impl Default for DdpRunConfig {
@@ -338,6 +346,7 @@ impl DdpRunConfig {
             checkpoint_every: None,
             snapshot_timeout_secs: 5,
             partition_ratios: None,
+            progressive_dispatch: None,
         }
     }
 
@@ -399,6 +408,18 @@ impl DdpRunConfig {
     /// so they sum to 1.0. Length must match `world_size` at launch time.
     pub fn with_partition_ratios(mut self, ratios: &[f64]) -> Self {
         self.partition_ratios = Some(ratios.to_vec());
+        self
+    }
+
+    /// Enable or disable progressive chunk dispatch.
+    ///
+    /// When enabled, the coordinator streams work in small chunks instead of
+    /// sending full epoch partitions. This allows continuous throughput
+    /// adaptation and eliminates cold-start idle time.
+    ///
+    /// Default: auto (true for Cadence/Async, false for Sync).
+    pub fn with_progressive_dispatch(mut self, enabled: bool) -> Self {
+        self.progressive_dispatch = Some(enabled);
         self
     }
 }

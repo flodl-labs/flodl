@@ -61,6 +61,82 @@ struct CpuAvgResult {
 }
 
 // ---------------------------------------------------------------------------
+// Chunk pool for progressive dispatch
+// ---------------------------------------------------------------------------
+
+/// Tracks remaining unassigned samples for one epoch during progressive dispatch.
+///
+/// Instead of sending the full partition at epoch start, the coordinator hands
+/// out small chunks from this pool. Each `take_chunk` advances a monotonic
+/// cursor, guaranteeing non-overlapping slices into the global permutation.
+struct ChunkPool {
+    epoch: usize,
+    total_samples: usize,
+    /// Next unassigned offset into the global permutation.
+    cursor: usize,
+    /// Per-rank: samples dispatched (sum of all chunk sizes sent).
+    dispatched: Vec<usize>,
+    /// Per-rank: samples completed (from MetricsMsg.samples_processed).
+    completed: Vec<usize>,
+    /// Per-rank: number of chunks sent.
+    chunks_sent: Vec<usize>,
+    /// Wall-clock start of this epoch (for EpochMetrics).
+    epoch_start: Instant,
+}
+
+impl ChunkPool {
+    fn new(epoch: usize, total_samples: usize, world_size: usize) -> Self {
+        ChunkPool {
+            epoch,
+            total_samples,
+            cursor: 0,
+            dispatched: vec![0; world_size],
+            completed: vec![0; world_size],
+            chunks_sent: vec![0; world_size],
+            epoch_start: Instant::now(),
+        }
+    }
+
+    /// Take the next chunk of `size` samples from the pool.
+    ///
+    /// Returns `(offset, actual_size)` or `None` if the pool is exhausted.
+    /// Actual size may be smaller than requested if near the end.
+    fn take_chunk(&mut self, size: usize, rank: usize) -> Option<(usize, usize)> {
+        if self.cursor >= self.total_samples {
+            return None;
+        }
+        let actual = size.min(self.total_samples - self.cursor);
+        let offset = self.cursor;
+        self.cursor += actual;
+        self.dispatched[rank] += actual;
+        self.chunks_sent[rank] += 1;
+        Some((offset, actual))
+    }
+
+    /// Samples not yet assigned to any rank.
+    fn remaining(&self) -> usize {
+        self.total_samples.saturating_sub(self.cursor)
+    }
+
+    /// Record that a rank completed processing some samples.
+    fn mark_completed(&mut self, rank: usize, samples: usize) {
+        self.completed[rank] += samples;
+    }
+
+    /// True when all samples have been dispatched AND all ranks have
+    /// reported completion for everything dispatched to them.
+    fn is_epoch_done(&self) -> bool {
+        self.cursor >= self.total_samples
+            && self.dispatched.iter().zip(&self.completed).all(|(d, c)| c >= d)
+    }
+
+    /// Epoch wall-clock time in milliseconds.
+    fn epoch_elapsed_ms(&self) -> f64 {
+        self.epoch_start.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Coordinator
 // ---------------------------------------------------------------------------
 
@@ -157,6 +233,16 @@ pub struct Coordinator {
     partition_ratios: Option<Vec<f64>>,
     /// Cached epoch plans: computed once per epoch, consistent across ranks.
     epoch_plan_cache: HashMap<usize, Vec<EpochPlan>>,
+
+    // Progressive chunk dispatch
+    /// Whether progressive dispatch is enabled.
+    progressive: bool,
+    /// Active chunk pool (None between epochs or when progressive is off).
+    chunk_pool: Option<ChunkPool>,
+    /// Floor for chunk size (in batches). Default: 4.
+    min_chunk_batches: usize,
+    /// Batch size (samples per batch), needed for chunk sizing.
+    batch_size: usize,
 }
 
 /// Builder for configuring a [`Coordinator`].
@@ -178,9 +264,24 @@ pub struct CoordinatorBuilder {
     device_indices: Vec<u8>,
     num_epochs: usize,
     partition_ratios: Option<Vec<f64>>,
+    progressive: bool,
+    batch_size: usize,
 }
 
 impl CoordinatorBuilder {
+    /// Enable or disable progressive chunk dispatch.
+    /// Default: true for Cadence/Async, false for Sync.
+    pub fn progressive(mut self, enabled: bool) -> Self {
+        self.progressive = enabled;
+        self
+    }
+
+    /// Set the batch size (needed for chunk sizing in progressive mode).
+    pub fn batch_size(mut self, bs: usize) -> Self {
+        self.batch_size = bs;
+        self
+    }
+
     /// Set the divergence threshold for adaptive averaging interval (Async mode).
     /// Default: 0.05 (5% relative norm difference triggers tightening).
     pub fn divergence_threshold(mut self, threshold: f64) -> Self {
@@ -276,6 +377,10 @@ impl CoordinatorBuilder {
             last_aggregated_epoch: None,
             partition_ratios: self.partition_ratios,
             epoch_plan_cache: HashMap::new(),
+            progressive: self.progressive,
+            chunk_pool: None,
+            min_chunk_batches: 4,
+            batch_size: self.batch_size.max(1),
         }
     }
 }
@@ -313,6 +418,8 @@ impl Coordinator {
             device_indices: (0..world_size as u8).collect(),
             num_epochs: 1,
             partition_ratios: None,
+            progressive: !matches!(policy, ApplyPolicy::Sync),
+            batch_size: 1,
         }
     }
 
@@ -410,13 +517,105 @@ impl Coordinator {
     }
 
     /// Send StartEpoch to all ranks (used for epoch 0 and Sync/Cadence dispatch).
+    ///
+    /// In progressive mode, delegates to [`start_epoch_progressive`].
     pub fn send_all_plans(&mut self, epoch: usize) {
+        if self.progressive {
+            self.start_epoch_progressive(epoch);
+            return;
+        }
         let plans = self.plans_for_epoch(epoch);
         for (rank, plan) in plans.into_iter().enumerate() {
             self.rank_epoch[rank] = epoch;
             self.rank_waiting[rank] = false;
             let _ = self.control_txs[rank].send(ControlMsg::StartEpoch(plan));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Progressive chunk dispatch
+    // -----------------------------------------------------------------------
+
+    /// Start a new epoch in progressive mode: create a chunk pool and
+    /// dispatch initial chunks to all ranks.
+    fn start_epoch_progressive(&mut self, epoch: usize) {
+        let pool = ChunkPool::new(epoch, self.total_samples, self.world_size);
+        self.chunk_pool = Some(pool);
+
+        let sizes: Vec<usize> = (0..self.world_size)
+            .map(|r| self.compute_chunk_batches(r))
+            .collect();
+        eprintln!(
+            "  ddp: epoch {epoch} progressive | initial chunks (batches) {sizes:?}"
+        );
+        for (rank, &batch_count) in sizes.iter().enumerate() {
+            self.dispatch_next_chunk_with_batches(rank, epoch, batch_count);
+        }
+    }
+
+    /// Dispatch the next chunk to a rank from the active pool.
+    ///
+    /// Computes chunk size based on calibration state, takes from the pool,
+    /// and sends a `StartEpoch` plan. Does nothing if the pool is exhausted.
+    fn dispatch_next_chunk(&mut self, rank: usize) {
+        let epoch = match &self.chunk_pool {
+            Some(pool) => pool.epoch,
+            None => return,
+        };
+        let batches = self.compute_chunk_batches(rank);
+        self.dispatch_next_chunk_with_batches(rank, epoch, batches);
+    }
+
+    fn dispatch_next_chunk_with_batches(&mut self, rank: usize, epoch: usize, batches: usize) {
+        let samples = batches * self.batch_size;
+        if samples == 0 {
+            return;
+        }
+        let (offset, actual_size) = match self.chunk_pool.as_mut() {
+            Some(pool) => match pool.take_chunk(samples, rank) {
+                Some(v) => v,
+                None => return,
+            },
+            None => return,
+        };
+        self.rank_epoch[rank] = epoch;
+        self.rank_waiting[rank] = false;
+        let _ = self.control_txs[rank].send(ControlMsg::StartEpoch(EpochPlan {
+            epoch,
+            partition_offset: offset,
+            partition_size: actual_size,
+        }));
+    }
+
+    /// Compute how many batches the next chunk for `rank` should contain.
+    fn compute_chunk_batches(&self, rank: usize) -> usize {
+        let remaining_samples = match &self.chunk_pool {
+            Some(pool) => pool.remaining(),
+            None => return 0,
+        };
+        let remaining_batches = remaining_samples / self.batch_size;
+        if remaining_batches == 0 {
+            return 0;
+        }
+
+        if !self.el_che.is_calibrated() && !self.el_che.has_speed_hint() {
+            // Probe: small equal chunks for fast calibration.
+            // ~10% of total per rank, min 4 batches. Enough for 5-6 averaging
+            // events at anchor=10, giving ElChe's EMA time to stabilize.
+            let probe = (self.total_samples / (self.world_size * 10 * self.batch_size)).max(4);
+            return probe.min(remaining_batches);
+        }
+
+        // Calibrated: proportional to throughput
+        let counts = self.el_che.batch_counts();
+        let total_counts: usize = counts.iter().sum();
+        if total_counts == 0 {
+            return remaining_batches.min(self.min_chunk_batches);
+        }
+        let ratio = counts[rank] as f64 / total_counts as f64;
+        let target = (remaining_batches as f64 * ratio).ceil() as usize;
+
+        target.max(self.min_chunk_batches).min(remaining_batches)
     }
 
     /// Send StartEpoch to a single rank (Auto per-rank dispatch).
@@ -540,12 +739,22 @@ impl Coordinator {
     pub fn drain_metrics(&mut self) -> Vec<MetricsMsg> {
         let mut msgs = Vec::new();
         while let Ok(msg) = self.metrics_rx.try_recv() {
-            // Auto dispatch: per-rank, before aggregation
-            self.on_rank_done(msg.rank, msg.epoch);
-            self.epoch_buffer.entry(msg.epoch).or_default().push(msg.clone());
+            if self.progressive {
+                // Progressive: accumulate into pool, dispatch next chunk
+                if let Some(ref mut pool) = self.chunk_pool {
+                    pool.mark_completed(msg.rank, msg.samples_processed);
+                }
+                self.epoch_buffer.entry(msg.epoch).or_default().push(msg.clone());
+                // Dispatch next chunk to this rank (if pool has work)
+                self.dispatch_next_chunk(msg.rank);
+            } else {
+                // Legacy: per-rank Auto dispatch before aggregation
+                self.on_rank_done(msg.rank, msg.epoch);
+                self.epoch_buffer.entry(msg.epoch).or_default().push(msg.clone());
+            }
             msgs.push(msg);
         }
-        // Global aggregation + Sync/Cadence dispatch
+        // Global aggregation + dispatch
         self.try_aggregate_epochs();
         msgs
     }
@@ -553,12 +762,20 @@ impl Coordinator {
     /// Check if any buffered epoch has reports from all active ranks.
     /// If so, aggregate, send metrics, and trigger epoch transitions.
     fn try_aggregate_epochs(&mut self) {
+        if self.progressive {
+            self.try_aggregate_epochs_progressive();
+        } else {
+            self.try_aggregate_epochs_legacy();
+        }
+    }
+
+    /// Legacy aggregation: one MetricsMsg per rank per epoch.
+    fn try_aggregate_epochs_legacy(&mut self) {
         let expected = self.active_count;
         let mut complete: Vec<usize> = self.epoch_buffer.iter()
             .filter(|(_, msgs)| msgs.len() >= expected)
             .map(|(epoch, _)| *epoch)
             .collect();
-        // Process in order: dispatch/shutdown logic depends on sequence.
         complete.sort_unstable();
         for epoch in complete {
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
@@ -568,6 +785,34 @@ impl Coordinator {
                 }
                 self.on_epoch_aggregated(epoch);
             }
+        }
+    }
+
+    /// Progressive aggregation: epoch is done when the chunk pool says so.
+    fn try_aggregate_epochs_progressive(&mut self) {
+        let pool_done = self.chunk_pool.as_ref().is_some_and(|p| p.is_epoch_done());
+        if !pool_done {
+            return;
+        }
+
+        let epoch = self.chunk_pool.as_ref().unwrap().epoch;
+        let epoch_ms = self.chunk_pool.as_ref().unwrap().epoch_elapsed_ms();
+
+        // Remove pool before processing (allows on_epoch_aggregated to create the next one)
+        self.chunk_pool = None;
+
+        if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
+            if let Some(tx) = &self.epoch_metrics_tx {
+                let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                // Override epoch_ms with the pool's wall-clock (not per-chunk times)
+                metrics.epoch_ms = epoch_ms;
+                let _ = tx.send(metrics);
+            }
+            eprintln!(
+                "  ddp: epoch {epoch} progressive complete | {:.0}ms",
+                epoch_ms,
+            );
+            self.on_epoch_aggregated(epoch);
         }
     }
 
@@ -1324,5 +1569,123 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
     super::EpochMetrics {
         epoch, scalars, per_rank, avg_loss, epoch_ms,
         per_rank_throughput, per_rank_batch_share, device_indices: dev_indices,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_pool_basic() {
+        let mut pool = ChunkPool::new(0, 1000, 2);
+        assert_eq!(pool.remaining(), 1000);
+        assert!(!pool.is_epoch_done());
+
+        // Take a chunk for rank 0
+        let (off, size) = pool.take_chunk(300, 0).unwrap();
+        assert_eq!(off, 0);
+        assert_eq!(size, 300);
+        assert_eq!(pool.remaining(), 700);
+
+        // Take a chunk for rank 1
+        let (off, size) = pool.take_chunk(200, 1).unwrap();
+        assert_eq!(off, 300);
+        assert_eq!(size, 200);
+        assert_eq!(pool.remaining(), 500);
+
+        // Not done yet (nothing completed)
+        assert!(!pool.is_epoch_done());
+    }
+
+    #[test]
+    fn chunk_pool_exhaustion() {
+        let mut pool = ChunkPool::new(0, 100, 2);
+
+        // Take more than available: clamped
+        let (off, size) = pool.take_chunk(80, 0).unwrap();
+        assert_eq!((off, size), (0, 80));
+
+        let (off, size) = pool.take_chunk(50, 1).unwrap();
+        assert_eq!((off, size), (80, 20)); // only 20 left
+
+        // Pool exhausted
+        assert!(pool.take_chunk(10, 0).is_none());
+        assert_eq!(pool.remaining(), 0);
+    }
+
+    #[test]
+    fn chunk_pool_is_epoch_done() {
+        let mut pool = ChunkPool::new(0, 100, 2);
+
+        pool.take_chunk(60, 0).unwrap();
+        pool.take_chunk(40, 1).unwrap();
+        assert!(pool.take_chunk(1, 0).is_none()); // exhausted
+
+        // All dispatched but nothing completed
+        assert!(!pool.is_epoch_done());
+
+        // Rank 0 completes
+        pool.mark_completed(0, 60);
+        assert!(!pool.is_epoch_done()); // rank 1 still pending
+
+        // Rank 1 completes
+        pool.mark_completed(1, 40);
+        assert!(pool.is_epoch_done());
+    }
+
+    #[test]
+    fn chunk_pool_incremental_completion() {
+        let mut pool = ChunkPool::new(0, 200, 2);
+
+        // Two chunks for rank 0
+        pool.take_chunk(50, 0).unwrap();
+        pool.take_chunk(50, 1).unwrap();
+        pool.take_chunk(60, 0).unwrap();
+        pool.take_chunk(40, 1).unwrap();
+        assert_eq!(pool.remaining(), 0);
+
+        // Complete in stages
+        pool.mark_completed(0, 50); // first chunk
+        pool.mark_completed(1, 50);
+        assert!(!pool.is_epoch_done()); // rank 0 dispatched 110, only 50 done
+
+        pool.mark_completed(0, 60); // second chunk
+        pool.mark_completed(1, 40);
+        assert!(pool.is_epoch_done());
+    }
+
+    #[test]
+    fn chunk_pool_no_overlap() {
+        let mut pool = ChunkPool::new(0, 500, 3);
+        let mut all_offsets = Vec::new();
+
+        while pool.remaining() > 0 {
+            for rank in 0..3 {
+                if let Some((off, size)) = pool.take_chunk(60, rank) {
+                    // Verify no overlap with previous chunks
+                    for &(prev_off, prev_size) in &all_offsets {
+                        let prev_end: usize = prev_off + prev_size;
+                        let this_end = off + size;
+                        assert!(off >= prev_end || this_end <= prev_off,
+                            "overlap: ({off}, {size}) vs ({prev_off}, {prev_size})");
+                    }
+                    all_offsets.push((off, size));
+                }
+            }
+        }
+
+        // Total coverage = total_samples
+        let total: usize = all_offsets.iter().map(|(_, s)| s).sum();
+        assert_eq!(total, 500);
+    }
+
+    #[test]
+    fn chunk_pool_epoch_elapsed() {
+        let pool = ChunkPool::new(0, 100, 2);
+        // Just verify it returns something reasonable (not zero, not huge)
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let ms = pool.epoch_elapsed_ms();
+        assert!((4.0..1000.0).contains(&ms), "elapsed {ms}ms");
     }
 }

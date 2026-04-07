@@ -83,6 +83,12 @@ pub struct GpuWorker<M: Module> {
     // -- Checkpoint --
     /// Called on rank 0 after averaging events. Log-and-continue on error.
     pub(super) checkpoint_fn: Option<CheckpointFn<M>>,
+
+    // -- Async prefetch (VRAM gauge) --
+    /// Background prefetch worker for async H2D transfers (None on CPU).
+    prefetch: Option<crate::data::prefetch::PrefetchWorker>,
+    /// Bytes per sample (for VRAM gauge depth calculation).
+    per_sample_bytes: usize,
 }
 
 /// Channels bundle returned by [`GpuWorker::channels`] for wiring into the coordinator.
@@ -201,6 +207,24 @@ impl<M: Module> GpuWorker<M> {
             (None, None, None)
         };
 
+        // Create prefetch worker for async H2D (VRAM gauge).
+        // Cap depth at 512 to avoid huge channel allocations when
+        // batch_bytes is tiny (e.g. toy test datasets).
+        let (prefetch, per_sample_bytes) = if config.device.is_cuda() {
+            let sample = dataset.get_batch(&[0])?;
+            let psb: usize = sample.iter().map(|t| t.nbytes()).sum();
+            drop(sample);
+            let depth = crate::data::prefetch_depth_from_vram(
+                psb, config.batch_size, config.device, 0.25,
+            ).min(512);
+            let pw = crate::data::prefetch::PrefetchWorker::new(
+                Arc::clone(&dataset), config.device, depth,
+            );
+            (Some(pw), psb)
+        } else {
+            (None, 0)
+        };
+
         Ok(GpuWorker {
             model,
             optimizer: Box::new(optimizer),
@@ -227,6 +251,8 @@ impl<M: Module> GpuWorker<M> {
             current_epoch: 0,
             pending_plan: None,
             checkpoint_fn,
+            prefetch,
+            per_sample_bytes,
         })
     }
 
@@ -549,13 +575,17 @@ impl<M: Module> GpuWorker<M> {
         }
     }
 
-    /// Process one epoch's partition from the coordinator's plan.
+    /// Process one partition (or chunk) from the coordinator's plan.
     ///
     /// Generates sample indices from the plan's offset and size using the
     /// same deterministic shuffle as all other ranks. Reports metrics at
-    /// the end so the coordinator can track global epoch completion.
+    /// the end so the coordinator can track completion.
     ///
-    /// Returns `true` if a Shutdown was received mid-epoch.
+    /// On CUDA, batches are prefetched asynchronously via a background
+    /// worker thread with a VRAM-sized buffer (gauge model). On CPU,
+    /// batches are loaded synchronously.
+    ///
+    /// Returns `true` if a Shutdown was received mid-plan.
     pub fn run_epoch_plan(
         &mut self,
         plan: &EpochPlan,
@@ -574,31 +604,66 @@ impl<M: Module> GpuWorker<M> {
             return Ok(false);
         }
 
+        // Recalculate prefetch depth at each plan boundary (VRAM may vary).
+        // Cap at num_batches: no point buffering more than the chunk contains.
+        if let Some(ref mut pw) = self.prefetch {
+            let vram_depth = crate::data::prefetch_depth_from_vram(
+                self.per_sample_bytes, self.batch_size, self.device, 0.25,
+            );
+            pw.set_prefetch_depth(vram_depth.min(num_batches));
+        }
+
         let epoch_start = Instant::now();
         let mut total_loss = 0.0;
 
-        for batch_idx in 0..num_batches {
-            let start = batch_idx * self.batch_size;
-            let end = start + self.batch_size;
-            let indices = &self.partition[start..end];
+        if let Some(ref prefetch) = self.prefetch {
+            // CUDA path: async prefetch with VRAM gauge.
+            // start_distributed_epoch creates a fresh bounded channel whose
+            // capacity equals the prefetch depth (VRAM budget). The prefetch
+            // thread fills it; SyncSender blocks when VRAM is full.
+            let batch_rx = prefetch.start_distributed_epoch();
 
-            let cpu_batch = self.dataset.get_batch(indices)?;
+            // Submit all batch indices for async H2D transfer
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * self.batch_size;
+                let end = start + self.batch_size;
+                prefetch.load_batch(self.partition[start..end].to_vec());
+            }
 
-            let batch: Vec<Tensor> = if self.device == Device::CPU {
-                cpu_batch
-            } else {
-                cpu_batch.into_iter()
-                    .map(|t| t.to_device(self.device))
-                    .collect::<Result<_>>()?
-            };
+            // Consume prefetched batches as they become ready
+            for _ in 0..num_batches {
+                let prefetched = batch_rx.recv()
+                    .map_err(|_| TensorError::new("prefetch channel closed"))??;
 
-            let (loss, ms) = self.train_step(&batch, train_fn)?;
-            total_loss += loss;
+                // Ensure compute stream waits for async H2D copy to finish
+                #[cfg(feature = "cuda")]
+                if let Some(ref event) = prefetched.ready_event {
+                    if let Some(ref stream) = self.compute_stream {
+                        stream.wait_event(event)?;
+                    }
+                }
 
-            let _ = self.report_timing(ms);
+                let (loss, ms) = self.train_step(&prefetched.tensors, train_fn)?;
+                total_loss += loss;
+                let _ = self.report_timing(ms);
+                if self.handle_control()? {
+                    return Ok(true); // Shutdown
+                }
+            }
+        } else {
+            // CPU path: synchronous batch loading
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * self.batch_size;
+                let end = start + self.batch_size;
+                let indices = &self.partition[start..end];
+                let batch = self.dataset.get_batch(indices)?;
 
-            if self.handle_control()? {
-                return Ok(true); // Shutdown
+                let (loss, ms) = self.train_step(&batch, train_fn)?;
+                total_loss += loss;
+                let _ = self.report_timing(ms);
+                if self.handle_control()? {
+                    return Ok(true); // Shutdown
+                }
             }
         }
 

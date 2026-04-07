@@ -255,6 +255,9 @@ impl DdpHandle {
         let ckpt_every = config.checkpoint_every;
         let snap_timeout = config.snapshot_timeout_secs;
         let partition_ratios = config.partition_ratios.clone();
+        let progressive = config.progressive_dispatch
+            .unwrap_or(!matches!(policy, ApplyPolicy::Sync));
+        let coord_batch_size = batch_size;
         let seed: u64 = 42;
 
         let coordinator_handle = std::thread::Builder::new()
@@ -271,7 +274,9 @@ impl DdpHandle {
                 .epoch_metrics_tx(epoch_metrics_tx)
                 .device_indices(coord_device_indices)
                 .num_epochs(num_epochs)
-                .partition_ratios(partition_ratios);
+                .partition_ratios(partition_ratios)
+                .progressive(progressive)
+                .batch_size(coord_batch_size);
                 if let Some(dt) = div_threshold {
                     builder = builder.divergence_threshold(dt);
                 }
@@ -417,9 +422,10 @@ impl DdpHandle {
                         // Training loop: coordinator-driven epochs.
                         // Workers are mode-agnostic: they wait for a plan,
                         // fire epoch_fn, process the partition, and report.
-                        // In Sync/Cadence, wait_for_epoch_plan blocks until
-                        // the coordinator sends the next plan. In Auto, the
-                        // plan is already queued (pre-dispatched per-rank).
+                        // In progressive mode, multiple plans may arrive for
+                        // the same epoch (chunks); the epoch_fn guard ensures
+                        // it only fires once per epoch transition.
+                        worker.current_epoch = usize::MAX; // sentinel for first epoch_fn
                         loop {
                             if shutdown_w.load(Ordering::Relaxed) {
                                 break;
@@ -428,11 +434,13 @@ impl DdpHandle {
                                 Some(p) => p,
                                 None => break, // Shutdown or disconnect
                             };
-                            // Set current_epoch before epoch_fn so
-                            // worker.current_epoch() is correct inside the callback.
-                            worker.current_epoch = plan.epoch;
-                            if let Some(ref f) = epoch_fn_w {
-                                f(plan.epoch, &mut worker);
+                            // Only fire epoch_fn on epoch transitions (not per-chunk).
+                            // The usize::MAX sentinel ensures epoch 0 triggers it.
+                            if plan.epoch != worker.current_epoch {
+                                worker.current_epoch = plan.epoch;
+                                if let Some(ref f) = epoch_fn_w {
+                                    f(plan.epoch, &mut worker);
+                                }
                             }
                             if worker.run_epoch_plan(&plan, &*tf)? {
                                 break; // Shutdown received mid-epoch
@@ -874,6 +882,16 @@ where
     /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
     pub fn checkpoint_every(mut self, n: usize) -> Self {
         self.config = self.config.with_checkpoint_every(n);
+        self
+    }
+
+    /// Enable or disable progressive chunk dispatch.
+    ///
+    /// When enabled, the coordinator streams work in small chunks instead of
+    /// sending full epoch partitions, adapting to throughput continuously.
+    /// Default: auto (true for Cadence/Async, false for Sync).
+    pub fn progressive_dispatch(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_progressive_dispatch(enabled);
         self
     }
 

@@ -57,7 +57,7 @@ const BOOTSTRAP_PREFETCH: usize = 4;
 ///
 /// Called at each `epoch()` boundary. By that point the model, optimizer,
 /// and any other allocations are done, so free VRAM is the real budget.
-fn prefetch_depth_from_vram(
+pub(crate) fn prefetch_depth_from_vram(
     per_sample_bytes: usize,
     batch_size: usize,
     device: Device,
