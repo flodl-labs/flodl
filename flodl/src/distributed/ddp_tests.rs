@@ -408,7 +408,7 @@
             .build()
             .unwrap();
 
-        model.set_optimizer(|p| Adam::new(&p, 0.01));
+        model.set_optimizer(|p| Adam::new(p, 0.01));
         model.set_training(true);
 
         // Snapshot initial params
@@ -501,7 +501,7 @@
                     .through(Linear::on_device(8, 2, dev)?)
                     .build()
             },
-            |p| Adam::new(&p, 0.001),
+            |p| Adam::new(p, 0.001),
         )
         .unwrap();
 
@@ -549,7 +549,7 @@
                     .through(Linear::on_device(8, 2, dev)?)
                     .build()
             },
-            |p| Adam::new(&p, 0.001),
+            |p| Adam::new(p, 0.001),
         )
         .unwrap();
 
@@ -601,7 +601,7 @@
             .build()
             .unwrap();
 
-        model.set_optimizer(|p| Adam::new(&p, 0.01));
+        model.set_optimizer(|p| Adam::new(p, 0.01));
         // Should not panic
         model.set_lr(0.001);
     }
@@ -1078,7 +1078,7 @@
                     .through(Linear::on_device(8, 2, dev)?)
                     .build()
             },
-            |p| Adam::new(&p, 0.001),
+            |p| Adam::new(p, 0.001),
             DdpConfig::new().speed_hint(1, 2.0).max_anchor(Some(3)),
         )
         .unwrap();
@@ -1163,7 +1163,7 @@
                     .through(Linear::on_device(8, 2, dev)?)
                     .build()
             },
-            |p| Adam::new(&p, 0.001),
+            |p| Adam::new(p, 0.001),
             DdpConfig::new().max_anchor(Some(2)),
         )
         .unwrap();

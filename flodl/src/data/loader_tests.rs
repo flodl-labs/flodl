@@ -632,7 +632,7 @@
             .unwrap();
 
         model.set_data_loader(loader, "input").unwrap();
-        model.set_optimizer(|p| Adam::new(&p, 0.01));
+        model.set_optimizer(|p| Adam::new(p, 0.01));
         model.set_training(true);
 
         // Snapshot params before training

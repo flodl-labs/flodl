@@ -21,7 +21,7 @@ pub use cuda_stream::{CudaStream, StreamGuard};
 pub use nccl::{NcclAbortHandle, NcclComms, NcclRankComm, NcclUniqueId, ReduceOp};
 pub use ddp::{Ddp, DdpConfig};
 pub use el_che::ElChe;
-pub use ddp_run::{ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar};
+pub use ddp_run::{ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, GpuWorker};
 // Deprecated aliases
 #[allow(deprecated)]
 pub use ddp_run::{AsyncDdp, AsyncDdpBuilder, AsyncDdpConfig};

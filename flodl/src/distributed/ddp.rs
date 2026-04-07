@@ -15,7 +15,7 @@
 //! # Setup mode (user owns the loop)
 //!
 //! ```ignore
-//! Ddp::setup(&model, |dev| build_model(dev), |p| Adam::new(&p, 0.001))?;
+//! Ddp::setup(&model, |dev| build_model(dev), |p| Adam::new(p, 0.001))?;
 //!
 //! // Training loop is identical for 1 or N GPUs:
 //! for (x, y) in &train_loader {
@@ -549,7 +549,7 @@ impl Ddp {
     /// Always prints a diagnostic summary to stderr showing detected hardware.
     ///
     /// ```ignore
-    /// Ddp::setup(&model, |dev| build_model(dev), |p| Adam::new(&p, 0.001))?;
+    /// Ddp::setup(&model, |dev| build_model(dev), |p| Adam::new(p, 0.001))?;
     ///
     /// // Training loop is identical for 1 or N GPUs:
     /// for batch in model.epoch(epoch).activate() {
@@ -566,7 +566,7 @@ impl Ddp {
     where
         F: Fn(Device) -> Result<M>,
         M: Module + 'static,
-        G: Fn(Vec<Parameter>) -> O,
+        G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
         Self::print_device_summary();
@@ -600,7 +600,7 @@ impl Ddp {
     where
         F: Fn(Device) -> Result<M>,
         M: Module + 'static,
-        G: Fn(Vec<Parameter>) -> O,
+        G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
         Self::print_device_summary();
@@ -621,7 +621,7 @@ impl Ddp {
     where
         F: Fn(Device) -> Result<M>,
         M: Module + 'static,
-        G: Fn(Vec<Parameter>) -> O,
+        G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
         Self::setup(model, builder, optimizer)
@@ -638,7 +638,7 @@ impl Ddp {
     where
         F: Fn(Device) -> Result<M>,
         M: Module + 'static,
-        G: Fn(Vec<Parameter>) -> O,
+        G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
         Self::setup_with(model, builder, optimizer, config)

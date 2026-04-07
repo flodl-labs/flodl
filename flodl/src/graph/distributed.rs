@@ -149,11 +149,11 @@ impl Graph {
     /// The factory receives the parameter list and returns an optimizer.
     ///
     /// ```ignore
-    /// model.set_optimizer(|p| Adam::new(&p, 0.001));
+    /// model.set_optimizer(|p| Adam::new(p, 0.001));
     /// ```
     pub fn set_optimizer<F, O>(&self, factory: F)
     where
-        F: Fn(Vec<crate::nn::Parameter>) -> O,
+        F: Fn(&[crate::nn::Parameter]) -> O,
         O: crate::nn::Optimizer + 'static,
     {
         let mut dist = self.distributed.borrow_mut();
@@ -162,19 +162,19 @@ impl Graph {
             let mut optimizers: Vec<Box<dyn crate::nn::Optimizer>> = Vec::new();
 
             // Rank 0 optimizer (uses self's parameters)
-            let rank0_opt = factory(self.parameters());
+            let rank0_opt = factory(&self.parameters());
             optimizers.push(Box::new(rank0_opt));
 
             // Replicas
             for replica in &state.replicas {
-                let opt = factory(replica.parameters());
+                let opt = factory(&replica.parameters());
                 optimizers.push(Box::new(opt));
             }
 
             state.optimizers = optimizers;
         } else {
             // Single GPU: one optimizer
-            let opt = factory(self.parameters());
+            let opt = factory(&self.parameters());
             *self.optimizer.borrow_mut() = Some(Box::new(opt));
         }
     }
