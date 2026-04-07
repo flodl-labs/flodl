@@ -19,7 +19,7 @@ pub(crate) struct PrefetchedBatch {
     pub tensors: Vec<Tensor>,
     /// Event recorded after async H2D copy. Consumer waits on this.
     #[cfg(feature = "cuda")]
-    pub ready_event: Option<crate::nn::cuda_event::CudaEvent>,
+    pub ready_event: Option<crate::distributed::cuda_event::CudaEvent>,
 }
 
 /// Commands sent to the persistent worker thread.
@@ -155,7 +155,7 @@ fn worker_loop(
     // Create a dedicated CUDA stream for H2D transfers (lives across epochs).
     #[cfg(feature = "cuda")]
     let copy_stream = if device.is_cuda() {
-        crate::nn::cuda_stream::CudaStream::new(device, false).ok()
+        crate::distributed::cuda_stream::CudaStream::new(device, false).ok()
     } else {
         None
     };
@@ -228,7 +228,7 @@ fn fetch_and_transfer(
     dataset: &dyn BatchDataSet,
     indices: &[usize],
     device: Device,
-    #[cfg(feature = "cuda")] copy_stream: Option<&crate::nn::cuda_stream::CudaStream>,
+    #[cfg(feature = "cuda")] copy_stream: Option<&crate::distributed::cuda_stream::CudaStream>,
 ) -> Result<PrefetchedBatch> {
     let tensors = dataset.get_batch(indices)?;
 
@@ -243,8 +243,8 @@ fn fetch_and_transfer(
     // Pin memory and async-copy to GPU on dedicated stream
     #[cfg(feature = "cuda")]
     {
-        use crate::nn::cuda_event::{CudaEvent, CudaEventFlags};
-        use crate::nn::cuda_stream::StreamGuard;
+        use crate::distributed::cuda_event::{CudaEvent, CudaEventFlags};
+        use crate::distributed::cuda_stream::StreamGuard;
 
         let mut on_device = Vec::with_capacity(tensors.len());
 

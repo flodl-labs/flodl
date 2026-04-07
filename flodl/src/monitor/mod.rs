@@ -156,7 +156,7 @@ impl<'a, const N: usize> Metrics for (&'a Graph, &'a [(&'a str, f64); N]) {
 ///     monitor.log(m.epoch, Duration::from_millis(m.epoch_ms as u64), &m);
 /// }
 /// ```
-impl Metrics for &crate::nn::EpochMetrics {
+impl Metrics for &crate::distributed::EpochMetrics {
     fn into_metrics(self) -> Vec<(String, f64)> {
         let mut out = Vec::with_capacity(self.scalars.len() + 1);
         out.push(("loss".to_string(), self.avg_loss));

@@ -39,6 +39,7 @@ pub mod tree;
 pub mod verbose;
 #[allow(clippy::module_inception)]
 mod graph;
+mod distributed;
 
 use std::collections::HashMap;
 

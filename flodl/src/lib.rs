@@ -28,6 +28,7 @@
 pub mod tensor;
 pub mod autograd;
 pub mod nn;
+pub mod distributed;
 pub mod graph;
 pub mod monitor;
 pub mod worker;
@@ -84,10 +85,12 @@ pub use nn::{
     xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal, uniform_bias, uniform, normal, orthogonal, trunc_normal,
     walk_modules, walk_modules_visited,
     CudaGraph, MemPoolId, CaptureMode, cuda_graph_capture, cuda_graph_pool_handle,
+    GaussianBlur, gaussian_blur_2d,
+};
+pub use distributed::{
     CudaEvent, CudaEventFlags, CudaStream, StreamGuard,
     NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, ElChe,
     ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar,
-    GaussianBlur, gaussian_blur_2d,
 };
 pub use graph::{
     FlowBuilder, MergeOp, Graph, LossContext, MapBuilder, Trend, TrendGroup,

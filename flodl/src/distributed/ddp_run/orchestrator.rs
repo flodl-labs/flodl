@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::autograd::Variable;
 use crate::data::BatchDataSet;
-use crate::nn::nccl;
+use crate::distributed::nccl;
 use crate::nn::{Module, Optimizer, Parameter};
 use crate::tensor::{Device, Result, Tensor, TensorError};
 
@@ -251,7 +251,7 @@ impl DdpHandle {
 
         // Step 3: Create ElChe with config knobs
         let anchor = config.anchor.unwrap_or(10);
-        let mut el_che = crate::nn::ddp::ElChe::new(world_size, anchor);
+        let mut el_che = crate::distributed::ddp::ElChe::new(world_size, anchor);
         if let Some(target) = config.overhead_target {
             el_che = el_che.with_overhead_target(target);
         }

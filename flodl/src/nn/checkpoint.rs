@@ -1401,4 +1401,322 @@ mod tests {
         let got = load_params[0].1.variable.data().to_f32_vec().unwrap();
         assert_eq!(expected, got);
     }
+
+    // --- Edge case / corruption tests ---
+
+    #[test]
+    fn test_truncated_checkpoint_header_only() {
+        // Write valid header but truncate before any entry data
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&[0u8; HASH_LEN]);
+        // Claim 5 entries, but provide none
+        buf.extend_from_slice(&5u32.to_le_bytes());
+
+        let params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &params, &[], None);
+        assert!(result.is_err(), "truncated checkpoint should return Err, not panic");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("io:"), "should be an IO error: {}", msg);
+    }
+
+    #[test]
+    fn test_truncated_checkpoint_mid_entry() {
+        // Save a valid checkpoint, then truncate in the middle of the first entry
+        let params = make_named_params(&[(4, 8)]);
+        let mut full = Vec::new();
+        save_checkpoint(&mut full, &params, &[], None).unwrap();
+
+        // Header = 4 (magic) + 4 (version) + 32 (hash) + 4 (count) = 44
+        // Truncate partway through the first entry (e.g., keep only 50 bytes)
+        let truncated = full[..50.min(full.len())].to_vec();
+
+        let load_params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&truncated);
+        let result = load_checkpoint(&mut cursor, &load_params, &[], None);
+        assert!(result.is_err(), "truncated mid-entry should return Err");
+    }
+
+    #[test]
+    fn test_empty_file() {
+        // Zero bytes: read_exact for magic should fail
+        let buf: Vec<u8> = Vec::new();
+        let params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &params, &[], None);
+        assert!(result.is_err(), "empty file should return Err");
+    }
+
+    #[test]
+    fn test_invalid_magic_bytes() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"JUNK"); // wrong magic
+        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&[0u8; HASH_LEN]);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+
+        let params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &params, &[], None);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("bad magic"), "error should mention bad magic: {}", msg);
+    }
+
+    #[test]
+    fn test_invalid_magic_checkpoint_version() {
+        // checkpoint_version() should also reject bad magic
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_bad_magic_version.fdl");
+        std::fs::write(&path, b"NOT_FDLC_data").unwrap();
+
+        let result = checkpoint_version(path.to_str().unwrap());
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("bad magic"), "error: {}", msg);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_unsupported_version_high() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&99u32.to_le_bytes()); // version 99
+        buf.extend_from_slice(&[0u8; HASH_LEN]);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+
+        let params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &params, &[], None);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("unsupported checkpoint version"), "error: {}", msg);
+        assert!(msg.contains("99"), "should mention version 99: {}", msg);
+    }
+
+    #[test]
+    fn test_unsupported_version_zero() {
+        // Version 0 is also rejected (valid range is 1..=MAX_VERSION)
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&0u32.to_le_bytes()); // version 0
+        buf.extend_from_slice(&[0u8; HASH_LEN]);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+
+        let params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &params, &[], None);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("unsupported checkpoint version"), "error: {}", msg);
+    }
+
+    #[test]
+    fn test_hash_mismatch_both_nonzero() {
+        // Both file and expected have nonzero hashes that differ
+        let params = make_named_params(&[(4, 8)]);
+        let hash_a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let hash_b = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+        let mut buf = Vec::new();
+        save_checkpoint(&mut buf, &params, &[], Some(hash_a)).unwrap();
+
+        let load_params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &load_params, &[], Some(hash_b));
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("architecture mismatch"), "error: {}", msg);
+        // Error message should include both hashes for diagnostics
+        assert!(msg.contains(hash_b), "should show expected hash: {}", msg);
+    }
+
+    #[test]
+    fn test_zero_entries_empty_model() {
+        // Save a checkpoint with no parameters and no buffers
+        let mut buf = Vec::new();
+        save_checkpoint(&mut buf, &[], &[], None).unwrap();
+
+        // Load into an empty model
+        let mut cursor = std::io::Cursor::new(&buf);
+        let report = load_checkpoint(&mut cursor, &[], &[], None).unwrap();
+        assert!(report.loaded.is_empty());
+        assert!(report.skipped.is_empty());
+        assert!(report.missing.is_empty());
+    }
+
+    #[test]
+    fn test_zero_entries_nonempty_model() {
+        // Save empty checkpoint, load into model that expects params
+        let mut buf = Vec::new();
+        save_checkpoint(&mut buf, &[], &[], None).unwrap();
+
+        let load_params = make_named_params(&[(4, 8)]);
+        let mut cursor = std::io::Cursor::new(&buf);
+        let report = load_checkpoint(&mut cursor, &load_params, &[], None).unwrap();
+        assert!(report.loaded.is_empty());
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.missing.len(), 1, "model param should be reported as missing");
+    }
+
+    #[test]
+    fn test_shape_mismatch_transposed() {
+        // Save [4, 8], try to load into [8, 4] (transposed, same numel)
+        let params = vec![
+            ("layer/weight".to_string(), Parameter::new(
+                Tensor::randn(&[4, 8], crate::tensor::test_opts()).unwrap(), "weight")),
+        ];
+        let mut buf = Vec::new();
+        save_checkpoint(&mut buf, &params, &[], None).unwrap();
+
+        let wrong_params = vec![
+            ("layer/weight".to_string(), Parameter::new(
+                Tensor::randn(&[8, 4], crate::tensor::test_opts()).unwrap(), "weight")),
+        ];
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &wrong_params, &[], None);
+        assert!(result.is_err(), "transposed shape should be a mismatch error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("shape mismatch"), "error: {}", msg);
+        assert!(msg.contains("[4, 8]"), "should show checkpoint shape: {}", msg);
+        assert!(msg.contains("[8, 4]"), "should show model shape: {}", msg);
+    }
+
+    #[test]
+    fn test_dtype_mismatch_auto_cast() {
+        // Save as f32, load into f64 parameter. The code does to_dtype() automatically.
+        let f32_param = vec![
+            ("layer/weight".to_string(), Parameter::new(
+                Tensor::ones(&[2, 3], crate::tensor::test_opts()).unwrap(), "weight")),
+        ];
+        let mut buf = Vec::new();
+        save_checkpoint(&mut buf, &f32_param, &[], None).unwrap();
+
+        // Create f64 parameter with same shape
+        let f64_param = vec![
+            ("layer/weight".to_string(), Parameter::new(
+                Tensor::zeros(&[2, 3], TensorOptions {
+                    dtype: DType::Float64,
+                    device: crate::tensor::test_device(),
+                }).unwrap(), "weight")),
+        ];
+        let mut cursor = std::io::Cursor::new(&buf);
+        let report = load_checkpoint(&mut cursor, &f64_param, &[], None).unwrap();
+        assert_eq!(report.loaded.len(), 1, "dtype auto-cast should succeed");
+
+        // Verify the loaded data is correct and in f64
+        let loaded = f64_param[0].1.variable.data();
+        assert_eq!(loaded.dtype(), DType::Float64);
+        let vals = loaded.to_f64_vec().unwrap();
+        for v in vals {
+            assert!((v - 1.0).abs() < 1e-6, "expected ~1.0, got {}", v);
+        }
+    }
+
+    #[test]
+    fn test_dtype_mismatch_buffer_auto_cast() {
+        // Same auto-cast test for buffers
+        let f32_buffers = vec![
+            ("norm/running_mean".to_string(), Buffer::new(
+                Tensor::ones(&[8], crate::tensor::test_opts()).unwrap(), "running_mean")),
+        ];
+        let mut buf = Vec::new();
+        save_checkpoint(&mut buf, &[], &f32_buffers, None).unwrap();
+
+        let f64_buffers = vec![
+            ("norm/running_mean".to_string(), Buffer::new(
+                Tensor::zeros(&[8], TensorOptions {
+                    dtype: DType::Float64,
+                    device: crate::tensor::test_device(),
+                }).unwrap(), "running_mean")),
+        ];
+        let mut cursor = std::io::Cursor::new(&buf);
+        let report = load_checkpoint(&mut cursor, &[], &f64_buffers, None).unwrap();
+        assert_eq!(report.loaded.len(), 1);
+        assert_eq!(f64_buffers[0].1.get().dtype(), DType::Float64);
+        let vals = f64_buffers[0].1.get().to_f64_vec().unwrap();
+        for v in vals {
+            assert!((v - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_compressed_roundtrip_with_hash() {
+        // Test gz compression with structural hash validation
+        let params = make_named_params(&[(8, 16)]);
+        let hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+        let dir = std::env::temp_dir();
+        let gz_path = dir.join("test_ckpt_hash_gz.fdl.gz");
+        let path_str = gz_path.to_str().unwrap();
+
+        save_checkpoint_file(path_str, &params, &[], Some(hash)).unwrap();
+
+        // Load with matching hash
+        let load_params = make_named_params(&[(8, 16)]);
+        let report = load_checkpoint_file(path_str, &load_params, &[], Some(hash)).unwrap();
+        assert_eq!(report.loaded.len(), 1);
+
+        // Load with wrong hash should fail
+        let bad_hash = "1111111111111111111111111111111111111111111111111111111111111111";
+        let load_params2 = make_named_params(&[(8, 16)]);
+        let result = load_checkpoint_file(path_str, &load_params2, &[], Some(bad_hash));
+        assert!(result.is_err());
+
+        std::fs::remove_file(gz_path).ok();
+    }
+
+    #[test]
+    fn test_corrupted_gz_file() {
+        // Write valid gz header then garbage: should produce an error
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_corrupt.fdl.gz");
+        // Write some garbage that is not valid gzip
+        std::fs::write(&path, b"\x1f\x8b\x08\x00GARBAGE_NOT_VALID_GZ").unwrap();
+
+        let params = make_named_params(&[(4, 8)]);
+        let result = load_checkpoint_file(path.to_str().unwrap(), &params, &[], None);
+        assert!(result.is_err(), "corrupted gz should return Err");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_unknown_dtype_tag() {
+        // Manually craft a checkpoint with an invalid dtype tag byte
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&[0u8; HASH_LEN]);
+        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 entry
+
+        // Entry name
+        let name = b"layer/weight";
+        buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(name);
+
+        // ndim = 1, shape = [4]
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&4i64.to_le_bytes());
+
+        // Invalid dtype tag (255)
+        buf.push(255);
+
+        // byte_count = 16 (4 * f32), then dummy data
+        buf.extend_from_slice(&16u64.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 16]);
+
+        let params = vec![
+            ("layer/weight".to_string(), Parameter::new(
+                Tensor::zeros(&[4], crate::tensor::test_opts()).unwrap(), "weight")),
+        ];
+        let mut cursor = std::io::Cursor::new(&buf);
+        let result = load_checkpoint(&mut cursor, &params, &[], None);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("unknown dtype tag"), "error: {}", msg);
+    }
 }

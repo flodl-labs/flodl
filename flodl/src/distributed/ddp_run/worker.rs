@@ -7,9 +7,9 @@ use std::time::Instant;
 use crate::autograd::{Variable, NoGradGuard};
 use crate::data::BatchDataSet;
 use crate::nn::buffer::Buffer;
-use crate::nn::cuda_event::{CudaEvent, CudaEventFlags};
-use crate::nn::cuda_stream::{CudaStream, StreamGuard};
-use crate::nn::nccl::{NcclRankComm, ReduceOp};
+use crate::distributed::cuda_event::{CudaEvent, CudaEventFlags};
+use crate::distributed::cuda_stream::{CudaStream, StreamGuard};
+use crate::distributed::nccl::{NcclRankComm, ReduceOp};
 use crate::nn::{Module, Optimizer, Parameter};
 use crate::tensor::{Device, Result, Tensor, TensorError};
 

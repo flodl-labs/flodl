@@ -51,11 +51,6 @@ pub mod attention;
 pub mod checkpoint;
 pub mod amp;
 pub mod cuda_graph;
-pub mod cuda_event;
-pub mod cuda_stream;
-pub mod nccl;
-pub mod ddp;
-pub mod ddp_run;
 pub mod functional;
 
 pub use parameter::Parameter;
@@ -107,14 +102,6 @@ pub use attention::MultiheadAttention;
 pub use init::{xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal, uniform_bias, uniform, normal, orthogonal, trunc_normal};
 pub use functional::{gaussian_blur_2d, GaussianBlur};
 pub use cuda_graph::{CudaGraph, MemPoolId, CaptureMode, cuda_graph_capture, cuda_graph_pool_handle};
-pub use cuda_event::{CudaEvent, CudaEventFlags};
-pub use cuda_stream::{CudaStream, StreamGuard};
-pub use nccl::{NcclAbortHandle, NcclComms, NcclRankComm, NcclUniqueId, ReduceOp};
-pub use ddp::{Ddp, DdpConfig, ElChe};
-pub use ddp_run::{ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar};
-// Deprecated aliases
-#[allow(deprecated)]
-pub use ddp_run::{AsyncDdp, AsyncDdpBuilder, AsyncDdpConfig};
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;

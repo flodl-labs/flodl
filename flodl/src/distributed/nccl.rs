@@ -583,7 +583,7 @@ impl std::fmt::Debug for NcclRankComm {
 mod tests {
     use super::*;
     use crate::tensor::{test_device, cuda_device_count, cuda_synchronize, TensorOptions, DType};
-    use crate::nn::ddp::NCCL_LOCK;
+    use crate::distributed::ddp::NCCL_LOCK;
 
     fn require_multi_gpu() -> bool {
         if !test_device().is_cuda() || cuda_device_count() < 2 {
