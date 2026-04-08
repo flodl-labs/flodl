@@ -2,6 +2,12 @@
 
 A side-by-side reference for PyTorch users learning flodl.
 
+> **Want the fast path?** flodl ships with an AI porting skill that reads
+> your PyTorch script and generates a complete flodl project. Run `/port
+> my_model.py` in Claude Code, or see the [Porting Guide](porting.md).
+> You can also run `fdl api-ref` to get the full, up-to-date API surface
+> in your terminal.
+
 ## Imports
 
 In PyTorch, `import torch` gives you almost everything. Rust uses explicit
@@ -1570,3 +1576,10 @@ See the [DDP Reference](ddp.md) for complete API documentation.
 | `torch.cuda.CUDAGraph()` | `CudaGraph::new()?` | CUDA graph capture/replay |
 | `torch.cuda.graph(g)` | `cuda_graph_capture(warmup, pool, \|\| { })` | Convenience capture helper |
 | `SummaryWriter` + TensorBoard | `Monitor::new(n).serve(3000)?` | Built-in live dashboard |
+
+## See also
+
+- [Porting Guide](porting.md) -- AI-assisted porting with `fdl` and the `/port` skill
+- [CLI documentation](cli.md) -- project scaffolding (`fdl init`), libtorch management, `fdl api-ref`
+- [Graph builder tutorial](tutorials/06-graph-builder.md) -- FlowBuilder patterns in depth
+- [DDP Reference](ddp.md) -- multi-GPU training
