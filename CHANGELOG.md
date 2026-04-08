@@ -5,6 +5,50 @@ All notable changes to floDl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+#### CLI: API Reference Generator
+- **`fdl api-ref`**: Generate a structured API reference from flodl source. Extracts all public types, constructors, methods, builder patterns, trait implementations, and doc examples.
+  - Human-readable output (1700+ lines, 170 types) or `--json` for structured data.
+  - `--path <dir>` for explicit source path.
+  - Auto-discovers source: project checkout, cargo registry, or downloads latest release from GitHub.
+  - Downloaded sources cached at `~/.flodl/api-ref-cache/<version>/` for instant re-use.
+  - Designed for AI-assisted PyTorch-to-flodl porting: the reference provides everything an agent needs to map PyTorch patterns to flodl equivalents.
+
+#### PyTorch Porting Skill
+- **`ai/skills/port/`**: AI-assisted PyTorch-to-flodl porting framework. Universal porting guide (`guide.md`) and agent instructions (`instructions.md`) that work with any AI coding assistant. Covers the full journey from environment setup (`fdl init`) through model translation (FlowBuilder patterns, layer mapping, loss/optimizer/scheduler tables) to validation (`cargo check` loop).
+- **`ai/adapters/claude/`**: Claude Code adapter (SKILL.md template) for `/port` slash command. Installed via `fdl skill install`.
+- Guide includes: project scaffolding (native vs Docker), 30+ module mappings, FlowBuilder patterns (sequential, residual, skip connections, split/merge, loops, tags), training loop translation, data loading, checkpointing, device management, and Rust-specific idioms.
+
+#### CLI: Global Install & Self-Update
+- **`fdl install`**: Copy the current binary to `~/.local/bin/fdl` for global access. Downloads the latest release from GitHub if a newer version is available. Detects shell (bash/zsh) and prints PATH instructions if needed.
+- **`fdl install --dev`**: Symlink to the current binary instead of copying. Global `fdl` tracks local builds automatically. Every `cargo build --release -p flodl-cli` updates the global command instantly. Ideal for developers.
+- **`fdl install --check`**: Compare installed version against latest GitHub release. Shows install mode (dev symlink or copied binary).
+- Version-aware: shows "Updating 0.3.0 -> 0.3.1" or "already installed".
+- Platform detection for pre-compiled binaries (linux/darwin/windows, x86_64/aarch64/arm64).
+
+#### CLI: Skill Management
+- **`fdl skill install`**: Detect the user's AI coding tool (Claude Code, Cursor) and install flodl skills. Auto-detects `.claude/` or `.cursorrules`. Copies universal skill files (guide, instructions) plus tool-specific adapter. `--tool <name>` to force a tool, `--skill <name>` to install one skill.
+- **`fdl skill list`**: Show available skills and detected tools with install status.
+- Claude Code: installs `/port` slash command to `.claude/skills/port/`.
+- Cursor: appends porting context to `.cursorrules`.
+- Skill files embedded in the binary via `include_str!`, so it works without a repo checkout.
+- Re-running `fdl skill install` updates existing skills in place.
+
+### Fixed
+
+#### CPU Averaging Race Condition
+- **`snapshot_params()` stream sync**: Added `comm_stream.synchronize()` before reading GPU parameters for CPU averaging snapshots. Without this, `Update` + `RequestParams` messages processed in the same `handle_control()` call could read mid-copy GPU memory from a pending `load_averaged()` non-blocking transfer. The coordinator's `tick()` method can send both messages in the same tick when averaging completes and the next cycle triggers immediately.
+- **CPU backend marked as known bug**: All three CPU averaging policies (Sync/Cadence/Async) fail to converge (~8-23% accuracy vs 87-95% for NCCL). The stream sync fix was necessary but not sufficient. The deeper bug in the snapshot/average/load round-trip is under active investigation. NCCL is the only recommended backend.
+
+### Changed
+- **Rust doc warnings**: Fixed all 32 documentation link warnings (unresolved cross-module references, private item links).
+- **GitHub Actions**: Added `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` env to silence Node.js 20 deprecation warnings.
+- **Release workflow**: `gh release create` now falls back to `gh release upload --clobber` when the release already exists (tag push before workflow completes).
+- **CLI help text**: Updated to reflect broader scope (API reference, global install). Added examples for `api-ref` and `install` commands.
+
 ## [0.3.0] - 2026-04-08 — Multi-GPU & Infrastructure
 
 ### Added

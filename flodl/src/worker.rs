@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 /// ```ignore
 /// let worker = CpuWorker::new();
 /// worker.submit(|| {
-///     save_checkpoint(&snapshot, "model.pt").unwrap();
+///     save_checkpoint(&snapshot, "model.fdl").unwrap();
 /// });
 /// // GPU training continues immediately
 /// worker.finish(); // blocks until all queued work completes

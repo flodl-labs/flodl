@@ -29,6 +29,20 @@ cargo build --release -p flodl-cli
 ./target/release/fdl help
 ```
 
+### Make it global
+
+```bash
+fdl install                  # copies to ~/.local/bin/fdl
+fdl install --dev            # symlink instead (developers: tracks local builds)
+fdl install --check          # check for updates
+```
+
+The install command downloads the latest release from GitHub if a newer
+version is available. It detects your shell and prints PATH instructions
+if `~/.local/bin` is not yet in your PATH. Use `--dev` to symlink
+instead of copy, so `cargo build --release -p flodl-cli` instantly
+updates the global `fdl`.
+
 ## Commands
 
 ### `fdl setup`
@@ -240,6 +254,122 @@ The JSON output is useful for CI pipelines and automated tooling:
 ```bash
 fdl diagnose --json | python3 -m json.tool
 ```
+
+### `fdl api-ref`
+
+Generate a structured API reference from the flodl source. Extracts all
+public types, constructors, methods, builder patterns, trait implementations,
+and doc examples.
+
+```bash
+fdl api-ref                # human-readable (170+ types, 1700+ lines)
+fdl api-ref --json         # structured JSON for tooling
+fdl api-ref --path ~/src   # explicit source path
+```
+
+Source discovery (in order):
+
+1. Walk up from cwd for a flodl checkout
+2. Cargo registry (`~/.cargo/registry/src/`)
+3. Cached GitHub download (`~/.flodl/api-ref-cache/<version>/`)
+4. Download latest release source from GitHub (cached for next time)
+
+This means `fdl api-ref` works anywhere, even without a local checkout.
+First run on a fresh machine downloads ~2MB of source; subsequent runs
+use the cache.
+
+Example output (abbreviated):
+
+```
+flodl API Reference v0.3.0
+========================================
+
+## Modules (nn)
+
+### Linear
+  Fully connected layer: `y = x @ W^T + b`.
+  file: nn/linear.rs
+  constructors:
+    pub fn new(in_features: i64, out_features: i64) -> Result<Self>
+    pub fn on_device(in_features: i64, out_features: i64, device: Device) -> Result<Self>
+
+### Conv2d  (implements: Module)
+  file: nn/conv2d.rs
+  constructors:
+    pub fn configure(in_ch: i64, out_ch: i64, kernel: impl Into<KernelSize>) -> Conv2dBuilder
+  builder:
+    .with_stride()  .with_padding()  .with_dilation()  .done()
+
+## Graph
+
+### FlowBuilder
+  Fluent builder for computation graphs. Reads as data flow.
+  examples:
+    let g = FlowBuilder::from(Linear::new(4, 8)?)
+        .through(GELU)
+        .also(Linear::new(8, 8)?)           // residual connection
+        .through(Linear::new(8, 2)?)
+        .build()?;
+```
+
+The JSON output is designed for AI-assisted porting tools. An agent can
+read the full API surface, match PyTorch patterns to flodl equivalents,
+and generate a working port.
+
+### `fdl install`
+
+Install or update fdl globally.
+
+```bash
+fdl install                # install to ~/.local/bin/fdl
+fdl install --dev          # symlink to current binary (tracks local builds)
+fdl install --check        # compare installed vs latest GitHub release
+```
+
+If a newer version exists on GitHub, `fdl install` downloads the
+pre-compiled binary for your platform automatically. Otherwise it copies
+the current binary. Detects your shell and prints PATH instructions if
+`~/.local/bin` is not in your PATH.
+
+**Dev mode** (`--dev`) creates a symlink instead of a copy. Every
+`cargo build --release -p flodl-cli` updates the global `fdl` instantly.
+Use this when developing flodl itself. Switch back to a stable copy with
+`fdl install` (without `--dev`).
+
+`--check` shows the current install mode (dev symlink or copied binary)
+and compares against the latest GitHub release.
+
+### `fdl skill`
+
+Manage AI coding assistant skills. Detects your tool, installs the right
+skill files.
+
+```bash
+fdl skill list                 # show available skills and detected tools
+fdl skill install              # auto-detect tool, install all skills
+fdl skill install --tool claude  # force Claude Code
+fdl skill install --tool cursor  # force Cursor
+```
+
+**Supported tools:**
+
+| Tool | Detection | Install target |
+|------|-----------|---------------|
+| Claude Code | `.claude/` directory | `.claude/skills/port/SKILL.md` |
+| Cursor | `.cursor/` or `.cursorrules` | `.cursorrules` (appended) |
+
+**Available skills:**
+
+| Skill | Description |
+|-------|-------------|
+| `port` | Port PyTorch scripts to flodl. Reads source, maps patterns, generates Rust project, validates with `cargo check`. |
+
+After installing, use `/port my_model.py` in Claude Code, or ask
+"Port this PyTorch code to flodl" in Cursor.
+
+The skill files are embedded in the `fdl` binary, so this works anywhere,
+even without a flodl repo checkout. When run inside a repo, it uses the
+latest `ai/skills/` files from the source tree.
 
 ## Architecture
 

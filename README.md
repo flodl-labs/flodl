@@ -588,7 +588,7 @@ supports. If `nvidia-smi` works, floDl trains on it.
 |-----------|-----------|
 | **New to Rust** | [Rust for PyTorch Users](https://github.com/fab2s/floDl/blob/main/docs/tutorials/00-rust-primer.md) — 10 patterns in 15 minutes |
 | **Know Rust, new to DL** | [Tensors](https://github.com/fab2s/floDl/blob/main/docs/tutorials/01-tensors.md) then [Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/04-training.md) |
-| **Know PyTorch** | [Migration Guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md) then [Graph Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md) |
+| **Know PyTorch** | [Porting Guide](https://github.com/fab2s/floDl/blob/main/docs/porting.md) (or `/port` with AI) then [Graph Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md) |
 | **Scaling to multi-GPU** | [Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md) then [DDP Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md) |
 | **Just show me code** | [`quickstart`](https://github.com/fab2s/floDl/tree/main/flodl/examples/quickstart/) or [`showcase`](https://github.com/fab2s/floDl/tree/main/flodl/examples/showcase/) |
 
@@ -618,6 +618,12 @@ supports. If `nvidia-smi` works, floDl trains on it.
 - [`schedulers`](https://github.com/fab2s/floDl/tree/main/flodl/examples/schedulers/) — warmup + cosine + plateau composition
 - [`observation`](https://github.com/fab2s/floDl/tree/main/flodl/examples/observation/) — collect, flush, trend queries, early stopping
 - [`showcase`](https://github.com/fab2s/floDl/tree/main/flodl/examples/showcase/) — every graph builder method in one graph
+
+### Porting from PyTorch
+
+- **[Porting Guide](https://github.com/fab2s/floDl/blob/main/docs/porting.md)** — module mapping, FlowBuilder patterns, training loop translation
+- **[AI-assisted porting](https://github.com/fab2s/floDl/tree/main/ai/skills/port/)** — point any AI coding assistant at the skill guide for automated translation. With Claude Code: `/port my_model.py`
+- **`fdl api-ref`** — generate a structured API reference for your flodl version. Used by AI tools and useful on its own.
 
 ### Architecture
 
