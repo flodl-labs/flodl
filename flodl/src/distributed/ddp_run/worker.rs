@@ -216,11 +216,14 @@ impl<M: Module> GpuWorker<M> {
         // Cap depth at 512 to avoid huge channel allocations when
         // batch_bytes is tiny (e.g. toy test datasets).
         // Depth 0 = skip prefetch entirely (sync fallback for tight VRAM).
+        // Skip entirely when the dataset fits in a single batch (nothing to
+        // prefetch ahead of).
         //
         // Note: activation_reserve=0 here because we haven't measured the
         // training activation peak yet. The first run_epoch_plan() will
         // force depth=0 (sync) to calibrate, then adjust on subsequent chunks.
-        let (prefetch, per_sample_bytes) = if config.device.is_cuda() {
+        let total_batches = dataset.len() / config.batch_size.max(1);
+        let (prefetch, per_sample_bytes) = if config.device.is_cuda() && total_batches > 1 {
             let sample = dataset.get_batch(&[0])?;
             let psb: usize = sample.iter().map(|t| t.nbytes()).sum();
             drop(sample);

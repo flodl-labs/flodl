@@ -56,6 +56,7 @@ LINK_REWRITES = [
     (r"\(tutorials/11-multi-gpu\.md\)", "(/guide/multi-gpu)"),
     (r"\(tutorials/12-async-ddp\.md\)", "(/guide/async-ddp)"),
     (r"\(tutorials/13-data-loading\.md\)", "(/guide/data-loading)"),
+    (r"\(cli\.md\)", "(/guide/cli)"),
 ]
 
 NAV_LINE_RE = re.compile(

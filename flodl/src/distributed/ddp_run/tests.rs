@@ -127,8 +127,16 @@ fn mse_train(model: &Linear, batch: &[Tensor]) -> Result<Variable> {
 }
 
 /// Create a GpuWorker with a simple Linear model for testing.
+///
+/// Uses a minimal dataset (4 samples = 1 batch, matching batch_size=4) so
+/// that GpuWorker::new skips PrefetchWorker creation (nothing to prefetch
+/// when the dataset fits in a single batch). This keeps CUDA resource
+/// footprint low: each GpuWorker still allocates 2 CUDA streams + 1 event,
+/// but avoids the extra thread + channel from PrefetchWorker. Under parallel
+/// test execution (or when training runs concurrently), VRAM contention from
+/// dozens of workers can cause transient allocation failures.
 fn make_test_worker() -> (GpuWorker<Linear>, WorkerChannels) {
-    make_test_worker_with(0, 1, 1000)
+    make_test_worker_with(0, 1, 4)
 }
 
 /// Create a GpuWorker with configurable rank/world_size/dataset_size.
@@ -221,13 +229,17 @@ fn test_worker_snapshot_is_send() {
 
 #[test]
 fn test_worker_load_averaged() {
+    // NOTE: This test can fail transiently under VRAM pressure (e.g. when
+    // training runs concurrently or many CUDA tests execute in parallel).
+    // GpuWorker::new allocates CUDA streams + events, and the update tensors
+    // below add further allocations. If this flakes, check GPU utilization.
     let (mut worker, _ch) = make_test_worker();
-    let dev = test_device();
-    let opts = TensorOptions { dtype: DType::Float32, device: dev };
 
-    // Create "averaged" params (all ones)
-    let new_weight = Tensor::ones(&[2, 4], opts).unwrap();
-    let new_bias = Tensor::ones(&[2], opts).unwrap();
+    // Create "averaged" params on CPU (mirrors the real averaging path where
+    // coordinator produces CPU tensors). copy_ handles the H2D transfer.
+    let cpu = TensorOptions { dtype: DType::Float32, device: Device::CPU };
+    let new_weight = Tensor::ones(&[2, 4], cpu).unwrap();
+    let new_bias = Tensor::ones(&[2], cpu).unwrap();
 
     let update = AveragedParams {
         params: vec![new_weight, new_bias],
@@ -240,6 +252,7 @@ fn test_worker_load_averaged() {
     // load_averaged uses non-blocking copy_ on comm_stream (CUDA).
     // In the training loop, sync_before_forward() at the next train_step
     // waits for the event. Here we read directly, so sync the device.
+    let dev = test_device();
     if let Device::CUDA(idx) = dev {
         crate::tensor::cuda_synchronize(idx);
     }
@@ -1386,31 +1399,52 @@ fn test_checkpoint_error_logged_not_propagated() {
 }
 
 #[test]
-fn test_coordinator_sends_checkpoint_every_n() {
-    let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
-    h.coord.checkpoint_every = Some(2);
+fn test_coordinator_sends_checkpoint_every_n_epochs() {
+    use crate::distributed::ddp::ElChe;
 
-    // Simulate 3 averaging events
-    for _ in 0..3 {
-        // Feed enough timing for should_average to trigger
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 1.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 1.0, step_count: 1 }).unwrap();
-        h.coord.drain_timing();
-        assert!(h.coord.should_average());
-        h.coord.trigger_averaging().unwrap();
+    let n = 2;
+    let (_timing_tx, timing_rx) = mpsc::channel();
+    let (_metrics_tx, metrics_rx) = mpsc::channel();
+    let (_param_tx, param_rx) = mpsc::channel();
+
+    let mut control_txs = Vec::new();
+    let mut control_rxs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..n {
+        let (tx, rx) = mpsc::channel();
+        control_txs.push(tx);
+        control_rxs.push(rx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
     }
 
-    // avg_count=3, checkpoint_every=2, so checkpoint sent at avg_count=2
-    // Check rank 0's control channel for Checkpoint messages
-    let mut checkpoint_count = 0;
-    for rx in &h.control_rxs {
+    let el_che = ElChe::new(n, 10);
+    let mut coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Sync, AverageBackend::Nccl,
+        n, 10000, el_che,
+    )
+    .num_epochs(10)
+    .checkpoint_every(2)
+    .build();
+
+    // Aggregate 3 global epochs.
+    for epoch in 0..3 {
+        coord.on_epoch_aggregated(epoch);
+    }
+
+    // checkpoint_every=2: epoch 0 → (0+1)%2=1 no, epoch 1 → (1+1)%2=0 yes, epoch 2 → (2+1)%2=1 no
+    let mut checkpoint_versions = Vec::new();
+    for rx in &control_rxs {
         while let Ok(msg) = rx.try_recv() {
-            if matches!(msg, ControlMsg::Checkpoint { .. }) {
-                checkpoint_count += 1;
+            if let ControlMsg::Checkpoint { version } = msg {
+                checkpoint_versions.push(version);
             }
         }
     }
-    assert_eq!(checkpoint_count, 1, "should send exactly 1 checkpoint after 3 averaging events with every=2");
+    assert_eq!(checkpoint_versions, vec![2], "should checkpoint once (at epoch 2) after 3 epochs with every=2");
 }
 
 // -----------------------------------------------------------------------
@@ -2000,7 +2034,7 @@ fn test_worker_partition_changes_with_epoch() {
 
 #[test]
 fn test_worker_epoch_plan_applies_partition_size() {
-    let (mut worker, _ch) = make_test_worker();
+    let (mut worker, _ch) = make_test_worker_with(0, 1, 1000);
 
     // Run with a smaller partition via EpochPlan
     let plan = EpochPlan { epoch: 0, partition_offset: 0, partition_size: 200 };

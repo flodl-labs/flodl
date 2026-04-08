@@ -305,7 +305,7 @@ pub struct DdpRunConfig {
     /// Maximum batch lead of fastest over slowest worker.
     /// `Some(0)` = strict lockstep. `None` = unlimited. Default: `None`.
     pub max_batch_diff: Option<usize>,
-    /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
+    /// Save a checkpoint every N global epochs.
     /// `None` = no checkpointing. Default: `None`.
     pub checkpoint_every: Option<usize>,
     /// Timeout for CPU averaging snapshot collection (seconds). Default: 5.
@@ -382,7 +382,7 @@ impl DdpRunConfig {
         self
     }
 
-    /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
+    /// Save a checkpoint every N global epochs.
     ///
     /// Requires a `checkpoint_fn` to be set on the builder.
     /// Errors from the checkpoint function are logged but do not stop training.

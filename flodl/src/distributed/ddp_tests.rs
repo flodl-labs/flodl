@@ -92,6 +92,7 @@
             el_che: None,
             last_el_che_counts: Vec::new(),
             last_el_che_sync: None,
+            max_grad_norm: None,
         }
     }
 

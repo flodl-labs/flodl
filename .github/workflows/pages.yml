@@ -25,9 +25,13 @@ jobs:
       - name: Build guide pages
         run: python3 site/build_guide.py
 
-      # ── Copy init.sh so flodl.dev/init.sh works ──
-      - name: Copy init.sh into site
-        run: cp init.sh site/init.sh
+      # ── Copy scripts into site root ──
+      # fdl: primary CLI bootstrap (flodl.dev/fdl)
+      # init.sh: kept for backwards compatibility (existing links)
+      - name: Copy scripts into site
+        run: |
+          cp fdl site/fdl
+          cp init.sh site/init.sh
 
       # ── Jekyll site ─────────────────────────────
       - name: Setup Pages

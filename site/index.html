@@ -46,9 +46,10 @@ title: Out of the cave
         <button id="copyBtn" onclick="copyCommands()">Copy</button>
       </div>
     </div>
-    <pre id="terminalPre"><span class="prompt">$ </span><span class="cm">curl</span> <span class="flag">-sL</span> <span class="url">https://flodl.dev/init.sh</span> | <span class="cm">sh</span> <span class="flag">-s</span> <span id="name1">my-project</span>
-<span class="prompt">$ </span><span class="cm">cd</span> <span id="name2">my-project</span>
-<span class="prompt">$ </span><span class="cm">make</span> run         <span class="comment"># first build downloads libtorch (~5 min)</span></pre>
+    <pre id="terminalPre"><span class="prompt">$ </span><span class="cm">curl</span> <span class="flag">-sL</span> <span class="url">https://flodl.dev/fdl</span> <span class="flag">-o</span> fdl <span class="flag">&amp;&amp;</span> <span class="cm">chmod</span> +x fdl
+<span class="prompt">$ </span>./fdl setup       <span class="comment"># detect GPUs, download libtorch, configure build</span>
+<span class="prompt">$ </span>./fdl init <span id="name1">my-project</span>
+<span class="prompt">$ </span><span class="cm">cd</span> <span id="name2">my-project</span> <span class="flag">&amp;&amp;</span> <span class="cm">make</span> run</pre>
   </div>
 
   <script>
@@ -75,7 +76,7 @@ title: Out of the cave
   function copyCommands() {
     var btn = document.getElementById('copyBtn');
     var n = document.getElementById('projName').value.replace(/[^a-zA-Z0-9_-]/g, '') || 'my-project';
-    var text = 'curl -sL https://flodl.dev/init.sh | sh -s ' + n + '\ncd ' + n + '\nmake run';
+    var text = 'curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl\n./fdl setup\n./fdl init ' + n + '\ncd ' + n + ' && make run';
     navigator.clipboard.writeText(text).then(function() {
       btn.textContent = 'Copied!';
       btn.classList.add('copied');
@@ -87,12 +88,7 @@ title: Out of the cave
   }
   </script>
 
-  <p style="margin: 1.2rem 0 0.2rem; color: var(--text-muted, #888); font-size: 0.95rem;">
-    Prefer native? Install <a href="https://rustup.rs/" target="_blank">Rust</a>, then:
-    <code style="font-size: 0.88em;">curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/download-libtorch.sh | sh</code>
-  </p>
-
-  <div class="cta-row">
+  <div class="cta-row" style="margin-top: 1.2rem;">
     <a href="{{ '/guide/' | relative_url }}" class="btn btn-primary">Get Started</a>
     <a href="https://github.com/fab2s/floDl" target="_blank" class="btn btn-outline">
       <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -201,7 +197,7 @@ model.<span class="fn">set_training</span>(<span class="kw">true</span>);
     <div class="feature">
       <div class="feature-icon docker">&#9638;</div>
       <h3>Easy setup</h3>
-      <p>Docker workflow via <code>init.sh</code> for zero-install builds. Or go native: <code>download-libtorch.sh</code> auto-detects your GPU and sets up libtorch &mdash; just add Rust.</p>
+      <p>One command to set up everything: <code>fdl setup</code> detects your GPUs, downloads libtorch, and configures your build. No Rust needed. <a href="/guide/cli">Full CLI reference</a>.</p>
     </div>
   </div>
 </section>

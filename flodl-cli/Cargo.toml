@@ -12,10 +12,3 @@ publish = false
 [[bin]]
 name = "flodl-cli"
 path = "src/main.rs"
-
-[features]
-default = []
-cuda = ["flodl/cuda"]
-
-[dependencies]
-flodl = { path = "../flodl" }

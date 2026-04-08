@@ -122,6 +122,8 @@ pub(crate) struct DistributedState {
     pub last_el_che_counts: Vec<usize>,
     /// Wall-clock time at end of last El Che AllReduce.
     pub last_el_che_sync: Option<std::time::Instant>,
+    /// Maximum gradient norm for per-rank clipping in El Che mode.
+    pub max_grad_norm: Option<f64>,
 }
 
 impl DistributedState {
@@ -347,6 +349,7 @@ impl DistributedState {
         }
 
         self.el_che = Some(el_che);
+        self.max_grad_norm = config.max_grad_norm;
     }
 
     /// Seed chunk_ratios from a speed hint.
@@ -784,6 +787,16 @@ pub struct DdpConfig {
     /// - `Some(0)` = disabled (traditional per-batch DDP, no El Che).
     /// - `Some(n)` = fixed anchor at n.
     pub max_anchor: Option<usize>,
+    /// Maximum gradient norm for per-rank clipping in El Che mode.
+    ///
+    /// When set, each rank's accumulated gradients are clipped (L2 norm)
+    /// before the normalize-by-count and weighted AllReduce steps. This
+    /// ensures replica gradients (which the caller cannot reach) are bounded
+    /// identically to rank 0.
+    ///
+    /// Standard DDP does not need this because the caller clips rank 0's
+    /// gradients and AllReduce averages them.
+    pub max_grad_norm: Option<f64>,
 }
 
 impl DdpConfig {
@@ -793,6 +806,7 @@ impl DdpConfig {
             speed_hint: None,
             overhead_target: None,
             max_anchor: None,
+            max_grad_norm: None,
         }
     }
 
@@ -825,6 +839,17 @@ impl DdpConfig {
     /// - `Some(n)`: fixed anchor at n (fast device gets proportionally more).
     pub fn max_anchor(mut self, max: Option<usize>) -> Self {
         self.max_anchor = max;
+        self
+    }
+
+    /// Set maximum gradient norm for per-rank clipping in El Che mode.
+    ///
+    /// When set, each rank's accumulated gradients are clipped to this L2
+    /// norm before normalize-by-count and AllReduce. Essential for
+    /// heterogeneous DDP where replica gradients are otherwise unreachable
+    /// by the caller.
+    pub fn max_grad_norm(mut self, max_norm: f64) -> Self {
+        self.max_grad_norm = Some(max_norm);
         self
     }
 }

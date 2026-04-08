@@ -47,7 +47,7 @@ pub fn run(name: Option<&str>, docker: bool) -> Result<(), String> {
         println!("  make test     # run tests");
         println!("  make run      # train the model");
     } else {
-        println!("  make setup    # detect hardware + download libtorch");
+        println!("  ./fdl setup   # detect hardware + download libtorch");
         println!("  make test     # run tests");
         println!("  make run      # train the model");
     }
@@ -151,15 +151,14 @@ fn scaffold_mounted(name: &str, crate_name: &str, flodl_dep: &str) -> Result<(),
         MAKEFILE_MOUNTED,
     )?;
 
-    // Copy download-libtorch.sh into the project for self-contained setup
-    let dl_script = include_str!("../../download-libtorch.sh");
-    write_file(&format!("{}/download-libtorch.sh", name), dl_script)?;
-    // Make executable
+    // Copy fdl bootstrap into the project for self-contained setup
+    let fdl_script = include_str!("../../fdl");
+    write_file(&format!("{}/fdl", name), fdl_script)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(
-            format!("{}/download-libtorch.sh", name),
+            format!("{}/fdl", name),
             fs::Permissions::from_mode(0o755),
         );
     }
@@ -624,7 +623,9 @@ RUN_GPU = $(COMPOSE) run --rm cuda
 _require-libtorch:
 	@if [ ! -d "$(LIBTORCH_CPU_PATH)/lib" ]; then \
 		echo ""; \
-		echo "ERROR: No CPU libtorch found. Run: make setup"; \
+		echo "ERROR: No CPU libtorch found."; \
+		echo "  Run: make setup"; \
+		echo "  Or:  ./fdl libtorch download --cpu"; \
 		echo ""; \
 		exit 1; \
 	fi
@@ -632,7 +633,9 @@ _require-libtorch:
 _require-libtorch-cuda:
 	@if [ -z "$(LIBTORCH_HOST_PATH)" ] || [ ! -d "$(LIBTORCH_HOST_PATH)/lib" ]; then \
 		echo ""; \
-		echo "ERROR: No active CUDA libtorch found. Run: make setup"; \
+		echo "ERROR: No active CUDA libtorch found."; \
+		echo "  Run: make setup"; \
+		echo "  Or:  ./fdl libtorch download --cuda 12.8"; \
 		echo ""; \
 		exit 1; \
 	fi
@@ -684,18 +687,7 @@ cuda-shell: cuda-image
 # --- Setup ---
 
 setup:
-	@echo "Downloading CPU libtorch..."
-	@./download-libtorch.sh --project --cpu
-	@if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then \
-		echo "GPU detected, downloading CUDA libtorch..."; \
-		./download-libtorch.sh --project --cuda 12.8; \
-		$(MAKE) cuda-image; \
-	else \
-		echo "No GPU detected. CPU-only setup."; \
-		$(MAKE) image; \
-	fi
-	@echo ""
-	@echo "Setup complete. Run 'make test' to verify."
+	./fdl setup --non-interactive
 
 # --- Cleanup ---
 

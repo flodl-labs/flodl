@@ -79,28 +79,32 @@ every op, module, and pattern.
 
 ## Getting Started
 
-**With the CLI** (guided setup):
+**With the CLI** (recommended, no Rust needed):
 
 ```bash
-curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/fdl -o fdl && chmod +x fdl
-./fdl setup          # detect hardware, download libtorch, pick build environment
-./fdl init my-proj   # scaffold a new project
+curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
+./fdl setup          # detect hardware, download libtorch, configure build environment
+./fdl init my-proj   # scaffold a new project with training template
 ```
 
-**With Docker** (no Rust or libtorch needed):
+The `fdl` script auto-downloads a pre-compiled CLI binary (~750KB, pure Rust,
+no libtorch dependency). It detects your GPUs, downloads the right libtorch
+variant, and configures Docker or native builds. See the [full CLI
+reference](docs/cli.md) for all commands.
+
+**One-liner with Docker** (no Rust, no setup):
 
 ```bash
 curl -sL https://flodl.dev/init.sh | sh -s my-project
 cd my-project
 make build    # first build (~5 min, downloads libtorch)
-make run      # train the template model
+make run      # train the model
 ```
 
-**Without Docker** — [Rust](https://rustup.rs/) 1.85+ and libtorch:
+**Native** -- [Rust](https://rustup.rs/) 1.85+ and libtorch:
 
 ```bash
-# Auto-detects CPU or CUDA
-curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/download-libtorch.sh | sh
+./fdl libtorch download    # auto-detects CPU or CUDA
 cargo add flodl && cargo build
 ```
 

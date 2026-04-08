@@ -210,7 +210,7 @@ pub struct Coordinator {
     // Checkpointing
     /// Number of averaging events completed.
     avg_count: usize,
-    /// Save a checkpoint every N averaging events. None = disabled.
+    /// Save a checkpoint every N global epochs. None = disabled.
     pub(super) checkpoint_every: Option<usize>,
 
     // Non-blocking CPU averaging
@@ -313,7 +313,7 @@ impl CoordinatorBuilder {
         self
     }
 
-    /// Set the checkpoint interval (averaging events between checkpoints).
+    /// Set the checkpoint interval (global epochs between checkpoints).
     pub fn checkpoint_every(mut self, n: usize) -> Self {
         self.checkpoint_every = Some(n);
         self
@@ -700,9 +700,18 @@ impl Coordinator {
     /// Called when all ranks have reported for an epoch (aggregation complete).
     ///
     /// Dispatches next epoch or sends Shutdown based on policy.
-    fn on_epoch_aggregated(&mut self, epoch: usize) {
+    pub(super) fn on_epoch_aggregated(&mut self, epoch: usize) {
         self.last_aggregated_epoch = Some(epoch);
         self.epoch_plan_cache.remove(&epoch);
+
+        // Checkpoint on global epoch boundaries (1-based for file naming).
+        if let Some(every) = self.checkpoint_every {
+            if every > 0 && (epoch + 1) % every == 0 {
+                if let Some(tx) = self.control_txs.first() {
+                    let _ = tx.send(ControlMsg::Checkpoint { version: (epoch + 1) as u64 });
+                }
+            }
+        }
 
         let next_global = epoch + 1;
         if next_global >= self.num_epochs {
@@ -984,14 +993,6 @@ impl Coordinator {
             self.avg_count, self.version
         );
 
-        if let Some(every) = self.checkpoint_every {
-            if every > 0 && self.avg_count % every == 0 {
-                if let Some(tx) = self.control_txs.first() {
-                    let _ = tx.send(ControlMsg::Checkpoint { version: self.version });
-                }
-            }
-        }
-
         for s in &mut self.steps_since_avg {
             *s = 0;
         }
@@ -1046,14 +1047,6 @@ impl Coordinator {
             "  ddp: CPU averaging #{} complete (v{}, {:.1}ms)",
             self.avg_count, self.version, avg_ms
         );
-
-        if let Some(every) = self.checkpoint_every {
-            if every > 0 && self.avg_count % every == 0 {
-                if let Some(tx) = self.control_txs.first() {
-                    let _ = tx.send(ControlMsg::Checkpoint { version: self.version });
-                }
-            }
-        }
 
         // Subtract snapshot from current counters. Residual = batches
         // that happened during the averaging window, carried forward.

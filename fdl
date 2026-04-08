@@ -1,637 +1,87 @@
 #!/bin/sh
 # fdl -- floDl CLI entry point.
 #
-# Guided setup for first-time users. Works with or without Docker.
-# Detects the environment and lets the user choose at every step.
+# Downloads a pre-compiled binary on first use (no Rust needed).
+# Falls back to building from source if the download fails.
 #
 # Usage:
+#   curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
 #   ./fdl setup              # interactive guided setup
 #   ./fdl init <name>        # scaffold a new project
+#   ./fdl libtorch download  # download pre-built libtorch
 #   ./fdl diagnose           # system and GPU diagnostics
 #   ./fdl help               # show usage
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CLI_BIN="$SCRIPT_DIR/target/release/flodl-cli"
-COMPOSE="docker compose"
+REPO="fab2s/floDl"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+CLI="$DIR/target/release/flodl-cli"
 
 # ---------------------------------------------------------------------------
-# libtorch auto-detection
+# Ensure the CLI binary exists
 # ---------------------------------------------------------------------------
 
-detect_libtorch() {
-    LIBTORCH_ACTIVE=$(cat "$SCRIPT_DIR/libtorch/.active" 2>/dev/null | tr -d '[:space:]')
-    if [ -n "$LIBTORCH_ACTIVE" ]; then
-        export LIBTORCH_HOST_PATH="./libtorch/$LIBTORCH_ACTIVE"
-        _LIBTORCH_ABS="$SCRIPT_DIR/libtorch/$LIBTORCH_ACTIVE"
-        ARCH_FILE="$_LIBTORCH_ABS/.arch"
-        ARCH_CUDA=$(grep '^cuda=' "$ARCH_FILE" 2>/dev/null | cut -d= -f2)
-    else
-        export LIBTORCH_HOST_PATH=""
-        _LIBTORCH_ABS=""
-        ARCH_CUDA=""
-    fi
+if [ ! -f "$CLI" ] || [ "${FDL_REBUILD:-}" = "1" ]; then
+    mkdir -p "$DIR/target/release"
 
-    export LIBTORCH_CPU_PATH="./libtorch/precompiled/cpu"
-    _LIBTORCH_CPU_ABS="$SCRIPT_DIR/libtorch/precompiled/cpu"
-
-    if [ "$ARCH_CUDA" = "none" ]; then
-        _CUDA_VER=""
-    elif [ -n "$ARCH_CUDA" ]; then
-        _CUDA_VER="${ARCH_CUDA}.0"
-    else
-        _CUDA_VER="12.8.0"
-    fi
-    export CUDA_VERSION="${CUDA_VERSION:-$_CUDA_VER}"
-    export CUDA_TAG=$(echo "$CUDA_VERSION" | cut -d. -f1,2)
-}
-
-detect_libtorch
-
-# ---------------------------------------------------------------------------
-# Environment detection
-# ---------------------------------------------------------------------------
-
-has_docker() {
-    command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
-}
-
-has_cargo() {
-    command -v cargo >/dev/null 2>&1
-}
-
-has_gpu() {
-    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1
-}
-
-has_cuda_libtorch() {
-    [ -n "$_LIBTORCH_ABS" ] && [ -d "$_LIBTORCH_ABS/lib" ]
-}
-
-has_cpu_libtorch() {
-    [ -d "$_LIBTORCH_CPU_ABS/lib" ]
-}
-
-native_libtorch_path() {
-    if has_cuda_libtorch; then
-        echo "$_LIBTORCH_ABS"
-    elif has_cpu_libtorch; then
-        echo "$_LIBTORCH_CPU_ABS"
-    else
-        echo ""
-    fi
-}
-
-can_run_native() {
-    [ -f "$CLI_BIN" ] || return 1
-    LT_PATH=$(native_libtorch_path)
-    [ -n "$LT_PATH" ] || return 1
-    LD_LIBRARY_PATH="$LT_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$CLI_BIN" version >/dev/null 2>&1
-}
-
-# ---------------------------------------------------------------------------
-# Interactive helpers
-# ---------------------------------------------------------------------------
-
-# Ask a yes/no question. Default is the capitalized option.
-ask_yn() {
-    printf "%s " "$1"
-    read -r answer </dev/tty 2>/dev/null || answer=""
-    case "$answer" in
-        [Yy]*|"") return 0 ;;
-        *) return 1 ;;
+    # --- Try downloading pre-compiled binary from GitHub Releases ---
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        arm64) ARCH="arm64" ;;    # macOS reports arm64
+        *)     ;;                  # x86_64, aarch64 pass through
     esac
-}
 
-# Ask user to pick a number. Usage: choice=$(ask_choice "prompt" max default)
-ask_choice() {
-    printf "%s " "$1"
-    read -r answer </dev/tty 2>/dev/null || answer=""
-    if [ -z "$answer" ]; then
-        echo "$3"
-    elif [ "$answer" -ge 1 ] 2>/dev/null && [ "$answer" -le "$2" ] 2>/dev/null; then
-        echo "$answer"
-    else
-        echo "$3"
-    fi
-}
+    ARTIFACT="flodl-cli-${OS}-${ARCH}"
+    case "$OS" in
+        *mingw*|*msys*|*cygwin*) ARTIFACT="flodl-cli-windows-x86_64.exe" ;;
+    esac
 
-# ---------------------------------------------------------------------------
-# Build helpers
-# ---------------------------------------------------------------------------
-
-build_native() {
-    LT_PATH=$(native_libtorch_path)
-    [ -n "$LT_PATH" ] || return 1
-    cd "$SCRIPT_DIR"
-    FEATURES=""
-    if has_gpu && has_cuda_libtorch; then
-        FEATURES="--features cuda"
-    fi
-    LIBTORCH_PATH="$LT_PATH" \
-    LD_LIBRARY_PATH="$LT_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    LIBRARY_PATH="$LT_PATH/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" \
-        cargo build --release -p flodl-cli $FEATURES
-}
-
-build_docker() {
-    cd "$SCRIPT_DIR"
-    if has_gpu && has_cuda_libtorch; then
-        mkdir -p .cargo-cache-cuda .cargo-git-cuda
-        if ! docker image inspect "flodl-cuda:$CUDA_TAG" >/dev/null 2>&1; then
-            $COMPOSE build cuda
-        fi
-        $COMPOSE run --rm cuda cargo build --release -p flodl-cli --features cuda
-    else
-        mkdir -p .cargo-cache .cargo-git
-        if ! docker image inspect flodl-dev:latest >/dev/null 2>&1; then
-            $COMPOSE build dev
-        fi
-        $COMPOSE run --rm dev cargo build --release -p flodl-cli
-    fi
-}
-
-ensure_cli() {
-    can_run_native && return 0
-    if has_cargo; then
-        LT_PATH=$(native_libtorch_path)
-        [ -n "$LT_PATH" ] && build_native 2>/dev/null && return 0
-    fi
-    has_docker && build_docker && return 0
-    return 1
-}
-
-# ---------------------------------------------------------------------------
-# Run the CLI binary (best available method)
-# ---------------------------------------------------------------------------
-
-run_cli() {
-    cd "$SCRIPT_DIR"
-
-    # 1. Native
-    if can_run_native; then
-        LT_PATH=$(native_libtorch_path)
-        LD_LIBRARY_PATH="$LT_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-            exec "$CLI_BIN" "$@"
+    # Get latest release tag
+    LATEST_TAG=""
+    if command -v curl >/dev/null 2>&1; then
+        LATEST_TAG=$(curl -sI "https://github.com/$REPO/releases/latest" 2>/dev/null \
+            | grep -i '^location:' | sed 's|.*/||' | tr -d '\r\n')
     fi
 
-    # 2. Try building native (quietly)
-    if has_cargo; then
-        LT_PATH=$(native_libtorch_path)
-        if [ -n "$LT_PATH" ] && build_native 2>/dev/null; then
-            LD_LIBRARY_PATH="$LT_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-                exec "$CLI_BIN" "$@"
-        fi
-    fi
-
-    # 3. Docker
-    if has_docker; then
-        build_docker
-        if has_gpu && has_cuda_libtorch; then
-            $COMPOSE run --rm cuda ./target/release/flodl-cli "$@"
-        else
-            $COMPOSE run --rm dev ./target/release/flodl-cli "$@"
-        fi
-        return
-    fi
-
-    echo "error: Cannot run CLI. Need either:" >&2
-    echo "  - Rust toolchain + libtorch on host" >&2
-    echo "  - Docker" >&2
-    echo "Run 'fdl setup' first." >&2
-    exit 1
-}
-
-# ---------------------------------------------------------------------------
-# Print usage
-# ---------------------------------------------------------------------------
-
-print_usage() {
-    echo "fdl -- floDl CLI"
-    echo ""
-    echo "USAGE:"
-    echo "    fdl <command> [options]"
-    echo ""
-    echo "COMMANDS:"
-    echo "    setup              Interactive guided setup"
-    echo "    init <name>        Scaffold a new floDl project"
-    echo "        --docker       Generate Docker-based scaffold (libtorch baked in)"
-    echo "    diagnose           System and GPU diagnostics"
-    echo "        --json         Output as JSON"
-    echo "    help               Show this help"
-    echo "    version            Show version"
-    echo ""
-    echo "EXAMPLES:"
-    echo "    fdl setup                  # first-time setup"
-    echo "    fdl init my-model          # scaffold with mounted libtorch"
-    echo "    fdl init my-model --docker # scaffold with Docker (standalone)"
-    echo "    fdl diagnose               # hardware + compatibility report"
-}
-
-# ---------------------------------------------------------------------------
-# Shell-only diagnostics
-# ---------------------------------------------------------------------------
-
-shell_diagnose() {
-    echo "floDl Diagnostics"
-    echo "================="
-    echo ""
-
-    echo "System"
-    if [ -f /proc/cpuinfo ]; then
-        CPU=$(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | sed 's/^ *//')
-        THREADS=$(grep -c "^processor" /proc/cpuinfo)
-        echo "  CPU:         $CPU ($THREADS threads)"
-    fi
-    if [ -f /proc/meminfo ]; then
-        RAM_KB=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
-        RAM_GB=$((RAM_KB / 1024 / 1024))
-        echo "  RAM:         ${RAM_GB}GB"
-    fi
-    KERNEL=$(uname -r 2>/dev/null || echo "unknown")
-    echo "  OS:          Linux $KERNEL"
-    if has_docker; then
-        DOCKER_VER=$(docker --version 2>/dev/null | sed 's/Docker version //' | cut -d, -f1)
-        echo "  Docker:      $DOCKER_VER"
-    else
-        echo "  Docker:      not installed"
-    fi
-    if has_cargo; then
-        CARGO_VER=$(cargo --version 2>/dev/null | sed 's/cargo //')
-        echo "  Cargo:       $CARGO_VER"
-    else
-        echo "  Cargo:       not installed"
-    fi
-    echo ""
-
-    echo "CUDA"
-    if has_gpu; then
-        DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
-        echo "  Driver:      $DRIVER"
-        echo "  GPUs:"
-        nvidia-smi --query-gpu=index,name,compute_cap,memory.total --format=csv,noheader 2>/dev/null \
-            | while IFS= read -r line; do echo "    $line"; done
-    else
-        echo "  No GPU detected"
-    fi
-    echo ""
-
-    echo "libtorch"
-    if [ -n "$LIBTORCH_ACTIVE" ]; then
-        echo "  Active:      $LIBTORCH_ACTIVE"
-        ARCH_FILE="$SCRIPT_DIR/libtorch/$LIBTORCH_ACTIVE/.arch"
-        if [ -f "$ARCH_FILE" ]; then
-            while IFS= read -r line; do
-                case "$line" in
-                    torch=*) echo "  Version:     ${line#torch=}" ;;
-                    cuda=*)  echo "  CUDA:        ${line#cuda=}" ;;
-                    archs=*) echo "  Archs:       ${line#archs=}" ;;
-                    source=*) echo "  Source:      ${line#source=}" ;;
-                esac
-            done < "$ARCH_FILE"
-        fi
-    else
-        echo "  Not installed (run 'fdl setup')"
-    fi
-    VARIANTS=""
-    for d in "$SCRIPT_DIR"/libtorch/precompiled/*/lib "$SCRIPT_DIR"/libtorch/builds/*/lib; do
-        if [ -d "$d" ]; then
-            V=$(echo "$d" | sed "s|$SCRIPT_DIR/libtorch/||" | sed 's|/lib$||')
-            VARIANTS="${VARIANTS:+$VARIANTS, }$V"
-        fi
-    done
-    if [ -n "$VARIANTS" ]; then
-        echo "  Variants:    $VARIANTS"
-    fi
-    echo ""
-}
-
-# ---------------------------------------------------------------------------
-# Setup wizard
-# ---------------------------------------------------------------------------
-
-do_setup() {
-    cd "$SCRIPT_DIR"
-
-    echo ""
-    echo "  floDl Setup"
-    echo "  ==========="
-    echo ""
-    echo "  floDl is a Rust deep learning framework built on libtorch"
-    echo "  (PyTorch's C++ backend). This wizard will help you set up"
-    echo "  your development environment."
-    echo ""
-
-    # ---- Step 1: detect and display system ----
-
-    echo "  Step 1: Detecting your system"
-    echo "  -----------------------------"
-    echo ""
-
-    if [ -f /proc/cpuinfo ]; then
-        CPU=$(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | sed 's/^ *//')
-        THREADS=$(grep -c "^processor" /proc/cpuinfo)
-    fi
-    if [ -f /proc/meminfo ]; then
-        RAM_KB=$(grep "MemTotal" /proc/meminfo | awk '{print $2}')
-        RAM_GB=$((RAM_KB / 1024 / 1024))
-    fi
-
-    echo "  CPU:    ${CPU:-Unknown} (${THREADS:-?} threads, ${RAM_GB:-?}GB RAM)"
-
-    _HAS_DOCKER=false
-    _HAS_CARGO=false
-
-    if has_docker; then
-        _HAS_DOCKER=true
-        DOCKER_VER=$(docker --version 2>/dev/null | sed 's/Docker version //' | cut -d, -f1)
-        echo "  Docker: $DOCKER_VER"
-    else
-        echo "  Docker: not found"
-    fi
-
-    if has_cargo; then
-        _HAS_CARGO=true
-        CARGO_VER=$(cargo --version 2>/dev/null)
-        echo "  Rust:   $CARGO_VER"
-    else
-        echo "  Rust:   not found"
-    fi
-
-    _HAS_GPU=false
-    if has_gpu; then
-        _HAS_GPU=true
-        echo ""
-        echo "  GPUs:"
-        nvidia-smi --query-gpu=index,name,compute_cap,memory.total --format=csv,noheader 2>/dev/null \
-            | while IFS= read -r line; do echo "    $line"; done
-    else
-        echo ""
-        echo "  GPU:    not detected (CPU-only mode)"
-    fi
-
-    if ! $_HAS_DOCKER && ! $_HAS_CARGO; then
-        echo ""
-        echo "  You need at least one of these to continue:"
-        echo ""
-        echo "    Rust:   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        echo "    Docker: https://docs.docker.com/engine/install/"
-        echo ""
-        echo "  Install one or both and run 'fdl setup' again."
-        exit 1
-    fi
-
-    # ---- Step 2: libtorch ----
-
-    echo ""
-    echo "  Step 2: libtorch"
-    echo "  ----------------"
-    echo ""
-    echo "  floDl needs libtorch, PyTorch's C++ library."
-    echo "  This downloads pre-built binaries (~2GB for CUDA, ~200MB for CPU)."
-    echo ""
-
-    # Check existing libtorch
-    _SKIP_DOWNLOAD=false
-    if has_cuda_libtorch; then
-        echo "  Found existing CUDA libtorch: $LIBTORCH_ACTIVE"
-        if ! ask_yn "  Download fresh? [y/N]"; then
-            _SKIP_DOWNLOAD=true
-        fi
-        echo ""
-    elif has_cpu_libtorch; then
-        echo "  Found existing CPU libtorch."
-    fi
-
-    if ! $_SKIP_DOWNLOAD; then
-        # CPU libtorch (always useful)
-        echo "  Downloading CPU libtorch..."
-        ./download-libtorch.sh --project --cpu
-
-        # CUDA libtorch
-        if $_HAS_GPU; then
-            CAPS=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
-            LO_MAJOR=$(echo "$CAPS" | sort -t. -k1,1n | head -1 | cut -d. -f1)
-            HI_MAJOR=$(echo "$CAPS" | sort -t. -k1,1n | tail -1 | cut -d. -f1)
-
-            if [ "$LO_MAJOR" -lt 7 ] && [ "$HI_MAJOR" -ge 10 ]; then
-                echo ""
-                echo "  Your GPUs span sm_${LO_MAJOR}.x to sm_${HI_MAJOR}.x."
-                echo "  No pre-built libtorch covers both architectures."
-                echo ""
-                if [ -d "libtorch/builds" ] && [ -n "$(ls -A libtorch/builds/ 2>/dev/null)" ]; then
-                    echo "  Found existing source build in libtorch/builds/."
-                else
-                    echo "  Options:"
-                    echo "    1) Build libtorch from source (2-6 hours, covers all GPUs)"
-                    echo "    2) Download cu128 (Volta+ only, your older GPU won't work)"
-                    echo "    3) Download cu126 (pre-Volta only, your newer GPU won't work)"
-                    echo "    4) Skip for now"
-                    echo ""
-                    CHOICE=$(ask_choice "  Choice [4]:" 4 4)
-                    case "$CHOICE" in
-                        1)
-                            echo ""
-                            echo "  Starting libtorch source build..."
-                            echo "  This will take 2-6 hours. You can safely Ctrl-C and"
-                            echo "  resume later with: make build-libtorch"
-                            echo ""
-                            make build-libtorch
-                            ;;
-                        2)
-                            echo "  Downloading cu128..."
-                            ./download-libtorch.sh --project --cuda 12.8
-                            ;;
-                        3)
-                            echo "  Downloading cu126..."
-                            ./download-libtorch.sh --project --cuda 12.6
-                            ;;
-                        4)
-                            echo "  Skipping CUDA libtorch. You can download later with:"
-                            echo "    ./download-libtorch.sh --project --cuda 12.8"
-                            echo "    # or build from source:"
-                            echo "    make build-libtorch"
-                            ;;
-                    esac
-                fi
-            elif [ "$LO_MAJOR" -lt 7 ]; then
-                echo ""
-                echo "  Downloading CUDA libtorch (cu126 for your pre-Volta GPU)..."
-                ./download-libtorch.sh --project --cuda 12.6
+    DOWNLOADED=false
+    if [ -n "$LATEST_TAG" ]; then
+        URL="https://github.com/$REPO/releases/download/${LATEST_TAG}/${ARTIFACT}"
+        echo "Downloading flodl-cli ${LATEST_TAG}..."
+        if curl -sfL "$URL" -o "$CLI" 2>/dev/null; then
+            chmod +x "$CLI"
+            # Verify the binary works
+            if "$CLI" version >/dev/null 2>&1; then
+                DOWNLOADED=true
             else
-                echo ""
-                echo "  Downloading CUDA libtorch (cu128 for your Volta+ GPU)..."
-                ./download-libtorch.sh --project --cuda 12.8
+                rm -f "$CLI"
             fi
-        fi
-    fi
-
-    # Re-detect after download
-    detect_libtorch
-
-    # ---- Step 3: build environment ----
-
-    echo ""
-    echo "  Step 3: Build environment"
-    echo "  -------------------------"
-    echo ""
-    echo "  floDl compiles Rust code that links against libtorch."
-    echo "  You can build with Docker (isolated, reproducible) or"
-    echo "  natively (faster iteration, requires Rust + C++ toolchain)."
-    echo ""
-
-    _BUILD_MODE=""
-    if $_HAS_DOCKER && $_HAS_CARGO; then
-        echo "  Both Docker and Rust are available. How would you like to build?"
-        echo ""
-        echo "    1) Docker (recommended)"
-        echo "       Isolated builds inside containers. Nothing installed on your system."
-        echo "       All you need is Docker."
-        echo ""
-        echo "    2) Native"
-        echo "       Build directly on your machine. Faster iteration, but requires"
-        echo "       a C++ compiler and CUDA toolkit (for GPU builds) on the host."
-        echo ""
-        echo "    3) Both"
-        echo "       Set up Docker images and show native build instructions."
-        echo ""
-        CHOICE=$(ask_choice "  Choice [1]:" 3 1)
-        case "$CHOICE" in
-            1) _BUILD_MODE="docker" ;;
-            2) _BUILD_MODE="native" ;;
-            3) _BUILD_MODE="both" ;;
-        esac
-    elif $_HAS_DOCKER; then
-        echo "  Docker is available. Rust is not installed on this machine."
-        echo "  Docker is the easiest way to get started (no Rust install needed)."
-        echo ""
-        if ask_yn "  Set up Docker build environment? [Y/n]"; then
-            _BUILD_MODE="docker"
-        fi
-    elif $_HAS_CARGO; then
-        echo "  Rust is available. Docker is not installed."
-        echo "  You can build natively (requires C++ compiler on the host)."
-        echo ""
-        _BUILD_MODE="native"
-    fi
-
-    # Docker setup
-    if [ "$_BUILD_MODE" = "docker" ] || [ "$_BUILD_MODE" = "both" ]; then
-        echo ""
-        echo "  Building Docker images..."
-        mkdir -p .cargo-cache .cargo-git
-        $COMPOSE build dev
-        if $_HAS_GPU && has_cuda_libtorch; then
-            mkdir -p .cargo-cache-cuda .cargo-git-cuda
-            $COMPOSE build cuda
-        fi
-        echo "  Docker images ready."
-    fi
-
-    # ---- Summary ----
-
-    echo ""
-    echo "  Setup complete!"
-    echo "  ==============="
-    echo ""
-
-    if has_cuda_libtorch; then
-        echo "  libtorch:  $LIBTORCH_ACTIVE (CUDA)"
-    elif has_cpu_libtorch; then
-        echo "  libtorch:  CPU only"
-    fi
-
-    if [ "$_BUILD_MODE" = "docker" ] || [ "$_BUILD_MODE" = "both" ]; then
-        echo ""
-        echo "  Build with Docker:"
-        if $_HAS_GPU && has_cuda_libtorch; then
-            echo "    make cuda-test       # run GPU tests"
-            echo "    make cuda-build      # compile with CUDA"
-            echo "    make cuda-shell      # interactive shell"
         else
-            echo "    make test            # run tests"
-            echo "    make build           # compile"
-            echo "    make shell           # interactive shell"
+            rm -f "$CLI"
         fi
     fi
 
-    if [ "$_BUILD_MODE" = "native" ] || [ "$_BUILD_MODE" = "both" ]; then
-        LT_PATH=$(native_libtorch_path)
-        if [ -n "$LT_PATH" ]; then
-            echo ""
-            echo "  Build natively:"
-            echo "    export LIBTORCH_PATH=$LT_PATH"
-            echo "    export LD_LIBRARY_PATH=\$LIBTORCH_PATH/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-            if $_HAS_GPU && has_cuda_libtorch; then
-                echo "    cargo test --features cuda"
-            else
-                echo "    cargo test"
-            fi
-        fi
-    fi
-
-    echo ""
-    echo "  Other commands:"
-    echo "    fdl diagnose         # verify GPU compatibility"
-    echo "    fdl init my-project  # scaffold a new project"
-    echo ""
-}
-
-# ---------------------------------------------------------------------------
-# Command dispatch
-# ---------------------------------------------------------------------------
-
-CMD="${1:-help}"
-shift 2>/dev/null || true
-
-case "$CMD" in
-    setup)
-        do_setup
-        ;;
-    init)
-        if ensure_cli 2>/dev/null; then
-            LT_PATH=$(native_libtorch_path)
-            if can_run_native; then
-                LD_LIBRARY_PATH="$LT_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-                    exec "$CLI_BIN" init "$@"
-            elif has_docker; then
-                if has_gpu && has_cuda_libtorch; then
-                    cd "$SCRIPT_DIR" && $COMPOSE run --rm cuda ./target/release/flodl-cli init "$@"
-                else
-                    cd "$SCRIPT_DIR" && $COMPOSE run --rm dev ./target/release/flodl-cli init "$@"
-                fi
-            fi
-        elif [ -f "$SCRIPT_DIR/init.sh" ]; then
-            exec sh "$SCRIPT_DIR/init.sh" "$@"
+    # --- Fall back to building from source ---
+    if ! $DOWNLOADED; then
+        if command -v cargo >/dev/null 2>&1; then
+            echo "Building flodl-cli from source..."
+            (cd "$DIR" && cargo build --release -p flodl-cli)
+        elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            echo "Building flodl-cli via Docker..."
+            (cd "$DIR" && docker compose run --rm dev cargo build --release -p flodl-cli)
         else
-            echo "error: Cannot run init. Need Rust, Docker, or init.sh." >&2
+            echo "error: Cannot obtain flodl-cli." >&2
+            echo "" >&2
+            echo "  No pre-compiled binary found for your platform ($OS/$ARCH)," >&2
+            echo "  and neither Rust nor Docker is available to build from source." >&2
+            echo "" >&2
+            echo "  Install one of:" >&2
+            echo "    Rust:   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
+            echo "    Docker: https://docs.docker.com/engine/install/" >&2
             exit 1
         fi
-        ;;
-    diagnose)
-        if ensure_cli 2>/dev/null; then
-            run_cli diagnose "$@"
-        else
-            shell_diagnose
-        fi
-        ;;
-    help|--help|-h)
-        print_usage
-        ;;
-    version|--version|-V)
-        VER=$(grep '^version' "$SCRIPT_DIR/Cargo.toml" 2>/dev/null \
-            | head -1 | sed 's/.*"\(.*\)".*/\1/')
-        echo "fdl ${VER:-unknown}"
-        ;;
-    *)
-        if ensure_cli 2>/dev/null; then
-            run_cli "$CMD" "$@"
-        else
-            echo "Unknown command: $CMD" >&2
-            echo "Run 'fdl setup' first, or 'fdl help' for usage." >&2
-            exit 1
-        fi
-        ;;
-esac
+    fi
+fi
+
+exec "$CLI" "$@"

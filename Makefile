@@ -51,7 +51,7 @@ RUN_BENCH = $(COMPOSE) run --rm bench
         test-all setup build-libtorch \
         bench-image bench bench-cpu bench-compare bench-publish \
         docs-rs site site-stop test-init \
-        cli cuda-cli \
+        cli \
         _require-libtorch _require-libtorch-cuda
 
 # --- libtorch guards ---
@@ -61,7 +61,7 @@ _require-libtorch:
 		echo ""; \
 		echo "[flodl] ERROR: No CPU libtorch found at $(LIBTORCH_CPU_PATH)."; \
 		echo "[flodl] Run:  make setup"; \
-		echo "[flodl]   or: ./download-libtorch.sh --project --cpu"; \
+		echo "[flodl]   or: fdl libtorch download --cpu"; \
 		echo ""; \
 		exit 1; \
 	fi
@@ -71,7 +71,7 @@ _require-libtorch-cuda:
 		echo ""; \
 		echo "[flodl] ERROR: No active CUDA libtorch found."; \
 		echo "[flodl] Run:  make setup        (auto-detect and download)"; \
-		echo "[flodl]   or: ./download-libtorch.sh --project --cuda 12.8"; \
+		echo "[flodl]   or: fdl libtorch download --cuda 12.8"; \
 		echo ""; \
 		exit 1; \
 	fi; \
@@ -185,92 +185,19 @@ test-all: test
 # --- Setup ---
 
 # Detect hardware, download/build libtorch, build Docker image.
-setup:
-	@echo "[flodl] Detecting hardware..."
-	@echo "[flodl] Downloading CPU libtorch (needed for make test)..."
-	@./download-libtorch.sh --project --cpu
-	@if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi >/dev/null 2>&1; then \
-		echo "[flodl] No GPU detected. CPU-only setup."; \
-		$(MAKE) image; \
-		echo ""; \
-		echo "[flodl] Setup complete. Run 'make test' to verify."; \
-		exit 0; \
-	fi; \
-	echo "[flodl] GPUs found:"; \
-	nvidia-smi --query-gpu=index,name,compute_cap,memory.total --format=csv,noheader 2>/dev/null \
-		| while IFS= read -r line; do echo "  $$line"; done; \
-	CAPS=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | tr -d ' '); \
-	LO_MAJOR=$$(echo "$$CAPS" | sort -t. -k1,1n | head -1 | cut -d. -f1); \
-	HI_MAJOR=$$(echo "$$CAPS" | sort -t. -k1,1n | tail -1 | cut -d. -f1); \
-	if [ "$$LO_MAJOR" -lt 7 ] && [ "$$HI_MAJOR" -ge 10 ]; then \
-		echo ""; \
-		echo "[flodl] GPUs span sm_$${LO_MAJOR}.x to sm_$${HI_MAJOR}.x."; \
-		echo "[flodl] No pre-built libtorch covers both."; \
-		if [ -d "libtorch/builds" ] && [ -n "$$(ls -A libtorch/builds/ 2>/dev/null)" ]; then \
-			echo "[flodl] Found existing source build in libtorch/builds/."; \
-		else \
-			echo "[flodl] Building libtorch from source (2-6 hours)."; \
-			echo "[flodl] To skip, press Ctrl-C and run: make build-libtorch"; \
-			$(MAKE) build-libtorch; \
-		fi; \
-	elif [ "$$LO_MAJOR" -lt 7 ]; then \
-		echo "[flodl] All GPUs are pre-Volta. Using libtorch cu126."; \
-		./download-libtorch.sh --project --cuda 12.6; \
-	else \
-		echo "[flodl] All GPUs are Volta+. Using libtorch cu128."; \
-		./download-libtorch.sh --project --cuda 12.8; \
-	fi; \
-	$(MAKE) cuda-image; \
-	echo ""; \
-	echo "[flodl] Setup complete. Run 'make cuda-test' to verify."
+setup: cli
+	./target/release/flodl-cli setup --non-interactive
 
 # Build libtorch from PyTorch source for custom GPU architectures.
 # Auto-detects compute capabilities from installed GPUs.
 # Takes 2-6 hours. Run overnight: make build-libtorch
-build-libtorch:
-	@echo "[flodl] Building libtorch from source..."
-	@if ! command -v nvidia-smi >/dev/null 2>&1; then \
-		echo "[flodl] ERROR: nvidia-smi not found. Cannot detect GPUs."; \
-		exit 1; \
-	fi
-	@ARCHS=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null \
-		| sort -u | tr -d ' ' | tr '\n' ';' | sed 's/;$$//'); \
-	ARCH_DIR=$$(echo "$$ARCHS" | tr ';' '-' | sed 's/\.//g' | sed 's/\([0-9]\+\)/sm\1/g'); \
-	echo "[flodl] GPUs detected:"; \
-	nvidia-smi --query-gpu=index,name,compute_cap --format=csv,noheader 2>/dev/null \
-		| while IFS= read -r line; do echo "  $$line"; done; \
-	echo "[flodl] Building with TORCH_CUDA_ARCH_LIST=\"$$ARCHS\""; \
-	echo "[flodl] Output: libtorch/builds/$$ARCH_DIR/"; \
-	echo ""; \
-	TORCH_CUDA_ARCH_LIST="$$ARCHS" $(COMPOSE) build cuda-source 2>&1; \
-	echo "[flodl] Extracting libtorch from builder image..."; \
-	CONTAINER=$$(docker create flodl-cuda-source); \
-	mkdir -p "libtorch/builds/$$ARCH_DIR"; \
-	docker cp "$$CONTAINER:/usr/local/libtorch/." "libtorch/builds/$$ARCH_DIR/"; \
-	docker rm "$$CONTAINER" >/dev/null; \
-	ARCH_SPACES=$$(echo "$$ARCHS" | tr ';' ' '); \
-	printf 'cuda=12.8\ntorch=2.10.0\narchs=%s\nsource=compiled\n' "$$ARCH_SPACES" \
-		> "libtorch/builds/$$ARCH_DIR/.arch"; \
-	echo "builds/$$ARCH_DIR" > libtorch/.active; \
-	echo ""; \
-	echo "[flodl] libtorch build complete!"; \
-	echo "[flodl] Active: builds/$$ARCH_DIR"; \
-	echo "[flodl] Run 'make cuda-test' to verify."
+build-libtorch: cli
+	./target/release/flodl-cli libtorch build
 
-# --- CLI ---
+# --- CLI (pure Rust, no libtorch needed) ---
 
-cli: image _require-libtorch
-	$(RUN) cargo build --release -p flodl-cli
-
-cuda-cli: cuda-image _require-libtorch-cuda
-	$(RUN_GPU) cargo build --release -p flodl-cli --features cuda
-
-# Run the compiled CLI (inside Docker with libtorch available)
-run-cli: _require-libtorch
-	$(RUN) ./target/release/flodl-cli $(ARGS)
-
-cuda-run-cli: _require-libtorch-cuda
-	$(RUN_GPU) ./target/release/flodl-cli $(ARGS)
+cli:
+	cargo build --release -p flodl-cli
 
 # --- Benchmarks ---
 

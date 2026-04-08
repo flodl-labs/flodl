@@ -1046,7 +1046,7 @@ where
         self
     }
 
-    /// Save a checkpoint every N averaging events (multi-GPU) or N epochs (single-GPU).
+    /// Save a checkpoint every N global epochs.
     pub fn checkpoint_every(mut self, n: usize) -> Self {
         self.config = self.config.with_checkpoint_every(n);
         self

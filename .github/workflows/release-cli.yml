@@ -1,0 +1,109 @@
+name: Release CLI
+
+# Build and upload pre-compiled flodl-cli binaries on every tagged release.
+# The `fdl` bootstrap script downloads these binaries so end users never
+# need Rust installed.
+#
+# Trigger: push a tag like `0.3.0` (no `v` prefix, matching existing convention).
+
+on:
+  push:
+    tags: ['[0-9]*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: flodl-cli-linux-x86_64
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: flodl-cli-linux-aarch64
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: flodl-cli-darwin-arm64
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: flodl-cli-windows-x86_64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cross-compilation toolchain for Linux aarch64
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        env:
+          # Linker for aarch64 cross-compilation
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release -p flodl-cli --target ${{ matrix.target }}
+
+      # Rename binary to artifact name
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/flodl-cli ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          copy target\${{ matrix.target }}\release\flodl-cli.exe ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+
+          # Collect all binaries into a flat list
+          FILES=""
+          for dir in artifacts/*/; do
+            for file in "$dir"*; do
+              [ -f "$file" ] && FILES="$FILES $file"
+            done
+          done
+
+          # Create release with binaries attached
+          gh release create "$TAG" \
+            --title "floDl $TAG" \
+            --generate-notes \
+            $FILES

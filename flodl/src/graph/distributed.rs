@@ -115,6 +115,7 @@ impl Graph {
             el_che: None,
             last_el_che_counts: Vec::new(),
             last_el_che_sync: None,
+            max_grad_norm: None,
         };
 
         // Broadcast params from rank 0 to all replicas
@@ -204,6 +205,25 @@ impl Graph {
                     let compute_ms = state.last_el_che_sync
                         .map(|t| t.elapsed().as_secs_f64() * 1000.0)
                         .unwrap_or(0.0);
+
+                    // Per-rank gradient clipping (before normalize-by-count).
+                    // Bounds accumulated gradients on all ranks identically,
+                    // including replicas the caller cannot reach.
+                    if let Some(max_norm) = state.max_grad_norm {
+                        for rank in 0..state.devices.len() {
+                            if counts[rank] == 0 {
+                                continue;
+                            }
+                            let params: Vec<Tensor> = state.param_groups
+                                .iter()
+                                .filter(|group| group[rank].grad().is_some())
+                                .map(|group| group[rank].data())
+                                .collect();
+                            if !params.is_empty() {
+                                Tensor::clip_grad_norm_fused(&params, max_norm)?;
+                            }
+                        }
+                    }
 
                     // Normalize accumulated gradients: each rank accumulated
                     // counts[rank] backward passes, scale by 1/count so the
