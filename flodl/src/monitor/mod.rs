@@ -295,7 +295,7 @@ impl Monitor {
     ///
     /// This is the standalone equivalent of what [`watch()`](Self::watch) does
     /// via `capture_graph_identity`. Use when you have the identity strings
-    /// but not a `&Graph` reference (e.g. from [`DdpHandle::setup_monitor()`]).
+    /// but not a `&Graph` reference (e.g. from `DdpHandle::setup_monitor()`).
     pub fn set_identity(&mut self, label: Option<&str>, hash: Option<&str>) {
         self.graph_label = label.map(|s| s.to_string());
         self.graph_hash = hash.map(|s| s.to_string());

@@ -112,7 +112,7 @@ pub trait DataSet: Send + Sync {
 /// bulk reads, or pre-stacked tensors).
 ///
 /// [`DataSet`] is automatically promoted to `BatchDataSet` via
-/// [`DataSetAdapter`] (call `get()` N times and stack position-wise).
+/// `DataSetAdapter` (call `get()` N times and stack position-wise).
 ///
 /// Requires `Send + Sync` for background prefetch (see [`DataSet`] docs).
 ///

@@ -253,16 +253,12 @@ synchronization, Cadence will show it in the first few epochs.
 This tells you whether strict synchronization helps your specific model.
 For most workloads, Async and Cadence match or beat Sync.
 
-### Step 3: validate cheaper backend
+### CPU backend: known bug
 
-```rust
-    .policy(ApplyPolicy::Cadence)
-    .backend(AverageBackend::Cpu)           // <-- swap transport
-```
-
-If the loss curve matches NCCL, the CPU backend is validated. Use it when
-NVLink is unavailable, for debugging, or on machines where NCCL is
-problematic.
+The CPU averaging backend has a known convergence bug. All three CPU
+policies produce near-random accuracy. Do not use `AverageBackend::Cpu`
+for training. The bug is under active investigation. See the
+[DDP reference](/guide/ddp) for details.
 
 ### What to compare
 
@@ -277,16 +273,17 @@ problematic.
 | Async | Nccl | **Best overall (recommended)** | Best | Best with clipping |
 | Cadence | Nccl | Strong second, predictable sync | Good | Good |
 | Sync | Nccl | Strict sync baseline | Baseline | Good |
-| Async | Cpu | Validate without NCCL | Good | Good with clipping |
-| Cadence | Cpu | Heterogeneous + no NVLink | Moderate | Good |
-| Sync | Cpu | Debugging, validation | Lower | Good |
+| Async | Cpu | **Known bug** -- do not use | -- | Broken |
+| Cadence | Cpu | **Known bug** -- do not use | -- | Broken |
+| Sync | Cpu | **Known bug** -- do not use | -- | Broken |
 
 Start with **Async + Nccl** (El Che). It's the best overall config in
 practice: fast GPUs overshoot between averaging, creating parameter
 diversity that benefits convergence. A/B test against **Cadence + Nccl**
 (strong second, more predictable sync) or **Sync + Nccl** (strict
-baseline). Validate **Cpu** backend if you want to avoid NCCL
-dependencies or simplify deployment.
+baseline). The **CPU backend** has a known convergence bug and should not
+be used for training. See the [DDP reference](/guide/ddp) for details.
+The fix is under active investigation.
 
 ## Safety guards
 

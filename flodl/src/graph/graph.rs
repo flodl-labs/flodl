@@ -36,7 +36,7 @@ pub(crate) struct StateEntry {
 
 /// An executable computation graph. Implements `Module` for composability.
 ///
-/// Built via [`FlowBuilder`]. Supports parallel execution of independent nodes,
+/// Built via `FlowBuilder`. Supports parallel execution of independent nodes,
 /// observation of tagged outputs, profiling, and DOT/SVG visualization.
 ///
 /// ```ignore
@@ -118,7 +118,7 @@ pub struct Graph {
     pub(crate) loss_fn: RefCell<Option<Box<dyn Fn(&LossContext) -> Result<Variable>>>>,
 }
 
-/// Binding between a [`DataLoader`] and a [`Graph`] for integrated training.
+/// Binding between a `DataLoader` and a [`Graph`] for integrated training.
 ///
 /// Created by [`Graph::set_data_loader`]. Maps batch tensor names to
 /// graph inputs and stores the loader reference.

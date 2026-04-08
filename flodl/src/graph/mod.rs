@@ -1,7 +1,7 @@
 //! Computation graph: fluent builder, parallel execution, observation, profiling,
 //! visualization, and hierarchical composition.
 //!
-//! Build graphs with [`FlowBuilder`], execute via the [`Module`] trait.
+//! Build graphs with `FlowBuilder`, execute via the `Module` trait.
 //! Label subgraphs for tree features: selective freeze/thaw, subgraph
 //! checkpoints, cross-boundary observation, and per-subgraph optimizer groups.
 //!

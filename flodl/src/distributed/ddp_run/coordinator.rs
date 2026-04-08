@@ -521,7 +521,7 @@ impl Coordinator {
 
     /// Send StartEpoch to all ranks (used for epoch 0 and Sync/Cadence dispatch).
     ///
-    /// In progressive mode, delegates to [`start_epoch_progressive`].
+    /// In progressive mode, delegates to `start_epoch_progressive`.
     pub fn send_all_plans(&mut self, epoch: usize) {
         if self.progressive {
             self.start_epoch_progressive(epoch);
@@ -747,8 +747,8 @@ impl Coordinator {
         }
     }
 
-    /// Process a single timing message. Shared by [`drain_timing`] and
-    /// [`drain_timing_blocking`].
+    /// Process a single timing message. Shared by [`Self::drain_timing`] and
+    /// [`Self::drain_timing_blocking`].
     fn process_timing_msg(&mut self, msg: TimingMsg) {
         match msg {
             TimingMsg::Batch { rank, batch_ms, .. } => {
@@ -932,9 +932,9 @@ impl Coordinator {
     /// (ElChe report, version bump, counter reset) synchronously.
     ///
     /// For CPU: sends `RequestParams`, snapshots the current counters, and
-    /// enters the [`CpuAvgState::Collecting`] state. The actual collection
-    /// and averaging happen over subsequent [`poll_cpu_averaging`] ticks,
-    /// keeping [`check_throttle`] active throughout.
+    /// enters the `CpuAvgState::Collecting` state. The actual collection
+    /// and averaging happen over subsequent [`Self::poll_cpu_averaging`] ticks,
+    /// keeping [`Self::check_throttle`] active throughout.
     pub fn trigger_averaging(&mut self) -> Result<()> {
         match self.backend {
             AverageBackend::Nccl => {
@@ -1511,7 +1511,7 @@ fn ratio_to_sizes(ratios: &[f64], total: usize) -> Vec<usize> {
     sizes
 }
 
-/// Aggregate per-rank [`MetricsMsg`] into a single [`EpochMetrics`].
+/// Aggregate per-rank `MetricsMsg` into a single `EpochMetrics`.
 ///
 /// Loss and scalars are averaged weighted by batch count (proportional
 /// to each rank's contribution). Epoch time is the max across ranks.

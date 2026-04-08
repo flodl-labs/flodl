@@ -655,8 +655,8 @@ impl Ddp {
     ///
     /// The framework owns the training loop, data pipeline, and epoch management.
     /// Each GPU gets its own model replica and optimizer. A coordinator triggers
-    /// periodic parameter averaging based on the configured [`ApplyPolicy`] and
-    /// [`AverageBackend`].
+    /// periodic parameter averaging based on the configured `ApplyPolicy` and
+    /// `AverageBackend`.
     ///
     /// Returns a [`DdpBuilder`] for fluent configuration. Call `.run()` to
     /// spawn training threads, then `.join()` on the returned [`DdpHandle`]

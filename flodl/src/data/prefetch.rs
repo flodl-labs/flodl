@@ -106,7 +106,7 @@ impl PrefetchWorker {
     }
 
     /// Open a distributed epoch: create one channel that persists across
-    /// all batches. Follow with [`load_batch()`] calls per batch.
+    /// all batches. Follow with [`Self::load_batch()`] calls per batch.
     pub fn start_distributed_epoch(&self) -> mpsc::Receiver<Result<PrefetchedBatch>> {
         let (batch_tx, batch_rx) =
             mpsc::sync_channel::<Result<PrefetchedBatch>>(self.prefetch_depth);
@@ -117,7 +117,7 @@ impl PrefetchWorker {
     }
 
     /// Send a single batch of indices for loading (distributed mode).
-    /// The result arrives on the receiver from [`start_distributed_epoch()`].
+    /// The result arrives on the receiver from [`Self::start_distributed_epoch()`].
     pub fn load_batch(&self, indices: Vec<usize>) {
         let _ = self.cmd_tx.send(WorkerCmd::LoadBatch { indices });
     }

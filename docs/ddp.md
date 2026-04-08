@@ -16,7 +16,7 @@ Graph-based models where you want transparent scaling.
 
 **DDP Builder** -- works with any `Module`. Thread-per-GPU with Local SGD.
 3 policies x 2 backends = 6 configs, swappable in one line for A/B testing.
-Run a few epochs with each, compare loss curves, commit to the winner.
+NCCL backend recommended; CPU backend has a known bug (see Strategy Guide).
 Best for non-Graph modules or when you need maximum configurability.
 
 ### Which one to use
@@ -588,9 +588,20 @@ in that a different config would have converged faster (or at all).
 | Async | Nccl | **Best overall (recommended)** | Best | Best with clipping | Low |
 | Cadence | Nccl | Strong second, predictable sync | Good | Good | Low |
 | Sync | Nccl | Strict sync baseline | Baseline | Good | Lowest |
-| Async | Cpu | Validate without NCCL | Good | Good with clipping | Low |
-| Cadence | Cpu | Heterogeneous + no NVLink | Moderate | Good | Low |
-| Sync | Cpu | Debugging, validation | Lower | Good | Lowest |
+| Async | Cpu | **Known bug** -- do not use | -- | Broken | -- |
+| Cadence | Cpu | **Known bug** -- do not use | -- | Broken | -- |
+| Sync | Cpu | **Known bug** -- do not use | -- | Broken | -- |
+
+> **CPU backend: known convergence bug.** The CPU averaging path has a known
+> bug that prevents convergence. All three CPU policies produce near-random
+> accuracy (~8-23% vs 87-95% for NCCL on the same model). The root cause is
+> under active investigation: the snapshot/average/load round-trip degrades
+> parameters on each cycle, with more frequent averaging causing more damage
+> (CPU sync at ~8% is worse than CPU async at ~23%). One race condition has
+> been fixed (`snapshot_params` reading mid-copy data), but the deeper issue
+> remains. **Use NCCL for all production and research training.** The CPU
+> backend is included for future use once the bug is resolved. A comprehensive
+> benchmark suite across all configurations is in progress.
 
 ### Recommended workflow
 
@@ -598,8 +609,8 @@ in that a different config would have converged faster (or at all).
 1. Start with Async + Nccl (El Che -- best overall in practice)
 2. A/B test against Cadence + Nccl for 3-5 epochs (strong second)
 3. A/B test against Sync + Nccl if you want a strict-sync baseline
-4. Optionally: swap Nccl -> Cpu on the winning policy (validate cheaper backend)
-5. Full training run with the winning combo
+4. Full training run with the winning NCCL combo
+5. CPU backend has a known convergence bug -- do not use until resolved
 ```
 
 The code change between runs is one line:
@@ -614,8 +625,8 @@ The code change between runs is one line:
 // Run C -- strict sync baseline
 .policy(ApplyPolicy::Sync).backend(AverageBackend::Nccl)
 
-// Run D -- validate cheaper backend on the winner
-.policy(ApplyPolicy::Async).backend(AverageBackend::Cpu)
+// Run D -- CPU backend: KNOWN BUG, do not use until resolved
+// .policy(ApplyPolicy::Async).backend(AverageBackend::Cpu)
 ```
 
 ### Decision tree
@@ -631,9 +642,9 @@ Convergence not stable enough?
 Want a strict-sync baseline?
   --> A/B test Sync + Nccl for 3-5 epochs, compare loss curves.
 
-Want to validate without NCCL?
-  --> Swap AverageBackend::Cpu on the winning policy. Compare loss curves.
-      If they match, the cheaper backend works for your model.
+No NCCL available?
+  --> CPU backend has a known convergence bug. Do not use for training.
+      The bug is under active investigation. See the CPU backend note above.
 ```
 
 ---
@@ -654,8 +665,9 @@ K (how many batches between averaging). The backend determines the
 transport (GPU-to-GPU DMA vs CPU round-trip). The mathematical operation
 is the same: weighted average of parameters.
 
-All 6 combinations are valid. Same model, same data, same seed. Change
-one knob, compare loss curves.
+The three NCCL combinations are validated and recommended. Same model,
+same data, same seed. Change one knob, compare loss curves. (CPU backend
+has a known bug; do not use for training.)
 
 ### Quick A/B test
 
@@ -691,17 +703,20 @@ let state_c = c.join()?;
 - **Wall time per epoch**: Cadence should be faster than Sync on heterogeneous hardware
 - **Loss per wall-second**: the real metric. A slightly higher loss in half the time often wins.
 
-### When CPU can match NCCL
+### NCCL vs CPU backend
 
-Both backends compute the same weighted average of the same parameters.
-The difference is timing: NCCL blocks all GPUs at the barrier, so all
-replicas see the averaged parameters at exactly the same training step.
-CPU averaging is non-blocking, so replicas may process 1-2 extra batches
-with stale parameters before the update arrives.
+NCCL uses hardware-level GPU-to-GPU AllReduce with implicit synchronization.
+It is validated across all three policies and is the only backend you should
+use for training.
 
-For most models, this difference is negligible. For models with sharp loss
-landscapes or very small learning rates, the synchronization point matters.
-The A/B test answers this for your specific model in minutes.
+The CPU backend has a **known convergence bug**. The snapshot/average/load
+round-trip (GPU to CPU copy, CPU-side averaging, CPU to GPU copy) degrades
+parameters on each cycle. More frequent averaging causes more damage: CPU
+sync (~8% accuracy) is worse than CPU async (~23%), while NCCL achieves
+87-95% on the same model and data. One race condition in `snapshot_params`
+has been fixed, but the root cause remains under investigation. The CPU
+backend is included in the codebase for completeness and will be fixed in a
+future release.
 
 ---
 

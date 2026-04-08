@@ -18,7 +18,7 @@ impl Graph {
     /// replicas via the factory closure, and broadcasts parameters from rank 0.
     ///
     /// If only one usable GPU is found, this is a no-op (single-GPU mode).
-    /// The factory receives a [`Device`] and must return a model with the same
+    /// The factory receives a `Device` and must return a model with the same
     /// architecture as `self` (same parameter count and shapes).
     ///
     /// After this call, [`forward`](Module::forward) automatically scatters
@@ -26,7 +26,7 @@ impl Graph {
     /// AllReduce + optimizer step + zero_grad.
     ///
     /// For a one-liner that also sets the optimizer and training mode, see
-    /// [`Ddp::setup()`](crate::nn::Ddp::setup).
+    /// [`Ddp::setup()`](crate::distributed::Ddp::setup).
     ///
     /// ```ignore
     /// model.distribute(|dev| build_model(dev))?;
@@ -373,7 +373,7 @@ impl Graph {
 
     /// Configure El Che cadence for distributed training.
     ///
-    /// Called by [`Ddp::setup_with()`] after [`distribute`](Graph::distribute).
+    /// Called by `Ddp::setup_with()` after [`distribute`](Graph::distribute).
     /// No-op if not in distributed mode.
     pub(crate) fn configure_el_che(&self, config: &crate::distributed::ddp::DdpConfig) {
         let mut dist = self.distributed.borrow_mut();
@@ -880,7 +880,7 @@ impl Graph {
 
     /// El Che distributed forward: multiple complete batches per device.
     ///
-    /// Each device processes its batch_counts[rank] batches independently.
+    /// Each device processes its `batch_counts[rank]` batches independently.
     /// Tagged outputs are gathered across all batches and all devices.
     ///
     /// **Per-batch backward** (when `set_loss_fn` is registered): each batch

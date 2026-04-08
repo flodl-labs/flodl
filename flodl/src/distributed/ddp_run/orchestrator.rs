@@ -28,7 +28,7 @@ use super::coordinator::Coordinator;
 /// triggers periodic parameter averaging based on [`ApplyPolicy`] and
 /// [`AverageBackend`]. Workers self-manage their epochs.
 ///
-/// Use [`Ddp::builder()`](crate::nn::Ddp::builder) for the full configuration API.
+/// Use [`Ddp::builder()`](crate::distributed::Ddp::builder) for the full configuration API.
 ///
 /// # Quick start
 ///
@@ -90,7 +90,7 @@ pub struct DdpHandle {
 impl DdpHandle {
     /// Detect GPUs, spawn worker threads and coordinator thread with default config.
     ///
-    /// Prefer [`Ddp::builder()`](crate::nn::Ddp::builder) as the primary entry point.
+    /// Prefer [`Ddp::builder()`](crate::distributed::Ddp::builder) as the primary entry point.
     #[allow(clippy::too_many_arguments)]
     #[deprecated(since = "0.3.0", note = "Use Ddp::builder() instead")]
     pub fn auto<F, M, G, O, T>(
@@ -120,7 +120,7 @@ impl DdpHandle {
 
     /// Detect GPUs, spawn worker threads and coordinator thread.
     ///
-    /// Prefer [`Ddp::builder()`](crate::nn::Ddp::builder) as the primary entry point.
+    /// Prefer [`Ddp::builder()`](crate::distributed::Ddp::builder) as the primary entry point.
     #[allow(clippy::too_many_arguments)]
     #[deprecated(since = "0.3.0", note = "Use Ddp::builder() instead")]
     pub fn auto_with<F, M, G, O, T>(
@@ -938,7 +938,7 @@ impl DdpHandle {
 
 /// Builder for configuring and launching framework-managed DDP training.
 ///
-/// Created via [`Ddp::builder()`](crate::nn::Ddp::builder). Required fields must be set before
+/// Created via [`Ddp::builder()`](crate::distributed::Ddp::builder). Required fields must be set before
 /// calling [`run`](Self::run); missing fields produce a clear panic message.
 ///
 /// # Example
@@ -1070,7 +1070,7 @@ where
     /// Set maximum gradient norm for per-worker clipping.
     ///
     /// Each worker clips accumulated gradients (L2 norm) after backward
-    /// and before the optimizer step. Same knob as [`DdpConfig::max_grad_norm`]
+    /// and before the optimizer step. Same knob as `DdpConfig::max_grad_norm`
     /// for the setup/El Che path.
     pub fn max_grad_norm(mut self, max_norm: f64) -> Self {
         self.config = self.config.with_max_grad_norm(max_norm);
@@ -1142,7 +1142,7 @@ where
 impl DdpHandle {
     /// Create a builder for configuring framework-managed DDP training.
     ///
-    /// Prefer [`Ddp::builder()`](crate::nn::Ddp::builder) as the primary entry point.
+    /// Prefer [`Ddp::builder()`](crate::distributed::Ddp::builder) as the primary entry point.
     /// This method exists for backward compatibility.
     #[deprecated(since = "0.3.0", note = "Use Ddp::builder() instead")]
     pub fn builder<F, M, G, O, T>(
@@ -1160,7 +1160,7 @@ impl DdpHandle {
         Self::new_builder(model_factory, optim_factory, train_fn)
     }
 
-    /// Internal builder constructor, called by [`Ddp::builder()`](crate::nn::Ddp::builder).
+    /// Internal builder constructor, called by [`Ddp::builder()`](crate::distributed::Ddp::builder).
     pub(crate) fn new_builder<F, M, G, O, T>(
         model_factory: F,
         optim_factory: G,

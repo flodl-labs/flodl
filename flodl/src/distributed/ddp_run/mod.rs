@@ -556,7 +556,7 @@ pub enum ControlMsg {
     /// plan's offset and size.
     StartEpoch(EpochPlan),
     /// Worker is too far ahead: block until the next real command arrives.
-    /// Sent when the worker's batch lead exceeds [`ElChe::max_batch_diff`].
+    /// Sent when the worker's batch lead exceeds `ElChe::max_batch_diff`.
     Throttle,
     /// Save a checkpoint from rank 0 after averaging.
     Checkpoint {

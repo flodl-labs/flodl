@@ -320,13 +320,12 @@ impl<M: Module> GpuWorker<M> {
     /// never needs CUDA access (avoiding slow CUDA context init on the
     /// compute thread, which can deadlock with `drain_avg_state`).
     ///
-    /// Waits for any pending comm_stream copy (from a recent `load_averaged`)
-    /// before reading GPU memory. Without this, Update + RequestParams
-    /// processed in the same `handle_control()` call would read mid-copy data.
+    /// Synchronizes comm_stream before reading, so Update + RequestParams
+    /// processed in the same `handle_control()` call cannot read mid-copy data.
     pub fn snapshot_params(&self) -> ParamSnapshot {
-        // Ensure any pending load_averaged() copy on comm_stream has completed.
-        if let (Some(ev), Some(stream)) = (&self.copy_done, &self.compute_stream) {
-            let _ = stream.wait_event(ev);
+        // Wait for any pending load_averaged() non-blocking copy to finish.
+        if let Some(stream) = &self.comm_stream {
+            let _ = stream.synchronize();
         }
         let params = self.param_vars.iter()
             .map(|v| {
@@ -572,7 +571,7 @@ impl<M: Module> GpuWorker<M> {
 
     /// Send the final parameter snapshot on the dedicated channel before exiting.
     ///
-    /// This uses [`final_param_tx`] (not [`param_tx`]) to avoid racing with
+    /// This uses `final_param_tx` (not `param_tx`) to avoid racing with
     /// CPU averaging snapshot collection on the same channel.
     pub fn send_final_snapshot(&self) {
         let _ = self.final_param_tx.send(self.snapshot_params());
@@ -580,7 +579,7 @@ impl<M: Module> GpuWorker<M> {
 
     /// Abort the NCCL communicator, unblocking any stuck collective.
     ///
-    /// Must be called before [`send_final_snapshot`] when the training loop
+    /// Must be called before [`Self::send_final_snapshot`] when the training loop
     /// exits due to shutdown. A pending AllReduce on `comm_stream` (from a
     /// SyncNow whose peer died) would block `to_device(CPU)` in snapshot_params
     /// because the CUDA default stream synchronizes with all other streams.

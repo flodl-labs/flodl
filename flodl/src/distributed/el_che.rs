@@ -162,7 +162,7 @@ impl ElChe {
         self.batch_counts[rank]
     }
 
-    /// Per-device batch counts (for [`Ddp::weighted_all_reduce_gradients`]).
+    /// Per-device batch counts (for `Ddp::weighted_all_reduce_gradients`).
     pub fn batch_counts(&self) -> &[usize] {
         &self.batch_counts
     }
