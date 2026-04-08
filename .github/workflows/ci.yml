@@ -20,6 +20,9 @@ on:
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/pull_request_template.md'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -32,7 +35,7 @@ jobs:
     name: CPU (test + clippy)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
@@ -46,7 +49,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry + build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -57,7 +60,7 @@ jobs:
 
       - name: Cache libtorch download
         id: cache-libtorch
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/libtorch
           key: libtorch-cpu-${{ env.LIBTORCH_VERSION }}
@@ -94,7 +97,7 @@ jobs:
     name: CUDA (build + clippy)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Free disk space
         run: |
@@ -107,7 +110,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Cache Docker layers
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
           key: buildx-cuda-${{ hashFiles('Dockerfile.cuda') }}
@@ -131,7 +134,7 @@ jobs:
 
       - name: Cache libtorch download (CUDA)
         id: cache-libtorch-cuda
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/libtorch-ci
           key: libtorch-cu128-${{ env.LIBTORCH_VERSION }}

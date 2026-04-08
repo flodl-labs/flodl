@@ -225,7 +225,7 @@ The [migration guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migr
 side-by-side code for every op, every module, every pattern. Same names,
 same semantics.
 
-And the [benchmarks keep improving](/2026/03/31/benchmark-update): up to 31%
+And the [benchmarks keep improving](/blog/benchmark-update): up to 31%
 faster, winning 8 of 10 architectures with zero regressions. Same CUDA
 kernels, less overhead between them.
 

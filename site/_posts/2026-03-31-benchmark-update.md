@@ -5,7 +5,7 @@ date: 2026-03-31
 description: "flodl v0.2.2 vs PyTorch 2.10.0 on 10 models. Up to 31% faster, wins 8 of 10, zero regressions. New: fused RNN kernels, scaled MAD variance, and a 30% smaller Docker image."
 ---
 
-The [first benchmark](/2026/03/25/benchmarks) measured seven models on
+The [first benchmark](/blog/benchmarks) measured seven models on
 flodl v0.1.3. That was two weeks and a lot of optimization ago. This update
 adds three models (transformer, lstm_seq, conv_autoenc), lands fused RNN
 kernels with C++-side parameter caching, and switches the variance metric
@@ -68,7 +68,7 @@ appears precisely where framework overhead has room to matter.
 
 ## Honest variance: why we switched to MAD
 
-The [v0.1.3 benchmarks](/2026/03/25/benchmarks) reported σ as standard
+The [v0.1.3 benchmarks](/blog/benchmarks) reported σ as standard
 deviation. That was correct but misleading. Here's what I found when I dug
 into the raw per-round data.
 
