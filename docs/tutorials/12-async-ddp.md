@@ -205,68 +205,88 @@ during averaging.
 | **Blocking** | All GPUs sync at barrier | No GPU ever blocks |
 | **Fault tolerance** | Abort handles unblock stuck ops | Timeout (5s) detects dead workers |
 
-## A/B testing backends
+## A/B testing: find the best config for your model
 
-Because `ApplyPolicy` and `AverageBackend` are orthogonal, you can run
-the exact same training configuration twice, changing only the backend.
-If the loss curves match, you have validated the cheaper backend for your
-workload.
+Every model responds differently to averaging frequency and transport
+timing. You have 6 valid configurations (3 policies x 2 backends), and
+the best one depends on your model, your data, and your hardware.
 
-### Protocol
+The recommended approach: **run 3-5 epochs with different configs, compare
+loss curves, then commit to the winner for your full training run.** This
+takes minutes, not hours.
 
-1. Fix your seed, dataset, model, and policy. Train with `Nccl`:
+### Step 1: start with El Che (Async + NCCL)
 
-```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
-    .dataset(dataset.clone())
-    .batch_size(32)
-    .num_epochs(10)
-    .policy(ApplyPolicy::Cadence)
-    .backend(AverageBackend::Nccl)      // <-- first run
-    .run()?;
-let nccl_state = ddp.join()?;
-```
-
-2. Same everything, swap the backend:
+Async + NCCL is the best overall config in practice. Fast GPUs overshoot
+between averaging events, creating parameter diversity that benefits
+convergence. The divergence monitor auto-tunes the averaging interval.
 
 ```rust
 let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset.clone())
     .batch_size(32)
-    .num_epochs(10)
-    .policy(ApplyPolicy::Cadence)
-    .backend(AverageBackend::Cpu)       // <-- second run
+    .num_epochs(5)                          // just enough to see the trend
+    .max_grad_norm(5.0)
+    .policy(ApplyPolicy::Async)
+    .backend(AverageBackend::Nccl)
     .run()?;
-let cpu_state = ddp.join()?;
+let async_state = ddp.join()?;
 ```
 
-3. Compare final losses and wall times.
+### Step 2: test Cadence (strong second)
 
-### Interpretation
+Same code, one line changed:
 
-- **Curves match**: CPU backend is validated. Use it when NVLink is
-  unavailable, for debugging, or on machines where NCCL is problematic.
-- **Curves diverge**: NCCL's tighter synchronization matters for your
-  model. Stick with NCCL, or increase averaging frequency.
+```rust
+    .policy(ApplyPolicy::Cadence)           // <-- the only change
+```
 
-This is not just a debugging tool. In production you might discover that
-the CPU path works fine for your model, freeing NVLink bandwidth for
-other workloads or simplifying deployment on heterogeneous clusters.
+Cadence provides more predictable sync points. If your model needs tighter
+synchronization, Cadence will show it in the first few epochs.
 
-## Strategy guide: the full matrix
+### Step 3 (optional): strict Sync baseline
+
+```rust
+    .policy(ApplyPolicy::Sync)              // <-- strict sync
+```
+
+This tells you whether strict synchronization helps your specific model.
+For most workloads, Async and Cadence match or beat Sync.
+
+### Step 3: validate cheaper backend
+
+```rust
+    .policy(ApplyPolicy::Cadence)
+    .backend(AverageBackend::Cpu)           // <-- swap transport
+```
+
+If the loss curve matches NCCL, the CPU backend is validated. Use it when
+NVLink is unavailable, for debugging, or on machines where NCCL is
+problematic.
+
+### What to compare
+
+- **Loss at epoch N**: lower is better
+- **Wall time per epoch**: Cadence should be faster than Sync on mixed hardware
+- **Loss per wall-second**: the real metric. Slightly higher loss in half the time often wins.
+
+### The full matrix
 
 | Policy | Backend | Use case | Throughput | Convergence |
 |--------|---------|----------|------------|-------------|
-| Sync | Nccl | Homogeneous GPUs, small models | Baseline | Best |
-| Sync | Cpu | Debugging, validation | Lower | Best |
-| Cadence | Nccl | **Heterogeneous GPUs (recommended)** | Good | Good |
+| Async | Nccl | **Best overall (recommended)** | Best | Best with clipping |
+| Cadence | Nccl | Strong second, predictable sync | Good | Good |
+| Sync | Nccl | Strict sync baseline | Baseline | Good |
+| Async | Cpu | Validate without NCCL | Good | Good with clipping |
 | Cadence | Cpu | Heterogeneous + no NVLink | Moderate | Good |
-| Async | Nccl | Large models, maximum throughput | Best | Monitor needed |
-| Async | Cpu | Research, maximum independence | Good | Monitor needed |
+| Sync | Cpu | Debugging, validation | Lower | Good |
 
-Start with **Cadence + Nccl** for heterogeneous setups, **Sync + Nccl**
-for homogeneous. Use `Cpu` backend when debugging or when NCCL is
-unavailable.
+Start with **Async + Nccl** (El Che). It's the best overall config in
+practice: fast GPUs overshoot between averaging, creating parameter
+diversity that benefits convergence. A/B test against **Cadence + Nccl**
+(strong second, more predictable sync) or **Sync + Nccl** (strict
+baseline). Validate **Cpu** backend if you want to avoid NCCL
+dependencies or simplify deployment.
 
 ## Safety guards
 

@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::context::Context;
 use crate::util::http;
 use crate::util::archive;
 use crate::util::system;
@@ -65,7 +66,6 @@ pub enum Variant {
 
 pub struct DownloadOpts {
     pub variant: Variant,
-    pub project_mode: bool,
     pub custom_path: Option<PathBuf>,
     pub activate: bool,
     pub dry_run: bool,
@@ -75,7 +75,6 @@ impl Default for DownloadOpts {
     fn default() -> Self {
         Self {
             variant: Variant::Auto,
-            project_mode: true,
             custom_path: None,
             activate: true,
             dry_run: false,
@@ -191,16 +190,20 @@ fn resolve_variant(variant: &Variant) -> &'static VariantSpec {
 // ---------------------------------------------------------------------------
 
 pub fn run(opts: DownloadOpts) -> Result<(), String> {
+    let ctx = Context::resolve();
+    run_with_context(opts, &ctx)
+}
+
+/// Run with an explicit context (used by `setup` which has its own context).
+pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<(), String> {
     let spec = resolve_variant(&opts.variant);
     let url = download_url(spec)?;
 
     // Determine install path
     let install_path = if let Some(ref p) = opts.custom_path {
         p.clone()
-    } else if opts.project_mode {
-        PathBuf::from(format!("libtorch/precompiled/{}", spec.dir_name))
     } else {
-        dirs_fallback().join("libtorch")
+        ctx.root.join(format!("libtorch/precompiled/{}", spec.dir_name))
     };
 
     let variant_id = format!("precompiled/{}", spec.dir_name);
@@ -290,18 +293,16 @@ pub fn run(opts: DownloadOpts) -> Result<(), String> {
         ));
     }
 
-    // Write .arch metadata
-    if opts.project_mode {
-        let arch_content = format!(
-            "cuda={}\ntorch={}\narchs={}\nsource=precompiled\nvariant={}\n",
-            spec.arch_cuda, LIBTORCH_VERSION, spec.arch_archs, spec.arch_variant
-        );
-        fs::write(install_path.join(".arch"), arch_content)
-            .map_err(|e| format!("cannot write .arch: {}", e))?;
+    // Write .arch metadata (always, both project and global)
+    let arch_content = format!(
+        "cuda={}\ntorch={}\narchs={}\nsource=precompiled\nvariant={}\n",
+        spec.arch_cuda, LIBTORCH_VERSION, spec.arch_archs, spec.arch_variant
+    );
+    fs::write(install_path.join(".arch"), arch_content)
+        .map_err(|e| format!("cannot write .arch: {}", e))?;
 
-        if opts.activate {
-            detect::set_active(Path::new("."), &variant_id)?;
-        }
+    if opts.activate {
+        detect::set_active(&ctx.root, &variant_id)?;
     }
 
     println!();
@@ -310,7 +311,7 @@ pub fn run(opts: DownloadOpts) -> Result<(), String> {
     println!("  {}", install_path.display());
     println!("  ================================================");
 
-    if opts.project_mode {
+    if ctx.is_project {
         println!();
         println!("  .arch:   {}/.arch", install_path.display());
         if opts.activate {
@@ -324,13 +325,18 @@ pub fn run(opts: DownloadOpts) -> Result<(), String> {
         }
     } else {
         println!();
-        println!("  Add to your shell profile:");
+        println!("  Installed to: {}", install_path.display());
         println!();
-        println!("    export LIBTORCH_PATH=\"{}\"", install_path.display());
+        println!("  To use with tch-rs or flodl, add to your shell profile:");
+        println!();
+        println!("    export LIBTORCH=\"{}\"", install_path.display());
         println!(
             "    export LD_LIBRARY_PATH=\"{}/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"",
             install_path.display()
         );
+        println!();
+        println!("  Or start a new floDl project:");
+        println!("    fdl init my-project");
     }
 
     Ok(())
@@ -339,13 +345,6 @@ pub fn run(opts: DownloadOpts) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Fallback for non-project installs: ~/.local/lib/
-fn dirs_fallback() -> PathBuf {
-    std::env::var("HOME")
-        .map(|h| PathBuf::from(h).join(".local/lib"))
-        .unwrap_or_else(|_| PathBuf::from("/usr/local/lib"))
-}
 
 /// Move all files and directories from `src` into `dest`.
 fn move_contents(src: &Path, dest: &Path) -> Result<(), String> {

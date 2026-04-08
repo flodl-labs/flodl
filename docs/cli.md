@@ -5,23 +5,28 @@ management, project scaffolding, and guided setup. It is a pure Rust binary
 with zero native dependencies (no libtorch needed to run), so it compiles in
 under a second and works on any machine with Rust or Docker.
 
-## Quick Start
+It works both inside a floDl project and standalone. When standalone, libtorch
+is managed under `~/.flodl/` (override with `$FLODL_HOME`).
+
+## Install
 
 ```bash
-# Download the bootstrap and run (auto-downloads pre-compiled binary)
+# Option 1: cargo install (requires Rust)
+cargo install flodl-cli
+
+# Option 2: download pre-compiled binary (no Rust needed)
 curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
-./fdl setup
 ```
 
-No Rust or Docker needed. The `fdl` script downloads a pre-compiled binary
-from GitHub Releases on first use. It falls back to `cargo build` if no
-pre-compiled binary is available for your platform.
+The `fdl` bootstrap script downloads a pre-compiled binary from GitHub Releases
+on first use. It falls back to `cargo build` if no binary is available for your
+platform.
 
 For developers working on flodl itself:
 
 ```bash
 cargo build --release -p flodl-cli
-./target/release/flodl-cli help
+./target/release/fdl help
 ```
 
 ## Commands

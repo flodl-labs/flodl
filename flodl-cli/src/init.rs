@@ -152,7 +152,7 @@ fn scaffold_mounted(name: &str, crate_name: &str, flodl_dep: &str) -> Result<(),
     )?;
 
     // Copy fdl bootstrap into the project for self-contained setup
-    let fdl_script = include_str!("../../fdl");
+    let fdl_script = include_str!("../assets/fdl");
     write_file(&format!("{}/fdl", name), fdl_script)?;
     #[cfg(unix)]
     {

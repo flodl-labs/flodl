@@ -62,13 +62,13 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/flodl-cli ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/fdl ${{ matrix.artifact }}
           chmod +x ${{ matrix.artifact }}
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
-          copy target\${{ matrix.target }}\release\flodl-cli.exe ${{ matrix.artifact }}
+          copy target\${{ matrix.target }}\release\fdl.exe ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

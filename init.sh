@@ -100,7 +100,7 @@ if ! $GOT_CLI && command -v cargo >/dev/null 2>&1; then
     trap 'rm -f "$CLI"; rm -rf "$TMPDIR_BUILD"' EXIT
     git clone --depth 1 "https://github.com/$REPO.git" "$TMPDIR_BUILD/flodl" 2>/dev/null
     (cd "$TMPDIR_BUILD/flodl" && cargo build --release -p flodl-cli 2>/dev/null)
-    cp "$TMPDIR_BUILD/flodl/target/release/flodl-cli" "$CLI"
+    cp "$TMPDIR_BUILD/flodl/target/release/fdl" "$CLI"
     chmod +x "$CLI"
     if "$CLI" version >/dev/null 2>&1; then
         GOT_CLI=true

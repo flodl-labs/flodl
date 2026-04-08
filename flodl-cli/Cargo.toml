@@ -6,9 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "CLI tool for the floDl deep learning framework"
-publish = false
+description = "libtorch manager and GPU diagnostic tool for Rust deep learning"
+readme = "README.md"
+keywords = ["libtorch", "pytorch", "cuda", "deep-learning", "gpu"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "flodl-cli"
+name = "fdl"
 path = "src/main.rs"

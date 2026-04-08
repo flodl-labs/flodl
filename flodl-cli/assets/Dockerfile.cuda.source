@@ -1,0 +1,78 @@
+# flodl libtorch builder -- compiles libtorch from PyTorch source.
+#
+# Use this when pre-built libtorch doesn't cover your GPU mix.
+# Example: sm_61 (GTX 1060) + sm_120 (RTX 5060 Ti) needs a custom build.
+#
+# Build:  make build-libtorch
+# Time:   2-6 hours depending on CPU cores
+#
+# The TORCH_CUDA_ARCH_LIST arg controls which GPU architectures are compiled.
+# `make build-libtorch` auto-detects this from your installed GPUs.
+#
+# This is a builder-only image. The Makefile extracts the built libtorch
+# to libtorch/builds/<arch>/ via docker cp.
+
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    cmake \
+    ninja-build \
+    python3 \
+    python3-pip \
+    python3-setuptools \
+    gcc \
+    g++ \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps needed by PyTorch build system
+# NOTE: do NOT install cmake via pip -- pip cmake 4.x is too new for some
+# PyTorch submodules. Use the system cmake from apt instead.
+RUN pip3 install --break-system-packages \
+    typing_extensions \
+    pyyaml \
+    filelock \
+    jinja2 \
+    networkx \
+    sympy \
+    packaging
+
+# Clone PyTorch at the specified version
+ARG PYTORCH_VERSION=v2.10.0
+RUN --mount=type=cache,target=/tmp/pytorch-cache \
+    if [ ! -d "/tmp/pytorch-cache/pytorch" ]; then \
+        git clone --depth 1 --branch ${PYTORCH_VERSION} \
+            --recurse-submodules --shallow-submodules \
+            https://github.com/pytorch/pytorch.git /tmp/pytorch-cache/pytorch; \
+    fi && \
+    cp -a /tmp/pytorch-cache/pytorch /pytorch
+
+WORKDIR /pytorch
+
+# Build configuration
+ARG TORCH_CUDA_ARCH_LIST="6.1;12.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+ENV USE_CUDA=1
+ENV USE_CUDNN=1
+ENV USE_NCCL=1
+ENV USE_DISTRIBUTED=1
+ENV BUILD_SHARED_LIBS=ON
+ENV CMAKE_BUILD_TYPE=Release
+ARG MAX_JOBS=6
+ENV MAX_JOBS=${MAX_JOBS}
+ENV BUILD_PYTHON=OFF
+ENV BUILD_TEST=OFF
+ENV BUILD_CAFFE2=OFF
+
+# Build libtorch C++ library using PyTorch's own build script.
+# Output lands in /pytorch/torch/{lib,include,share}.
+RUN python3 tools/build_libtorch.py
+
+# Package into the standard libtorch directory layout
+RUN mkdir -p /usr/local/libtorch && \
+    cp -a /pytorch/torch/lib /usr/local/libtorch/lib && \
+    cp -a /pytorch/torch/include /usr/local/libtorch/include && \
+    cp -a /pytorch/torch/share /usr/local/libtorch/share 2>/dev/null || true

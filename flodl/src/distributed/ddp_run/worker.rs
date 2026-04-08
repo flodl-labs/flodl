@@ -94,6 +94,8 @@ pub struct GpuWorker<M: Module> {
     /// memory that forward/backward will need. Zero = not yet measured;
     /// first chunk runs sync to calibrate.
     activation_peak_bytes: usize,
+    /// Maximum gradient norm for clipping (None = no clipping).
+    max_grad_norm: Option<f64>,
 }
 
 /// Channels bundle returned by [`GpuWorker::channels`] for wiring into the coordinator.
@@ -273,6 +275,7 @@ impl<M: Module> GpuWorker<M> {
             prefetch,
             per_sample_bytes,
             activation_peak_bytes: 0,
+            max_grad_norm: config.max_grad_norm,
         })
     }
 
@@ -317,9 +320,14 @@ impl<M: Module> GpuWorker<M> {
     /// never needs CUDA access (avoiding slow CUDA context init on the
     /// compute thread, which can deadlock with `drain_avg_state`).
     ///
-    /// Called between batches (after optimizer.step completes on default stream),
-    /// so param data is consistent without explicit stream sync.
+    /// Waits for any pending comm_stream copy (from a recent `load_averaged`)
+    /// before reading GPU memory. Without this, Update + RequestParams
+    /// processed in the same `handle_control()` call would read mid-copy data.
     pub fn snapshot_params(&self) -> ParamSnapshot {
+        // Ensure any pending load_averaged() copy on comm_stream has completed.
+        if let (Some(ev), Some(stream)) = (&self.copy_done, &self.compute_stream) {
+            let _ = stream.wait_event(ev);
+        }
         let params = self.param_vars.iter()
             .map(|v| {
                 let t = v.data();
@@ -439,6 +447,18 @@ impl<M: Module> GpuWorker<M> {
 
         // Backward
         loss.backward()?;
+
+        // Per-worker gradient clipping (before optimizer step).
+        if let Some(max_norm) = self.max_grad_norm {
+            let params: Vec<Tensor> = self.model.parameters()
+                .iter()
+                .filter(|p| p.variable.grad().is_some())
+                .map(|p| p.variable.data())
+                .collect();
+            if !params.is_empty() {
+                Tensor::clip_grad_norm_fused(&params, max_norm)?;
+            }
+        }
 
         // Optimizer step (GPU-local Adam, ~0.1ms fused kernel)
         self.optimizer.step()?;

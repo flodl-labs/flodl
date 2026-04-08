@@ -5,7 +5,7 @@ All notable changes to floDl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] - Multi-GPU & Infrastructure
+## [0.3.0] - 2026-04-08 — Multi-GPU & Infrastructure
 
 ### Added
 
@@ -118,7 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - `speed_hint(slow_rank, ratio)`: Initial speed estimate (optional, self-corrects).
   - `overhead_target(f64)`: AllReduce overhead ceiling.
   - `max_anchor(Option<usize>)`: `None` = auto (default), `Some(0)` = disable El Che (traditional DDP), `Some(n)` = fixed cap.
-- **`Graph::step()` El Che branch**: Normalizes accumulated gradients by `1/count[rank]` (mean per device), weighted AllReduce by `count[rank]/total` (proportional contribution), reports timing to ElChe for adaptation. Existing scatter and single-GPU paths unchanged.
+  - `max_grad_norm(f64)`: Per-rank gradient clipping before normalize-by-count and weighted AllReduce. Bounds accumulated gradients on all ranks (including replicas the caller cannot reach). Uses fused C++ kernel (`clip_grad_norm_fused`).
+- **`Graph::step()` El Che branch**: Normalizes accumulated gradients by `1/count[rank]` (mean per device), weighted AllReduce by `count[rank]/total` (proportional contribution), reports timing to ElChe for adaptation. Per-rank gradient clipping when configured. Existing scatter and single-GPU paths unchanged.
 - **`Graph::has_el_che()`** / **`Graph::configure_el_che()`**: Query and configure El Che state.
 - **`weighted_all_reduce_gradients()`**: Scales each replica's gradient by batch contribution before AllReduce Sum. Produces the mathematically correct mean gradient regardless of per-device batch counts.
 
@@ -155,7 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`GpuWorker<M>`**: Generic worker bound to a single GPU. Thread-local model + optimizer (Rc-based, not Send). CUDA streams for overlapped compute/communication. Handles `SyncNow` (NCCL), `RequestParams`/`Update` (CPU), `Throttle`, `StartEpoch`, `Checkpoint`, `Shutdown`.
 - **`Coordinator`**: Lightweight scheduling thread. Collects timing from workers (for ElChe throughput ratios), triggers averaging, monitors divergence to auto-tune interval, rebalances data partitions. Builder pattern with configurable `divergence_threshold`, `overhead_target`, `max_anchor`, `checkpoint_every`, `snapshot_timeout_secs`.
 - **`TrainedState`**: Return type from `DdpHandle::join()`. Contains averaged `params` and `buffers` as CPU tensors, ready for inference or checkpoint.
-- **`DdpRunConfig`**: Configuration struct with builder methods: `with_overhead_target()`, `with_max_anchor()`, `with_anchor()`, `with_divergence_threshold()`, `with_max_batch_diff()`, `with_checkpoint_every()`, `with_snapshot_timeout()`, `with_partition_ratios()`, `with_progressive_dispatch()`.
+- **`DdpRunConfig`**: Configuration struct with builder methods: `with_overhead_target()`, `with_max_anchor()`, `with_anchor()`, `with_divergence_threshold()`, `with_max_batch_diff()`, `with_max_grad_norm()`, `with_checkpoint_every()`, `with_snapshot_timeout()`, `with_partition_ratios()`, `with_progressive_dispatch()`.
+- **Per-worker gradient clipping**: `DdpBuilder::max_grad_norm(f64)` clips gradients between `backward()` and `optimizer.step()` on each GPU worker. Prevents gradient spikes on any single GPU from propagating through AllReduce averaging. Same fused kernel as El Che path.
 - **`progressive_dispatch`**: When enabled, the coordinator streams work in small chunks instead of sending full epoch partitions, adapting to throughput continuously. Default: auto (true for Cadence/Async, false for Sync).
 - **Global epoch management**: Coordinator owns epochs globally. Workers are mode-agnostic (wait for `EpochPlan`, run partition, report metrics). `EpochPlan { epoch, partition_offset, partition_size }` ensures deterministic, non-overlapping sample coverage. Throughput-proportional partition sizing when ElChe is calibrated; `partition_ratios` for fixed splits. Auto lookahead in `Async` mode (fast ranks may run 1 epoch ahead).
 - **Single-GPU fallback**: With fewer than 2 CUDA devices, training runs on the main thread with no coordinator or averaging. API is identical; `join()` returns `TrainedState` in both cases.
@@ -209,12 +211,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 #### CLI Tool
 - **`fdl`** (shell script): Zero-dependency entry point. Auto-detects libtorch, Docker, Rust, GPUs. Dispatches to the compiled binary (native or Docker) with shell fallback for diagnostics. Interactive setup wizard guides users through libtorch installation and build environment selection.
-- **`flodl-cli`** (Rust workspace member): Compiled binary with GPU probing via `flodl::probe_device()`. Commands:
-  - `fdl setup`: Guided 3-step wizard: (1) system detection, (2) libtorch download with hardware-specific choices, (3) build environment (Docker/native/both).
+- **`flodl-cli`** (`cargo install flodl-cli`): Standalone Rust binary. Pure Rust, no libtorch dependency. Works inside floDl projects and standalone (system-wide libtorch management under `~/.flodl/`). Override global root with `$FLODL_HOME`. Commands:
+  - `fdl setup`: Guided wizard. Detects project vs standalone mode. In a project: system detection, libtorch download, Docker image build. Standalone: system detection, libtorch download to `~/.flodl/`, prints shell export instructions.
+  - `fdl libtorch download [--cpu | --cuda 12.6|12.8]`: Auto-detect GPUs and download matching libtorch variant. Project-local or global depending on context.
+  - `fdl libtorch build [--docker | --native] [--archs "6.1;12.0"]`: Compile libtorch from source for custom GPU architectures.
+  - `fdl libtorch list / info / activate / remove`: Manage installed variants.
   - `fdl init <name> [--docker]`: Scaffold a new floDl project. Default mode uses mounted libtorch (like the main repo). `--docker` bakes libtorch into the Docker image for standalone deployment. Generates Cargo.toml, Dockerfiles, docker-compose.yml, Makefile, and annotated src/main.rs.
-  - `fdl diagnose [--json]`: System + GPU + libtorch + compatibility report. Probes each GPU with a test kernel, verifies libtorch arch coverage, detects Docker containers.
+  - `fdl diagnose [--json]`: System + GPU + libtorch + compatibility report. Shows context mode (project/global). Probes GPUs via nvidia-smi, verifies libtorch arch coverage, detects Docker containers.
   - `fdl help / version`
-- Binary is `publish = false` (links libtorch, not portable). Built lazily on first `fdl` invocation.
+- Pre-compiled binaries published via GitHub Releases for Linux x86_64/aarch64, macOS arm64, Windows x86_64. Downloaded automatically by the `fdl` shell script on first use.
 
 #### Small Additions
 - **`Linear::no_bias_on_device()`**: Create a bias-free linear layer on a specific device. Previously `no_bias()` was CPU-only.

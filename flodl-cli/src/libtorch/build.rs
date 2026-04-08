@@ -9,12 +9,13 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::context::Context;
 use crate::util::docker;
 use crate::util::prompt;
 use crate::util::system;
 use super::detect;
 
-const DOCKERFILE_CONTENT: &str = include_str!("../../../Dockerfile.cuda.source");
+const DOCKERFILE_CONTENT: &str = include_str!("../../assets/Dockerfile.cuda.source");
 const IMAGE_NAME: &str = "flodl-libtorch-builder";
 const LIBTORCH_VERSION: &str = "2.10.0";
 const PYTORCH_VERSION: &str = "v2.10.0";
@@ -225,6 +226,8 @@ fn select_backend(backend: &BuildBackend) -> Result<&'static str, String> {
 // ---------------------------------------------------------------------------
 
 pub fn run(opts: BuildOpts) -> Result<(), String> {
+    let ctx = Context::resolve();
+
     // Determine architectures
     let archs = match &opts.archs {
         Some(a) => {
@@ -235,7 +238,7 @@ pub fn run(opts: BuildOpts) -> Result<(), String> {
     };
 
     let arch_dir = arch_dir_name(&archs);
-    let install_path = format!("libtorch/builds/{}", arch_dir);
+    let install_path = ctx.root.join(format!("libtorch/builds/{}", arch_dir));
     let variant_id = format!("builds/{}", arch_dir);
 
     // Select backend
@@ -244,7 +247,7 @@ pub fn run(opts: BuildOpts) -> Result<(), String> {
     println!();
     println!("  libtorch source build");
     println!("  Archs:   {}", archs);
-    println!("  Output:  {}", install_path);
+    println!("  Output:  {}", install_path.display());
     println!("  Jobs:    {}", opts.max_jobs);
     println!("  Method:  {}", backend);
     println!();
@@ -258,14 +261,15 @@ pub fn run(opts: BuildOpts) -> Result<(), String> {
     println!("  This will take 2-6 hours. You can safely Ctrl-C and resume later.");
     println!();
 
+    let install_str = install_path.to_str().unwrap_or("libtorch/builds");
     match backend {
-        "docker" => build_docker(&archs, &install_path, opts.max_jobs)?,
-        "native" => build_native(&archs, &install_path, opts.max_jobs)?,
+        "docker" => build_docker(&archs, install_str, opts.max_jobs)?,
+        "native" => build_native(&archs, install_str, &ctx, opts.max_jobs)?,
         _ => unreachable!(),
     }
 
     // Verify
-    let lib_dir = Path::new(&install_path).join("lib");
+    let lib_dir = install_path.join("lib");
     if !lib_dir.join("libtorch.so").exists() && !lib_dir.join("libtorch.dylib").exists() {
         return Err(format!(
             "libtorch library not found at {}.\n\
@@ -280,21 +284,30 @@ pub fn run(opts: BuildOpts) -> Result<(), String> {
         "cuda=12.8\ntorch={}\narchs={}\nsource=compiled\n",
         LIBTORCH_VERSION, arch_spaces
     );
-    fs::write(Path::new(&install_path).join(".arch"), arch_content)
+    fs::write(install_path.join(".arch"), arch_content)
         .map_err(|e| format!("cannot write .arch: {}", e))?;
 
     // Set as active
-    detect::set_active(Path::new("."), &variant_id)?;
+    detect::set_active(&ctx.root, &variant_id)?;
 
     println!();
     println!("  ================================================");
     println!("  libtorch {} (source build) complete!", LIBTORCH_VERSION);
     println!("  Archs:  {}", arch_spaces);
-    println!("  Path:   {}", install_path);
+    println!("  Path:   {}", install_path.display());
     println!("  Active: {}", variant_id);
     println!("  ================================================");
     println!();
-    println!("  Run 'make cuda-test' to verify.");
+    if ctx.is_project {
+        println!("  Run 'make cuda-test' to verify.");
+    } else {
+        println!("  To use, add to your shell profile:");
+        println!("    export LIBTORCH=\"{}\"", install_path.display());
+        println!(
+            "    export LD_LIBRARY_PATH=\"{}/lib${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"",
+            install_path.display()
+        );
+    }
 
     Ok(())
 }
@@ -379,13 +392,13 @@ fn build_docker(archs: &str, install_path: &str, max_jobs: usize) -> Result<(), 
 // Native backend
 // ---------------------------------------------------------------------------
 
-fn build_native(archs: &str, install_path: &str, max_jobs: usize) -> Result<(), String> {
-    let build_dir = Path::new("libtorch/.build-cache/pytorch");
+fn build_native(archs: &str, install_path: &str, ctx: &Context, max_jobs: usize) -> Result<(), String> {
+    let build_dir = ctx.root.join("libtorch/.build-cache/pytorch");
 
     // Clone PyTorch if not cached
     if !build_dir.join(".git").exists() {
         println!("  Cloning PyTorch {}...", PYTORCH_VERSION);
-        fs::create_dir_all("libtorch/.build-cache")
+        fs::create_dir_all(ctx.root.join("libtorch/.build-cache"))
             .map_err(|e| format!("cannot create build cache: {}", e))?;
 
         let status = Command::new("git")
@@ -435,7 +448,7 @@ fn build_native(archs: &str, install_path: &str, max_jobs: usize) -> Result<(), 
 
     let status = Command::new("python3")
         .arg("tools/build_libtorch.py")
-        .current_dir(build_dir)
+        .current_dir(&build_dir)
         .env("TORCH_CUDA_ARCH_LIST", archs)
         .env("USE_CUDA", "1")
         .env("USE_CUDNN", "1")

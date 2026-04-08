@@ -2,7 +2,11 @@
 //!
 //! Provides hardware diagnostics, libtorch management, and project scaffolding.
 //! Pure Rust binary with no libtorch dependency (GPU detection via nvidia-smi).
+//!
+//! Works both inside a floDl project and standalone. When standalone, libtorch
+//! is managed under `~/.flodl/` (override with `$FLODL_HOME`).
 
+pub mod context;
 mod diagnose;
 mod init;
 mod libtorch;
@@ -11,6 +15,8 @@ mod util;
 
 use std::env;
 use std::process::ExitCode;
+
+use context::Context;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -38,7 +44,6 @@ fn main() -> ExitCode {
             }
         }
         "libtorch" => {
-            // TODO: Phases 2-3 -- libtorch management
             let sub = args.get(2).map(String::as_str).unwrap_or("help");
             match sub {
                 "list" => {
@@ -102,11 +107,12 @@ fn main() -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// libtorch subcommands (already functional)
+// libtorch subcommands
 // ---------------------------------------------------------------------------
 
 fn cmd_libtorch_list(json: bool) -> ExitCode {
-    let root = std::path::Path::new(".");
+    let ctx = Context::resolve();
+    let root = &ctx.root;
     let variants = libtorch::detect::list_variants(root);
     let active = libtorch::detect::read_active(root);
     let active_path = active.as_ref().map(|i| i.path.as_str());
@@ -145,7 +151,8 @@ fn cmd_libtorch_list(json: bool) -> ExitCode {
 }
 
 fn cmd_libtorch_info() -> ExitCode {
-    let root = std::path::Path::new(".");
+    let ctx = Context::resolve();
+    let root = &ctx.root;
     match libtorch::detect::read_active(root) {
         Some(info) => {
             println!("Active:   {}", info.path);
@@ -172,7 +179,8 @@ fn cmd_libtorch_info() -> ExitCode {
 }
 
 fn cmd_libtorch_activate(variant: Option<&str>) -> ExitCode {
-    let root = std::path::Path::new(".");
+    let ctx = Context::resolve();
+    let root = &ctx.root;
     let variant = match variant {
         Some(v) => v,
         None => {
@@ -246,7 +254,6 @@ fn cmd_libtorch_download(args: &[String]) -> ExitCode {
                 }
                 i += 1;
                 opts.custom_path = Some(PathBuf::from(&args[i]));
-                opts.project_mode = false;
                 i += 1;
             }
             "--no-activate" => {
@@ -338,7 +345,8 @@ fn cmd_libtorch_build(args: &[String]) -> ExitCode {
 }
 
 fn cmd_libtorch_remove(variant: Option<&str>) -> ExitCode {
-    let root = std::path::Path::new(".");
+    let ctx = Context::resolve();
+    let root = &ctx.root;
     let variant = match variant {
         Some(v) => v,
         None => {
@@ -368,6 +376,9 @@ fn cmd_libtorch_remove(variant: Option<&str>) -> ExitCode {
 fn print_usage() {
     println!("flodl-cli {}", env!("CARGO_PKG_VERSION"));
     println!();
+    println!("libtorch manager and GPU diagnostic tool for Rust deep learning.");
+    println!("Works inside floDl projects and standalone (~/.flodl).");
+    println!();
     println!("USAGE:");
     println!("    fdl <command> [options]");
     println!();
@@ -380,6 +391,9 @@ fn print_usage() {
     println!("        --json         Output as JSON");
     println!("    help               Show this help");
     println!("    version            Show version");
+    println!();
+    println!("INSTALL:");
+    println!("    cargo install flodl-cli    # installs 'fdl' binary");
     println!();
     println!("EXAMPLES:");
     println!("    fdl setup                  # first-time setup");

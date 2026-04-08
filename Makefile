@@ -186,13 +186,13 @@ test-all: test
 
 # Detect hardware, download/build libtorch, build Docker image.
 setup: cli
-	./target/release/flodl-cli setup --non-interactive
+	./target/release/fdl setup --non-interactive
 
 # Build libtorch from PyTorch source for custom GPU architectures.
 # Auto-detects compute capabilities from installed GPUs.
 # Takes 2-6 hours. Run overnight: make build-libtorch
 build-libtorch: cli
-	./target/release/flodl-cli libtorch build
+	./target/release/fdl libtorch build
 
 # --- CLI (pure Rust, no libtorch needed) ---
 

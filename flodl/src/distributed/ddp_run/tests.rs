@@ -85,6 +85,7 @@ fn test_worker_config_clone() {
         total_samples: 10000,
         batch_size: 32,
         seed: 42,
+        max_grad_norm: None,
     };
     let cfg2 = cfg.clone();
     assert_eq!(cfg2.rank, 0);
@@ -166,6 +167,7 @@ fn make_test_worker_with(
         total_samples: dataset_size,
         batch_size: 4,
         seed: 42,
+        max_grad_norm: None,
     };
 
     let ((timing_tx, metrics_tx, param_tx, final_param_tx, control_rx), channels) =

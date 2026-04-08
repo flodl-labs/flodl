@@ -5,15 +5,17 @@
 use std::fmt::Write;
 use std::path::Path;
 
+use crate::context::Context;
 use crate::libtorch::detect;
 use crate::util::system;
 
 pub fn run(json: bool) {
-    let root = Path::new(".");
+    let ctx = Context::resolve();
+    let root = &ctx.root;
     if json {
-        print_json(root);
+        print_json(root, &ctx);
     } else {
-        print_report(root);
+        print_report(root, &ctx);
     }
 }
 
@@ -21,9 +23,13 @@ pub fn run(json: bool) {
 // Human-readable report
 // ---------------------------------------------------------------------------
 
-fn print_report(root: &Path) {
+fn print_report(root: &Path, ctx: &Context) {
     println!("floDl Diagnostics");
     println!("=================");
+    println!();
+
+    // Context
+    println!("Context:       {}", ctx.label());
     println!();
 
     // System
@@ -139,15 +145,23 @@ fn print_report(root: &Path) {
 // JSON output
 // ---------------------------------------------------------------------------
 
-fn print_json(root: &Path) {
+fn print_json(root: &Path, ctx: &Context) {
     let mut b = String::with_capacity(2048);
     b.push('{');
+
+    // Context
+    let _ = write!(
+        b,
+        "\"context\":{{\"mode\":\"{}\",\"root\":\"{}\"}}",
+        if ctx.is_project { "project" } else { "global" },
+        system::escape_json(&ctx.root.display().to_string())
+    );
 
     // System
     let cpu = system::cpu_model().unwrap_or_else(|| "Unknown".into());
     let _ = write!(
         b,
-        "\"system\":{{\"cpu\":\"{}\",\"threads\":{},\"ram_gb\":{}",
+        ",\"system\":{{\"cpu\":\"{}\",\"threads\":{},\"ram_gb\":{}",
         system::escape_json(&cpu),
         system::cpu_threads(),
         system::ram_total_gb()

@@ -325,6 +325,13 @@ pub struct DdpRunConfig {
     ///
     /// Default: `None` (auto: true for Cadence/Async, false for Sync).
     pub progressive_dispatch: Option<bool>,
+    /// Maximum gradient norm for per-worker clipping.
+    ///
+    /// When set, each worker clips its accumulated gradients (L2 norm)
+    /// after backward and before the optimizer step. Ensures gradient
+    /// spikes on any GPU are bounded before they propagate through
+    /// AllReduce averaging.
+    pub max_grad_norm: Option<f64>,
 }
 
 impl Default for DdpRunConfig {
@@ -346,6 +353,7 @@ impl DdpRunConfig {
             snapshot_timeout_secs: 5,
             partition_ratios: None,
             progressive_dispatch: None,
+            max_grad_norm: None,
         }
     }
 
@@ -419,6 +427,16 @@ impl DdpRunConfig {
     /// Default: auto (true for Cadence/Async, false for Sync).
     pub fn with_progressive_dispatch(mut self, enabled: bool) -> Self {
         self.progressive_dispatch = Some(enabled);
+        self
+    }
+
+    /// Set maximum gradient norm for per-worker clipping.
+    ///
+    /// Each worker clips accumulated gradients to this L2 norm after backward
+    /// and before the optimizer step. Prevents gradient spikes on any GPU from
+    /// propagating through AllReduce.
+    pub fn with_max_grad_norm(mut self, max_norm: f64) -> Self {
+        self.max_grad_norm = Some(max_norm);
         self
     }
 }
@@ -576,6 +594,8 @@ pub struct WorkerConfig {
     pub batch_size: usize,
     /// RNG seed for deterministic shuffling.
     pub seed: u64,
+    /// Maximum gradient norm for clipping (None = no clipping).
+    pub max_grad_norm: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------

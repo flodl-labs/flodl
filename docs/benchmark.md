@@ -7,7 +7,7 @@ overhead.
 > This is a living document. The benchmark suite ships with flodl and runs in
 > Docker -- anyone can reproduce these numbers on their own hardware.
 
-## Results (v0.2.2 -- March 2026)
+## Results (v0.3.0 -- April 2026)
 
 | Model | PyTorch | flodl | Delta | Py σ | Rs σ | Py alloc | Rs alloc | Py rsrvd | Rs rsrvd |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -192,7 +192,7 @@ standard deviation for well-behaved data.
 
 | Component | Version |
 |---|---|
-| flodl | 0.2.2 |
+| flodl | 0.3.0 |
 | PyTorch | 2.10.0+cu128 |
 | Rust | 1.94.0 |
 | CUDA | 12.8 (runtime) |

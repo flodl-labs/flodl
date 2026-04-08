@@ -2,8 +2,7 @@
 //!
 //! Detects hardware, downloads libtorch, optionally builds Docker images.
 
-use std::path::Path;
-
+use crate::context::Context;
 use crate::libtorch::{build, detect, download};
 use crate::util::{docker, prompt, system};
 
@@ -95,7 +94,15 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
     println!("  This downloads pre-built binaries (~2GB for CUDA, ~200MB for CPU).");
     println!();
 
-    let root = Path::new(".");
+    let ctx = Context::resolve();
+    let root = &ctx.root;
+
+    if !ctx.is_project {
+        println!("  Not inside a floDl project.");
+        println!("  libtorch will be installed to: {}", ctx.libtorch_dir().display());
+        println!();
+    }
+
     let existing = detect::read_active(root);
     let mut skip_download = false;
 
@@ -125,7 +132,7 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
             activate: false, // don't activate CPU if we'll also get CUDA
             ..Default::default()
         };
-        download::run(cpu_opts)?;
+        download::run_with_context(cpu_opts, &ctx)?;
 
         // CUDA libtorch
         if !gpus.is_empty() {
@@ -152,7 +159,7 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                         variant: download::Variant::Cuda126,
                         ..Default::default()
                     };
-                    download::run(cuda_opts)?;
+                    download::run_with_context(cuda_opts, &ctx)?;
                 } else {
                     let choice = prompt::ask_choice(
                         "  Choice",
@@ -180,7 +187,7 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                                 variant: download::Variant::Cuda128,
                                 ..Default::default()
                             };
-                            download::run(cuda_opts)?;
+                            download::run_with_context(cuda_opts, &ctx)?;
                         }
                         3 => {
                             println!("  Downloading cu126...");
@@ -188,7 +195,7 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                                 variant: download::Variant::Cuda126,
                                 ..Default::default()
                             };
-                            download::run(cuda_opts)?;
+                            download::run_with_context(cuda_opts, &ctx)?;
                         }
                         _ => {
                             println!("  Skipping CUDA libtorch. You can download later with:");
@@ -205,7 +212,7 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                     variant: download::Variant::Cuda126,
                     ..Default::default()
                 };
-                download::run(cuda_opts)?;
+                download::run_with_context(cuda_opts, &ctx)?;
             } else {
                 println!();
                 println!("  Downloading CUDA libtorch (cu128 for your Volta+ GPU)...");
@@ -213,12 +220,31 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                     variant: download::Variant::Cuda128,
                     ..Default::default()
                 };
-                download::run(cuda_opts)?;
+                download::run_with_context(cuda_opts, &ctx)?;
             }
         }
     }
 
-    // ---- Step 3: Build environment ----
+    // ---- Step 3: Build environment (project-only) ----
+
+    if !ctx.is_project {
+        // Skip Docker image building when running standalone
+        println!();
+        println!("  Setup complete!");
+        println!("  ===============");
+        println!();
+        if let Some(info) = detect::read_active(root) {
+            let cuda_str = if info.cuda_version.as_deref() != Some("none") { "CUDA" } else { "CPU" };
+            println!("  libtorch:  {} ({})", info.path, cuda_str);
+            println!("  Location:  {}", ctx.libtorch_dir().display());
+        }
+        println!();
+        println!("  Next steps:");
+        println!("    fdl init my-project  # scaffold a new project");
+        println!("    fdl diagnose         # verify GPU compatibility");
+        println!();
+        return Ok(());
+    }
 
     println!();
     println!("  Step 3: Build environment");

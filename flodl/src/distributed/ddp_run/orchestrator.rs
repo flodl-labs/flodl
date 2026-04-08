@@ -183,6 +183,7 @@ impl DdpHandle {
                 checkpoint_fn.as_ref().cloned(),
                 config.checkpoint_every,
                 epoch_fn,
+                config.max_grad_norm,
             );
         }
 
@@ -278,6 +279,7 @@ impl DdpHandle {
         let ckpt_every = config.checkpoint_every;
         let snap_timeout = config.snapshot_timeout_secs;
         let partition_ratios = config.partition_ratios.clone();
+        let max_grad_norm = config.max_grad_norm;
         let coord_batch_size = batch_size;
         let seed: u64 = 42;
 
@@ -413,6 +415,7 @@ impl DdpHandle {
                 total_samples,
                 batch_size,
                 seed,
+                max_grad_norm,
             };
 
             let handle = std::thread::Builder::new()
@@ -544,6 +547,7 @@ impl DdpHandle {
         checkpoint_fn: Option<CheckpointFn<M>>,
         checkpoint_every: Option<usize>,
         epoch_fn: Option<EpochFn<M>>,
+        max_grad_norm: Option<f64>,
     ) -> Result<Self>
     where
         F: Fn(Device) -> Result<M>,
@@ -590,6 +594,7 @@ impl DdpHandle {
             total_samples,
             batch_size,
             seed: 42,
+            max_grad_norm,
         };
 
         // Channels (unused in single-GPU mode, but needed by GpuWorker)
@@ -1059,6 +1064,16 @@ where
     /// Default: auto (true for Cadence/Async, false for Sync).
     pub fn progressive_dispatch(mut self, enabled: bool) -> Self {
         self.config = self.config.with_progressive_dispatch(enabled);
+        self
+    }
+
+    /// Set maximum gradient norm for per-worker clipping.
+    ///
+    /// Each worker clips accumulated gradients (L2 norm) after backward
+    /// and before the optimizer step. Same knob as [`DdpConfig::max_grad_norm`]
+    /// for the setup/El Che path.
+    pub fn max_grad_norm(mut self, max_norm: f64) -> Self {
+        self.config = self.config.with_max_grad_norm(max_norm);
         self
     }
 
