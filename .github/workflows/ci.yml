@@ -22,13 +22,11 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  LIBTORCH_VERSION: "2.10.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
-
-env:
-  LIBTORCH_VERSION: "2.10.0"
 
 jobs:
   cpu:
