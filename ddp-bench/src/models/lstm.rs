@@ -22,21 +22,21 @@ const SEQ_LEN: i64 = 32;
 pub fn def() -> ModelDef {
     ModelDef {
         name: "lstm",
-        description: "2-layer LSTM, tests RNN gradients",
+        description: "4-layer LSTM, tests RNN gradients",
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
         defaults: ModelDefaults {
             epochs: 5,
-            batches_per_epoch: 500,
-            batch_size: 128,
+            batches_per_epoch: 1000,
+            batch_size: 256,
             lr: 0.001,
         },
     }
 }
 
 fn build_model(device: Device) -> Result<Box<dyn Module>> {
-    let model = FlowBuilder::from(LSTM::on_device(INPUT_DIM, HIDDEN_DIM, 2, true, device)?)
+    let model = FlowBuilder::from(LSTM::on_device(INPUT_DIM, HIDDEN_DIM, 4, true, device)?)
         .through(Linear::on_device(HIDDEN_DIM, OUTPUT_DIM, device)?)
         .build()?;
     Ok(Box::new(model))

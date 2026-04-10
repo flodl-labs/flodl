@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./run.sh                              # all models, all modes
-#   ./run.sh --model linear --mode solo:0 # single combo
+#   ./run.sh --model linear --mode solo-0 # single combo
 #   ./run.sh --model convnet              # one model, all modes
 #
 

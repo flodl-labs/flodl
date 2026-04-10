@@ -180,7 +180,6 @@ fn run() -> flodl::tensor::Result<()> {
                 seed,
                 output_dir: output.clone(),
                 monitor_port,
-                validate,
             };
 
             match harness::run_combo(model_def, mode, &run_config) {
@@ -279,7 +278,7 @@ fn print_help() {
         eprintln!("  {name}");
     }
     eprintln!("\nExamples:");
-    eprintln!("  ddp-bench --model linear --mode solo:0 --epochs 2");
+    eprintln!("  ddp-bench --model linear --mode solo-0 --epochs 2");
     eprintln!("  ddp-bench --model convnet --mode nccl-cadence --monitor 3000");
     eprintln!("  ddp-bench --model all --mode all --validate");
 }

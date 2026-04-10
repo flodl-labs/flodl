@@ -1,4 +1,4 @@
-//! 8 residual blocks via `.also()`, 512D, MSE.
+//! 24 residual blocks via `.also()`, 2048D, MSE.
 //!
 //! Tests FlowBuilder graph skip connections under DDP.
 
@@ -14,20 +14,20 @@ use super::ModelDef;
 use crate::config::ModelDefaults;
 use crate::data::SyntheticDataSet;
 
-const DIM: i64 = 512;
-const OUTPUT_DIM: i64 = 128;
+const DIM: i64 = 2048;
+const OUTPUT_DIM: i64 = 512;
 
 pub fn def() -> ModelDef {
     ModelDef {
         name: "residual",
-        description: "8 residual blocks via .also(), tests graph builder + DDP",
+        description: "24 residual blocks via .also(), tests graph builder + DDP",
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
         defaults: ModelDefaults {
             epochs: 5,
-            batches_per_epoch: 500,
-            batch_size: 128,
+            batches_per_epoch: 1000,
+            batch_size: 512,
             lr: 0.001,
         },
     }
@@ -35,7 +35,7 @@ pub fn def() -> ModelDef {
 
 fn build_model(device: Device) -> Result<Box<dyn Module>> {
     let mut builder = FlowBuilder::from(Linear::on_device(DIM, DIM, device)?);
-    for _ in 0..8 {
+    for _ in 0..24 {
         builder = builder.also(
             FlowBuilder::from(Linear::on_device(DIM, DIM, device)?)
                 .through(GELU)

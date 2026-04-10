@@ -23,14 +23,14 @@ const SEQ_LEN: i64 = 64;
 pub fn def() -> ModelDef {
     ModelDef {
         name: "transformer",
-        description: "2-layer transformer, tests complex gradient graphs",
+        description: "4-layer transformer, tests complex gradient graphs",
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
         defaults: ModelDefaults {
             epochs: 5,
-            batches_per_epoch: 500,
-            batch_size: 64,
+            batches_per_epoch: 1000,
+            batch_size: 128,
             lr: 0.0005,
         },
     }
@@ -39,8 +39,8 @@ pub fn def() -> ModelDef {
 fn build_model(device: Device) -> Result<Box<dyn Module>> {
     let mut builder = FlowBuilder::from(Embedding::on_device(VOCAB, D_MODEL, device)?);
 
-    // 2 transformer encoder layers
-    for _ in 0..2 {
+    // 4 transformer encoder layers
+    for _ in 0..4 {
         builder = builder
             .also(
                 FlowBuilder::from(MultiheadAttention::on_device(D_MODEL, N_HEADS, device)?)

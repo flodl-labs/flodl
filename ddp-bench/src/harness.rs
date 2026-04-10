@@ -35,13 +35,17 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         model_def.name, mode_str, config.epochs, config.batches_per_epoch, config.batch_size,
     );
 
-    // Create timeline
+    // Create dataset -- pool is capped to keep generation fast while
+    // remaining large enough to avoid GPU cache distortion.
+    let load_start = Instant::now();
+    let total_samples = (config.batches_per_epoch * config.batch_size).min(50_000);
+    let dataset = (model_def.dataset)(config.seed, total_samples)?;
+    let load_ms = load_start.elapsed().as_millis();
+    eprintln!("  data: {total_samples} samples in {load_ms}ms");
+
+    // Start timeline AFTER data loading so measurements reflect training only.
     let timeline = Timeline::new(100);
     timeline.start();
-
-    // Create dataset
-    let total_samples = config.batches_per_epoch * config.batch_size;
-    let dataset = (model_def.dataset)(config.seed, total_samples)?;
 
     // Create monitor
     let mut monitor = Monitor::new(config.epochs);

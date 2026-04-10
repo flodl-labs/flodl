@@ -19,7 +19,7 @@ pub enum DdpMode {
 }
 
 impl DdpMode {
-    /// Parse a mode string like "solo:0", "sync", "nccl-cadence", "cpu-async".
+    /// Parse a mode string like "solo-0", "sync", "nccl-cadence", "cpu-async".
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "sync" => Some(DdpMode::Sync),
@@ -47,7 +47,7 @@ impl DdpMode {
                 policy: ApplyPolicy::Async,
                 backend: AverageBackend::Cpu,
             }),
-            _ if s.starts_with("solo:") => s[5..].parse::<usize>().ok().map(DdpMode::Solo),
+            _ if s.starts_with("solo-") => s[5..].parse::<usize>().ok().map(DdpMode::Solo),
             _ => None,
         }
     }
@@ -55,8 +55,8 @@ impl DdpMode {
     /// All known mode names.
     pub fn all_names() -> &'static [&'static str] {
         &[
-            "solo:0",
-            "solo:1",
+            "solo-0",
+            "solo-1",
             "sync",
             "nccl-sync",
             "nccl-cadence",
@@ -76,7 +76,7 @@ impl DdpMode {
 impl fmt::Display for DdpMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DdpMode::Solo(idx) => write!(f, "solo:{idx}"),
+            DdpMode::Solo(idx) => write!(f, "solo-{idx}"),
             DdpMode::Sync => write!(f, "sync"),
             DdpMode::Builder { policy, backend } => {
                 let b = match backend {
@@ -113,5 +113,4 @@ pub struct RunConfig {
     pub seed: u64,
     pub output_dir: String,
     pub monitor_port: Option<u16>,
-    pub validate: bool,
 }

@@ -1,24 +1,27 @@
 //! Synthetic dataset generation for reproducible benchmarks.
+//!
+//! Uses bulk tensor operations for fast pool generation.
 
 use std::sync::Arc;
 
 use flodl::data::BatchDataSet;
-use flodl::tensor::{Result, Tensor, TensorOptions};
+use flodl::tensor::{Device, Result, Tensor, TensorOptions};
 
-/// A pre-generated synthetic dataset stored as flat Vec of tensors.
+/// A pre-generated synthetic dataset stored as bulk tensors.
 ///
-/// Each "sample" is a set of tensors (e.g., input + target).
-/// `get_batch` stacks the requested indices along dim 0.
+/// Each tensor group is `[total_samples, ...]`. Batching uses `index_select`
+/// on the pre-stacked pool, avoiding per-sample stack overhead.
 pub struct SyntheticDataSet {
-    /// tensors[tensor_idx][sample_idx] = [per-sample shape]
-    tensors: Vec<Vec<Tensor>>,
+    /// tensors[group_idx] = [total_samples, per-sample dims...]
+    tensors: Vec<Tensor>,
     len: usize,
 }
 
 impl SyntheticDataSet {
     /// Generate a regression dataset: input [input_dim], target [output_dim].
     ///
-    /// Uses a fixed linear transform + noise so models can actually converge.
+    /// Uses independent random tensors. Training still produces gradients
+    /// and the model learns a mapping, which is all DDP benchmarks need.
     pub fn regression(
         seed: u64,
         total_samples: usize,
@@ -26,20 +29,11 @@ impl SyntheticDataSet {
         output_dim: i64,
     ) -> Result<Arc<dyn BatchDataSet>> {
         flodl::manual_seed(seed);
+        let n = total_samples as i64;
         let opts = TensorOptions::default();
 
-        // Fixed weight matrix for generating targets
-        let w = Tensor::randn(&[input_dim, output_dim], opts)?;
-
-        let mut inputs = Vec::with_capacity(total_samples);
-        let mut targets = Vec::with_capacity(total_samples);
-
-        for _ in 0..total_samples {
-            let x = Tensor::randn(&[input_dim], opts)?;
-            let y = x.matmul(&w)?;
-            inputs.push(x);
-            targets.push(y);
-        }
+        let inputs = Tensor::randn(&[n, input_dim], opts)?;
+        let targets = Tensor::randn(&[n, output_dim], opts)?;
 
         Ok(Arc::new(SyntheticDataSet {
             tensors: vec![inputs, targets],
@@ -47,7 +41,7 @@ impl SyntheticDataSet {
         }))
     }
 
-    /// Generate a classification dataset: input [dims...], target [1] (class index).
+    /// Generate a classification dataset: input [dims...], target [] (class index).
     pub fn classification(
         seed: u64,
         total_samples: usize,
@@ -55,17 +49,13 @@ impl SyntheticDataSet {
         num_classes: i64,
     ) -> Result<Arc<dyn BatchDataSet>> {
         flodl::manual_seed(seed);
+        let n = total_samples as i64;
         let opts = TensorOptions::default();
 
-        let mut inputs = Vec::with_capacity(total_samples);
-        let mut targets = Vec::with_capacity(total_samples);
-
-        for _ in 0..total_samples {
-            let x = Tensor::randn(input_shape, opts)?;
-            let y = Tensor::randint(0, num_classes, &[], opts)?;
-            inputs.push(x);
-            targets.push(y);
-        }
+        let mut shape = vec![n];
+        shape.extend_from_slice(input_shape);
+        let inputs = Tensor::randn(&shape, opts)?;
+        let targets = Tensor::randint(0, num_classes, &[n], opts)?;
 
         Ok(Arc::new(SyntheticDataSet {
             tensors: vec![inputs, targets],
@@ -80,17 +70,13 @@ impl SyntheticDataSet {
         shape: &[i64],
     ) -> Result<Arc<dyn BatchDataSet>> {
         flodl::manual_seed(seed);
+        let n = total_samples as i64;
         let opts = TensorOptions::default();
 
-        let mut inputs = Vec::with_capacity(total_samples);
-
-        for _ in 0..total_samples {
-            let x = Tensor::randn(shape, opts)?;
-            inputs.push(x);
-        }
-
-        // Target = input (clone the tensors)
-        let targets: Vec<Tensor> = inputs.iter().map(|t| t.clone()).collect();
+        let mut full_shape = vec![n];
+        full_shape.extend_from_slice(shape);
+        let inputs = Tensor::randn(&full_shape, opts)?;
+        let targets = inputs.clone();
 
         Ok(Arc::new(SyntheticDataSet {
             tensors: vec![inputs, targets],
@@ -107,21 +93,11 @@ impl SyntheticDataSet {
         output_dim: i64,
     ) -> Result<Arc<dyn BatchDataSet>> {
         flodl::manual_seed(seed);
+        let n = total_samples as i64;
         let opts = TensorOptions::default();
 
-        let w = Tensor::randn(&[input_dim, output_dim], opts)?;
-
-        let mut inputs = Vec::with_capacity(total_samples);
-        let mut targets = Vec::with_capacity(total_samples);
-
-        for _ in 0..total_samples {
-            let x = Tensor::randn(&[seq_len, input_dim], opts)?;
-            // Target from last timestep
-            let last = x.select(0, seq_len - 1)?;
-            let y = last.matmul(&w)?;
-            inputs.push(x);
-            targets.push(y);
-        }
+        let inputs = Tensor::randn(&[n, seq_len, input_dim], opts)?;
+        let targets = Tensor::randn(&[n, output_dim], opts)?;
 
         Ok(Arc::new(SyntheticDataSet {
             tensors: vec![inputs, targets],
@@ -129,7 +105,7 @@ impl SyntheticDataSet {
         }))
     }
 
-    /// Generate a token sequence dataset: input [seq_len] (i64 tokens), target [seq_len] (shifted).
+    /// Generate a token sequence dataset: input [seq_len] (i64 tokens), target [seq_len].
     pub fn token_sequence(
         seed: u64,
         total_samples: usize,
@@ -137,18 +113,11 @@ impl SyntheticDataSet {
         vocab_size: i64,
     ) -> Result<Arc<dyn BatchDataSet>> {
         flodl::manual_seed(seed);
+        let n = total_samples as i64;
         let opts = TensorOptions::default();
 
-        let mut inputs = Vec::with_capacity(total_samples);
-        let mut targets = Vec::with_capacity(total_samples);
-
-        for _ in 0..total_samples {
-            let x = Tensor::randint(0, vocab_size, &[seq_len], opts)?;
-            // Target: shifted by 1 (simple language modeling)
-            let y = Tensor::randint(0, vocab_size, &[seq_len], opts)?;
-            inputs.push(x);
-            targets.push(y);
-        }
+        let inputs = Tensor::randint(0, vocab_size, &[n, seq_len], opts)?;
+        let targets = Tensor::randint(0, vocab_size, &[n, seq_len], opts)?;
 
         Ok(Arc::new(SyntheticDataSet {
             tensors: vec![inputs, targets],
@@ -163,14 +132,16 @@ impl BatchDataSet for SyntheticDataSet {
     }
 
     fn get_batch(&self, indices: &[usize]) -> Result<Vec<Tensor>> {
+        // Build index tensor (wrapping via modulo)
+        let idx: Vec<i64> = indices
+            .iter()
+            .map(|&i| (i % self.len) as i64)
+            .collect();
+        let idx_tensor = Tensor::from_i64(&idx, &[idx.len() as i64], Device::CPU)?;
+
         let mut result = Vec::with_capacity(self.tensors.len());
-        for tensor_group in &self.tensors {
-            let batch: Vec<&Tensor> = indices
-                .iter()
-                .map(|&i| &tensor_group[i % self.len])
-                .collect();
-            let stacked = Tensor::stack(&batch, 0)?;
-            result.push(stacked);
+        for bulk in &self.tensors {
+            result.push(bulk.index_select(0, &idx_tensor)?);
         }
         Ok(result)
     }

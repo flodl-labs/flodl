@@ -1,4 +1,4 @@
-//! Linear regression canary: Linear(128 -> 1), MSE.
+//! Linear regression canary: Linear(4096 -> 1024), MSE.
 //!
 //! The simplest possible model. If this doesn't converge, everything is broken.
 
@@ -14,20 +14,20 @@ use super::ModelDef;
 use crate::config::ModelDefaults;
 use crate::data::SyntheticDataSet;
 
-const INPUT_DIM: i64 = 128;
-const OUTPUT_DIM: i64 = 1;
+const INPUT_DIM: i64 = 4096;
+const OUTPUT_DIM: i64 = 1024;
 
 pub fn def() -> ModelDef {
     ModelDef {
         name: "linear",
-        description: "Canary: Linear(128->1), MSE",
+        description: "Canary: Linear(4096->1024), MSE",
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
         defaults: ModelDefaults {
             epochs: 5,
             batches_per_epoch: 1000,
-            batch_size: 256,
+            batch_size: 1024,
             lr: 0.001,
         },
     }

@@ -21,7 +21,7 @@ pub struct Baseline {
 
 /// Load baselines from a JSON file.
 ///
-/// Format: `[{"model":"linear","mode":"solo:0","loss":1.23,"epochs":5,"batches":1000,"batch_size":64}, ...]`
+/// Format: `[{"model":"linear","mode":"solo-0","loss":1.23,"epochs":5,"batches":1000,"batch_size":64}, ...]`
 pub fn load_baselines(path: &str) -> Result<Vec<Baseline>, String> {
     let data = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -69,7 +69,7 @@ pub fn results_to_baselines(
 /// Validate run results against baselines. Returns (pass_count, fail_count, messages).
 ///
 /// Matches by model name only (ignoring mode) so any DDP mode can be validated
-/// against the solo:0 reference. If multiple baselines exist for a model, uses
+/// against the solo-0 reference. If multiple baselines exist for a model, uses
 /// the first one found.
 ///
 /// A result passes if its final loss is within `tolerance` (relative) of the baseline.

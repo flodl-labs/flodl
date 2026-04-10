@@ -1,4 +1,4 @@
-//! 6 iterations via `.loop_body().for_n()`, 512D, MSE.
+//! 24 iterations via `.loop_body().for_n()`, 2048D, MSE.
 //!
 //! Tests iterative refinement under DDP parameter averaging.
 
@@ -14,9 +14,9 @@ use super::ModelDef;
 use crate::config::ModelDefaults;
 use crate::data::SyntheticDataSet;
 
-const DIM: i64 = 512;
-const OUTPUT_DIM: i64 = 128;
-const N_ITERS: usize = 6;
+const DIM: i64 = 2048;
+const OUTPUT_DIM: i64 = 512;
+const N_ITERS: usize = 24;
 
 pub fn def() -> ModelDef {
     ModelDef {
@@ -27,8 +27,8 @@ pub fn def() -> ModelDef {
         train_fn: train_step,
         defaults: ModelDefaults {
             epochs: 5,
-            batches_per_epoch: 500,
-            batch_size: 128,
+            batches_per_epoch: 1000,
+            batch_size: 512,
             lr: 0.001,
         },
     }

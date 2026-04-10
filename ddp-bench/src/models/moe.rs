@@ -1,4 +1,4 @@
-//! 4-expert Mixture of Experts via `.gate()`, 512D, MSE.
+//! 8-expert Mixture of Experts via `.gate()`, 2048D, MSE.
 //!
 //! Tests soft-routing weights under async parameter averaging.
 
@@ -14,21 +14,21 @@ use super::ModelDef;
 use crate::config::ModelDefaults;
 use crate::data::SyntheticDataSet;
 
-const DIM: i64 = 512;
-const OUTPUT_DIM: i64 = 128;
-const N_EXPERTS: usize = 4;
+const DIM: i64 = 2048;
+const OUTPUT_DIM: i64 = 512;
+const N_EXPERTS: usize = 8;
 
 pub fn def() -> ModelDef {
     ModelDef {
         name: "moe",
-        description: "4-expert MoE via .gate(), tests routing under async",
+        description: "8-expert MoE via .gate(), tests routing under async",
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
         defaults: ModelDefaults {
             epochs: 5,
-            batches_per_epoch: 500,
-            batch_size: 128,
+            batches_per_epoch: 1000,
+            batch_size: 512,
             lr: 0.001,
         },
     }
@@ -38,6 +38,9 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
     let mut experts: Vec<Box<dyn Module>> = Vec::new();
     for _ in 0..N_EXPERTS {
         let expert = FlowBuilder::from(Linear::on_device(DIM, DIM, device)?)
+            .through(GELU)
+            .through(LayerNorm::on_device(DIM, device)?)
+            .through(Linear::on_device(DIM, DIM, device)?)
             .through(GELU)
             .through(LayerNorm::on_device(DIM, device)?)
             .build()?;
