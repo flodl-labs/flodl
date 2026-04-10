@@ -24,3 +24,6 @@ site/Gemfile.lock
 
 # libtorch variants (downloaded or built from source)
 /libtorch/
+
+mempalace.yaml
+entities.json

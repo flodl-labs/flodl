@@ -56,7 +56,10 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(seed: u64, virtual_len: usize, pool_size: usize) -> Result<Arc<dyn BatchDataSet>> {
-    SyntheticDataSet::regression(seed, virtual_len, pool_size, DIM, OUTPUT_DIM)
+    // 8 clusters with per-cluster linear maps; router must learn cluster membership
+    SyntheticDataSet::clustered_regression(
+        seed, virtual_len, pool_size, DIM, OUTPUT_DIM, N_EXPERTS as i64,
+    )
 }
 
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {

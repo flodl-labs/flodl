@@ -59,7 +59,9 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(seed: u64, virtual_len: usize, pool_size: usize) -> Result<Arc<dyn BatchDataSet>> {
-    SyntheticDataSet::classification(seed, virtual_len, pool_size, &[3, 64, 64], NUM_CLASSES)
+    SyntheticDataSet::prototype_classification(
+        seed, virtual_len, pool_size, 3, 64, 64, NUM_CLASSES, 0.3,
+    )
 }
 
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {

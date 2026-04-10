@@ -55,7 +55,8 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(seed: u64, virtual_len: usize, pool_size: usize) -> Result<Arc<dyn BatchDataSet>> {
-    SyntheticDataSet::regression(seed, virtual_len, pool_size, INPUT_DIM, OUTPUT_DIM)
+    // 2-layer teacher: student has excess capacity to learn this exactly
+    SyntheticDataSet::teacher_mlp(seed, virtual_len, pool_size, INPUT_DIM, OUTPUT_DIM, OUTPUT_DIM)
 }
 
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {

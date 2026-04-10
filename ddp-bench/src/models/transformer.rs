@@ -63,7 +63,8 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(seed: u64, virtual_len: usize, pool_size: usize) -> Result<Arc<dyn BatchDataSet>> {
-    SyntheticDataSet::token_sequence(seed, virtual_len, pool_size, SEQ_LEN, VOCAB)
+    // Shift cipher: target[i] = (input[i] + 3) % vocab. Deterministic, learnable.
+    SyntheticDataSet::shift_cipher(seed, virtual_len, pool_size, SEQ_LEN, VOCAB, 3)
 }
 
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {

@@ -28,7 +28,7 @@ pub fn def() -> ModelDef {
             epochs: 5,
             batches_per_epoch: 1000,
             batch_size: 128,
-            lr: 0.001,
+            lr: 0.0003,
         },
     }
 }
@@ -50,7 +50,8 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(seed: u64, virtual_len: usize, pool_size: usize) -> Result<Arc<dyn BatchDataSet>> {
-    SyntheticDataSet::regression(seed, virtual_len, pool_size, DIM, OUTPUT_DIM)
+    // Identity + small perturbation: skip connections pass identity, learned blocks model perturbation
+    SyntheticDataSet::identity_perturbation(seed, virtual_len, pool_size, DIM, OUTPUT_DIM, 0.1)
 }
 
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {

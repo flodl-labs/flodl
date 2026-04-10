@@ -87,7 +87,8 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(seed: u64, virtual_len: usize, pool_size: usize) -> Result<Arc<dyn BatchDataSet>> {
-    SyntheticDataSet::reconstruction(seed, virtual_len, pool_size, &[3, 64, 64])
+    // 16 basis vectors; data lives on a low-rank subspace the autoencoder can learn
+    SyntheticDataSet::low_rank_reconstruction(seed, virtual_len, pool_size, 3, 64, 64, 16)
 }
 
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {

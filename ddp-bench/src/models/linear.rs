@@ -39,7 +39,7 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(seed: u64, virtual_len: usize, pool_size: usize) -> Result<Arc<dyn BatchDataSet>> {
-    SyntheticDataSet::regression(seed, virtual_len, pool_size, INPUT_DIM, OUTPUT_DIM)
+    SyntheticDataSet::linear_mapping(seed, virtual_len, pool_size, INPUT_DIM, OUTPUT_DIM)
 }
 
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
