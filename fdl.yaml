@@ -1,0 +1,32 @@
+description: flodl - Rust deep learning framework
+
+scripts:
+  build:
+    run: cargo build
+    docker: dev
+  test:
+    run: cargo test
+    docker: dev
+  clippy:
+    run: cargo clippy -- -D warnings
+    docker: dev
+  shell:
+    description: Interactive shell in CUDA container
+    run: bash
+    docker: cuda
+  cuda-test:
+    description: Run CUDA tests (parallel, excludes NCCL/Graph)
+    run: cargo test --features cuda
+    docker: cuda
+  cuda-test-all:
+    description: Full CUDA suite including NCCL isolated tests
+    run: make cuda-test-all
+  cuda-test-nccl:
+    description: NCCL/DDP tests only (isolated processes)
+    run: make cuda-test-nccl
+  bench:
+    description: Run flodl vs PyTorch benchmarks
+    run: make bench
+
+commands:
+  - ddp-bench/

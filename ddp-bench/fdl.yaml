@@ -1,0 +1,40 @@
+description: DDP validation and benchmark suite
+docker: cuda
+entry: cargo run --release --features cuda --
+
+training:
+  epochs: 5
+  seed: 42
+
+output:
+  dir: runs/
+
+jobs:
+  quick:
+    description: Fast smoke test (linear, 1 epoch)
+    training: { epochs: 1 }
+    options: { model: linear, mode: solo-0, batches: 100 }
+
+  full-sweep:
+    description: All models, all DDP modes
+    options: { model: all, mode: all }
+
+  solo-0:
+    description: Solo baseline on fast GPU (all models)
+    options: { model: all, mode: solo-0 }
+
+  solo-1:
+    description: Solo baseline on slow GPU (all models)
+    options: { model: all, mode: solo-1 }
+
+  nccl-async:
+    description: NCCL async for all models
+    options: { model: all, mode: nccl-async }
+
+  nccl-cadence:
+    description: NCCL cadence for all models
+    options: { model: all, mode: nccl-cadence }
+
+  report:
+    description: Generate convergence report from timeline data
+    options: { report: runs/report.md }
