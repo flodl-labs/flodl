@@ -25,5 +25,9 @@ site/Gemfile.lock
 # libtorch variants (downloaded or built from source)
 /libtorch/
 
+# Local fdl config (fdl.yaml.example is committed; fdl copies it on first run)
+fdl.yaml
+fdl.yml
+
 mempalace.yaml
 entities.json

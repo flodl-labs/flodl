@@ -1,6 +1,8 @@
 //! Verbosity-gated output for flodl.
 //!
-//! All output goes to **stdout** (training has no piping use case).
+//! Normal and Verbose levels go to **stdout**.
+//! Debug (`-vv`) and Trace (`-vvv`) go to **stderr** (unbuffered, visible
+//! in Docker non-TTY mode where stdout is block-buffered).
 //! Errors always go to **stderr** via standard `eprintln!` -- never gated.
 //!
 //! ```ignore
@@ -145,26 +147,28 @@ macro_rules! verbose {
     };
 }
 
-/// Prints to stdout at `-vv` (Debug) and above.
+/// Prints to stderr at `-vv` (Debug) and above.
 ///
-/// Internal shortcut. Equivalent to `flodl::msg!(@Debug, ...)`.
+/// Uses stderr so output is unbuffered and visible immediately in Docker
+/// non-TTY mode (stdout is block-buffered there).
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
         if $crate::log::enabled($crate::log::Verbosity::Debug) {
-            println!($($arg)*)
+            eprintln!($($arg)*)
         }
     };
 }
 
-/// Prints to stdout at `-vvv` (Trace) and above.
+/// Prints to stderr at `-vvv` (Trace) and above.
 ///
-/// Internal shortcut. Equivalent to `flodl::msg!(@Trace, ...)`.
+/// Uses stderr so output is unbuffered and visible immediately in Docker
+/// non-TTY mode (stdout is block-buffered there).
 #[macro_export]
 macro_rules! trace {
     ($($arg:tt)*) => {
         if $crate::log::enabled($crate::log::Verbosity::Trace) {
-            println!($($arg)*)
+            eprintln!($($arg)*)
         }
     };
 }

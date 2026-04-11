@@ -534,8 +534,17 @@ impl<M: Module> GpuWorker<M> {
                 self.steps_since_avg = 0;
             }
             ControlMsg::SyncNow => {
+                crate::debug!("  ddp-worker: rank {} SyncNow (step={}, epoch={})", self.rank, self.local_step, self.current_epoch);
                 self.sync_now_nccl()?;
+                crate::debug!("  ddp-worker: rank {} SyncNow done", self.rank);
                 self.steps_since_avg = 0;
+                // Bump local_step and send a timing ack so the coordinator's
+                // nccl_ack mechanism sees step_count > snapshot. Without this,
+                // a SyncNow processed in wait_for_epoch_plan (no batches to
+                // train afterward) leaves nccl_ack permanently false, blocking
+                // all future should_average() calls.
+                self.local_step += 1;
+                let _ = self.report_timing(0.0, None);
             }
             ControlMsg::StartEpoch(plan) => {
                 self.pending_plan = Some(plan);
@@ -656,17 +665,33 @@ impl<M: Module> GpuWorker<M> {
     /// to prevent NCCL deadlock while waiting between epochs.
     /// Returns `Some(plan)` for the next epoch, or `None` on Shutdown/disconnect.
     pub fn wait_for_epoch_plan(&mut self) -> Result<Option<EpochPlan>> {
+        crate::debug!("  ddp-worker: rank {} waiting for plan (step={})", self.rank, self.local_step);
         loop {
             // Check if a plan was queued by dispatch_control (e.g. StartEpoch
             // arrived during Throttle handler). Must be checked each iteration,
             // not just at entry, because dispatch_control may set it mid-loop.
             if let Some(plan) = self.pending_plan.take() {
+                crate::debug!("  ddp-worker: rank {} got plan (pending) epoch={}", self.rank, plan.epoch);
                 return Ok(Some(plan));
             }
             match self.control_rx.recv() {
-                Ok(ControlMsg::StartEpoch(plan)) => return Ok(Some(plan)),
+                Ok(ControlMsg::StartEpoch(plan)) => {
+                    crate::debug!("  ddp-worker: rank {} got plan epoch={}", self.rank, plan.epoch);
+                    return Ok(Some(plan));
+                }
                 Ok(ControlMsg::Shutdown) => return Ok(None),
                 Ok(msg) => {
+                    crate::debug!("  ddp-worker: rank {} wait_for_plan got {:?}", self.rank,
+                        match &msg {
+                            ControlMsg::SyncNow => "SyncNow",
+                            ControlMsg::Throttle => "Throttle",
+                            ControlMsg::RequestParams => "RequestParams",
+                            ControlMsg::Update(_) => "Update",
+                            ControlMsg::Checkpoint { .. } => "Checkpoint",
+                            ControlMsg::Shutdown => "Shutdown",
+                            ControlMsg::StartEpoch(_) => "StartEpoch",
+                        }
+                    );
                     if self.dispatch_control(msg)? {
                         return Ok(None); // Shutdown consumed by handler (e.g. Throttle)
                     }
@@ -776,7 +801,15 @@ impl<M: Module> GpuWorker<M> {
             }
 
             // Consume prefetched batches as they become ready
+            let mut batch_done = 0usize;
             for _ in 0..num_batches {
+                // Process control messages (SyncNow, Throttle) BEFORE blocking
+                // on prefetch. Without this, a SyncNow arriving while the worker
+                // is setting up a new chunk deadlocks: the peer enters AllReduce
+                // but this worker is stuck in batch_rx.recv().
+                if self.handle_control()? {
+                    return Ok(true);
+                }
                 let prefetched = batch_rx.recv()
                     .map_err(|_| TensorError::new("prefetch channel closed"))??;
 
@@ -789,6 +822,7 @@ impl<M: Module> GpuWorker<M> {
                 }
 
                 let (loss, ms) = self.train_step(&prefetched.tensors, train_fn)?;
+                batch_done += 1;
                 total_loss += loss;
                 let norm = if self.steps_since_avg % 10 == 0 {
                     self.compute_param_norm().ok()
@@ -800,6 +834,7 @@ impl<M: Module> GpuWorker<M> {
                     return Ok(true); // Shutdown
                 }
             }
+            crate::debug!("  ddp-worker: rank {} epoch {} chunk done ({} batches)", self.rank, plan.epoch, batch_done);
         } else {
             // Sync path: load one batch at a time, move to device if needed.
             // Used for CPU devices, or CUDA when VRAM is too tight for prefetch.

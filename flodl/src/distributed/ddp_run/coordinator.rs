@@ -565,6 +565,34 @@ impl Coordinator {
         self.last_aggregated_epoch.is_some_and(|e| e + 1 >= self.num_epochs)
     }
 
+    /// Emit a periodic state dump (gated by `-vv` verbosity).
+    pub fn debug_state_dump(&self, tick: u64) {
+        if !crate::log::enabled(crate::log::Verbosity::Debug) {
+            return;
+        }
+        let pools: Vec<_> = self.chunk_pools.iter()
+            .map(|(e, p)| {
+                let inf: Vec<_> = (0..self.world_size)
+                    .map(|r| format!("{}:{}/{}", r, p.completed[r], p.dispatched[r]))
+                    .collect();
+                format!("e{}(cur={}/{} [{}])", e, p.cursor, p.total_samples, inf.join(" "))
+            })
+            .collect();
+        let wall_rounded: Vec<_> = self.wall_ms_accum.iter()
+            .map(|w| (w * 10.0).round() / 10.0)
+            .collect();
+        crate::debug!(
+            "  ddp-state: tick={} steps={:?} wall={:.0?} throttled={:?} \
+             nccl_ack={:?} rank_epoch={:?} active={} last_agg={:?} avg#={} \
+             pools=[{}]",
+            tick, self.steps_since_avg, wall_rounded,
+            self.throttled, self.nccl_ack,
+            self.rank_epoch, self.active_count,
+            self.last_aggregated_epoch, self.avg_count,
+            pools.join(", "),
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Global epoch management
     // -----------------------------------------------------------------------
@@ -677,16 +705,24 @@ impl Coordinator {
         // Only applies when streaming AHEAD of a not-yet-aggregated epoch.
         // If the rank's current epoch is already aggregated, this is a normal
         // transition (all ranks completed), not overshoot.
-        let current_aggregated = self.last_aggregated_epoch
-            .is_some_and(|agg| epoch <= agg);
-        if !current_aggregated {
-            let planned = self.el_che.batch_counts().get(rank).copied().unwrap_or(0);
-            if planned > 0 && self.steps_since_avg[rank] >= planned + self.max_overshoot {
-                crate::debug!(
-                    "  ddp: overshoot gate BLOCKED rank {rank} | steps={} planned={} overshoot={} | wall_ms={:?}",
-                    self.steps_since_avg[rank], planned, self.max_overshoot, self.wall_ms_accum,
-                );
-                return; // At overshoot limit, wait for next AllReduce
+        //
+        // Skip for NCCL backend: overshoot is an async/CPU concept. NCCL
+        // cadence uses AllReduce as its sole coordination mechanism; blocking
+        // the fast GPU here forces it into wait_for_epoch_plan where it can't
+        // send timing messages, leaving nccl_ack permanently false and
+        // deadlocking should_average + check_throttle.
+        if !matches!(self.backend, AverageBackend::Nccl) {
+            let current_aggregated = self.last_aggregated_epoch
+                .is_some_and(|agg| epoch <= agg);
+            if !current_aggregated {
+                let planned = self.el_che.batch_counts().get(rank).copied().unwrap_or(0);
+                if planned > 0 && self.steps_since_avg[rank] >= planned + self.max_overshoot {
+                    crate::debug!(
+                        "  ddp: overshoot gate BLOCKED rank {rank} | steps={} planned={} overshoot={} | wall_ms={:?}",
+                        self.steps_since_avg[rank], planned, self.max_overshoot, self.wall_ms_accum,
+                    );
+                    return; // At overshoot limit, wait for next AllReduce
+                }
             }
         }
 
@@ -1066,6 +1102,15 @@ impl Coordinator {
         // Collectives require all ranks. If any worker has exited,
         // skip averaging to prevent NCCL deadlock or channel disconnect.
         if self.active_count < self.world_size {
+            return false;
+        }
+        // All ranks must have trained at least one batch since the last
+        // sync. A rank at 0 steps is setting up a new chunk (blocked in
+        // prefetch or batch loading) or idle in wait_for_epoch_plan.
+        // Sending SyncNow to it would deadlock: the NCCL collective
+        // blocks the participating rank's GPU while the zero-step rank
+        // can't call AllReduce until its batch setup completes.
+        if self.steps_since_avg.contains(&0) {
             return false;
         }
         match self.policy {
@@ -1718,6 +1763,14 @@ impl Coordinator {
     /// Tracks which ranks are already throttled to avoid sending duplicate
     /// Throttle messages (which would nest blocking loops in the worker).
     pub fn check_throttle(&mut self) {
+        // NCCL cadence uses AllReduce as its coordination mechanism.
+        // Throttle is an async/CPU concept: it blocks the fast worker waiting
+        // for SyncNow, but if the slow worker is idle (between epochs),
+        // should_average never fires and the throttled worker deadlocks.
+        if matches!(self.backend, AverageBackend::Nccl) {
+            return;
+        }
+
         let max_diff = match self.el_che.max_batch_diff() {
             Some(d) => d,
             None => return,
@@ -2334,6 +2387,10 @@ mod tests {
         assert!(coord.el_che.is_calibrated());
         let target = coord.el_che.anchor_wall_ms();
         assert!(target > 0.0, "anchor_wall_ms should be positive after calibration");
+
+        // Satisfy preconditions: steps > 0 and nccl_ack = true.
+        coord.steps_since_avg = vec![1, 1];
+        coord.nccl_ack = vec![true, true];
 
         // Not enough wall time accumulated.
         coord.wall_ms_accum[0] = target * 0.5;

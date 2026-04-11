@@ -926,7 +926,7 @@ fn make_throttle_harness(
         timing_rx, metrics_rx, param_rx,
         final_param_rxs,
         control_txs,
-        ApplyPolicy::Async, AverageBackend::Nccl,
+        ApplyPolicy::Async, AverageBackend::Cpu,
         n, 10000, el_che,
     ).build();
 
@@ -984,6 +984,49 @@ fn test_throttle_zero_is_strict_lockstep() {
         Ok(ControlMsg::Throttle) => {}
         _ => panic!("expected Throttle for rank 0"),
     }
+}
+
+#[test]
+fn test_throttle_skipped_for_nccl() {
+    // NCCL cadence uses AllReduce as its coordination mechanism.
+    // Throttle must be skipped to prevent deadlock when one rank is
+    // idle (between epochs) and the other gets throttled waiting for
+    // a SyncNow that can never fire.
+    let (timing_tx, timing_rx) = mpsc::channel();
+    let (_metrics_tx, metrics_rx) = mpsc::channel();
+    let (_param_tx, param_rx) = mpsc::channel();
+
+    let mut control_txs = Vec::new();
+    let mut control_rxs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..2 {
+        let (tx, rx) = mpsc::channel();
+        control_txs.push(tx);
+        control_rxs.push(rx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    // NCCL backend with max_batch_diff = 3.
+    let el_che = ElChe::new(2, 10).with_max_batch_diff(3);
+    let mut coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Cadence, AverageBackend::Nccl,
+        2, 10000, el_che,
+    ).build();
+
+    // Rank 0 is 10 steps ahead (would trigger throttle with CPU backend).
+    for i in 0..10 {
+        timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i, param_norm: None }).unwrap();
+    }
+    coord.drain_timing();
+    coord.check_throttle();
+
+    // No throttle for NCCL -- cadence AllReduce handles coordination.
+    assert!(control_rxs[0].try_recv().is_err(),
+        "NCCL backend must not throttle (AllReduce is the coordination mechanism)");
 }
 
 #[test]
@@ -2699,7 +2742,7 @@ fn make_streaming_harness_with_metrics(
         timing_rx, metrics_rx, param_rx,
         final_param_rxs,
         control_txs,
-        ApplyPolicy::Cadence, AverageBackend::Nccl,
+        ApplyPolicy::Cadence, AverageBackend::Cpu,
         n, total_samples, el_che,
     )
     .progressive(true)
@@ -2751,7 +2794,7 @@ fn test_streaming_cross_epoch_dispatch() {
     // Rank 0 should have received some dispatch (from epoch 0 or 1).
     // The exact behavior depends on pool sizing, but no crash = the
     // multi-pool logic works.
-    assert!(true, "cross-epoch dispatch did not panic");
+    // If we got here without panic, multi-pool logic works.
 }
 
 #[test]
@@ -2817,6 +2860,69 @@ fn test_overshoot_gate_blocks_runaway() {
     }
     assert!(!got_epoch_1,
         "overshoot gate should prevent cross-epoch dispatch when at limit");
+}
+
+#[test]
+fn test_overshoot_gate_skipped_for_nccl() {
+    // NCCL cadence must not apply the overshoot gate. Blocking the fast
+    // GPU forces it into wait_for_epoch_plan where it can't send timing
+    // messages, leaving nccl_ack permanently false and deadlocking.
+    let (_timing_tx, timing_rx) = mpsc::channel();
+    let (metrics_tx, metrics_rx) = mpsc::channel();
+    let (_param_tx, param_rx) = mpsc::channel();
+    let mut control_txs = Vec::new();
+    let mut control_rxs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..2 {
+        let (tx, rx) = mpsc::channel();
+        control_txs.push(tx);
+        control_rxs.push(rx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    let el_che = ElChe::new(2, 10);
+    let mut coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Cadence, AverageBackend::Nccl,
+        2, 100, el_che,
+    )
+    .progressive(true)
+    .batch_size(10)
+    .num_epochs(3)
+    .max_overshoot(Some(0)) // Would block everything with CPU backend.
+    .build();
+
+    // Create epoch 0 pool, take all samples for both ranks.
+    let pool = super::coordinator::ChunkPool::new(0, 100, 2);
+    coord.chunk_pools.insert(0, pool);
+    coord.chunk_pools.get_mut(&0).unwrap().take_chunk(50, 0);
+    coord.chunk_pools.get_mut(&0).unwrap().take_chunk(50, 1);
+
+    // Rank 0 has trained well past its planned batch count.
+    coord.steps_since_avg[0] = 10;
+    coord.steps_since_avg[1] = 3;
+
+    // Report rank 0 chunk completion.
+    metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 5,
+        epoch_ms: 50.0, samples_processed: 50,
+        scalars: Default::default(),
+    }).unwrap();
+    coord.drain_metrics();
+
+    // With NCCL, the overshoot gate is skipped: rank 0 should get
+    // a cross-epoch StartEpoch even with max_overshoot=0.
+    let mut got_start_epoch = false;
+    while let Ok(msg) = control_rxs[0].try_recv() {
+        if let ControlMsg::StartEpoch(_) = msg {
+            got_start_epoch = true;
+        }
+    }
+    assert!(got_start_epoch,
+        "NCCL backend must skip overshoot gate (AllReduce handles coordination)");
 }
 
 #[test]
@@ -2943,7 +3049,7 @@ fn test_shutdown_with_streaming_pools() {
 
     // Drain dispatch messages from on_epoch_aggregated.
     for rx in &h.control_rxs {
-        while let Ok(_) = rx.try_recv() {}
+        while rx.try_recv().is_ok() {}
     }
 
     // Create epoch 1 pool with both ranks dispatched.

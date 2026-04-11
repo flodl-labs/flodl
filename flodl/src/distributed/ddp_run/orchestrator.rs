@@ -332,7 +332,10 @@ impl DdpHandle {
                 coord.send_all_plans(0);
 
                 let poll_timeout = std::time::Duration::from_micros(100);
+                let mut loop_tick: u64 = 0;
+                let mut last_state_dump = std::time::Instant::now();
                 let loop_err = loop {
+                    loop_tick += 1;
                     if shutdown_coord.load(Ordering::Relaxed) {
                         crate::verbose!("  ddp: coordinator exit: shutdown flag set (worker error?)");
                         break None;
@@ -350,6 +353,13 @@ impl DdpHandle {
                     if coord.all_epochs_done() {
                         break None;
                     }
+
+                    // Periodic state dump (every 2s) for deadlock diagnosis.
+                    if last_state_dump.elapsed().as_secs() >= 2 {
+                        last_state_dump = std::time::Instant::now();
+                        coord.debug_state_dump(loop_tick);
+                    }
+
                     coord.check_throttle();
                     if let Err(e) = coord.poll_cpu_averaging() {
                         shutdown_coord.store(true, Ordering::Relaxed);

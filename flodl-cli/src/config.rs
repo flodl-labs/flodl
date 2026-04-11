@@ -153,20 +153,70 @@ pub struct Job {
 // ── Config discovery ────────────────────────────────────────────────────
 
 const CONFIG_NAMES: &[&str] = &["fdl.yaml", "fdl.yml", "fdl.json"];
+const EXAMPLE_SUFFIXES: &[&str] = &[".example", ".dist"];
 
 /// Walk up from `start` looking for fdl.yaml.
+///
+/// If only an `.example` (or `.dist`) variant exists, offers to copy it
+/// to the real config path. This lets the repo commit `fdl.yaml.example`
+/// while `.gitignore`-ing `fdl.yaml` so users can customize locally.
 pub fn find_config(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
+        // First pass: look for the real config.
         for name in CONFIG_NAMES {
             let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
+        // Second pass: look for .example/.dist variants.
+        for name in CONFIG_NAMES {
+            for suffix in EXAMPLE_SUFFIXES {
+                let example = dir.join(format!("{name}{suffix}"));
+                if example.is_file() {
+                    let target = dir.join(name);
+                    if try_copy_example(&example, &target) {
+                        return Some(target);
+                    }
+                    // User declined: use the example directly.
+                    return Some(example);
+                }
+            }
+        }
         if !dir.pop() {
             return None;
         }
+    }
+}
+
+/// Prompt the user to copy an example config to the real path.
+/// Returns true if the copy succeeded.
+fn try_copy_example(example: &Path, target: &Path) -> bool {
+    let example_name = example.file_name().unwrap_or_default().to_string_lossy();
+    let target_name = target.file_name().unwrap_or_default().to_string_lossy();
+    eprintln!(
+        "fdl: found {example_name} but no {target_name}. \
+         Copy it to create your local config? [Y/n] "
+    );
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    let answer = input.trim().to_lowercase();
+    if answer.is_empty() || answer == "y" || answer == "yes" {
+        match std::fs::copy(example, target) {
+            Ok(_) => {
+                eprintln!("fdl: created {target_name} (edit to customize)");
+                true
+            }
+            Err(e) => {
+                eprintln!("fdl: failed to copy: {e}");
+                false
+            }
+        }
+    } else {
+        false
     }
 }
 
@@ -178,6 +228,8 @@ pub fn load_project(path: &Path) -> Result<ProjectConfig, String> {
 }
 
 /// Load a command config from a sub-directory.
+///
+/// Applies the same `.example`/`.dist` fallback as [`find_config`].
 pub fn load_command(dir: &Path) -> Result<CommandConfig, String> {
     for name in CONFIG_NAMES {
         let path = dir.join(name);
@@ -187,7 +239,25 @@ pub fn load_command(dir: &Path) -> Result<CommandConfig, String> {
             return parse(&content, &path);
         }
     }
-    Err(format!("no fdl.yaml found in {}", dir.display()))
+    // Fallback: try .example/.dist variants.
+    for name in CONFIG_NAMES {
+        for suffix in EXAMPLE_SUFFIXES {
+            let example = dir.join(format!("{name}{suffix}"));
+            if example.is_file() {
+                let target = dir.join(name);
+                if try_copy_example(&example, &target) {
+                    let content = std::fs::read_to_string(&target)
+                        .map_err(|e| format!("cannot read {}: {}", target.display(), e))?;
+                    return parse(&content, &target);
+                }
+                // User declined: load example directly.
+                let content = std::fs::read_to_string(&example)
+                    .map_err(|e| format!("cannot read {}: {}", example.display(), e))?;
+                return parse(&content, &example);
+            }
+        }
+    }
+    Err(format!("no fdl.yml found in {}", dir.display()))
 }
 
 /// Resolve a command path string (e.g. "ddp-bench/") to its short name.

@@ -1,0 +1,84 @@
+description: flodl - Rust deep learning framework
+
+scripts:
+  # --- CPU targets ---
+  build:
+    description: Build (debug)
+    run: cargo build
+    docker: dev
+  test:
+    description: Run all CPU tests
+    run: cargo test -- --nocapture
+    docker: dev
+  test-release:
+    description: Run tests in release mode
+    run: cargo test --release -- --nocapture
+    docker: dev
+  check:
+    description: Type check without building
+    run: cargo check
+    docker: dev
+  clippy:
+    description: Lint (including test code)
+    run: cargo clippy --tests -- -W clippy::all
+    docker: dev
+  doc:
+    description: Generate API docs
+    run: cargo doc --no-deps --document-private-items
+    docker: dev
+  shell:
+    description: Interactive shell in dev container
+    run: bash
+    docker: dev
+
+  # --- CUDA targets ---
+  cuda-build:
+    description: Build with CUDA feature
+    run: cargo build --features cuda
+    docker: cuda
+  cuda-test:
+    description: Run CUDA tests (parallel, excludes NCCL/Graph)
+    run: cargo test --features cuda -- --nocapture
+    docker: cuda
+  cuda-test-all:
+    description: Full CUDA suite (parallel + NCCL isolated + serial)
+    run: cargo test --features cuda -- --nocapture && cargo test --features cuda -- --nocapture --ignored --test-threads=1 nccl && cargo test --features cuda -- --nocapture --ignored --test-threads=1 graph_distribute && cargo test --features cuda -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute
+    docker: cuda
+  cuda-test-nccl:
+    description: NCCL/DDP tests only (isolated processes)
+    run: cargo test --features cuda -- --nocapture --ignored --test-threads=1 nccl && cargo test --features cuda -- --nocapture --ignored --test-threads=1 graph_distribute
+    docker: cuda
+  cuda-test-serial:
+    description: Serial CUDA tests (Graphs, manual_seed, probes)
+    run: cargo test --features cuda -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute
+    docker: cuda
+  cuda-test-graph:
+    description: CUDA Graph tests only (exclusive GPU, single-threaded)
+    run: cargo test --features cuda -- --nocapture --ignored --test-threads=1 cuda_graph
+    docker: cuda
+  cuda-clippy:
+    description: Lint with CUDA feature (including tests)
+    run: cargo clippy --features cuda --tests -- -W clippy::all
+    docker: cuda
+  cuda-shell:
+    description: Interactive shell in CUDA container
+    run: bash
+    docker: cuda
+
+  # --- Benchmarks ---
+  bench:
+    description: Run flodl vs PyTorch benchmarks
+    run: benchmarks/run.sh
+    docker: bench
+  bench-cpu:
+    description: Run CPU-only benchmarks
+    run: benchmarks/run.sh --cpu
+    docker: bench
+
+  # --- fdl CLI ---
+  self-build:
+    description: Rebuild fdl CLI after changes
+    run: cargo install --path flodl-cli
+
+commands:
+  - ddp-bench/

@@ -167,6 +167,10 @@ fn libtorch_env(project_root: &Path) -> Vec<(String, String)> {
 }
 
 /// Spawn a shell command with libtorch env vars set.
+///
+/// `FLODL_VERBOSITY` is forwarded to Docker containers via the
+/// `environment:` section in docker-compose.yml (bare variable name
+/// passes the host value through when set, ignored otherwise).
 fn spawn_docker_shell(command: &str, project_root: &Path) -> ExitCode {
     let env_vars = libtorch_env(project_root);
 
