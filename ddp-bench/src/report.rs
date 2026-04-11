@@ -47,22 +47,17 @@ pub fn save_baselines(path: &str, baselines: &[Baseline]) -> Result<(), String> 
         .map_err(|e| format!("cannot write {path}: {e}"))
 }
 
-/// Build baselines from run results.
-pub fn results_to_baselines(
-    results: &[RunResult],
-    epochs: usize,
-    batches: usize,
-    batch_size: usize,
-) -> Vec<Baseline> {
+/// Build baselines from run results. Uses per-result config.
+pub fn results_to_baselines(results: &[RunResult]) -> Vec<Baseline> {
     results
         .iter()
         .map(|r| Baseline {
             model: r.model_name.clone(),
             mode: r.mode.clone(),
             loss: r.final_loss,
-            epochs,
-            batches,
-            batch_size,
+            epochs: r.epochs,
+            batches: r.batches_per_epoch,
+            batch_size: r.batch_size,
         })
         .collect()
 }
@@ -226,10 +221,26 @@ pub fn generate_report(groups: &[(String, Vec<RunAnalysis>)]) -> String {
         write_model_table(&mut md, model, runs);
     }
 
+    // Convergence quality matrix (loss ratio vs solo-0)
+    md.push_str("## Convergence Quality (loss ratio vs solo-0)\n\n");
+    write_loss_ratio_table(&mut md, groups);
+
+    // Per-epoch loss trajectory
+    if groups.iter().any(|(_, runs)| runs.iter().any(|r| r.epoch_data.len() > 1)) {
+        md.push_str("## Per-Epoch Loss Trajectory\n\n");
+        write_epoch_trajectory(&mut md, groups);
+    }
+
     // Speedup vs sync
     if groups.iter().any(|(_, runs)| runs.len() > 1) {
         md.push_str("## Speedup vs Sync\n\n");
         write_speedup_table(&mut md, groups);
+    }
+
+    // VRAM overhead
+    if groups.iter().any(|(_, runs)| runs.iter().any(|r| !r.vram_stats.is_empty() && r.vram_stats[0].peak_allocated > 0)) {
+        md.push_str("## VRAM Usage\n\n");
+        write_vram_table(&mut md, groups);
     }
 
     // Idle analysis (the main event)
@@ -243,10 +254,16 @@ pub fn generate_report(groups: &[(String, Vec<RunAnalysis>)]) -> String {
     md.push_str("## Idle Breakdown by Cause\n\n");
     write_idle_breakdown(&mut md, groups);
 
-    // ElChe details (anchor + throttle)
-    if groups.iter().any(|(_, runs)| runs.iter().any(|r| r.anchor_changes > 0)) {
+    // ElChe details (anchor + throttle + sync intervals)
+    if groups.iter().any(|(_, runs)| runs.iter().any(|r| r.anchor_changes > 0 || r.sync_count > 0)) {
         md.push_str("## ElChe Calibration\n\n");
         write_elche_details(&mut md, groups);
+    }
+
+    // Epoch overlap (streaming epochs indicator)
+    if groups.iter().any(|(_, runs)| runs.iter().any(|r| r.epoch_overlap_ms > 0.0)) {
+        md.push_str("## Streaming Epoch Overlap\n\n");
+        write_epoch_overlap(&mut md, groups);
     }
 
     md
@@ -275,8 +292,8 @@ fn write_model_table(md: &mut String, model: &str, runs: &[RunAnalysis]) {
         return;
     }
     let _ = writeln!(md, "### {model}\n");
-    md.push_str("| Mode | Loss | Total (s) | Syncs | Avg Sync (ms) | GPU0 | GPU1 | Idle (s) |\n");
-    md.push_str("|------|------|-----------|-------|--------------|------|------|----------|\n");
+    md.push_str("| Mode | Loss | Total (s) | Syncs | Avg Sync (ms) | Bat/Sync | GPU0 | GPU1 | Idle (s) |\n");
+    md.push_str("|------|------|-----------|-------|--------------|----------|------|------|----------|\n");
 
     for r in runs {
         let a0 = r.gpu_active_pct.first().copied().unwrap_or(0.0);
@@ -285,20 +302,117 @@ fn write_model_table(md: &mut String, model: &str, runs: &[RunAnalysis]) {
             .map(|c| c.total_ms)
             .sum::<f64>() / 1000.0;
 
+        let bps = if r.batches_per_sync > 0.0 {
+            format!("{:.1}", r.batches_per_sync)
+        } else {
+            "-".to_string()
+        };
+
         let _ = writeln!(
             md,
-            "| {} | {:.6} | {:.1} | {} | {:.1} | {:.0}% | {:.0}% | {:.1} |",
+            "| {} | {:.6} | {:.1} | {} | {:.1} | {} | {:.0}% | {:.0}% | {:.1} |",
             r.mode,
             r.final_loss,
             r.total_ms as f64 / 1000.0,
             r.sync_count,
             r.avg_sync_ms,
+            bps,
             a0,
             a1,
             total_idle_s,
         );
     }
     md.push('\n');
+}
+
+/// Loss ratio table: mode_loss / solo-0_loss per model.
+fn write_loss_ratio_table(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
+    // Collect all mode names across all groups
+    let mut all_modes: Vec<String> = Vec::new();
+    for (_, runs) in groups {
+        for r in runs {
+            if !all_modes.contains(&r.mode) {
+                all_modes.push(r.mode.clone());
+            }
+        }
+    }
+
+    // Header
+    md.push_str("| Model |");
+    for m in &all_modes {
+        if m == "solo-0" { continue; }
+        let _ = write!(md, " {} |", m);
+    }
+    md.push('\n');
+
+    md.push_str("|-------|");
+    for m in &all_modes {
+        if m == "solo-0" { continue; }
+        let _ = write!(md, "{}|", "-".repeat(m.len() + 2));
+    }
+    md.push('\n');
+
+    for (model, runs) in groups {
+        let solo_loss = runs.iter()
+            .find(|r| r.mode == "solo-0")
+            .map(|r| r.final_loss)
+            .unwrap_or(0.0);
+
+        let _ = write!(md, "| {model} |");
+        for m in &all_modes {
+            if m == "solo-0" { continue; }
+            if let Some(r) = runs.iter().find(|r| r.mode == *m) {
+                if solo_loss.abs() > 1e-10 {
+                    let ratio = r.final_loss / solo_loss;
+                    let _ = write!(md, " {:.2}x |", ratio);
+                } else if r.final_loss.abs() < 1e-10 {
+                    md.push_str(" 1.00x |");
+                } else {
+                    md.push_str(" >100x |");
+                }
+            } else {
+                md.push_str(" - |");
+            }
+        }
+        md.push('\n');
+    }
+    md.push('\n');
+}
+
+/// Per-epoch loss trajectory for each model/mode.
+fn write_epoch_trajectory(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
+    for (model, runs) in groups {
+        let n_epochs = runs.iter().map(|r| r.epoch_data.len()).max().unwrap_or(0);
+        if n_epochs < 2 { continue; }
+
+        let _ = writeln!(md, "### {model}\n");
+
+        // Header: Mode | E0 | E1 | ... | EN
+        let _ = write!(md, "| Mode |");
+        for ep in 0..n_epochs {
+            let _ = write!(md, " E{ep} |");
+        }
+        md.push('\n');
+
+        let _ = write!(md, "|------|");
+        for _ in 0..n_epochs {
+            md.push_str("------|");
+        }
+        md.push('\n');
+
+        for r in runs {
+            let _ = write!(md, "| {} |", r.mode);
+            for ep in 0..n_epochs {
+                if let Some(ed) = r.epoch_data.get(ep) {
+                    let _ = write!(md, " {:.4} |", ed.loss);
+                } else {
+                    md.push_str(" - |");
+                }
+            }
+            md.push('\n');
+        }
+        md.push('\n');
+    }
 }
 
 fn write_speedup_table(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
@@ -343,6 +457,33 @@ fn write_speedup_table(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
             }
         }
         md.push('\n');
+    }
+    md.push('\n');
+}
+
+/// VRAM usage table per mode per GPU.
+fn write_vram_table(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
+    md.push_str("| Model | Mode | GPU0 Peak (MB) | GPU0 Mean (MB) | GPU1 Peak (MB) | GPU1 Mean (MB) |\n");
+    md.push_str("|-------|------|---------------|---------------|---------------|---------------|\n");
+
+    for (model, runs) in groups {
+        for r in runs {
+            let g0 = r.vram_stats.first();
+            let g1 = r.vram_stats.get(1);
+
+            let g0_peak = g0.map(|v| v.peak_allocated / (1024 * 1024)).unwrap_or(0);
+            let g0_mean = g0.map(|v| v.mean_allocated / (1024 * 1024)).unwrap_or(0);
+            let g1_peak = g1.map(|v| v.peak_allocated / (1024 * 1024)).unwrap_or(0);
+            let g1_mean = g1.map(|v| v.mean_allocated / (1024 * 1024)).unwrap_or(0);
+
+            if g0_peak == 0 && g1_peak == 0 { continue; }
+
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} | {} | {} | {} |",
+                model, r.mode, g0_peak, g0_mean, g1_peak, g1_mean,
+            );
+        }
     }
     md.push('\n');
 }
@@ -417,24 +558,73 @@ fn write_idle_breakdown(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) 
 }
 
 fn write_elche_details(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
-    md.push_str("| Model | Mode | Anchor Changes | Throttles | Syncs | CPU Avgs | Avg CPU Avg (ms) |\n");
-    md.push_str("|-------|------|---------------|-----------|-------|---------|----------------|\n");
+    md.push_str("| Model | Mode | Anchors | Throttles | Syncs | Bat/Sync | Avg Sync (ms) | Sync Interval P50/P95 (ms) | CPU Avgs | Avg CPU (ms) |\n");
+    md.push_str("|-------|------|---------|-----------|-------|----------|--------------|---------------------------|---------|-------------|\n");
 
     for (model, runs) in groups {
         for r in runs {
-            if r.anchor_changes == 0 && r.throttle_count == 0 {
+            // Skip solo modes with no DDP activity
+            if r.mode.starts_with("solo") || r.sync_count == 0 {
                 continue;
             }
+
+            let bps = if r.batches_per_sync > 0.0 {
+                format!("{:.1}", r.batches_per_sync)
+            } else {
+                "-".to_string()
+            };
+
+            // Sync interval percentiles
+            let interval_str = if r.sync_intervals.len() >= 2 {
+                let mut sorted = r.sync_intervals.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let p50 = sorted[sorted.len() / 2];
+                let p95_idx = (sorted.len() as f64 * 0.95) as usize;
+                let p95 = sorted[p95_idx.min(sorted.len() - 1)];
+                format!("{:.0}/{:.0}", p50, p95)
+            } else {
+                "-".to_string()
+            };
+
             let _ = writeln!(
                 md,
-                "| {} | {} | {} | {} | {} | {} | {:.1} |",
+                "| {} | {} | {} | {} | {} | {} | {:.1} | {} | {} | {:.1} |",
                 model,
                 r.mode,
                 r.anchor_changes,
                 r.throttle_count,
                 r.sync_count,
+                bps,
+                r.avg_sync_ms,
+                interval_str,
                 r.cpu_avg_count,
                 r.avg_cpu_avg_ms,
+            );
+        }
+    }
+    md.push('\n');
+}
+
+/// Streaming epoch overlap table.
+fn write_epoch_overlap(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
+    md.push_str("| Model | Mode | Overlap (s) | % of Total |\n");
+    md.push_str("|-------|------|------------|------------|\n");
+
+    for (model, runs) in groups {
+        for r in runs {
+            if r.epoch_overlap_ms <= 0.0 { continue; }
+            let pct = if r.total_ms > 0 {
+                r.epoch_overlap_ms / r.total_ms as f64 * 100.0
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                md,
+                "| {} | {} | {:.1} | {:.1}% |",
+                model,
+                r.mode,
+                r.epoch_overlap_ms / 1000.0,
+                pct,
             );
         }
     }

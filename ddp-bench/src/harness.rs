@@ -21,6 +21,10 @@ pub struct RunResult {
     pub epoch_times_ms: Vec<f64>,
     pub total_ms: f64,
     pub timeline_summary: flodl::monitor::TimelineSummary,
+    /// Training config for baseline generation.
+    pub epochs: usize,
+    pub batches_per_epoch: usize,
+    pub batch_size: usize,
 }
 
 /// Run a single (model, mode) combination.
@@ -30,9 +34,14 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
     std::fs::create_dir_all(&run_dir)
         .map_err(|e| TensorError::new(&format!("failed to create {run_dir}: {e}")))?;
 
+    let lr_note = if (config.lr - model_def.defaults.lr).abs() > 1e-10 {
+        format!(", lr={:.1e} ({:.2}x)", config.lr, config.lr / model_def.defaults.lr)
+    } else {
+        String::new()
+    };
     eprintln!(
-        "\n=== {} / {} ({} epochs, {} batches x {}) ===",
-        model_def.name, mode_str, config.epochs, config.batches_per_epoch, config.batch_size,
+        "\n=== {} / {} ({} epochs, {} batches x {}{}) ===",
+        model_def.name, mode_str, config.epochs, config.batches_per_epoch, config.batch_size, lr_note,
     );
 
     // Create dataset.  Virtual length = batches * batch_size so DataLoader
@@ -125,6 +134,9 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         epoch_times_ms: epoch_times,
         total_ms,
         timeline_summary: summary,
+        epochs: config.epochs,
+        batches_per_epoch: config.batches_per_epoch,
+        batch_size: config.batch_size,
     })
 }
 

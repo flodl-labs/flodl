@@ -657,6 +657,10 @@ impl Coordinator {
         if !current_aggregated {
             let planned = self.el_che.batch_counts().get(rank).copied().unwrap_or(0);
             if planned > 0 && self.steps_since_avg[rank] >= planned + self.max_overshoot {
+                crate::debug!(
+                    "  ddp: overshoot gate BLOCKED rank {rank} | steps={} planned={} overshoot={} | wall_ms={:?}",
+                    self.steps_since_avg[rank], planned, self.max_overshoot, self.wall_ms_accum,
+                );
                 return; // At overshoot limit, wait for next AllReduce
             }
         }
@@ -924,6 +928,11 @@ impl Coordinator {
                 if let Some(pool) = self.chunk_pools.get_mut(&msg.epoch) {
                     pool.mark_completed(msg.rank, msg.samples_processed);
                 }
+                crate::debug!(
+                    "  ddp: metrics rank {} epoch {} done | samples={} | pools={:?}",
+                    msg.rank, msg.epoch, msg.samples_processed,
+                    self.chunk_pools.keys().collect::<Vec<_>>(),
+                );
                 self.epoch_buffer.entry(msg.epoch).or_default().push(msg.clone());
                 // Dispatch next chunk to this rank (if pool has work)
                 self.dispatch_next_chunk(msg.rank);
@@ -970,14 +979,21 @@ impl Coordinator {
 
     /// Progressive aggregation: check all pools, fire global event for completed ones.
     ///
-    /// BTreeMap iteration order guarantees epochs are processed in order,
-    /// so epoch 0 always aggregates before epoch 1.
+    /// Only aggregates epoch N if no earlier epoch pool is still active.
+    /// This prevents a fast GPU from streaming ahead and triggering Shutdown
+    /// for the final epoch while the slow GPU is still processing earlier work.
     fn try_aggregate_epochs_progressive(&mut self) {
-        // Collect completed epochs (can't mutate chunk_pools while iterating)
-        let completed: Vec<(usize, f64)> = self.chunk_pools.iter()
-            .filter(|(_, pool)| pool.is_epoch_done())
-            .map(|(&epoch, pool)| (epoch, pool.epoch_elapsed_ms()))
-            .collect();
+        // Collect completed epochs in order, stopping at first incomplete pool.
+        // BTreeMap iterates in ascending key order, so if epoch 1's pool isn't
+        // done, epoch 2 won't aggregate even if its pool is done.
+        let mut completed: Vec<(usize, f64)> = Vec::new();
+        for (&epoch, pool) in &self.chunk_pools {
+            if pool.is_epoch_done() {
+                completed.push((epoch, pool.epoch_elapsed_ms()));
+            } else {
+                break; // Earlier epoch not done: can't aggregate anything after it
+            }
+        }
 
         for (epoch, epoch_ms) in completed {
             self.chunk_pools.remove(&epoch);
@@ -1034,6 +1050,10 @@ impl Coordinator {
                     let min_wall = self.wall_ms_accum.iter()
                         .copied()
                         .fold(f64::MAX, f64::min);
+                    crate::debug!(
+                        "  ddp: should_average cadence | min_wall={min_wall:.0} target={target:.0} steps={:?}",
+                        self.steps_since_avg,
+                    );
                     return min_wall >= target;
                 }
                 // Fallback (uncalibrated): batch-count trigger with equal

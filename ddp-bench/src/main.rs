@@ -35,6 +35,7 @@ fn run() -> flodl::tensor::Result<()> {
     let mut baseline_path = "baselines/baseline.json".to_string();
     let mut tolerance: f64 = 0.15; // 15% relative tolerance
     let mut seed: u64 = 42;
+    let mut lr_scale: Option<f64> = None;
     let mut list = false;
     let mut do_report = false;
     let mut report_file: Option<String> = None;
@@ -99,6 +100,10 @@ fn run() -> flodl::tensor::Result<()> {
                     report_file = Some(args[i].clone());
                 }
             }
+            "--lr-scale" => {
+                i += 1;
+                lr_scale = Some(args[i].parse().expect("invalid --lr-scale"));
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -152,7 +157,16 @@ fn run() -> flodl::tensor::Result<()> {
                 .join(mode)
                 .join("timeline.json");
             match analyze::load_timeline(&path) {
-                Ok(tl) => analyses.push(analyze::analyze(model, mode, &tl)),
+                Ok(tl) => {
+                    let mut a = analyze::analyze(model, mode, &tl);
+                    // Set batches_per_sync from model defaults
+                    if let Some(m) = models::find_model(model) {
+                        let total_batches = m.defaults.batches_per_epoch
+                            * epochs.unwrap_or(m.defaults.epochs);
+                        analyze::set_batches_per_sync(&mut a, total_batches);
+                    }
+                    analyses.push(a);
+                }
                 Err(e) => eprintln!("  skip {model}/{mode}: {e}"),
             }
         }
@@ -236,11 +250,25 @@ fn run() -> flodl::tensor::Result<()> {
                 continue;
             }
 
+            let run_epochs = epochs.unwrap_or(defaults.epochs);
+
+            // LR scaling: explicit --lr-scale takes priority.
+            // When unset and epochs > default, auto-scale LR down so
+            // convergence stretches across the extra epochs.
+            // E.g. 10 epochs with default 5 -> lr_scale = 0.5
+            let effective_lr = if let Some(scale) = lr_scale {
+                defaults.lr * scale
+            } else if run_epochs > defaults.epochs {
+                defaults.lr * (defaults.epochs as f64 / run_epochs as f64)
+            } else {
+                defaults.lr
+            };
+
             let run_config = RunConfig {
-                epochs: epochs.unwrap_or(defaults.epochs),
+                epochs: run_epochs,
                 batches_per_epoch: batches.unwrap_or(defaults.batches_per_epoch),
                 batch_size: batch_size.unwrap_or(defaults.batch_size),
-                lr: defaults.lr,
+                lr: effective_lr,
                 seed,
                 output_dir: output.clone(),
                 monitor_port,
@@ -269,14 +297,8 @@ fn run() -> flodl::tensor::Result<()> {
 
     // Save baseline
     if save_baseline {
-        let bl_epochs = epochs.unwrap_or(5);
-        let bl_batches = batches.unwrap_or(1000);
-        let bl_batch_size = batch_size.unwrap_or(64);
         let baselines = report::results_to_baselines(
             &flat_results.iter().map(|r| (*r).clone()).collect::<Vec<_>>(),
-            bl_epochs,
-            bl_batches,
-            bl_batch_size,
         );
         // Ensure directory exists
         if let Some(parent) = std::path::Path::new(&baseline_path).parent() {
@@ -324,6 +346,7 @@ fn print_help() {
     eprintln!("  --epochs <N>         Override epoch count");
     eprintln!("  --batches <N>        Override batches per epoch");
     eprintln!("  --batch-size <N>     Override batch size");
+    eprintln!("  --lr-scale <F>       Multiply default LR (auto-scales when epochs > default)");
     eprintln!("  --output <DIR>       Output directory (default: runs/)");
     eprintln!("  --monitor <PORT>     Live dashboard port");
     eprintln!("  --validate           Check results against baselines");

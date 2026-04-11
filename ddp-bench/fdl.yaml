@@ -2,6 +2,12 @@ description: DDP validation and benchmark suite
 docker: cuda
 entry: cargo run --release --features cuda --
 
+# Default LRs per model (for reference):
+#   linear=0.001  mlp=0.001  convnet=0.001  lstm=0.001
+#   transformer=0.0005  autoencoder=0.001  residual=0.0003
+#   moe=0.001  feedback=0.001
+# LR auto-scales when --epochs > 5: lr = default * (5 / epochs)
+# Override with --lr-scale <F> to multiply all LRs explicitly.
 training:
   epochs: 5
   seed: 42
@@ -34,6 +40,10 @@ jobs:
   nccl-cadence:
     description: NCCL cadence for all models
     options: { model: all, mode: nccl-cadence }
+
+  validate:
+    description: Check convergence against structured baselines
+    options: { model: all, mode: all, validate: true, baseline: baselines/structured.json }
 
   report:
     description: Generate convergence report from timeline data

@@ -13,6 +13,13 @@ pub struct GpuSample {
     #[allow(dead_code)]
     pub device: u8,
     pub util: u8,
+    /// CUDA caching allocator bytes (from "va" field).
+    pub vram_allocated: u64,
+    /// Physical VRAM used bytes (from "vu" field).
+    #[allow(dead_code)]
+    pub vram_used: u64,
+    /// Total physical VRAM bytes (from "vt" field).
+    pub vram_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +90,31 @@ impl std::fmt::Display for IdleCause {
     }
 }
 
+/// Per-GPU VRAM statistics.
+#[derive(Debug, Clone, Default)]
+pub struct VramStats {
+    #[allow(dead_code)]
+    pub device: u8,
+    /// Peak VRAM allocated (bytes) during the run.
+    pub peak_allocated: u64,
+    /// Mean VRAM allocated (bytes) during the run.
+    pub mean_allocated: u64,
+    /// Total VRAM on this device (bytes).
+    pub total: u64,
+}
+
+/// Per-epoch convergence data.
+#[derive(Debug, Clone)]
+pub struct EpochData {
+    #[allow(dead_code)]
+    pub epoch: usize,
+    /// Loss at end of this epoch (from the last EpochEnd event for this epoch).
+    pub loss: f64,
+    /// Wall-clock span for this epoch (first start to last end, ms).
+    #[allow(dead_code)]
+    pub wall_ms: f64,
+}
+
 /// Aggregate analysis of a single run.
 #[derive(Debug, Clone)]
 pub struct RunAnalysis {
@@ -92,8 +124,8 @@ pub struct RunAnalysis {
     #[allow(dead_code)]
     pub n_epochs: usize,
     pub final_loss: f64,
-    #[allow(dead_code)]
-    pub epoch_times_ms: Vec<f64>,
+    /// Per-epoch convergence trajectory.
+    pub epoch_data: Vec<EpochData>,
     /// Per-GPU active percentage.
     pub gpu_active_pct: Vec<f64>,
     /// Sync event count.
@@ -103,6 +135,8 @@ pub struct RunAnalysis {
     /// Total sync time (ms).
     #[allow(dead_code)]
     pub total_sync_ms: f64,
+    /// Average number of batches between syncs (total_batches / sync_count).
+    pub batches_per_sync: f64,
     /// CPU averaging count and average.
     pub cpu_avg_count: usize,
     pub avg_cpu_avg_ms: f64,
@@ -114,6 +148,12 @@ pub struct RunAnalysis {
     pub idle_gaps: Vec<IdleGap>,
     /// Total idle time per GPU by cause (ms).
     pub idle_by_cause: Vec<IdleByCause>,
+    /// Per-GPU VRAM statistics.
+    pub vram_stats: Vec<VramStats>,
+    /// Total epoch overlap time (ms). Nonzero when streaming epochs overlap.
+    pub epoch_overlap_ms: f64,
+    /// Sync intervals: time between consecutive SyncEnd events (ms).
+    pub sync_intervals: Vec<f64>,
 }
 
 /// Total idle time for one GPU broken down by cause.
@@ -156,6 +196,9 @@ fn parse_samples(val: &serde_json::Value) -> Result<Vec<Sample>, String> {
                 .map(|g| GpuSample {
                     device: g["d"].as_u64().unwrap_or(0) as u8,
                     util: g["u"].as_u64().unwrap_or(0) as u8,
+                    vram_allocated: g["va"].as_u64().unwrap_or(0),
+                    vram_used: g["vu"].as_u64().unwrap_or(0),
+                    vram_total: g["vt"].as_u64().unwrap_or(0),
                 })
                 .collect()
         } else {
@@ -232,6 +275,28 @@ pub fn analyze(model: &str, mode: &str, tl: &Timeline) -> RunAnalysis {
         }
     }
 
+    // VRAM statistics per GPU
+    let mut vram_stats: Vec<VramStats> = (0..n_gpus)
+        .map(|i| VramStats { device: i as u8, ..Default::default() })
+        .collect();
+    if sample_count > 0 {
+        let mut vram_sums: Vec<u64> = vec![0; n_gpus];
+        for s in &tl.samples {
+            for (i, g) in s.gpus.iter().enumerate() {
+                if g.vram_allocated > vram_stats[i].peak_allocated {
+                    vram_stats[i].peak_allocated = g.vram_allocated;
+                }
+                vram_sums[i] += g.vram_allocated;
+                if g.vram_total > 0 {
+                    vram_stats[i].total = g.vram_total;
+                }
+            }
+        }
+        for (i, sum) in vram_sums.iter().enumerate() {
+            vram_stats[i].mean_allocated = sum / sample_count as u64;
+        }
+    }
+
     // Sync stats
     let mut sync_count = 0usize;
     let mut sync_total_ms = 0.0f64;
@@ -240,10 +305,16 @@ pub fn analyze(model: &str, mode: &str, tl: &Timeline) -> RunAnalysis {
     let mut anchor_changes = 0usize;
     let mut throttle_count = 0usize;
 
+    // Track sync intervals (time between consecutive SyncEnd events)
+    let mut sync_end_times: Vec<u64> = Vec::new();
+
     for e in &tl.events {
         match &e.kind {
             EventKind::SyncStart => sync_count += 1,
-            EventKind::SyncEnd { ms } => sync_total_ms += ms,
+            EventKind::SyncEnd { ms } => {
+                sync_total_ms += ms;
+                sync_end_times.push(e.t);
+            }
             EventKind::CpuAvgStart => cpu_avg_count += 1,
             EventKind::CpuAvgEnd { ms } => cpu_avg_total_ms += ms,
             EventKind::Anchor { .. } => anchor_changes += 1,
@@ -252,7 +323,11 @@ pub fn analyze(model: &str, mode: &str, tl: &Timeline) -> RunAnalysis {
         }
     }
 
-    // Epoch info
+    let sync_intervals: Vec<f64> = sync_end_times.windows(2)
+        .map(|w| (w[1] - w[0]) as f64)
+        .collect();
+
+    // Epoch info: collect all start/end events per epoch
     let mut epoch_ends: Vec<(usize, f64, u64)> = Vec::new(); // (epoch, loss, t)
     let mut epoch_starts: Vec<(usize, u64)> = Vec::new();
     for e in &tl.events {
@@ -265,18 +340,60 @@ pub fn analyze(model: &str, mode: &str, tl: &Timeline) -> RunAnalysis {
 
     let final_loss = epoch_ends.last().map(|(_, l, _)| *l).unwrap_or(0.0);
 
-    // Epoch times: group epoch_start/epoch_end by epoch number.
-    // Multiple ranks emit these, so take max(end) - min(start) per epoch.
+    // Per-epoch data: wall time + loss trajectory
     let max_epoch = epoch_ends.iter().map(|(e, _, _)| *e).max().unwrap_or(0);
-    let n_epochs = max_epoch + 1;
-    let mut epoch_times_ms = Vec::with_capacity(n_epochs);
+    let n_epochs = if epoch_ends.is_empty() { 0 } else { max_epoch + 1 };
+    let mut epoch_data = Vec::with_capacity(n_epochs);
+
+    // Collect epoch spans for overlap detection
+    let mut epoch_spans: Vec<(u64, u64)> = Vec::with_capacity(n_epochs); // (min_start, max_end)
+
     for ep in 0..n_epochs {
-        let starts: Vec<u64> = epoch_starts.iter().filter(|(e, _)| *e == ep).map(|(_, t)| *t).collect();
-        let ends: Vec<u64> = epoch_ends.iter().filter(|(e, _, _)| *e == ep).map(|(_, _, t)| *t).collect();
-        if let (Some(&s), Some(&e)) = (starts.iter().min(), ends.iter().max()) {
-            epoch_times_ms.push((e - s) as f64);
+        let starts: Vec<u64> = epoch_starts.iter()
+            .filter(|(e, _)| *e == ep)
+            .map(|(_, t)| *t)
+            .collect();
+        let ends: Vec<u64> = epoch_ends.iter()
+            .filter(|(e, _, _)| *e == ep)
+            .map(|(_, _, t)| *t)
+            .collect();
+        // Loss: use the last EpochEnd for this epoch (most complete)
+        let loss = epoch_ends.iter()
+            .filter(|(e, _, _)| *e == ep)
+            .last()
+            .map(|(_, l, _)| *l)
+            .unwrap_or(0.0);
+
+        let wall_ms = match (starts.iter().min(), ends.iter().max()) {
+            (Some(&s), Some(&e)) => {
+                epoch_spans.push((s, e));
+                (e - s) as f64
+            }
+            _ => {
+                epoch_spans.push((0, 0));
+                0.0
+            }
+        };
+
+        epoch_data.push(EpochData { epoch: ep, loss, wall_ms });
+    }
+
+    // Epoch overlap: sum of overlapping time between consecutive epoch spans
+    let mut epoch_overlap_ms = 0.0f64;
+    for pair in epoch_spans.windows(2) {
+        let (_, prev_end) = pair[0];
+        let (next_start, _) = pair[1];
+        if prev_end > next_start {
+            epoch_overlap_ms += (prev_end - next_start) as f64;
         }
     }
+
+    // Estimate total batches from epoch events for batches-per-sync
+    // Each epoch has total_samples / batch_size batches. We estimate from
+    // the total run: n_epochs worth of batches across all ranks.
+    // For now, use sync_count directly since we know the total from the run config.
+    // batches_per_sync is computed externally where batch counts are known.
+    // Here we store the raw sync_intervals for the report to use.
 
     // Idle gap detection per GPU
     let mut all_gaps: Vec<IdleGap> = Vec::new();
@@ -340,23 +457,38 @@ pub fn analyze(model: &str, mode: &str, tl: &Timeline) -> RunAnalysis {
             + idle_by_cause[gpu_idx].unexplained_ms;
     }
 
+    // batches_per_sync: caller should set this from run config, but we can
+    // approximate from sync intervals if needed. Default to 0 (unknown).
+    let batches_per_sync = 0.0;
+
     RunAnalysis {
         model: model.to_string(),
         mode: mode.to_string(),
         total_ms,
         n_epochs,
         final_loss,
-        epoch_times_ms,
+        epoch_data,
         gpu_active_pct,
         sync_count,
         avg_sync_ms: if sync_count > 0 { sync_total_ms / sync_count as f64 } else { 0.0 },
         total_sync_ms: sync_total_ms,
+        batches_per_sync,
         cpu_avg_count,
         avg_cpu_avg_ms: if cpu_avg_count > 0 { cpu_avg_total_ms / cpu_avg_count as f64 } else { 0.0 },
         anchor_changes,
         throttle_count,
         idle_gaps: all_gaps,
         idle_by_cause,
+        vram_stats,
+        epoch_overlap_ms,
+        sync_intervals,
+    }
+}
+
+/// Post-process: set batches_per_sync from known batch counts.
+pub fn set_batches_per_sync(analysis: &mut RunAnalysis, total_batches: usize) {
+    if analysis.sync_count > 0 {
+        analysis.batches_per_sync = total_batches as f64 / analysis.sync_count as f64;
     }
 }
 

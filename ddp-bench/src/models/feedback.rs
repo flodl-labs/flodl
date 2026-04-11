@@ -21,7 +21,7 @@ const N_ITERS: usize = 24;
 pub fn def() -> ModelDef {
     ModelDef {
         name: "feedback",
-        description: "6-iter feedback loop, tests iterative refinement + DDP",
+        description: "24-iter feedback loop, tests iterative refinement + DDP",
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
