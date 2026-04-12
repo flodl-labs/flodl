@@ -16,7 +16,7 @@ benchmarks/rounds/
 benchmarks/report*.txt
 ddp-bench/runs-*/
 ddp-bench/data/
-data/
+/data/
 
 # Generated guide pages (built from site/_stubs/ + docs/ by site/build_guide.py)
 site/guide/*.md
