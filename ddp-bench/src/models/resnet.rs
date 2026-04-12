@@ -48,24 +48,24 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
     Ok(Box::new(ResNet20::new(device)?))
 }
 
-fn make_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
+pub fn make_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
     let cifar = crate::download::ensure_cifar10(&cfg.data_dir)?;
     Ok(Arc::new(cifar))
 }
 
-fn make_test_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
+pub fn make_test_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
     let cifar = crate::download::ensure_cifar10_test(&cfg.data_dir)?;
     Ok(Arc::new(cifar))
 }
 
-fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
+pub fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
     let input = Variable::new(batch[0].clone(), false);
     let target = Variable::new(batch[1].to_dtype(DType::Int64)?, false);
     let pred = model.forward(&input)?;
     flodl::cross_entropy_loss(&pred, &target)
 }
 
-fn eval_accuracy(model: &dyn Module, batch: &[Tensor]) -> Result<f64> {
+pub fn eval_accuracy(model: &dyn Module, batch: &[Tensor]) -> Result<f64> {
     // Normalize test images (same constants as training augmentation).
     let normed = cifar10_normalize(&batch[0])?;
     let input = Variable::new(normed, false);
@@ -82,7 +82,7 @@ fn eval_accuracy(model: &dyn Module, batch: &[Tensor]) -> Result<f64> {
 // ---------------------------------------------------------------------------
 
 /// Per-channel normalize: (x - mean) / std.
-fn cifar10_normalize(images: &Tensor) -> Result<Tensor> {
+pub fn cifar10_normalize(images: &Tensor) -> Result<Tensor> {
     let device = images.device();
     let mean = Tensor::from_f32(&CIFAR10_MEAN, &[1, 3, 1, 1], device)?;
     let std = Tensor::from_f32(&CIFAR10_STD, &[1, 3, 1, 1], device)?;
@@ -94,7 +94,7 @@ fn cifar10_normalize(images: &Tensor) -> Result<Tensor> {
 /// 2. Pad 4px (zero = mean in normalized space)
 /// 3. Random crop 32x32
 /// 4. Random horizontal flip (p=0.5)
-fn augment_cifar10(batch: &[Tensor]) -> Result<Vec<Tensor>> {
+pub fn augment_cifar10(batch: &[Tensor]) -> Result<Vec<Tensor>> {
     let images = cifar10_normalize(&batch[0])?;
 
     // Pad 4px on each spatial side: [B,3,32,32] -> [B,3,40,40]

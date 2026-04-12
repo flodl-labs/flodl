@@ -113,7 +113,7 @@ pub fn record_scalar(name: &str, value: f64) {
 ///
 /// Called by [`GpuWorker`] at epoch boundaries to package accumulated scalars
 /// into the [`MetricsMsg`].
-pub(crate) fn drain_scalars() -> HashMap<String, (f64, usize)> {
+pub fn drain_scalars() -> HashMap<String, (f64, usize)> {
     SCALAR_ACCUM.with(|acc| std::mem::take(&mut *acc.borrow_mut()))
 }
 

@@ -354,6 +354,9 @@ fn run_solo(
                 loss: final_loss,
             });
 
+            // Drain per-batch scalars from record_scalar (training accuracy etc.).
+            let scalars = drain_epoch_scalars();
+
             // Eval metric (accuracy, etc.) if available.
             // Use held-out test data when present, otherwise fall back to training data.
             if let Some(eval_fn) = model_def.eval_fn {
@@ -374,11 +377,15 @@ fn run_solo(
                     Ok(if eval_samples > 0 { total_metric / eval_samples as f64 } else { 0.0 })
                 })?;
                 model.train();
-                let line = format!("epoch {epoch}: loss={final_loss:.6}, metric={avg:.4}, time={epoch_ms:.0}ms");
+                let mut line = format!("epoch {epoch}: loss={final_loss:.6}, metric={avg:.4}");
+                line.push_str(&format_scalars(&scalars));
+                line.push_str(&format!(", time={epoch_ms:.0}ms"));
                 eprintln!("    {line}");
                 log_lines.push(line);
             } else {
-                let line = format!("epoch {epoch}: loss={final_loss:.6}, time={epoch_ms:.0}ms");
+                let mut line = format!("epoch {epoch}: loss={final_loss:.6}");
+                line.push_str(&format_scalars(&scalars));
+                line.push_str(&format!(", time={epoch_ms:.0}ms"));
                 eprintln!("    {line}");
                 log_lines.push(line);
             }
@@ -493,9 +500,17 @@ fn run_sync(
 
             let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
             final_loss = if batch_count > 0 { total_loss / batch_count as f64 } else { 0.0 };
-            log_lines.push(format!("epoch {epoch}: loss={final_loss:.6}, time={epoch_ms:.0}ms"));
+            let scalars = drain_epoch_scalars();
+            let mut line = format!("epoch {epoch}: loss={final_loss:.6}");
+            line.push_str(&format_scalars(&scalars));
+            line.push_str(&format!(", time={epoch_ms:.0}ms"));
+            eprintln!("    {line}");
+            log_lines.push(line);
 
             graph.record_scalar("loss", final_loss);
+            for (k, v) in &scalars {
+                graph.record_scalar(k, *v);
+            }
             graph.flush(&[]);
             monitor.log(epoch, epoch_start.elapsed(), graph);
             epoch_times.push(epoch_ms);
@@ -522,9 +537,17 @@ fn run_sync(
 
             let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
             final_loss = total_loss / batches_per_epoch as f64;
-            log_lines.push(format!("epoch {epoch}: loss={final_loss:.6}, time={epoch_ms:.0}ms"));
+            let scalars = drain_epoch_scalars();
+            let mut line = format!("epoch {epoch}: loss={final_loss:.6}");
+            line.push_str(&format_scalars(&scalars));
+            line.push_str(&format!(", time={epoch_ms:.0}ms"));
+            eprintln!("    {line}");
+            log_lines.push(line);
 
             graph.record_scalar("loss", final_loss);
+            for (k, v) in &scalars {
+                graph.record_scalar(k, *v);
+            }
             graph.flush(&[]);
             monitor.log(epoch, epoch_start.elapsed(), graph);
             epoch_times.push(epoch_ms);
@@ -591,7 +614,13 @@ fn run_builder(
     while let Some(metrics) = handle.next_metrics() {
         final_loss = metrics.avg_loss;
         epoch_times.push(metrics.epoch_ms);
-        let line = format!("epoch {}: loss={:.6}, time={:.0}ms", metrics.epoch, metrics.avg_loss, metrics.epoch_ms);
+        // Build log line: loss + model-defined scalars + time.
+        let scalars: std::collections::BTreeMap<String, f64> =
+            metrics.scalars.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let mut line = format!("epoch {}: loss={:.6}", metrics.epoch, metrics.avg_loss);
+        line.push_str(&format_scalars(&scalars));
+        line.push_str(&format!(", time={:.0}ms", metrics.epoch_ms));
+        eprintln!("    {line}");
         log_lines.push(line);
         monitor.log(
             metrics.epoch,
@@ -602,4 +631,29 @@ fn run_builder(
 
     let _state = handle.join()?;
     Ok((final_loss, epoch_times, log_lines))
+}
+
+// ---------------------------------------------------------------------------
+// Scalar helpers (record_scalar / drain_scalars integration)
+// ---------------------------------------------------------------------------
+
+/// Drain thread-local scalars accumulated by `flodl::record_scalar()` during
+/// this epoch and return the per-key mean values.
+fn drain_epoch_scalars() -> std::collections::BTreeMap<String, f64> {
+    flodl::drain_scalars()
+        .into_iter()
+        .map(|(k, (sum, count))| {
+            let mean = if count > 0 { sum / count as f64 } else { 0.0 };
+            (k, mean)
+        })
+        .collect()
+}
+
+/// Format scalars as `, key=value` pairs (sorted, for appending to a log line).
+fn format_scalars(scalars: &std::collections::BTreeMap<String, f64>) -> String {
+    let mut s = String::new();
+    for (k, v) in scalars {
+        s.push_str(&format!(", {k}={v:.4}"));
+    }
+    s
 }

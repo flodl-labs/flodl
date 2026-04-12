@@ -76,7 +76,7 @@ pub use nn::{
     ConvTranspose1d, ConvTranspose2d,
     Conv3d, Conv3dBuilder, ConvTranspose3d,
     GroupNorm, BatchNorm, BatchNorm2d, InstanceNorm,
-    MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d,
+    MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d, AdaptiveAvgPool2d,
     PixelShuffle, PixelUnshuffle, Upsample, Unfold, Fold, Bilinear,
     MultiheadAttention,
     mse_loss, cross_entropy_loss, bce_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss,
@@ -92,7 +92,7 @@ pub use nn::{
 pub use distributed::{
     CudaEvent, CudaEventFlags, CudaStream, StreamGuard,
     NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, ElChe,
-    ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, GpuWorker,
+    ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, drain_scalars, GpuWorker,
 };
 pub use graph::{
     FlowBuilder, MergeOp, Graph, LossContext, MapBuilder, Trend, TrendGroup,

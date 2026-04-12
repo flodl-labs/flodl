@@ -10,6 +10,7 @@ pub mod lenet;
 pub mod logistic;
 pub mod mlp;
 pub mod resnet;
+pub mod resnet_graph;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +67,7 @@ pub fn all_models() -> Vec<ModelDef> {
         mlp::def(),
         lenet::def(),
         resnet::def(),
+        resnet_graph::def(),
         char_rnn::def(),
         gpt_nano::def(),
         conv_ae::def(),
@@ -84,6 +86,7 @@ pub fn model_names() -> Vec<&'static str> {
         "mlp",
         "lenet",
         "resnet",
+        "resnet-graph",
         "char-rnn",
         "gpt-nano",
         "conv-ae",
