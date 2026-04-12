@@ -845,23 +845,17 @@ mod tests {
         if crate::tensor::test_device() != Device::CPU { return; }
         // Verify that backward() + detach_() doesn't leak C++ autograd Nodes.
         // Simulates a training loop: multiple loss terms per step, many steps.
+        // Uses live_tensor_count (C++ handle tracking) instead of RSS which
+        // is unreliable on CI runners with shared memory pressure.
         use crate::nn::{Module, Linear};
         use crate::nn::optim::{Adam, Optimizer};
-
-        fn get_rss_kb() -> usize {
-            std::fs::read_to_string("/proc/self/statm")
-                .ok()
-                .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
-                .map(|pages| pages * 4)
-                .unwrap_or(0)
-        }
 
         let linear = Linear::on_device(256, 256, crate::tensor::test_device()).unwrap();
         let params = linear.parameters();
         let mut opt = Adam::new(&params, 0.001);
         let opts = crate::tensor::test_opts();
 
-        // Warm up — let allocators settle
+        // Warm up -- let allocators settle
         for _ in 0..50 {
             let x = Variable::new(Tensor::randn(&[32, 256], opts).unwrap(), false);
             let y = linear.forward(&x).unwrap();
@@ -871,8 +865,7 @@ mod tests {
             opt.step().unwrap();
         }
 
-        crate::tensor::malloc_trim();
-        let rss_before = get_rss_kb();
+        let handles_before = crate::tensor::live_tensor_count();
 
         for _ in 0..2000 {
             let x = Variable::new(Tensor::randn(&[32, 256], opts).unwrap(), false);
@@ -886,12 +879,12 @@ mod tests {
             opt.step().unwrap();
         }
 
-        crate::tensor::malloc_trim();
-        let rss_after = get_rss_kb();
-        let growth_mb = (rss_after as f64 - rss_before as f64) / 1024.0;
+        let handles_after = crate::tensor::live_tensor_count();
+        let leaked = handles_after as i64 - handles_before as i64;
         assert!(
-            growth_mb < 50.0,
-            "RSS grew by {growth_mb:.1}MB over 2000 training steps — possible grad_fn leak"
+            leaked < 100,
+            "live tensor count grew by {leaked} over 2000 training steps — possible grad_fn leak \
+             (before={handles_before}, after={handles_after})"
         );
     }
 
