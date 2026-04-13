@@ -12,7 +12,22 @@ fn main() {
         .unwrap_or_else(|_| "/usr/local/libtorch".to_string());
     let libtorch = PathBuf::from(&libtorch);
 
-    // Compile shim.cpp as C++17
+    // Unity build: shim.cpp #includes the topic-focused ops_*.cpp files so the
+    // C++ compiler parses torch/torch.h exactly once. Splitting into separate
+    // TUs would multiply torch.h parse cost (~17s/TU) since cc::Build rebuilds
+    // every TU on any change.
+    //
+    // Files listed for cargo:rerun-if-changed below; only shim.cpp is compiled.
+    let shim_includes = [
+        "shim.h",
+        "helpers.h",
+        "ops_tensor.cpp",
+        "ops_nn.cpp",
+        "ops_math_ext.cpp",
+        "ops_training.cpp",
+        "ops_cuda.cpp",
+    ];
+
     let mut build = cc::Build::new();
     build
         .cpp(true)
@@ -55,9 +70,11 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=nccl");
     }
 
-    // Rerun if sources change
+    // Rerun if sources change (shim.cpp + every #included unit + headers).
     println!("cargo:rerun-if-changed=shim.cpp");
-    println!("cargo:rerun-if-changed=shim.h");
+    for src in &shim_includes {
+        println!("cargo:rerun-if-changed={}", src);
+    }
     println!("cargo:rerun-if-env-changed=LIBTORCH_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
 }

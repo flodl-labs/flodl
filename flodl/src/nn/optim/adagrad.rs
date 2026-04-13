@@ -1,0 +1,179 @@
+//! Adagrad optimizer.
+
+use crate::autograd::{Variable, no_grad};
+use crate::tensor::Result;
+
+use crate::nn::parameter::Parameter;
+
+use super::Optimizer;
+
+/// Adagrad optimizer (Duchi et al., 2011).
+///
+/// Adapts learning rate per-parameter based on historical gradient magnitude.
+/// Good for sparse gradients (NLP embeddings).
+///
+/// Update rule:
+///   state_sum += grad^2
+///   param -= lr * grad / (sqrt(state_sum) + eps)
+pub struct Adagrad {
+    params: Vec<Variable>,
+    lr: f64,
+    eps: f64,
+    weight_decay: f64,
+    lr_decay: f64,
+    state_sum: Vec<Option<crate::tensor::Tensor>>,
+    step_count: u64,
+}
+
+/// Builder for Adagrad optimizer.
+pub struct AdagradBuilder {
+    params: Vec<Parameter>,
+    lr: f64,
+    eps: f64,
+    weight_decay: f64,
+    lr_decay: f64,
+}
+
+impl AdagradBuilder {
+    /// Set epsilon for numerical stability (default: 1e-10).
+    pub fn eps(mut self, eps: f64) -> Self { self.eps = eps; self }
+    /// Set L2 penalty / weight decay (default: 0.0).
+    pub fn weight_decay(mut self, wd: f64) -> Self { self.weight_decay = wd; self }
+    /// Set learning rate decay applied each step: `clr = lr / (1 + (step-1) * lr_decay)` (default: 0.0).
+    pub fn lr_decay(mut self, lr_decay: f64) -> Self { self.lr_decay = lr_decay; self }
+
+    /// Build the Adagrad optimizer.
+    pub fn build(self) -> Adagrad {
+        let n = self.params.len();
+        Adagrad {
+            params: self.params.iter().map(|p| p.variable.clone()).collect(),
+            lr: self.lr, eps: self.eps,
+            weight_decay: self.weight_decay, lr_decay: self.lr_decay,
+            state_sum: vec![None; n],
+            step_count: 0,
+        }
+    }
+}
+
+impl Adagrad {
+    /// Create a new Adagrad optimizer with default parameters:
+    /// eps=1e-10, weight_decay=0, lr_decay=0.
+    pub fn new(params: &[Parameter], lr: f64) -> Self {
+        let n = params.len();
+        Adagrad {
+            params: params.iter().map(|p| p.variable.clone()).collect(),
+            lr, eps: 1e-10, weight_decay: 0.0, lr_decay: 0.0,
+            state_sum: vec![None; n],
+            step_count: 0,
+        }
+    }
+
+    /// Create a builder for Adagrad with customizable options.
+    pub fn builder(params: &[Parameter], lr: f64) -> AdagradBuilder {
+        AdagradBuilder {
+            params: params.to_vec(), lr, eps: 1e-10, weight_decay: 0.0, lr_decay: 0.0,
+        }
+    }
+
+    /// Current learning rate.
+    pub fn lr(&self) -> f64 { self.lr }
+}
+
+impl Optimizer for Adagrad {
+    fn lr(&self) -> f64 { self.lr }
+    fn step(&mut self) -> Result<()> {
+        self.step_count += 1;
+        let clr = self.lr / (1.0 + (self.step_count - 1) as f64 * self.lr_decay);
+        no_grad(|| {
+            for (i, param) in self.params.iter().enumerate() {
+                if let Some(mut grad) = param.grad() {
+                    let data = param.data().detach()?;
+                    if self.weight_decay > 0.0 {
+                        grad = grad.add(&data.mul_scalar(self.weight_decay)?)?;
+                    }
+                    let grad2 = grad.mul(&grad)?;
+                    let ss = match self.state_sum[i].take() {
+                        Some(ss) => ss.add(&grad2)?,
+                        None => grad2,
+                    };
+                    let update = grad.div(&ss.sqrt()?.add_scalar(self.eps)?)?.mul_scalar(clr)?;
+                    data.sub_(&update)?;
+                    self.state_sum[i] = Some(ss);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn zero_grad(&self) {
+        for p in &self.params { p.zero_grad_set_to_none(); }
+    }
+
+    fn set_lr(&mut self, lr: f64) { self.lr = lr; }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::test_helpers::make_param;
+    use crate::tensor::Tensor;
+
+    #[test]
+    fn test_adagrad_steps() {
+        let p = make_param("w", &[1]);
+        let before = p.variable.data().item().unwrap();
+        let mut opt = Adagrad::new(std::slice::from_ref(&p), 0.5);
+        let x = Variable::new(
+            Tensor::from_f32(&[2.0], &[1], crate::tensor::test_device()).unwrap(), false,
+        );
+        let loss = x.mul(&p.variable).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+        opt.step().unwrap();
+        let after = p.variable.data().item().unwrap();
+        // Parameter should change
+        assert!((after - before).abs() > 1e-6, "Adagrad step should change parameter");
+    }
+
+    #[test]
+    fn test_adagrad_convergence_50_steps() {
+        use crate::nn::{Linear, Module, loss::mse_loss};
+
+        let dev = crate::tensor::test_device();
+        let model = Linear::on_device(4, 1, dev).unwrap();
+        let mut opt = Adagrad::new(&model.parameters(), 0.1);
+
+        let x = Variable::new(
+            Tensor::from_f32(
+                &[1.0, 0.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0, 0.0,
+                  0.0, 0.0, 1.0, 0.0,
+                  0.0, 0.0, 0.0, 1.0],
+                &[4, 4], dev,
+            ).unwrap(),
+            false,
+        );
+        let target = Variable::new(
+            Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[4, 1], dev).unwrap(),
+            false,
+        );
+
+        let first_loss;
+        {
+            let pred = model.forward(&x).unwrap();
+            first_loss = mse_loss(&pred, &target).unwrap().item().unwrap();
+        }
+
+        for _ in 0..50 {
+            opt.zero_grad();
+            let pred = model.forward(&x).unwrap();
+            let loss = mse_loss(&pred, &target).unwrap();
+            loss.backward().unwrap();
+            opt.step().unwrap();
+        }
+
+        let pred = model.forward(&x).unwrap();
+        let final_loss = mse_loss(&pred, &target).unwrap().item().unwrap();
+        assert!(final_loss < first_loss * 0.5,
+            "Adagrad should converge: first={}, final={}", first_loss, final_loss);
+    }
+}
