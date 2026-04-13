@@ -1,7 +1,7 @@
 //! Standard dataset parsers (MNIST, CIFAR-10, Shakespeare).
 //!
 //! Pure parsers: accept raw bytes, return tensors. No I/O or download logic.
-//! Implement [`BatchDataSet`] for direct use with [`DataLoader`].
+//! Implement [`super::BatchDataSet`] for direct use with [`super::DataLoader`].
 
 pub mod mnist;
 pub mod cifar10;

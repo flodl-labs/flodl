@@ -1268,7 +1268,7 @@ impl Coordinator {
     /// collective; zeroing is correct.
     ///
     /// Weight-space divergence guard feeds into cadence control via
-    /// [`ConvergenceGuard`]. The guard is mode-aware: Sync skips entirely,
+    /// [`super::ConvergenceGuard`]. The guard is mode-aware: Sync skips entirely,
     /// Cadence/Async use trend detection on `||pre-post|| / ||post||`.
     pub(super) fn finish_averaging_nccl(&mut self) {
         let old_anchor = self.el_che.anchor();

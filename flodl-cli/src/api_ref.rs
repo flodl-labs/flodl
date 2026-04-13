@@ -50,7 +50,7 @@ struct ApiRef {
 /// 1. Explicit path from --path flag
 /// 2. ./flodl/src/ (dev checkout, walk up to 5 levels)
 /// 3. Cargo registry (~/.cargo/registry/src/*/flodl-*/src/)
-/// 4. Cached download (~/.flodl/api-ref-cache/<tag>/)
+/// 4. Cached download (`~/.flodl/api-ref-cache/<tag>/`)
 /// 5. Download from latest GitHub release (cached for next time)
 pub fn find_flodl_src(explicit: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = explicit {
@@ -152,7 +152,7 @@ fn fetch_latest_tag() -> Option<String> {
     None
 }
 
-/// Cache directory for downloaded source: ~/.flodl/api-ref-cache/<tag>/
+/// Cache directory for downloaded source: `~/.flodl/api-ref-cache/<tag>/`
 fn cache_dir(tag: &str) -> Option<PathBuf> {
     let home = home_dir()?;
     let flodl_home = std::env::var("FLODL_HOME")
@@ -197,7 +197,7 @@ fn download_source(tag: &str) -> Result<PathBuf, String> {
 }
 
 /// Find flodl/src/lib.rs inside a cache directory.
-/// GitHub archives extract to <repo-name>-<tag>/ (e.g. floDl-0.3.0/).
+/// GitHub archives extract to `<repo-name>-<tag>/` (e.g. `floDl-0.3.0/`).
 fn find_src_in_cache(cache: &Path) -> Option<PathBuf> {
     if !cache.is_dir() {
         return None;

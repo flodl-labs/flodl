@@ -397,7 +397,7 @@ impl Module for AdaptiveMaxPool2d {
 
 /// Adaptive average pooling that outputs a fixed spatial size regardless of input.
 ///
-/// Wraps [`autograd::adaptive_avg_pool2d`](crate::autograd::adaptive_avg_pool2d).
+/// Wraps [`crate::autograd::adaptive_avg_pool2d`].
 /// Produces exactly `[N, C, output_h, output_w]` from any spatial input, enabling
 /// variable-size inputs.
 ///
