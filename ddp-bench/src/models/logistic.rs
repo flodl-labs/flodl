@@ -22,7 +22,7 @@ pub fn def() -> ModelDef {
         dataset: make_dataset,
         train_fn: train_step,
         eval_fn: Some(eval_accuracy),
-        test_dataset: None,
+        test_dataset: Some(make_test_dataset),
         augment_fn: None,
         optimizer: |p, lr| Box::new(Adam::new(p, lr)),
         scheduler: None,
@@ -44,6 +44,11 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 
 fn make_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
     let mnist = crate::download::ensure_mnist(&cfg.data_dir)?;
+    Ok(Arc::new(mnist))
+}
+
+fn make_test_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
+    let mnist = crate::download::ensure_mnist_test(&cfg.data_dir)?;
     Ok(Arc::new(mnist))
 }
 

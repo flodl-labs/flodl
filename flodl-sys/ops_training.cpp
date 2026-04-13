@@ -12,6 +12,7 @@
 #include "helpers.h"
 #include <ATen/autocast_mode.h>
 #include <torch/csrc/autograd/function.h>
+#include <torch/csrc/autograd/variable.h>
 #include <queue>
 #include <unordered_set>
 #ifdef __linux__
@@ -32,6 +33,55 @@ extern "C" char* flodl_set_requires_grad(FlodlTensor t, int requires_grad,
 
 extern "C" int flodl_requires_grad(FlodlTensor t) {
     return unwrap(t).requires_grad() ? 1 : 0;
+}
+
+// Force creation of the AccumulateGrad node for a leaf tensor with
+// requires_grad=true and return a handle that keeps the node alive.
+//
+// Normally the node is created lazily on first backward() — inside the
+// autograd engine's worker thread, whose current stream is the device
+// default. The node's input_metadata captures getCurrentCUDAStream(device)
+// at construction time, so the node is pinned to the default stream and
+// libtorch fires the "AccumulateGrad node's stream does not match"
+// warning on every run that uses a non-default training stream.
+//
+// The tensor's AutogradMeta stores a weak_ptr to the AccumulateGrad.
+// To keep the node alive across backward calls we must hold a strong
+// shared_ptr somewhere — returning an opaque handle lets the caller
+// own the lifetime.
+//
+// Usage:
+//   1. Under a StreamGuard on the training stream, call this for each
+//      leaf parameter.
+//   2. Store the returned handle(s) for the lifetime of the worker.
+//   3. Call flodl_grad_accumulator_delete to free the handle (and the
+//      AccumulateGrad node, if no backward is in flight).
+//
+// No-op (returns nullptr handle, nullptr error) for non-leaf or
+// non-requires-grad tensors.
+extern "C" char* flodl_ensure_grad_accumulator(FlodlTensor t, void** handle_out) {
+    try {
+        *handle_out = nullptr;
+        auto& tensor = unwrap(t);
+        if (tensor.is_leaf() && tensor.requires_grad()) {
+            auto acc = torch::autograd::impl::grad_accumulator(tensor);
+            // Heap-allocate the shared_ptr so the strong ref survives
+            // after this function returns. Rust owns the deletion.
+            auto* boxed = new std::shared_ptr<torch::autograd::Node>(std::move(acc));
+            *handle_out = static_cast<void*>(boxed);
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
+// Delete a handle returned by flodl_ensure_grad_accumulator.
+// Safe to call with nullptr (no-op).
+extern "C" void flodl_grad_accumulator_delete(void* handle) {
+    if (handle != nullptr) {
+        delete static_cast<std::shared_ptr<torch::autograd::Node>*>(handle);
+    }
 }
 
 extern "C" char* flodl_backward(FlodlTensor t) {

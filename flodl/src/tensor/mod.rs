@@ -797,6 +797,25 @@ impl Tensor {
         unsafe { ffi::flodl_is_leaf(self.handle) != 0 }
     }
 
+    /// Eagerly materialize the AccumulateGrad node for a leaf tensor
+    /// with `requires_grad=true`, pinning its stream to the current
+    /// CUDA stream at the moment of this call. Returns a handle that
+    /// keeps the node alive; drop it to free.
+    ///
+    /// See [`Variable::ensure_grad_accumulator`](crate::autograd::Variable::ensure_grad_accumulator)
+    /// for the motivation. Returns `Ok(None)` for non-leaf or
+    /// non-requires-grad tensors.
+    pub fn ensure_grad_accumulator(&self) -> Result<Option<GradAccumulatorHandle>> {
+        let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
+        let err = unsafe { ffi::flodl_ensure_grad_accumulator(self.handle, &mut handle) };
+        check_err(err)?;
+        if handle.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(GradAccumulatorHandle { handle }))
+        }
+    }
+
     /// Count unique autograd nodes reachable from this tensor's grad_fn.
     /// Returns 0 for leaf tensors or tensors without gradient tracking.
     /// This is the number of backward operations libtorch will execute.
@@ -1138,6 +1157,31 @@ impl Tensor {
     /// Returns true if this tensor is contiguous in memory.
     pub fn is_contiguous(&self) -> bool {
         unsafe { ffi::flodl_is_contiguous(self.handle) != 0 }
+    }
+}
+
+/// Opaque strong-reference handle to a leaf tensor's AccumulateGrad
+/// node. Dropping it frees the node (unless a backward pass still
+/// holds its own reference).
+///
+/// Safe to send across threads: the underlying object is an
+/// immutable `std::shared_ptr<Node>` whose refcount is atomic.
+pub struct GradAccumulatorHandle {
+    handle: *mut std::ffi::c_void,
+}
+
+// The wrapped shared_ptr<Node> only stores a reference; dropping it
+// from any thread is safe because libtorch's shared_ptr refcount is
+// atomic and the Node itself is thread-safe.
+unsafe impl Send for GradAccumulatorHandle {}
+unsafe impl Sync for GradAccumulatorHandle {}
+
+impl Drop for GradAccumulatorHandle {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { ffi::flodl_grad_accumulator_delete(self.handle) };
+            self.handle = std::ptr::null_mut();
+        }
     }
 }
 

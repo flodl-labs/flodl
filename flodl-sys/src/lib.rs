@@ -848,6 +848,24 @@ unsafe extern "C" {
 
     pub fn flodl_requires_grad(t: FlodlTensor) -> i32;
 
+    /// Force creation of the AccumulateGrad node for a leaf tensor with
+    /// `requires_grad=true`. The node's stream is pinned to the current
+    /// CUDA stream at the moment of this call. Use under `StreamGuard`
+    /// to ensure DDP workers' parameters accumulate on the training
+    /// stream, not the autograd engine's default stream.
+    ///
+    /// Writes an opaque handle to `*handle_out` that keeps the node
+    /// alive. The caller must later pass it to
+    /// [`flodl_grad_accumulator_delete`] to free it. For non-leaf or
+    /// non-requires-grad tensors `*handle_out` is set to null.
+    pub fn flodl_ensure_grad_accumulator(
+        t: FlodlTensor, handle_out: *mut *mut c_void,
+    ) -> *mut i8;
+
+    /// Free a handle returned by [`flodl_ensure_grad_accumulator`].
+    /// Safe to call with a null pointer.
+    pub fn flodl_grad_accumulator_delete(handle: *mut c_void);
+
     pub fn flodl_backward(t: FlodlTensor) -> *mut i8;
 
     pub fn flodl_grad(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;

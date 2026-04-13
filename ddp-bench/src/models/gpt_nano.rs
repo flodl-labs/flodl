@@ -31,8 +31,8 @@ pub fn def() -> ModelDef {
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
-        eval_fn: None, // loss is the metric
-        test_dataset: None,
+        eval_fn: Some(eval_loss),
+        test_dataset: Some(make_test_dataset),
         augment_fn: None,
         // nanoGPT: Adam lr=3e-4, warmup 20% then cosine decay to 1e-5
         // (published: 10/50 epochs warmup; total is in batches)
@@ -58,7 +58,12 @@ fn build_model(device: Device) -> Result<Box<dyn Module>> {
 }
 
 fn make_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
-    let shakespeare = crate::download::ensure_shakespeare(&cfg.data_dir, SEQ_LEN)?;
+    let shakespeare = crate::download::ensure_shakespeare_train(&cfg.data_dir, SEQ_LEN)?;
+    Ok(Arc::new(shakespeare))
+}
+
+fn make_test_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
+    let shakespeare = crate::download::ensure_shakespeare_test(&cfg.data_dir, SEQ_LEN)?;
     Ok(Arc::new(shakespeare))
 }
 
@@ -71,6 +76,11 @@ fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
     let flat_pred = pred.reshape(&[-1, shape[shape.len() - 1]])?;
     let flat_target = Variable::new(target.reshape(&[-1])?, false);
     flodl::cross_entropy_loss(&flat_pred, &flat_target)
+}
+
+/// Held-out CE loss (lower is better).
+fn eval_loss(model: &dyn Module, batch: &[Tensor]) -> Result<f64> {
+    train_step(model, batch)?.item()
 }
 
 // ---------------------------------------------------------------------------

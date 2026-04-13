@@ -22,8 +22,8 @@ pub fn def() -> ModelDef {
         build: build_model,
         dataset: make_dataset,
         train_fn: train_step,
-        eval_fn: None, // loss is the metric
-        test_dataset: None,
+        eval_fn: Some(eval_mse),
+        test_dataset: Some(make_test_dataset),
         augment_fn: None,
         optimizer: |p, lr| Box::new(Adam::new(p, lr)),
         scheduler: None,
@@ -83,10 +83,23 @@ fn make_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
     Ok(Arc::new(mnist))
 }
 
+fn make_test_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
+    let mnist = crate::download::ensure_mnist_test(&cfg.data_dir)?;
+    Ok(Arc::new(mnist))
+}
+
 fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
     // Autoencoder: input = target = images
     let input = Variable::new(batch[0].clone(), false);
     let target = Variable::new(batch[0].clone(), false);
     let pred = model.forward(&input)?;
     mse_loss(&pred, &target)
+}
+
+/// Reconstruction MSE on a held-out batch (lower is better).
+fn eval_mse(model: &dyn Module, batch: &[Tensor]) -> Result<f64> {
+    let input = Variable::new(batch[0].clone(), false);
+    let target = Variable::new(batch[0].clone(), false);
+    let pred = model.forward(&input)?;
+    mse_loss(&pred, &target)?.item()
 }

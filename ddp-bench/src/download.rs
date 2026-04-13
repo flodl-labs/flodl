@@ -17,28 +17,44 @@ use flodl::tensor::{Result, TensorError};
 const MNIST_BASE: &str = "https://storage.googleapis.com/cvdf-datasets/mnist";
 const MNIST_TRAIN_IMAGES: &str = "train-images-idx3-ubyte.gz";
 const MNIST_TRAIN_LABELS: &str = "train-labels-idx1-ubyte.gz";
+const MNIST_TEST_IMAGES: &str = "t10k-images-idx3-ubyte.gz";
+const MNIST_TEST_LABELS: &str = "t10k-labels-idx1-ubyte.gz";
 
 /// Download MNIST training data (if not cached) and parse it.
 ///
 /// Files are cached in `{data_dir}/mnist/`.
 /// Returns 60,000 images `[N, 1, 28, 28]` and labels `[N]`.
 pub fn ensure_mnist(data_dir: &Path) -> Result<Mnist> {
+    ensure_mnist_split(data_dir, MNIST_TRAIN_IMAGES, MNIST_TRAIN_LABELS, "train")
+}
+
+/// Download MNIST test data (if not cached) and parse it.
+///
+/// Files are cached in `{data_dir}/mnist/`.
+/// Returns 10,000 images `[N, 1, 28, 28]` and labels `[N]`.
+pub fn ensure_mnist_test(data_dir: &Path) -> Result<Mnist> {
+    ensure_mnist_split(data_dir, MNIST_TEST_IMAGES, MNIST_TEST_LABELS, "test")
+}
+
+fn ensure_mnist_split(
+    data_dir: &Path, images_file: &str, labels_file: &str, split: &str,
+) -> Result<Mnist> {
     let dir = data_dir.join("mnist");
     ensure_dir(&dir)?;
 
-    let images_path = dir.join(MNIST_TRAIN_IMAGES);
-    let labels_path = dir.join(MNIST_TRAIN_LABELS);
+    let images_path = dir.join(images_file);
+    let labels_path = dir.join(labels_file);
 
     if !images_path.exists() {
-        let url = format!("{MNIST_BASE}/{MNIST_TRAIN_IMAGES}");
+        let url = format!("{MNIST_BASE}/{images_file}");
         download_to_file(&url, &images_path)?;
     }
     if !labels_path.exists() {
-        let url = format!("{MNIST_BASE}/{MNIST_TRAIN_LABELS}");
+        let url = format!("{MNIST_BASE}/{labels_file}");
         download_to_file(&url, &labels_path)?;
     }
 
-    eprintln!("  parsing MNIST...");
+    eprintln!("  parsing MNIST {split}...");
     let images_gz = read_file(&images_path)?;
     let labels_gz = read_file(&labels_path)?;
     Mnist::parse(&images_gz, &labels_gz)
@@ -161,6 +177,9 @@ fn extract_cifar10(tar_gz: &[u8], out_dir: &Path) -> Result<()> {
 const SHAKESPEARE_URL: &str =
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt";
 
+/// Default train fraction for Shakespeare splits (nanoGPT convention).
+const SHAKESPEARE_TRAIN_RATIO: f64 = 0.9;
+
 /// Download Shakespeare text (if not cached) and parse into sequences.
 ///
 /// The file is cached in `{data_dir}/shakespeare/input.txt`.
@@ -181,6 +200,54 @@ pub fn ensure_shakespeare(data_dir: &Path, seq_len: usize) -> Result<Shakespeare
         text.len()
     );
     Shakespeare::parse(&text, seq_len)
+}
+
+/// Shakespeare train split (~90% of sequences).
+///
+/// Built from the same parsed dataset as [`ensure_shakespeare_test`] so
+/// vocab is shared and char indices are comparable across splits.
+pub fn ensure_shakespeare_train(data_dir: &Path, seq_len: usize) -> Result<Shakespeare> {
+    Ok(shakespeare_split(data_dir, seq_len, SHAKESPEARE_TRAIN_RATIO)?.0)
+}
+
+/// Shakespeare test split (~10% of sequences, end of corpus).
+pub fn ensure_shakespeare_test(data_dir: &Path, seq_len: usize) -> Result<Shakespeare> {
+    Ok(shakespeare_split(data_dir, seq_len, SHAKESPEARE_TRAIN_RATIO)?.1)
+}
+
+/// Parse the full Shakespeare corpus, then slice the resulting
+/// `(data, targets)` tensors into train/test halves that share the
+/// same vocab. Splitting after parsing (rather than splitting the raw
+/// text first) guarantees both halves see identical char-to-index
+/// mappings even if a rare character appears in only one side.
+fn shakespeare_split(
+    data_dir: &Path, seq_len: usize, train_ratio: f64,
+) -> Result<(Shakespeare, Shakespeare)> {
+    let full = ensure_shakespeare(data_dir, seq_len)?;
+    let n = full.len() as i64;
+    let n_train = ((n as f64) * train_ratio) as i64;
+    let n_test = n - n_train;
+    if n_train <= 0 || n_test <= 0 {
+        return Err(TensorError::new(&format!(
+            "Shakespeare split: corpus has only {n} sequences, cannot split with ratio {train_ratio}"
+        )));
+    }
+
+    let train = Shakespeare {
+        data: full.data.narrow(0, 0, n_train)?,
+        targets: full.targets.narrow(0, 0, n_train)?,
+        vocab_size: full.vocab_size,
+        char_to_idx: full.char_to_idx.clone(),
+        idx_to_char: full.idx_to_char.clone(),
+    };
+    let test = Shakespeare {
+        data: full.data.narrow(0, n_train, n_test)?,
+        targets: full.targets.narrow(0, n_train, n_test)?,
+        vocab_size: full.vocab_size,
+        char_to_idx: full.char_to_idx,
+        idx_to_char: full.idx_to_char,
+    };
+    Ok((train, test))
 }
 
 // ---------------------------------------------------------------------------

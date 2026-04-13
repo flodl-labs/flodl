@@ -115,6 +115,19 @@ pub struct GpuWorker<M: Module> {
     /// Allocated once at worker creation. `None` when policy == Sync (divergence
     /// is near-zero by construction, no point measuring) or no NCCL comm.
     pre_sync_scratch: Option<Vec<Tensor>>,
+
+    /// Strong references to each parameter's AccumulateGrad node, created
+    /// under `StreamGuard(compute_stream)` during worker init. Keeping
+    /// these alive pins the nodes' streams to `compute_stream` across
+    /// the worker's lifetime; without this, the nodes are GCed between
+    /// iterations and re-created on the autograd engine's default stream,
+    /// triggering libtorch's "AccumulateGrad stream does not match" warning.
+    ///
+    /// DO NOT REMOVE: never read at runtime, existence is the point. The
+    /// `_` prefix signals intentional liveness-only ownership. Dropping
+    /// this field at any point before worker teardown re-introduces the
+    /// stream-mismatch bug on the next backward().
+    _grad_accumulators: Vec<crate::tensor::GradAccumulatorHandle>,
 }
 
 /// Channels bundle returned by [`GpuWorker::channels`] for wiring into the coordinator.
@@ -184,44 +197,12 @@ impl<M: Module> GpuWorker<M> {
         G: FnOnce(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
-        // Create model on the target device
-        let model = model_factory(config.device)?;
-        let params = model.parameters();
-        let buffers = model.buffers();
-
-        // Copy initial params into model variables (no_grad: leaf tensors with requires_grad)
-        if params.len() != config.initial_params.len() {
-            return Err(TensorError::new(&format!(
-                "GpuWorker rank {}: model has {} params but config has {}",
-                config.rank, params.len(), config.initial_params.len()
-            )));
-        }
-        {
-            let _no_grad = NoGradGuard::new();
-            for (p, src) in params.iter().zip(&config.initial_params) {
-                p.variable.data().copy_(src, false)?;
-            }
-        }
-
-        // Copy initial buffers into model buffers
-        if buffers.len() != config.initial_buffers.len() {
-            return Err(TensorError::new(&format!(
-                "GpuWorker rank {}: model has {} buffers but config has {}",
-                config.rank, buffers.len(), config.initial_buffers.len()
-            )));
-        }
-        for (b, src) in buffers.iter().zip(&config.initial_buffers) {
-            b.get().copy_(src, false)?;
-        }
-
-        // Create optimizer for this replica's parameters
-        let optimizer = optim_factory(&params);
-
-        // Extract variable handles (for snapshot/load)
-        let param_vars: Vec<Variable> = params.iter().map(|p| p.variable.clone()).collect();
-        let buffer_list = buffers;
-
-        // Create CUDA streams if on GPU
+        // Create CUDA streams first (before model construction) so model
+        // parameters are allocated on the same stream used by subsequent
+        // forward/backward passes. Without this, AccumulateGrad nodes end
+        // up on the default stream while gradients arrive on compute_stream,
+        // triggering libtorch's "stream does not match" warning and breaking
+        // CUDA graph capture.
         let (compute_stream, comm_stream, copy_done) = if config.device.is_cuda() {
             let cs = CudaStream::new(config.device, false)?;
             let ms = CudaStream::new(config.device, false)?;
@@ -232,6 +213,77 @@ impl<M: Module> GpuWorker<M> {
         } else {
             (None, None, None)
         };
+
+        // Build the model under compute_stream so every leaf tensor
+        // (parameters, buffers) and the AccumulateGrad nodes created at
+        // first backward belong to the training stream.
+        let model = {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            model_factory(config.device)?
+        };
+        let params = model.parameters();
+        let buffers = model.buffers();
+
+        // Copy initial params into model variables on compute_stream
+        // (no_grad: leaf tensors with requires_grad).
+        if params.len() != config.initial_params.len() {
+            return Err(TensorError::new(&format!(
+                "GpuWorker rank {}: model has {} params but config has {}",
+                config.rank, params.len(), config.initial_params.len()
+            )));
+        }
+        {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            let _no_grad = NoGradGuard::new();
+            for (p, src) in params.iter().zip(&config.initial_params) {
+                p.variable.data().copy_(src, false)?;
+            }
+        }
+
+        // Copy initial buffers into model buffers on compute_stream.
+        if buffers.len() != config.initial_buffers.len() {
+            return Err(TensorError::new(&format!(
+                "GpuWorker rank {}: model has {} buffers but config has {}",
+                config.rank, buffers.len(), config.initial_buffers.len()
+            )));
+        }
+        {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            for (b, src) in buffers.iter().zip(&config.initial_buffers) {
+                b.get().copy_(src, false)?;
+            }
+        }
+
+        // Eagerly materialize each parameter's AccumulateGrad node under
+        // compute_stream and hold a strong reference so it survives
+        // between iterations. The node captures the current CUDA stream
+        // at construction time into its input_metadata. If the node is
+        // GCed and re-created on the autograd engine's worker thread
+        // (whose current stream is the device default), libtorch fires
+        // the "AccumulateGrad stream does not match" warning on every
+        // DDP run that uses a non-default training stream.
+        let grad_accumulators: Vec<crate::tensor::GradAccumulatorHandle> = {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            let mut handles = Vec::with_capacity(params.len());
+            for p in &params {
+                if let Some(h) = p.variable.ensure_grad_accumulator()? {
+                    handles.push(h);
+                }
+            }
+            handles
+        };
+
+        // Create optimizer for this replica's parameters on compute_stream
+        // so optimizer state tensors (momentum, Adam moments, ...) are
+        // allocated on the same stream as the gradients that will update them.
+        let optimizer = {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            optim_factory(&params)
+        };
+
+        // Extract variable handles (for snapshot/load)
+        let param_vars: Vec<Variable> = params.iter().map(|p| p.variable.clone()).collect();
+        let buffer_list = buffers;
 
         // Create prefetch worker for async H2D (VRAM gauge).
         // Cap depth at 512 to avoid huge channel allocations when
@@ -311,6 +363,7 @@ impl<M: Module> GpuWorker<M> {
             max_grad_norm: config.max_grad_norm,
             timeline: config.timeline.clone(),
             pre_sync_scratch,
+            _grad_accumulators: grad_accumulators,
         })
     }
 
