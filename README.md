@@ -19,6 +19,7 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
 
 <p align="center">
   <a href="#if-you-know-pytorch-you-know-flodl">PyTorch Users</a> &bull;
+  <a href="https://flodl.dev/thesis"><b>Thesis</b></a> &bull;
   <a href="#getting-started">Getting Started</a> &bull;
   <a href="#the-graph-builder">Graph Builder</a> &bull;
   <a href="#graph-tree-hierarchical-composition">Graph Tree</a> &bull;
@@ -26,6 +27,7 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
   <a href="#multi-gpu-training">Multi-GPU</a> &bull;
   <a href="#pytorch-parity">Parity</a> &bull;
   <a href="#performance">Benchmarks</a> &bull;
+  <a href="https://github.com/fab2s/floDl/blob/main/ROADMAP.md">Roadmap</a> &bull;
   <a href="https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md">Migration Guide</a> &bull;
   <a href="https://github.com/fab2s/floDl/blob/main/docs/tutorials/13-data-loading.md">Data Loading</a>
 </p>

@@ -1,8 +1,9 @@
 //! Optimizers and optimizer state serialization.
 //!
-//! Each optimizer lives in its own submodule: [`sgd`], [`adam`] (also hosts
-//! `AdamW`), [`rmsprop`], [`adagrad`], [`radam`], [`nadam`]. The shared
-//! [`Optimizer`] and [`Stateful`] traits plus per-group LR metadata live here.
+//! Each optimizer lives in its own private submodule and is re-exported here:
+//! [`SGD`], [`Adam`] (also hosts [`AdamW`]), [`RMSprop`], [`Adagrad`],
+//! [`RAdam`], [`NAdam`]. The shared [`Optimizer`] and [`Stateful`] traits plus
+//! per-group LR metadata live here.
 
 use std::io::{Read, Write};
 
