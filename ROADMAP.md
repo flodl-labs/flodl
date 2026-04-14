@@ -69,6 +69,9 @@ not a commitment; only moving one to In Progress is.
 - **Model parallelism**: tensor / pipeline parallelism for models that
   exceed single-GPU VRAM.
 - **Higher-order gradients**: differentiate through backward.
+- **HuggingFace fine-tuning**: safetensors loader, `tokenizers` crate
+  integration, LoRA adapters, pre-built architectures (LLaMA, BERT).
+  Fine-tune published models on heterogeneous consumer GPUs with ElChe.
 
 ---
 
