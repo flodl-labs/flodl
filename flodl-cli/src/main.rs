@@ -509,15 +509,15 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
 
     // --dev: symlink to current binary (always tracks latest build)
     if dev {
-        let self_canonical = self_path.canonicalize().unwrap_or(self_path.clone());
-
-        // Remove existing (file or symlink)
-        if dest.exists() || dest.is_symlink() {
-            let _ = std::fs::remove_file(&dest);
-        }
-
         #[cfg(unix)]
         {
+            let self_canonical = self_path.canonicalize().unwrap_or(self_path.clone());
+
+            // Remove existing (file or symlink)
+            if dest.exists() || dest.is_symlink() {
+                let _ = std::fs::remove_file(&dest);
+            }
+
             match std::os::unix::fs::symlink(&self_canonical, &dest) {
                 Ok(()) => {
                     println!("Linked fdl -> {}", self_canonical.display());
@@ -529,6 +529,8 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
+
+            return print_path_hint(&bin_dir);
         }
 
         #[cfg(not(unix))]
@@ -536,8 +538,6 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
             eprintln!("--dev mode requires Unix (symlinks). Use fdl install without --dev.");
             return ExitCode::FAILURE;
         }
-
-        return print_path_hint(&bin_dir);
     }
 
     // Normal install: download from GitHub if newer, else copy self

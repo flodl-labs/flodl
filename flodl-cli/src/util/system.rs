@@ -1,5 +1,6 @@
 //! Cross-platform system detection (CPU, RAM, OS, Docker, GPU).
 
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::path::Path;
 use std::process::Command;
