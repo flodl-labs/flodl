@@ -145,7 +145,7 @@ fn install_claude(ai_dir: &Option<PathBuf>, skill_filter: Option<&str>) -> Resul
 
         // Install SKILL.md (adapter)
         let adapter_content = if let Some(ai) = ai_dir {
-            let adapter_path = ai.join(format!("adapters/claude/port-skill.md"));
+            let adapter_path = ai.join("adapters/claude/port-skill.md");
             fs::read_to_string(&adapter_path).unwrap_or_else(|_| CLAUDE_ADAPTER.to_string())
         } else {
             CLAUDE_ADAPTER.to_string()

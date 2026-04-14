@@ -6,7 +6,7 @@
 /// ```ignore
 /// optimizer.set_lr(sched.lr(step));
 /// ```
-pub trait Scheduler {
+pub trait Scheduler: Send + Sync {
     /// Learning rate at the given step (0-based).
     fn lr(&self, step: usize) -> f64;
 }

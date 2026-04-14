@@ -1,0 +1,50 @@
+description: DDP validation and benchmark suite
+docker: cuda
+entry: cargo run --release --features cuda --
+
+# Default LRs per model (for reference):
+#   linear=0.001  mlp=0.001  convnet=0.001  lstm=0.001
+#   transformer=0.0005  autoencoder=0.001  residual=0.0003
+#   moe=0.001  feedback=0.001
+# LR auto-scales when --epochs > 5: lr = default * (5 / epochs)
+# Override with --lr-scale <F> to multiply all LRs explicitly.
+training:
+  epochs: 5
+  seed: 42
+
+output:
+  dir: runs/
+
+jobs:
+  quick:
+    description: Fast smoke test (linear, 1 epoch)
+    training: { epochs: 1 }
+    options: { model: linear, mode: solo-0, batches: 100 }
+
+  full-sweep:
+    description: All models, all DDP modes
+    options: { model: all, mode: all }
+
+  solo-0:
+    description: Solo baseline on fast GPU (all models)
+    options: { model: all, mode: solo-0 }
+
+  solo-1:
+    description: Solo baseline on slow GPU (all models)
+    options: { model: all, mode: solo-1 }
+
+  nccl-async:
+    description: NCCL async for all models
+    options: { model: all, mode: nccl-async }
+
+  nccl-cadence:
+    description: NCCL cadence for all models
+    options: { model: all, mode: nccl-cadence }
+
+  validate:
+    description: Check convergence against structured baselines
+    options: { model: all, mode: all, validate: true, baseline: baselines/structured.json }
+
+  report:
+    description: Generate convergence report from timeline data
+    options: { report: runs/report.md }

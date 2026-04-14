@@ -25,6 +25,7 @@
 
 pub mod format;
 pub mod resources;
+pub mod timeline;
 mod server;
 
 use std::fmt::Write;
@@ -34,6 +35,7 @@ use crate::graph::Graph;
 
 pub use format::{format_eta, format_bytes, format_metric};
 pub use resources::{ResourceSample, ResourceSampler, GpuSnapshot};
+pub use timeline::{Timeline, TimelineBroadcast, TimelineEvent, EventKind, TimelineSample, GpuTimelineSample, TimelineSummary};
 
 /// DDP metrics for a single GPU (throughput, batch split, shard size).
 #[derive(Debug, Clone, Default)]
@@ -220,7 +222,7 @@ impl Monitor {
     /// in real time as training progresses.
     pub fn serve(&mut self, port: u16) -> std::io::Result<()> {
         let srv = server::DashboardServer::start(port)?;
-        eprintln!("  dashboard: http://localhost:{}", port);
+        crate::msg!("  dashboard: http://localhost:{}", port);
         srv.set_hardware(self.hardware.clone());
 
         // Sample GPU hardware for immediate tab init (before epoch 1)
@@ -437,7 +439,7 @@ impl Monitor {
             let _ = write!(line, " ({:.0}%)", gpu);
         }
 
-        eprintln!("{}", line);
+        crate::msg!("{}", line);
 
         // --- Dashboard push ---
         if let Some(ref srv) = self.server {
@@ -486,7 +488,7 @@ impl Monitor {
             }
         }
 
-        eprintln!("{}", line);
+        crate::msg!("{}", line);
 
         // Save HTML archive
         if let Some(ref path) = self.save_html {
@@ -495,7 +497,7 @@ impl Monitor {
                     if let Err(e) = std::fs::write(path, html) {
                         eprintln!("  warning: failed to save dashboard archive: {}", e);
                     } else {
-                        eprintln!("  saved: {}", path);
+                        crate::msg!("  saved: {}", path);
                     }
                 }
                 Err(e) => eprintln!("  warning: failed to build dashboard archive: {}", e),

@@ -1,5 +1,11 @@
 # Graph Tree: Composable Subgraph Training
 
+> **ARCHIVED — Historical design doc.** This feature shipped in v0.2.0
+> and is documented for users in
+> [Tutorial 10: Graph Tree](../../tutorials/10-graph-tree.md). Internal
+> links below were written from the original `docs/design/` location;
+> add a `../` if reread.
+
 A design for hierarchical graph composition with label-path addressing and
 per-subgraph training control.
 
@@ -8,7 +14,7 @@ described in the trajectory thesis -- trained graphs nested as modules inside
 parent graphs, with fine-grained control over which parts train, freeze, or
 share gradients.
 
-**Status:** Implemented in v0.2.0. See [Tutorial 10: Graph Tree](../tutorials/10-graph-tree.md)
+**Status:** Implemented in v0.2.0. See [Tutorial 10: Graph Tree](../../tutorials/10-graph-tree.md)
 for the current API and usage examples.
 
 ---

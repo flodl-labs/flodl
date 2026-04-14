@@ -41,6 +41,7 @@
 
 pub mod sampler;
 pub mod loader;
+pub mod datasets;
 pub(crate) mod prefetch;
 
 pub use sampler::{Sampler, RandomSampler, SequentialSampler};

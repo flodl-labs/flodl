@@ -79,6 +79,18 @@ pub struct GpuWorker<M: Module> {
     pub(super) current_epoch: usize,
     /// Queued epoch plan from coordinator (set if StartEpoch arrives during run_epoch_plan).
     pub(super) pending_plan: Option<EpochPlan>,
+    /// Cumulative total batches across all GPUs at last sync.
+    /// Updated by `SetGlobalStep` from the coordinator after averaging.
+    /// Workers compute per-batch LR as `scheduler.lr(global_step + steps_since_avg)`.
+    global_step: usize,
+    /// Per-batch LR scheduler. When set, the worker adjusts the optimizer's
+    /// learning rate before each `optimizer.step()`.
+    scheduler: Option<Arc<dyn crate::nn::Scheduler>>,
+    /// DDP linear-scaling factor (Goyal et al., 2017). Applied multiplicatively
+    /// to the scheduler's output each batch, so schedulers see the scaling too.
+    /// When no scheduler is attached, the scaling is baked into the optimizer
+    /// once at startup via [`Self::scale_lr`]. Default: 1.0 (no scaling).
+    lr_scale: f64,
 
     // -- Checkpoint --
     /// Called on rank 0 after averaging events. Log-and-continue on error.
@@ -96,6 +108,26 @@ pub struct GpuWorker<M: Module> {
     activation_peak_bytes: usize,
     /// Maximum gradient norm for clipping (None = no clipping).
     max_grad_norm: Option<f64>,
+    /// Optional system timeline for event injection.
+    timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
+
+    /// Scratch buffers for pre-sync parameter snapshot (weight-space divergence).
+    /// Allocated once at worker creation. `None` when policy == Sync (divergence
+    /// is near-zero by construction, no point measuring) or no NCCL comm.
+    pre_sync_scratch: Option<Vec<Tensor>>,
+
+    /// Strong references to each parameter's AccumulateGrad node, created
+    /// under `StreamGuard(compute_stream)` during worker init. Keeping
+    /// these alive pins the nodes' streams to `compute_stream` across
+    /// the worker's lifetime; without this, the nodes are GCed between
+    /// iterations and re-created on the autograd engine's default stream,
+    /// triggering libtorch's "AccumulateGrad stream does not match" warning.
+    ///
+    /// DO NOT REMOVE: never read at runtime, existence is the point. The
+    /// `_` prefix signals intentional liveness-only ownership. Dropping
+    /// this field at any point before worker teardown re-introduces the
+    /// stream-mismatch bug on the next backward().
+    _grad_accumulators: Vec<crate::tensor::GradAccumulatorHandle>,
 }
 
 /// Channels bundle returned by [`GpuWorker::channels`] for wiring into the coordinator.
@@ -165,44 +197,12 @@ impl<M: Module> GpuWorker<M> {
         G: FnOnce(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
-        // Create model on the target device
-        let model = model_factory(config.device)?;
-        let params = model.parameters();
-        let buffers = model.buffers();
-
-        // Copy initial params into model variables (no_grad: leaf tensors with requires_grad)
-        if params.len() != config.initial_params.len() {
-            return Err(TensorError::new(&format!(
-                "GpuWorker rank {}: model has {} params but config has {}",
-                config.rank, params.len(), config.initial_params.len()
-            )));
-        }
-        {
-            let _no_grad = NoGradGuard::new();
-            for (p, src) in params.iter().zip(&config.initial_params) {
-                p.variable.data().copy_(src, false)?;
-            }
-        }
-
-        // Copy initial buffers into model buffers
-        if buffers.len() != config.initial_buffers.len() {
-            return Err(TensorError::new(&format!(
-                "GpuWorker rank {}: model has {} buffers but config has {}",
-                config.rank, buffers.len(), config.initial_buffers.len()
-            )));
-        }
-        for (b, src) in buffers.iter().zip(&config.initial_buffers) {
-            b.get().copy_(src, false)?;
-        }
-
-        // Create optimizer for this replica's parameters
-        let optimizer = optim_factory(&params);
-
-        // Extract variable handles (for snapshot/load)
-        let param_vars: Vec<Variable> = params.iter().map(|p| p.variable.clone()).collect();
-        let buffer_list = buffers;
-
-        // Create CUDA streams if on GPU
+        // Create CUDA streams first (before model construction) so model
+        // parameters are allocated on the same stream used by subsequent
+        // forward/backward passes. Without this, AccumulateGrad nodes end
+        // up on the default stream while gradients arrive on compute_stream,
+        // triggering libtorch's "stream does not match" warning and breaking
+        // CUDA graph capture.
         let (compute_stream, comm_stream, copy_done) = if config.device.is_cuda() {
             let cs = CudaStream::new(config.device, false)?;
             let ms = CudaStream::new(config.device, false)?;
@@ -213,6 +213,77 @@ impl<M: Module> GpuWorker<M> {
         } else {
             (None, None, None)
         };
+
+        // Build the model under compute_stream so every leaf tensor
+        // (parameters, buffers) and the AccumulateGrad nodes created at
+        // first backward belong to the training stream.
+        let model = {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            model_factory(config.device)?
+        };
+        let params = model.parameters();
+        let buffers = model.buffers();
+
+        // Copy initial params into model variables on compute_stream
+        // (no_grad: leaf tensors with requires_grad).
+        if params.len() != config.initial_params.len() {
+            return Err(TensorError::new(&format!(
+                "GpuWorker rank {}: model has {} params but config has {}",
+                config.rank, params.len(), config.initial_params.len()
+            )));
+        }
+        {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            let _no_grad = NoGradGuard::new();
+            for (p, src) in params.iter().zip(&config.initial_params) {
+                p.variable.data().copy_(src, false)?;
+            }
+        }
+
+        // Copy initial buffers into model buffers on compute_stream.
+        if buffers.len() != config.initial_buffers.len() {
+            return Err(TensorError::new(&format!(
+                "GpuWorker rank {}: model has {} buffers but config has {}",
+                config.rank, buffers.len(), config.initial_buffers.len()
+            )));
+        }
+        {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            for (b, src) in buffers.iter().zip(&config.initial_buffers) {
+                b.get().copy_(src, false)?;
+            }
+        }
+
+        // Eagerly materialize each parameter's AccumulateGrad node under
+        // compute_stream and hold a strong reference so it survives
+        // between iterations. The node captures the current CUDA stream
+        // at construction time into its input_metadata. If the node is
+        // GCed and re-created on the autograd engine's worker thread
+        // (whose current stream is the device default), libtorch fires
+        // the "AccumulateGrad stream does not match" warning on every
+        // DDP run that uses a non-default training stream.
+        let grad_accumulators: Vec<crate::tensor::GradAccumulatorHandle> = {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            let mut handles = Vec::with_capacity(params.len());
+            for p in &params {
+                if let Some(h) = p.variable.ensure_grad_accumulator()? {
+                    handles.push(h);
+                }
+            }
+            handles
+        };
+
+        // Create optimizer for this replica's parameters on compute_stream
+        // so optimizer state tensors (momentum, Adam moments, ...) are
+        // allocated on the same stream as the gradients that will update them.
+        let optimizer = {
+            let _guard = compute_stream.as_ref().map(StreamGuard::new);
+            optim_factory(&params)
+        };
+
+        // Extract variable handles (for snapshot/load)
+        let param_vars: Vec<Variable> = params.iter().map(|p| p.variable.clone()).collect();
+        let buffer_list = buffers;
 
         // Create prefetch worker for async H2D (VRAM gauge).
         // Cap depth at 512 to avoid huge channel allocations when
@@ -246,6 +317,17 @@ impl<M: Module> GpuWorker<M> {
             (None, 0)
         };
 
+        // Allocate scratch buffers for weight-space divergence measurement.
+        // Skip for Sync mode (AllReduce every batch, divergence near-zero).
+        let pre_sync_scratch = if nccl_comm.is_some() && config.policy != super::ApplyPolicy::Sync {
+            let scratch: Result<Vec<Tensor>> = param_vars.iter()
+                .map(|v| Tensor::zeros_like(&v.data()))
+                .collect();
+            scratch.ok()
+        } else {
+            None
+        };
+
         Ok(GpuWorker {
             model,
             optimizer: Box::new(optimizer),
@@ -271,11 +353,17 @@ impl<M: Module> GpuWorker<M> {
             current_version: 0,
             current_epoch: 0,
             pending_plan: None,
+            global_step: 0,
+            scheduler: None,
+            lr_scale: 1.0,
             checkpoint_fn,
             prefetch,
             per_sample_bytes,
             activation_peak_bytes: 0,
             max_grad_norm: config.max_grad_norm,
+            timeline: config.timeline.clone(),
+            pre_sync_scratch,
+            _grad_accumulators: grad_accumulators,
         })
     }
 
@@ -307,6 +395,39 @@ impl<M: Module> GpuWorker<M> {
     /// Set the learning rate on this worker's optimizer.
     pub fn set_lr(&mut self, lr: f64) {
         self.optimizer.set_lr(lr);
+    }
+
+    /// Current learning rate on this worker's optimizer. Reflects the most
+    /// recent value written by either [`Self::set_lr`], the attached
+    /// scheduler (in `train_step`), or [`Self::scale_lr`].
+    pub fn current_lr(&self) -> f64 {
+        self.optimizer.lr()
+    }
+
+    /// Scale the learning rate by a factor (for DDP linear scaling rule).
+    ///
+    /// Applies the scaling to the optimizer immediately. Has no effect on
+    /// subsequent schedulers: use [`Self::set_lr_scale`] for a factor that
+    /// persists across scheduler updates.
+    pub fn scale_lr(&mut self, factor: f64) {
+        self.optimizer.scale_lr(factor);
+    }
+
+    /// Set the DDP linear-scaling factor without touching the optimizer's
+    /// current LR. Applied multiplicatively to the attached scheduler's
+    /// output on every batch, so the scaling survives per-batch LR updates.
+    pub fn set_lr_scale(&mut self, scale: f64) {
+        self.lr_scale = scale;
+    }
+
+    /// Attach a per-batch LR scheduler.
+    ///
+    /// When set, the worker computes
+    /// `scheduler.lr(global_step + steps_since_avg) * lr_scale` before each
+    /// optimizer step, ensuring the LR tracks global training progress and
+    /// honors the DDP linear-scaling rule.
+    pub fn set_scheduler(&mut self, sched: Arc<dyn crate::nn::Scheduler>) {
+        self.scheduler = Some(sched);
     }
 
     /// A reference to the concrete model.
@@ -388,29 +509,78 @@ impl<M: Module> GpuWorker<M> {
     /// All ranks must process SyncNow concurrently for the collective to complete.
     /// Runs on `comm_stream` and records `copy_done` so the compute stream waits
     /// before the next forward.
-    fn sync_now_nccl(&self) -> Result<()> {
+    ///
+    /// Returns the weight-space divergence for this rank: `||pre - post|| / ||post||`.
+    /// `None` when scratch buffers are absent (Sync mode or no NCCL comm).
+    fn sync_now_nccl(&self) -> Result<Option<f64>> {
         let comm = match &self.nccl_comm {
             Some(c) => c,
-            None => return Ok(()), // No NCCL comm (CPU backend or single-GPU): no-op
+            None => return Ok(None),
         };
 
-        // Collect param data tensors (raw storage, no grad graph)
         let param_tensors: Vec<_> = self.param_vars.iter().map(|v| v.data()).collect();
         let param_refs: Vec<&Tensor> = param_tensors.iter().collect();
 
+        // Snapshot pre-sync params into scratch buffers for divergence measurement.
+        if let Some(ref scratch) = self.pre_sync_scratch {
+            let _guard = self.comm_stream.as_ref().map(StreamGuard::new);
+            for (dst, src) in scratch.iter().zip(&param_tensors) {
+                dst.copy_(src, true)?; // non-blocking on comm_stream
+            }
+        }
+
         if let Some(stream) = &self.comm_stream {
-            // AllReduce on comm_stream (non-blocking on host)
+            // AllReduce on comm_stream (in-place averaging)
             comm.all_reduce_on_stream(&param_refs, ReduceOp::Avg, stream)?;
+            // HOST-synchronize: block until AllReduce completes.
+            stream.synchronize()?;
+
+            // Compute weight-space divergence: ||pre - post|| / ||post||
+            let divergence = if let Some(ref scratch) = self.pre_sync_scratch {
+                // scratch = pre (from copy above). Compute diff in-place:
+                // scratch[i] += (-1) * param_tensors[i]  ->  scratch[i] = pre[i] - post[i]
+                Tensor::foreach_add_list_(scratch, &param_tensors, -1.0)?;
+
+                let diff_norms = Tensor::foreach_norm(scratch, 2.0)?;
+                let post_norms = Tensor::foreach_norm(&param_tensors, 2.0)?;
+
+                let mut diff_sq = 0.0f64;
+                for n in &diff_norms {
+                    let v: f64 = n.item()?;
+                    diff_sq += v * v;
+                }
+                let mut post_sq = 0.0f64;
+                for n in &post_norms {
+                    let v: f64 = n.item()?;
+                    post_sq += v * v;
+                }
+
+                let post_norm = post_sq.sqrt();
+                let div = if post_norm > 1e-10 {
+                    diff_sq.sqrt() / post_norm
+                } else {
+                    0.0
+                };
+
+                crate::verbose!(
+                    "  ddp-worker: rank {} sync divergence={:.6} (||delta||={:.4}, ||post||={:.4})",
+                    self.rank, div, diff_sq.sqrt(), post_norm,
+                );
+                Some(div)
+            } else {
+                None
+            };
+
             // Record event so compute_stream waits before next forward
             if let Some(ev) = &self.copy_done {
                 ev.record_on(stream)?;
             }
-        } else {
-            // CPU fallback (should not happen for NCCL backend, but handle gracefully)
-            comm.all_reduce(&param_refs, ReduceOp::Avg)?;
-        }
 
-        Ok(())
+            Ok(divergence)
+        } else {
+            comm.all_reduce(&param_refs, ReduceOp::Avg)?;
+            Ok(None)
+        }
     }
 
     /// Wait for any pending parameter copy to complete on the compute stream.
@@ -457,6 +627,16 @@ impl<M: Module> GpuWorker<M> {
             if !params.is_empty() {
                 Tensor::clip_grad_norm_fused(&params, max_norm)?;
             }
+        }
+
+        // Per-batch LR: scheduler tracks global progress.
+        // global_step = total batches at last sync, steps_since_avg = local
+        // batches since then. The LR reflects this worker's real position
+        // in the global schedule, multiplied by the DDP linear-scaling factor
+        // (1.0 when lr_scale_ratio == 0 or world_size == 1).
+        if let Some(ref sched) = self.scheduler {
+            let base = sched.lr(self.global_step + self.steps_since_avg);
+            self.optimizer.set_lr(base * self.lr_scale);
         }
 
         // Optimizer step (GPU-local Adam, ~0.1ms fused kernel)
@@ -518,8 +698,26 @@ impl<M: Module> GpuWorker<M> {
                 self.steps_since_avg = 0;
             }
             ControlMsg::SyncNow => {
-                self.sync_now_nccl()?;
+                crate::debug!("  ddp-worker: rank {} SyncNow (step={}, epoch={})", self.rank, self.local_step, self.current_epoch);
+                let divergence = self.sync_now_nccl()?;
+                crate::debug!("  ddp-worker: rank {} SyncNow done", self.rank);
                 self.steps_since_avg = 0;
+                // Bump local_step and send a dedicated SyncAck so the
+                // coordinator's nccl_ack mechanism sees step_count > snapshot.
+                // Without this, a SyncNow processed in wait_for_epoch_plan
+                // (no batches to train afterward) leaves nccl_ack permanently
+                // false, blocking all future should_average() calls.
+                //
+                // SyncAck is used instead of TimingMsg::Batch so the
+                // coordinator doesn't count this as a real batch -- that would
+                // inflate steps_since_avg (and thus global_step) by one per
+                // sync per rank, firing the LR scheduler early.
+                self.local_step += 1;
+                let _ = self.timing_tx.send(TimingMsg::SyncAck {
+                    rank: self.rank,
+                    step_count: self.local_step,
+                    divergence,
+                });
             }
             ControlMsg::StartEpoch(plan) => {
                 self.pending_plan = Some(plan);
@@ -548,6 +746,9 @@ impl<M: Module> GpuWorker<M> {
                     }
                 }
             }
+            ControlMsg::SetGlobalStep(step) => {
+                self.global_step = step;
+            }
             ControlMsg::Checkpoint { version } => {
                 if let Some(ref f) = self.checkpoint_fn {
                     if let Err(e) = f(version, &self.model) {
@@ -561,12 +762,40 @@ impl<M: Module> GpuWorker<M> {
     }
 
     /// Send a timing report to the coordinator.
-    pub fn report_timing(&self, batch_ms: f64) -> Result<()> {
+    pub fn report_timing(
+        &self,
+        batch_ms: f64,
+        param_norm: Option<f64>,
+        batch_loss: f64,
+        sync_divergence: Option<f64>,
+    ) -> Result<()> {
         self.timing_tx.send(TimingMsg::Batch {
             rank: self.rank,
             batch_ms,
             step_count: self.local_step,
+            param_norm,
+            batch_loss,
+            sync_divergence,
         }).map_err(|_| TensorError::new("timing channel disconnected"))
+    }
+
+    /// Compute the L2 norm of all model parameters.
+    ///
+    /// Uses `Tensor::foreach_norm` for a single batched CUDA kernel instead
+    /// of per-parameter norm calls. Returns the global L2 norm (sqrt of sum
+    /// of squared per-tensor norms). Used for NCCL divergence detection.
+    fn compute_param_norm(&self) -> Result<f64> {
+        let data: Vec<Tensor> = self.param_vars.iter().map(|v| v.data()).collect();
+        if data.is_empty() {
+            return Ok(0.0);
+        }
+        let norms = Tensor::foreach_norm(&data, 2.0)?;
+        let mut total_sq = 0.0f64;
+        for n in &norms {
+            let val: f64 = n.item()?;
+            total_sq += val * val;
+        }
+        Ok(total_sq.sqrt())
     }
 
     /// Send the final parameter snapshot on the dedicated channel before exiting.
@@ -620,17 +849,34 @@ impl<M: Module> GpuWorker<M> {
     /// to prevent NCCL deadlock while waiting between epochs.
     /// Returns `Some(plan)` for the next epoch, or `None` on Shutdown/disconnect.
     pub fn wait_for_epoch_plan(&mut self) -> Result<Option<EpochPlan>> {
+        crate::debug!("  ddp-worker: rank {} waiting for plan (step={})", self.rank, self.local_step);
         loop {
             // Check if a plan was queued by dispatch_control (e.g. StartEpoch
             // arrived during Throttle handler). Must be checked each iteration,
             // not just at entry, because dispatch_control may set it mid-loop.
             if let Some(plan) = self.pending_plan.take() {
+                crate::debug!("  ddp-worker: rank {} got plan (pending) epoch={}", self.rank, plan.epoch);
                 return Ok(Some(plan));
             }
             match self.control_rx.recv() {
-                Ok(ControlMsg::StartEpoch(plan)) => return Ok(Some(plan)),
+                Ok(ControlMsg::StartEpoch(plan)) => {
+                    crate::debug!("  ddp-worker: rank {} got plan epoch={}", self.rank, plan.epoch);
+                    return Ok(Some(plan));
+                }
                 Ok(ControlMsg::Shutdown) => return Ok(None),
                 Ok(msg) => {
+                    crate::debug!("  ddp-worker: rank {} wait_for_plan got {:?}", self.rank,
+                        match &msg {
+                            ControlMsg::SyncNow => "SyncNow",
+                            ControlMsg::Throttle => "Throttle",
+                            ControlMsg::RequestParams => "RequestParams",
+                            ControlMsg::Update(_) => "Update",
+                            ControlMsg::SetGlobalStep(_) => "SetGlobalStep",
+                            ControlMsg::Checkpoint { .. } => "Checkpoint",
+                            ControlMsg::Shutdown => "Shutdown",
+                            ControlMsg::StartEpoch(_) => "StartEpoch",
+                        }
+                    );
                     if self.dispatch_control(msg)? {
                         return Ok(None); // Shutdown consumed by handler (e.g. Throttle)
                     }
@@ -669,21 +915,30 @@ impl<M: Module> GpuWorker<M> {
             return Ok(false);
         }
 
-        // Defragment CUDA allocator between chunks. The caching allocator
-        // holds freed blocks from the previous chunk's activations and NCCL
-        // buffers, which fragment VRAM. Without this, follow-up chunks can
-        // OOM even though enough total VRAM exists (just not contiguous).
-        if self.device.is_cuda() {
-            crate::tensor::cuda_empty_cache();
-        }
+        // ALL CUDA work must avoid the default stream and device-wide sync.
+        // The CUDA default stream implicitly synchronizes with every other
+        // stream, and cuda_synchronize waits for ALL streams on the device.
+        // If a SyncNow triggered AllReduce on comm_stream (via the other rank)
+        // while this rank touches the default stream or calls device sync,
+        // it blocks waiting for comm_stream which waits for this rank -> deadlock.
+        //
+        // Solution: use compute_stream for all ops, sync compute_stream only.
+        let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
+
+        // NOTE: cuda_empty_cache() was here to defragment VRAM between chunks,
+        // but it internally does a device-wide sync that deadlocks with pending
+        // NCCL AllReduce on comm_stream. Removed: the caching allocator handles
+        // fragmentation adequately without explicit cache flushes.
 
         // Update activation peak from the previous chunk's high-water mark.
         // Uses max() so the budget never grows beyond the worst observed peak.
-        // Sync first so all async work (NCCL on comm_stream, etc.) completes
-        // and deferred frees are processed before reading the baseline.
+        // Sync compute_stream only (NOT device-wide cuda_synchronize which
+        // would block on comm_stream's pending AllReduce -> deadlock).
         if self.device.is_cuda() && self.activation_peak_bytes > 0 {
             let idx = self.device.index() as i32;
-            crate::tensor::cuda_synchronize(idx as u8);
+            if let Some(ref stream) = self.compute_stream {
+                let _ = stream.synchronize();
+            }
             if let Ok(peak) = crate::tensor::cuda_peak_active_bytes_idx(idx) {
                 if let Ok(baseline) = crate::tensor::cuda_active_bytes_idx(idx) {
                     let overhead = (peak as usize).saturating_sub(baseline as usize);
@@ -718,6 +973,9 @@ impl<M: Module> GpuWorker<M> {
             false
         };
 
+        if let Some(ref tl) = self.timeline {
+            tl.event(crate::monitor::EventKind::EpochStart { epoch: plan.epoch });
+        }
         let epoch_start = Instant::now();
         let mut total_loss = 0.0;
 
@@ -737,9 +995,29 @@ impl<M: Module> GpuWorker<M> {
             }
 
             // Consume prefetched batches as they become ready
+            let mut batch_done = 0usize;
             for _ in 0..num_batches {
-                let prefetched = batch_rx.recv()
-                    .map_err(|_| TensorError::new("prefetch channel closed"))??;
+                // Interleave control message processing with prefetch waiting.
+                // SyncNow can arrive at any time; if we block on batch_rx.recv()
+                // the peer enters AllReduce waiting for us -> deadlock.
+                // Use recv_timeout to periodically check for control messages.
+                if self.handle_control()? {
+                    return Ok(true);
+                }
+                let prefetched = loop {
+                    match batch_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                        Ok(batch) => break batch
+                            .map_err(|e| TensorError::new(&format!("prefetch error: {e}")))?,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if self.handle_control()? {
+                                return Ok(true);
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Err(TensorError::new("prefetch channel closed"));
+                        }
+                    }
+                };
 
                 // Ensure compute stream waits for async H2D copy to finish
                 #[cfg(feature = "cuda")]
@@ -750,12 +1028,19 @@ impl<M: Module> GpuWorker<M> {
                 }
 
                 let (loss, ms) = self.train_step(&prefetched.tensors, train_fn)?;
+                batch_done += 1;
                 total_loss += loss;
-                let _ = self.report_timing(ms);
+                let norm = if self.steps_since_avg % 10 == 0 {
+                    self.compute_param_norm().ok()
+                } else {
+                    None
+                };
+                let _ = self.report_timing(ms, norm, loss, None);
                 if self.handle_control()? {
                     return Ok(true); // Shutdown
                 }
             }
+            crate::debug!("  ddp-worker: rank {} epoch {} chunk done ({} batches)", self.rank, plan.epoch, batch_done);
         } else {
             // Sync path: load one batch at a time, move to device if needed.
             // Used for CPU devices, or CUDA when VRAM is too tight for prefetch.
@@ -784,8 +1069,10 @@ impl<M: Module> GpuWorker<M> {
                 // isolate the activation + gradient overhead. This is the
                 // reserve that prefetch_depth_from_vram must account for.
                 if measuring_peak && batch_idx == 0 {
+                    if let Some(ref stream) = self.compute_stream {
+                        let _ = stream.synchronize();
+                    }
                     let idx = self.device.index() as i32;
-                    crate::tensor::cuda_synchronize(idx as u8);
                     if let Ok(peak) = crate::tensor::cuda_peak_active_bytes_idx(idx) {
                         if let Ok(current) = crate::tensor::cuda_active_bytes_idx(idx) {
                             let overhead = (peak as usize).saturating_sub(current as usize);
@@ -797,7 +1084,12 @@ impl<M: Module> GpuWorker<M> {
                     crate::tensor::cuda_reset_peak_stats_idx(idx);
                 }
 
-                let _ = self.report_timing(ms);
+                let norm = if self.steps_since_avg % 10 == 0 {
+                    self.compute_param_norm().ok()
+                } else {
+                    None
+                };
+                let _ = self.report_timing(ms, norm, loss, None);
                 if self.handle_control()? {
                     return Ok(true); // Shutdown
                 }
@@ -805,11 +1097,14 @@ impl<M: Module> GpuWorker<M> {
         }
 
         let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
-        let _ = self.report_epoch(
-            total_loss / num_batches as f64,
-            num_batches,
-            epoch_ms,
-        );
+        let avg_loss = total_loss / num_batches as f64;
+        if let Some(ref tl) = self.timeline {
+            tl.event(crate::monitor::EventKind::EpochEnd {
+                epoch: plan.epoch,
+                loss: avg_loss,
+            });
+        }
+        let _ = self.report_epoch(avg_loss, num_batches, epoch_ms);
 
         Ok(false)
     }

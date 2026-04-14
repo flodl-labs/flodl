@@ -401,6 +401,95 @@ g.export_trends("metrics.csv", &["loss"])?;
 g.write_log("training.log", total_epochs, &["loss"])?;
 ```
 
+## Verbosity-gated logging
+
+floDl ships a tiny logging system in `flodl::log`. Five levels, four
+macros, one global atomic — no log targets, no module filtering, no
+external dependencies. Designed so library code can chatter freely at
+higher verbosities without forcing every user to wire up a logger.
+
+### Levels
+
+| Level | When | Where it goes |
+|------|------|----------------|
+| `Quiet` (0) | `--quiet` — errors only via `eprintln!` | (everything else suppressed) |
+| `Normal` (1) | Default — epoch summaries, progress, milestones | stdout |
+| `Verbose` (2) | `-v` — DDP sync, cadence changes, data loading detail | stdout |
+| `Debug` (3) | `-vv` — per-batch timing, internal loops | **stderr** (unbuffered) |
+| `Trace` (4) | `-vvv` — extreme granularity | **stderr** (unbuffered) |
+
+Debug and Trace use stderr deliberately so they stay visible in Docker
+non-TTY environments where stdout is block-buffered.
+
+### Macros
+
+```rust
+// Default level is Normal — suppressed by --quiet, shown otherwise
+flodl::msg!("epoch {}: loss={:.4}", epoch, loss);
+
+// Explicit level via @ prefix
+flodl::msg!(@Verbose, "AllReduce: {:.1}ms", elapsed);
+flodl::msg!(@Debug,   "per-batch: {}ms", batch_ms);
+flodl::msg!(@Trace,   "{:?}", tensor);
+
+// Or use the level-named shortcuts
+flodl::verbose!("AllReduce: {:.1}ms", elapsed);
+flodl::debug!  ("per-batch: {}ms", batch_ms);
+flodl::trace!  ("{:?}", tensor);
+```
+
+All four macros are zero-cost when the level is not enabled — the format
+arguments are not evaluated.
+
+### Configuration
+
+Three ways to set the level, in priority order:
+
+```bash
+# 1. CLI (sets FLODL_VERBOSITY for child processes too, including Docker)
+fdl -v   ddp-bench quick      # Verbose
+fdl -vv  cuda-test            # Debug
+fdl -vvv shell                # Trace
+fdl --quiet test              # Errors only
+```
+
+```bash
+# 2. Environment variable (no code, no CLI)
+FLODL_VERBOSITY=verbose cargo run
+FLODL_VERBOSITY=2       cargo run    # same — accepts integers 0..4
+```
+
+```rust
+// 3. Programmatic — overrides the env var
+use flodl::{Verbosity, set_verbosity};
+set_verbosity(Verbosity::Debug);
+```
+
+The level is read once on first access, then cached in a single global
+atomic — checking enablement on a hot loop is one relaxed atomic load.
+
+### Recipe: gating expensive diagnostics
+
+```rust
+use flodl::log;
+
+if log::enabled(log::Verbosity::Debug) {
+    let stats = collect_expensive_stats();   // skipped at Normal level
+    flodl::debug!("stats: {:?}", stats);
+}
+```
+
+### Recipe: per-rank tracing in DDP
+
+```rust
+let rank = world.rank();
+flodl::msg!(@Verbose, "rank {} | epoch {} done in {:.0}ms", rank, epoch, ms);
+flodl::trace!("rank {} | grad norms: {:?}", rank, grad_norms);
+```
+
+Set `FLODL_VERBOSITY=trace` once at launch and every rank starts emitting
+trace output without code changes.
+
 ## Peak VRAM profiling
 
 When optimizing GPU memory, use the CUDA memory stats API to measure
@@ -459,7 +548,7 @@ for (x, y) in &batches {
 Expect 2-5x speedup for models with many small kernels (RNNs, GRUs).
 All tensors involved in the captured region must have fixed shapes --
 dynamic shapes require a new capture. Tests that use CUDA graphs must
-run single-threaded (`make cuda-test-graph`).
+run single-threaded (`fdl cuda-test-serial`).
 
 ## Putting it together
 

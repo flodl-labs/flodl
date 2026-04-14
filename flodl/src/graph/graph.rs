@@ -111,6 +111,18 @@ pub struct Graph {
     pub(crate) distributed: RefCell<Option<crate::distributed::ddp::DistributedState>>,
     // Optimizer for step() (works for both single-GPU and distributed)
     pub(crate) optimizer: RefCell<Option<Box<dyn crate::nn::Optimizer>>>,
+    // Optional per-batch LR scheduler. When set, `step()` updates every
+    // optimizer's LR from `scheduler.lr(training_step) * lr_scale` before
+    // calling `optimizer.step()`.
+    pub(crate) scheduler: RefCell<Option<std::sync::Arc<dyn crate::nn::Scheduler>>>,
+    // DDP linear-scaling factor applied multiplicatively to scheduler output.
+    // Defaults to 1.0 (no scaling). Set by `Ddp::setup_with` when the user
+    // enabled `DdpConfig::lr_scale_ratio`.
+    pub(crate) lr_scale: Cell<f64>,
+    // Dedicated training step counter for the LR scheduler. Incremented once
+    // per `step()` call, regardless of whether the caller also invokes
+    // `end_step()` (which is only used by recurrent graphs to cut gradients).
+    pub(crate) training_step: Cell<usize>,
     // DataLoader binding for resident DDP (set by set_data_loader(), None by default)
     pub(crate) data_binding: RefCell<Option<DataLoaderBinding>>,
     // Per-batch loss closure for El Che (set by set_loss_fn(), None = legacy gather path)
@@ -390,13 +402,16 @@ impl Graph {
             exec_slots,
             distributed: RefCell::new(None),
             optimizer: RefCell::new(None),
+            scheduler: RefCell::new(None),
+            lr_scale: Cell::new(1.0),
+            training_step: Cell::new(0),
             data_binding: RefCell::new(None),
             loss_fn: RefCell::new(None),
         });
 
         if verbose {
             if let Ok(ref g) = graph {
-                eprintln!("{}", g.tree_summary());
+                crate::verbose!("{}", g.tree_summary());
             }
         }
 
@@ -1003,6 +1018,30 @@ impl Module for Graph {
         }
 
         params
+    }
+
+    fn buffers(&self) -> Vec<crate::nn::Buffer> {
+        let mut bufs = Vec::new();
+        let mut seen = HashSet::new();
+
+        for &ni in &self.order {
+            if let Some(ref module) = self.nodes[ni].module {
+                crate::nn::walk_modules_visited(
+                    module.as_ref(),
+                    &mut HashSet::new(),
+                    &mut |m: &dyn crate::nn::Module| {
+                        for b in m.buffers() {
+                            let ptr = Rc::as_ptr(&b.inner) as usize;
+                            if seen.insert(ptr) {
+                                bufs.push(b);
+                            }
+                        }
+                    },
+                );
+            }
+        }
+
+        bufs
     }
 
     fn set_training(&self, training: bool) {

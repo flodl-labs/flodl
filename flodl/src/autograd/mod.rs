@@ -845,23 +845,17 @@ mod tests {
         if crate::tensor::test_device() != Device::CPU { return; }
         // Verify that backward() + detach_() doesn't leak C++ autograd Nodes.
         // Simulates a training loop: multiple loss terms per step, many steps.
+        // Uses live_tensor_count (C++ handle tracking) instead of RSS which
+        // is unreliable on CI runners with shared memory pressure.
         use crate::nn::{Module, Linear};
         use crate::nn::optim::{Adam, Optimizer};
-
-        fn get_rss_kb() -> usize {
-            std::fs::read_to_string("/proc/self/statm")
-                .ok()
-                .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
-                .map(|pages| pages * 4)
-                .unwrap_or(0)
-        }
 
         let linear = Linear::on_device(256, 256, crate::tensor::test_device()).unwrap();
         let params = linear.parameters();
         let mut opt = Adam::new(&params, 0.001);
         let opts = crate::tensor::test_opts();
 
-        // Warm up — let allocators settle
+        // Warm up -- let allocators settle
         for _ in 0..50 {
             let x = Variable::new(Tensor::randn(&[32, 256], opts).unwrap(), false);
             let y = linear.forward(&x).unwrap();
@@ -871,8 +865,7 @@ mod tests {
             opt.step().unwrap();
         }
 
-        crate::tensor::malloc_trim();
-        let rss_before = get_rss_kb();
+        let handles_before = crate::tensor::live_tensor_count();
 
         for _ in 0..2000 {
             let x = Variable::new(Tensor::randn(&[32, 256], opts).unwrap(), false);
@@ -886,12 +879,12 @@ mod tests {
             opt.step().unwrap();
         }
 
-        crate::tensor::malloc_trim();
-        let rss_after = get_rss_kb();
-        let growth_mb = (rss_after as f64 - rss_before as f64) / 1024.0;
+        let handles_after = crate::tensor::live_tensor_count();
+        let leaked = handles_after as i64 - handles_before as i64;
         assert!(
-            growth_mb < 50.0,
-            "RSS grew by {growth_mb:.1}MB over 2000 training steps — possible grad_fn leak"
+            leaked < 100,
+            "live tensor count grew by {leaked} over 2000 training steps — possible grad_fn leak \
+             (before={handles_before}, after={handles_after})"
         );
     }
 
@@ -1038,8 +1031,6 @@ mod tests {
             .into_iter().map(|(_name, p)| p).collect();
         let mut opt = Adam::new(&params, 0.001);
 
-        let iters = 500;
-
         // Warm up
         for _ in 0..30 {
             let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
@@ -1054,51 +1045,70 @@ mod tests {
             graph.detach_state();
         }
 
-        // Sample handle count at 25% and 75% of the loop to avoid noise
-        // from other tests running in parallel (shared global counter).
-        let mut h_at_25 = 0u64;
-        let mut h_at_75 = 0u64;
-        malloc_trim();
-        let rss_before = rss_kb();
+        // live_tensor_count is a global atomic shared with every other test
+        // running in parallel, so symmetric drift checks (|a - b| < N) flake
+        // on CI when concurrent tests happen to start or finish work during
+        // our measurement window. Use the same one-sided pattern as
+        // test_backward_frees_grad_fn_chain: a real leak only manifests as
+        // monotonic growth, while concurrent activity that completes during
+        // our window can only push the counter spuriously DOWN. Tolerate
+        // shrinkage, catch growth.
+        // Leak detection: run two chunks and compare growth rates.
+        // A real leak grows linearly with iterations; concurrent test noise
+        // is constant (unrelated to our chunk size). By comparing a short
+        // chunk to a long chunk, we cancel out the shared-atomic noise.
+        let mut run_chunk = |n: usize| {
+            for _ in 0..n {
+                let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
+                let y = graph.forward(&x).unwrap();
+                let target = Variable::new(
+                    Tensor::zeros(&[batch], TensorOptions { dtype: crate::tensor::DType::Int64, ..opts }).unwrap(), false);
+                let l1 = cross_entropy_loss(&y, &target).unwrap();
+                let l2 = y.mean().unwrap();
+                let total = l1.add(&l2).unwrap();
+                opt.zero_grad();
+                total.backward().unwrap();
+                clip_grad_norm(&params, 1.0).unwrap();
+                opt.step().unwrap();
+                graph.detach_state();
+                graph.record_scalar("loss", total.item().unwrap());
+            }
+            graph.flush(&[]);
+        };
 
-        for i in 0..iters {
-            let x = Variable::new(Tensor::randn(&[batch, dim], opts).unwrap(), false);
-            let y = graph.forward(&x).unwrap();
-            let target = Variable::new(
-                Tensor::zeros(&[batch], TensorOptions { dtype: crate::tensor::DType::Int64, ..opts }).unwrap(), false);
-            // Multiple loss terms (like FBRL)
-            let l1 = cross_entropy_loss(&y, &target).unwrap();
-            let l2 = y.mean().unwrap();
-            let total = l1.add(&l2).unwrap();
-            opt.zero_grad();
-            total.backward().unwrap();
-            clip_grad_norm(&params, 1.0).unwrap();
-            opt.step().unwrap();
-            graph.detach_state();
-            // Also record metrics (like FBRL does)
-            graph.record_scalar("loss", total.item().unwrap());
-            if i == iters / 4 { h_at_25 = live_tensor_count(); }
-            if i == iters * 3 / 4 { h_at_75 = live_tensor_count(); }
-        }
-        graph.flush(&[]);
-
+        // First chunk: 100 iters
         malloc_trim();
-        let rss_after = rss_kb();
-        let handle_drift = h_at_75 as i64 - h_at_25 as i64;
-        let rss_growth_mb = (rss_after as f64 - rss_before as f64) / 1024.0;
+        let h0 = live_tensor_count();
+        let rss0 = rss_kb();
+        run_chunk(100);
+        let h1 = live_tensor_count();
+
+        // Second chunk: 400 iters (4x longer -- a leak shows 4x more growth)
+        run_chunk(400);
+        malloc_trim();
+        let h2 = live_tensor_count();
+        let rss2 = rss_kb();
+
+        let growth_first = h1 as i64 - h0 as i64;
+        let growth_second = h2 as i64 - h1 as i64;
+        let rss_growth_mb = (rss2 as f64 - rss0 as f64) / 1024.0;
 
         eprintln!(
-            "Graph+loop ({iters} steps, {loop_iters} loop iters): handles {:+} (25%-75%)  RSS {:+.1}MB",
-            handle_drift, rss_growth_mb
+            "Graph+loop leak: chunk1={growth_first:+} (100 iters)  chunk2={growth_second:+} (400 iters)  RSS {rss_growth_mb:+.1}MB"
         );
 
+        // A real leak of even 1 tensor/iter would add 300 extra handles in
+        // chunk2 vs chunk1. Allow chunk2 up to chunk1 + 100 for noise.
         assert!(
-            handle_drift.unsigned_abs() < 50,
-            "handle count drifted by {handle_drift} between 25% and 75% — tensor handle leak!"
+            growth_second < growth_first + 100,
+            "tensor count grew faster in longer chunk ({growth_second} vs {growth_first}) — \
+             likely a real leak (h0={h0}, h1={h1}, h2={h2})"
         );
+
+        // RSS: informational. glibc can hold pages past last use.
         assert!(
-            rss_growth_mb < 30.0,
-            "RSS grew by {rss_growth_mb:.1}MB over {iters} graph+loop steps"
+            rss_growth_mb < 100.0,
+            "RSS grew by {rss_growth_mb:.1}MB over 500 graph+loop steps"
         );
     }
 

@@ -20,6 +20,9 @@ exclude:
 
 permalink: /blog/:slug
 
+plugins:
+  - jekyll-sitemap
+
 defaults:
   - scope:
       path: "guide"

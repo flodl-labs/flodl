@@ -395,6 +395,45 @@ impl Module for AdaptiveMaxPool2d {
     }
 }
 
+/// Adaptive average pooling that outputs a fixed spatial size regardless of input.
+///
+/// Wraps [`crate::autograd::adaptive_avg_pool2d`].
+/// Produces exactly `[N, C, output_h, output_w]` from any spatial input, enabling
+/// variable-size inputs.
+///
+/// - **Input shape:** `[N, C, H_in, W_in]` (any spatial size)
+/// - **Output shape:** `[N, C, output_h, output_w]` (fixed)
+///
+/// # Example
+///
+/// ```ignore
+/// let pool = AdaptiveAvgPool2d::new([1, 1]);  // global average pooling
+/// let pool = AdaptiveAvgPool2d::new([7, 7]);  // common before FC layers
+/// let y = pool.forward(&x)?;
+/// ```
+pub struct AdaptiveAvgPool2d {
+    output_size: [i64; 2],
+}
+
+impl AdaptiveAvgPool2d {
+    /// Create with the desired output spatial dimensions `[output_h, output_w]`.
+    pub fn new(output_size: [i64; 2]) -> Self {
+        Self { output_size }
+    }
+}
+
+impl Module for AdaptiveAvgPool2d {
+    fn name(&self) -> &str { "adaptive_avgpool2d" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        autograd::adaptive_avg_pool2d(input, self.output_size)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        vec![]
+    }
+}
+
 /// Sub-pixel convolution upsampling (pixel shuffle).
 ///
 /// Rearranges elements from the channel dimension into spatial dimensions,

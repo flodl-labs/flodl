@@ -545,6 +545,7 @@ layer = nn.AvgPool2d(kernel_size=2)
 layer = nn.MaxPool1d(kernel_size=2)
 layer = nn.AvgPool1d(kernel_size=2)
 layer = nn.AdaptiveMaxPool2d((7, 7))
+layer = nn.AdaptiveAvgPool2d((1, 1))
 layer = nn.PixelShuffle(2)
 layer = nn.PixelUnshuffle(2)
 layer = nn.Upsample(size=(64, 64), mode='bilinear')
@@ -589,6 +590,7 @@ let pool = AvgPool2d::new(2);
 let pool = MaxPool1d::new(2);
 let pool = AvgPool1d::new(2);
 let pool = AdaptiveMaxPool2d::new(7, 7);
+let pool = AdaptiveAvgPool2d::new([1, 1]);                                   // global avg pool (ResNet head)
 let layer = PixelShuffle::new(2);
 let layer = PixelUnshuffle::new(2);
 let layer = Upsample::new(&[64, 64], 1);                                    // mode: 0=nearest, 1=bilinear
@@ -1192,6 +1194,44 @@ let model = FlowBuilder::from(Linear::new(128, 128)?)
     .also(ReLU)    // skip connection: output = input + ReLU(input)
     .build()?;
 ```
+
+### Residual with Projection Skip (ResNet downsample)
+
+When the skip path needs its own transform (e.g. 1×1 conv + BN to match
+channel/stride changes in ResNet's downsample blocks), use `also_with`.
+It generalizes `also` with an explicit `skip` path alongside the `main`
+path: `output = skip(x) + main(x)`.
+
+```python
+# PyTorch — ResNet BasicBlock with downsample
+class BasicBlock(nn.Module):
+    def __init__(self, c_in, c_out, stride):
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(c_in, c_out, 3, stride, 1, bias=False), nn.BatchNorm2d(c_out), nn.ReLU(),
+            nn.Conv2d(c_out, c_out, 3, 1, 1, bias=False), nn.BatchNorm2d(c_out),
+        )
+        self.downsample = (
+            nn.Sequential(nn.Conv2d(c_in, c_out, 1, stride, bias=False), nn.BatchNorm2d(c_out))
+            if stride != 1 or c_in != c_out else nn.Identity()
+        )
+    def forward(self, x):
+        return F.relu(self.downsample(x) + self.main(x))
+```
+
+```rust
+// flodl — same block, one builder chain
+FlowBuilder::from(prev)
+    .also_with(
+        downsample_1x1_bn,         // skip branch (Identity if no projection needed)
+        conv_bn_relu_conv_bn,      // main branch
+    )
+    .through(ReLU)
+    .build()?;
+```
+
+See `ddp-bench/src/models/resnet_graph.rs` for a full ResNet-20 built
+with `also_with`.
 
 ### Parallel Branches
 

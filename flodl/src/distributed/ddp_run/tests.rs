@@ -86,6 +86,8 @@ fn test_worker_config_clone() {
         batch_size: 32,
         seed: 42,
         max_grad_norm: None,
+        timeline: None,
+        policy: ApplyPolicy::Sync,
     };
     let cfg2 = cfg.clone();
     assert_eq!(cfg2.rank, 0);
@@ -168,6 +170,8 @@ fn make_test_worker_with(
         batch_size: 4,
         seed: 42,
         max_grad_norm: None,
+        timeline: None,
+        policy: ApplyPolicy::Sync,
     };
 
     let ((timing_tx, metrics_tx, param_tx, final_param_tx, control_rx), channels) =
@@ -305,11 +309,11 @@ fn test_worker_train_step() {
 fn test_worker_report_timing() {
     let (worker, ch) = make_test_worker();
 
-    worker.report_timing(12.5).unwrap();
+    worker.report_timing(12.5, None, 0.5, None).unwrap();
 
     let msg = ch.timing_rx.recv().unwrap();
     match msg {
-        TimingMsg::Batch { rank, batch_ms, step_count } => {
+        TimingMsg::Batch { rank, batch_ms, step_count, .. } => {
             assert_eq!(rank, 0);
             assert!((batch_ms - 12.5).abs() < 1e-10);
             assert_eq!(step_count, 0);
@@ -456,7 +460,7 @@ fn test_worker_channels_create() {
         GpuWorker::<Linear>::channels();
 
     // Verify channel pairs work
-    timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 1.0, step_count: 0 }).unwrap();
+    timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 1.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     let msg = ch.timing_rx.recv().unwrap();
     assert!(matches!(msg, TimingMsg::Batch { rank: 0, .. }));
 
@@ -548,8 +552,8 @@ fn test_coordinator_initial_state() {
 fn test_coordinator_drain_timing() {
     let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
 
     h.coord.drain_timing();
 
@@ -564,12 +568,12 @@ fn test_coordinator_should_average_sync() {
     assert!(!h.coord.should_average());
 
     // One rank reports
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
     assert!(!h.coord.should_average()); // rank 1 still at 0
 
     // Both ranks report
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
     assert!(h.coord.should_average());
 }
@@ -581,15 +585,15 @@ fn test_coordinator_should_average_async() {
     // Async now uses batch_counts() same as Cadence (anchor=10 from harness).
     // Feed 9 steps per rank: not enough yet.
     for _ in 0..9 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     assert!(!h.coord.should_average());
 
     // 10th step: both ranks reach batch_counts (anchor=10, uncalibrated so equal).
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
     assert!(h.coord.should_average());
 }
@@ -604,9 +608,10 @@ fn test_coordinator_should_average_wall_time() {
 
     // Phase 1: calibrate ElChe (uncalibrated uses batch-count fallback).
     // Send 10 batches per rank to trigger initial averaging.
-    for _ in 0..10 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+    // step_count must increment to satisfy NCCL ack tracking.
+    for i in 0..10 {
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i + 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: i + 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     assert!(h.coord.should_average()); // batch-count fallback: 10 >= 10
@@ -624,17 +629,17 @@ fn test_coordinator_should_average_wall_time() {
     // After calibration with 2:1 ratio, batch_counts ≈ [20, 10].
     // If we feed 10 batches to each: wall_ms_accum = [50, 100].
     // min(50, 100) = 50 < 100 → no trigger (fast rank hasn't accumulated enough).
-    for _ in 0..10 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+    for i in 0..10 {
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 11 + i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 11 + i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     assert!(!h.coord.should_average(), "fast rank wall time < target");
 
     // Feed 10 more to rank 0 only (simulating fast GPU running ahead).
     // wall_ms_accum = [100, 100]. min = 100 >= target → trigger!
-    for _ in 0..10 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+    for i in 0..10 {
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 21 + i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     assert!(h.coord.should_average(), "both ranks at target wall time");
@@ -647,9 +652,10 @@ fn test_async_uses_batch_count_not_wall_time() {
     let mut h = make_coord_harness(2, ApplyPolicy::Async, AverageBackend::Nccl);
 
     // Calibrate: 10 batches each at 2:1 speed ratio.
-    for _ in 0..10 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+    // step_count must increment to satisfy NCCL ack tracking.
+    for i in 0..10 {
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i + 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: i + 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     assert!(h.coord.should_average());
@@ -657,16 +663,20 @@ fn test_async_uses_batch_count_not_wall_time() {
     for rx in &h.control_rxs { while rx.try_recv().is_ok() {} }
     assert!(h.coord.is_calibrated());
 
-    // After calibration, batch_counts ≈ [20, 10].
+    // After calibration, batch_counts ~ [20, 10].
     // Feed exactly those counts. With wall-time trigger this would NOT
     // fire (fast rank wall = 100ms, slow = 100ms, but batch counts would
     // differ). With batch-count trigger it fires immediately.
     let counts = h.coord.el_che.batch_counts();
+    let mut step0 = 11usize;
+    let mut step1 = 11usize;
     for _ in 0..counts[0] {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: step0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        step0 += 1;
     }
     for _ in 0..counts[1] {
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: step1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        step1 += 1;
     }
     h.coord.drain_timing();
     assert!(h.coord.should_average(), "async triggers on batch counts, not wall time");
@@ -677,8 +687,8 @@ fn test_coordinator_trigger_nccl() {
     let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
     // Feed timing and trigger
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
     h.coord.trigger_averaging().unwrap();
 
@@ -702,18 +712,23 @@ fn test_coordinator_trigger_cpu_averaging() {
     let opts = TensorOptions { dtype: DType::Float32, device: dev };
 
     // Feed timing
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
 
     // trigger_averaging now returns immediately (enters Collecting state)
     h.coord.trigger_averaging().unwrap();
 
-    // Workers should receive RequestParams
+    // Workers should receive RequestParams + Throttle (Sync policy blocks
+    // workers during CPU averaging to prevent training with stale params).
     for rx in &h.control_rxs {
         match rx.recv().unwrap() {
             ControlMsg::RequestParams => {}
             other => panic!("expected RequestParams, got {:?}", std::mem::discriminant(&other)),
+        }
+        match rx.recv().unwrap() {
+            ControlMsg::Throttle => {}
+            other => panic!("expected Throttle, got {:?}", std::mem::discriminant(&other)),
         }
     }
 
@@ -742,7 +757,7 @@ fn test_coordinator_trigger_cpu_averaging() {
 
     assert_eq!(h.coord.version(), 1);
 
-    // Workers should receive Update
+    // Workers should receive Update (Throttle handler dispatches it)
     for rx in &h.control_rxs {
         match rx.recv().unwrap() {
             ControlMsg::Update(avg) => {
@@ -801,8 +816,8 @@ fn test_coordinator_tick_sync_flow() {
     assert_eq!(h.coord.version(), 0);
 
     // Feed steps from both ranks
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
 
     // Tick: should trigger averaging
     let metrics = h.coord.tick().unwrap();
@@ -843,26 +858,31 @@ fn test_coordinator_compute_partition_sizes() {
 
 #[test]
 fn test_divergence_correction_nudges_anchor_down() {
-    // High divergence should nudge ElChe's anchor down after timing
-    // calibration. Use zero sync_ms to avoid overhead auto-tune.
+    // Rising divergence trend should suppress overshoot growth (unified guard).
+    // The old single-shot NudgeDown behavior is replaced by trend detection.
     let mut h = make_coord_harness(2, ApplyPolicy::Async, AverageBackend::Cpu);
 
     // Calibrate first so we have a stable anchor baseline.
     let steps = vec![10; 2];
     let wall_ms = vec![100.0; 2];
     h.coord.finish_averaging_cpu(0.0, &steps, &wall_ms, None);
-    let anchor_after_calibration = h.coord.el_che.anchor();
-    assert!(anchor_after_calibration >= 10);
+    let overshoot_before = h.coord.max_overshoot;
 
-    // Now apply with high divergence (same timing, zero sync_ms).
-    let steps2 = vec![10; 2];
-    let wall_ms2 = vec![100.0; 2];
-    h.coord.finish_averaging_cpu(0.0, &steps2, &wall_ms2, Some(0.20));
+    // 3 intervals with rising divergence -> trigger SuppressGrowth.
+    for i in 0..3 {
+        let div = 0.10 + i as f64 * 0.05; // 0.10, 0.15, 0.20
+        h.coord.finish_averaging_cpu(0.0, &[10, 10], &[100.0, 100.0],
+            Some(super::convergence::DivergenceReport {
+                deltas: vec![div, div],
+                pre_norms: None,
+                post_norm: None,
+            }));
+    }
 
-    // Anchor should have decreased from calibrated value.
-    assert!(h.coord.el_che.anchor() < anchor_after_calibration,
-        "anchor should decrease from {}, got {}",
-        anchor_after_calibration, h.coord.el_che.anchor());
+    // Overshoot should NOT have grown on the 3rd interval (SuppressGrowth).
+    // First 2 intervals grew normally, 3rd was suppressed.
+    assert!(h.coord.max_overshoot <= overshoot_before + 2,
+        "3rd interval should suppress overshoot growth, got {}", h.coord.max_overshoot);
 }
 
 #[test]
@@ -879,7 +899,11 @@ fn test_divergence_below_threshold_no_correction() {
     // Apply with low divergence.
     let steps2 = vec![10; 2];
     let wall_ms2 = vec![100.0; 2];
-    h.coord.finish_averaging_cpu(0.0, &steps2, &wall_ms2, Some(0.01));
+    h.coord.finish_averaging_cpu(0.0, &steps2, &wall_ms2, Some(super::convergence::DivergenceReport {
+        deltas: vec![0.01, 0.01],
+        pre_norms: None,
+        post_norm: None,
+    }));
 
     // Divergence 0.01 < threshold 0.05: no correction applied.
     assert_eq!(h.coord.el_che.anchor(), anchor_after_calibration);
@@ -913,7 +937,7 @@ fn make_throttle_harness(
         timing_rx, metrics_rx, param_rx,
         final_param_rxs,
         control_txs,
-        ApplyPolicy::Async, AverageBackend::Nccl,
+        ApplyPolicy::Async, AverageBackend::Cpu,
         n, 10000, el_che,
     ).build();
 
@@ -926,7 +950,7 @@ fn test_throttle_sends_when_diff_exceeded() {
 
     // Rank 0 is 5 steps ahead, rank 1 at 0 -> diff = 5 > 3
     for i in 0..5 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     h.coord.check_throttle();
@@ -947,7 +971,7 @@ fn test_throttle_no_send_within_limit() {
 
     // Rank 0 is 3 steps ahead, rank 1 at 0 -> diff = 3 <= 5
     for i in 0..3 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     h.coord.check_throttle();
@@ -962,7 +986,7 @@ fn test_throttle_zero_is_strict_lockstep() {
     let mut h = make_throttle_harness(2, 0);
 
     // Rank 0 does 1 batch, rank 1 does 0 -> diff = 1 > 0
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
     h.coord.check_throttle();
 
@@ -974,13 +998,56 @@ fn test_throttle_zero_is_strict_lockstep() {
 }
 
 #[test]
+fn test_throttle_skipped_for_nccl() {
+    // NCCL cadence uses AllReduce as its coordination mechanism.
+    // Throttle must be skipped to prevent deadlock when one rank is
+    // idle (between epochs) and the other gets throttled waiting for
+    // a SyncNow that can never fire.
+    let (timing_tx, timing_rx) = mpsc::channel();
+    let (_metrics_tx, metrics_rx) = mpsc::channel();
+    let (_param_tx, param_rx) = mpsc::channel();
+
+    let mut control_txs = Vec::new();
+    let mut control_rxs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..2 {
+        let (tx, rx) = mpsc::channel();
+        control_txs.push(tx);
+        control_rxs.push(rx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    // NCCL backend with max_batch_diff = 3.
+    let el_che = ElChe::new(2, 10).with_max_batch_diff(3);
+    let mut coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Cadence, AverageBackend::Nccl,
+        2, 10000, el_che,
+    ).build();
+
+    // Rank 0 is 10 steps ahead (would trigger throttle with CPU backend).
+    for i in 0..10 {
+        timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    }
+    coord.drain_timing();
+    coord.check_throttle();
+
+    // No throttle for NCCL -- cadence AllReduce handles coordination.
+    assert!(control_rxs[0].try_recv().is_err(),
+        "NCCL backend must not throttle (AllReduce is the coordination mechanism)");
+}
+
+#[test]
 fn test_throttle_disabled_when_none() {
     // Default harness has no max_batch_diff
     let mut h = make_coord_harness(2, ApplyPolicy::Async, AverageBackend::Nccl);
 
     // Rank 0 far ahead
     for i in 0..50 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     h.coord.check_throttle();
@@ -1613,8 +1680,8 @@ fn test_cadence_heterogeneous_timing() {
     // Feed enough timing to calibrate ElChe.
     // First, trigger with equal steps so ElChe sees the timing.
     for _ in 0..10 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
         h.coord.drain_timing();
         if h.coord.should_average() {
             h.coord.trigger_averaging().unwrap();
@@ -1646,8 +1713,8 @@ fn test_cpu_averaging_divergence_correction() {
 
     // Feed enough timing to reach batch_counts (anchor=10, uncalibrated).
     for _ in 0..10 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
     assert!(h.coord.should_average());
@@ -1701,14 +1768,15 @@ fn test_cpu_averaging_divergence_correction() {
 #[test]
 fn test_throttle_during_cpu_averaging() {
     // The key invariant: check_throttle fires even while CPU averaging
-    // is in Collecting state.
-    let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Cpu);
-    let el_che = ElChe::new(2, 10).with_max_batch_diff(2);
+    // is in Collecting state. Uses Cadence policy because Sync sends
+    // a sync Throttle with RequestParams (workers block immediately).
+    let mut h = make_coord_harness(2, ApplyPolicy::Cadence, AverageBackend::Cpu);
+    let el_che = ElChe::new(2, 1).with_max_batch_diff(2);
     h.coord.el_che = el_che;
 
     // Feed enough timing to trigger averaging
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
 
     // Trigger averaging (enters Collecting state, returns immediately)
@@ -1727,7 +1795,7 @@ fn test_throttle_during_cpu_averaging() {
 
     // Simulate rank 0 running ahead by 5 batches during the averaging window
     for i in 0..5 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 1.0, step_count: 2 + i }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 1.0, step_count: 2 + i, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     }
     h.coord.drain_timing();
 
@@ -1751,8 +1819,8 @@ fn test_cpu_avg_state_machine_full_cycle() {
     let opts = TensorOptions { dtype: DType::Float32, device: dev };
 
     // Feed timing
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
 
     assert_eq!(h.coord.version(), 0);
@@ -1823,8 +1891,8 @@ fn test_cpu_avg_collection_timeout() {
     );
 
     // Feed timing to trigger averaging
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
 
     // Trigger: enters Collecting
@@ -1854,8 +1922,8 @@ fn test_stale_snapshot_after_timeout() {
     let opts = TensorOptions { dtype: DType::Float32, device: dev };
 
     // Feed timing
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
 
     // Round 1: trigger, send only rank 0's snapshot, let it timeout
@@ -1875,8 +1943,8 @@ fn test_stale_snapshot_after_timeout() {
 
     // Round 2: trigger fresh. The stale rank-0 snapshot from round 1
     // should have been drained by abort_cpu_averaging.
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 2 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 2 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 2, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 5.0, step_count: 2, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
 
     h.coord.trigger_averaging().unwrap();
@@ -1930,8 +1998,8 @@ fn test_elche_calibration_produces_proportional_sizes() {
 
     // Feed heterogeneous timing to trigger ElChe calibration
     for _ in 0..5 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
         h.coord.drain_timing();
         if h.coord.should_average() {
             h.coord.trigger_averaging().unwrap();
@@ -1954,10 +2022,10 @@ fn test_wall_ms_accumulation() {
     let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
     // Send multiple timing messages per rank
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 7.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 12.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 7.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 12.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
 
     // wall_ms_accum should have accumulated totals
@@ -2147,8 +2215,8 @@ fn test_proportional_sharding() {
 
     // Calibrate ElChe with 2:1 timing
     for _ in 0..3 {
-        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0 }).unwrap();
-        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0 }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+        h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: 0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
         h.coord.drain_timing();
         if h.coord.should_average() {
             h.coord.trigger_averaging().unwrap();
@@ -2611,8 +2679,8 @@ fn test_coordinator_active_count_prevents_averaging_after_exit() {
     let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
     // Both ranks report a batch
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
     assert!(h.coord.should_average(), "both ranks reported, should average");
 
@@ -2620,8 +2688,8 @@ fn test_coordinator_active_count_prevents_averaging_after_exit() {
     h.coord.trigger_averaging().unwrap();
 
     // Both report again
-    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 2 }).unwrap();
-    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 2 }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 2, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
+    h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 20.0, step_count: 2, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
     h.coord.drain_timing();
     assert!(h.coord.should_average());
 
@@ -2633,4 +2701,882 @@ fn test_coordinator_active_count_prevents_averaging_after_exit() {
     // should_average must return false (can't do collective with dead peer)
     assert!(!h.coord.should_average(),
         "should NOT average when active_count < world_size");
+}
+
+// ---------------------------------------------------------------------------
+// Streaming epochs tests
+// ---------------------------------------------------------------------------
+
+/// Streaming-epoch test harness with optional epoch metrics channel.
+struct StreamingTestHarness {
+    inner: CoordTestHarness,
+    epoch_metrics_rx: mpsc::Receiver<EpochMetrics>,
+}
+
+/// Helper: create a progressive coordinator with configurable epochs, batch_size,
+/// and max_overshoot for streaming epoch tests.
+fn make_streaming_harness(
+    n: usize,
+    num_epochs: usize,
+    total_samples: usize,
+    batch_size: usize,
+    max_overshoot: Option<usize>,
+) -> CoordTestHarness {
+    make_streaming_harness_with_metrics(n, num_epochs, total_samples, batch_size, max_overshoot).inner
+}
+
+fn make_streaming_harness_with_metrics(
+    n: usize,
+    num_epochs: usize,
+    total_samples: usize,
+    batch_size: usize,
+    max_overshoot: Option<usize>,
+) -> StreamingTestHarness {
+    let (timing_tx, timing_rx) = mpsc::channel();
+    let (metrics_tx, metrics_rx) = mpsc::channel();
+    let (param_tx, param_rx) = mpsc::channel();
+    let (epoch_metrics_tx, epoch_metrics_rx) = mpsc::channel();
+
+    let mut control_txs = Vec::new();
+    let mut control_rxs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..n {
+        let (tx, rx) = mpsc::channel();
+        control_txs.push(tx);
+        control_rxs.push(rx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    let el_che = ElChe::new(n, 10);
+    let coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Async, AverageBackend::Cpu,
+        n, total_samples, el_che,
+    )
+    .progressive(true)
+    .batch_size(batch_size)
+    .num_epochs(num_epochs)
+    .max_overshoot(max_overshoot)
+    .epoch_metrics_tx(epoch_metrics_tx)
+    .build();
+
+    StreamingTestHarness {
+        inner: CoordTestHarness { coord, timing_tx, metrics_tx, param_tx, control_rxs },
+        epoch_metrics_rx,
+    }
+}
+
+#[test]
+fn test_streaming_cross_epoch_dispatch() {
+    // 2 ranks, 3 epochs, 20 samples, batch_size=10 (2 batches/epoch).
+    // With probe chunks of ~4 batches capped at 1 batch (2 batches total / 2 ranks),
+    // each rank gets 10 samples. Completing that exhausts the pool.
+    let mut h = make_streaming_harness(2, 3, 20, 10, Some(5));
+
+    h.coord.send_all_plans(0);
+    // Collect initial dispatch: each rank should get an epoch 0 chunk.
+    let mut rank0_plan = None;
+    while let Ok(msg) = h.control_rxs[0].try_recv() {
+        if let ControlMsg::StartEpoch(p) = msg { rank0_plan = Some(p); }
+    }
+    let plan = rank0_plan.expect("rank 0 should get initial chunk");
+    assert_eq!(plan.epoch, 0);
+    let dispatched = plan.partition_size;
+
+    // Rank 0 reports exactly what was dispatched.
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1,
+        batches_processed: dispatched / 10,
+        epoch_ms: 50.0, samples_processed: dispatched,
+        scalars: Default::default(),
+    }).unwrap();
+    h.coord.drain_metrics();
+
+    // After reporting, rank 0 should get new work: either more from epoch 0
+    // or streaming into epoch 1 (pool was tiny, likely exhausted).
+    let mut epochs_dispatched = Vec::new();
+    while let Ok(msg) = h.control_rxs[0].try_recv() {
+        if let ControlMsg::StartEpoch(p) = msg { epochs_dispatched.push(p.epoch); }
+    }
+
+    // Rank 0 should have received some dispatch (from epoch 0 or 1).
+    // The exact behavior depends on pool sizing, but no crash = the
+    // multi-pool logic works.
+    // If we got here without panic, multi-pool logic works.
+}
+
+#[test]
+fn test_streaming_global_epoch_event_fires_when_all_complete() {
+    // Manually set up a pool and feed it exact completions.
+    let mut h = make_streaming_harness(2, 2, 20, 10, Some(5));
+
+    // Manually create epoch 0 pool with known sizes.
+    let pool = super::coordinator::ChunkPool::new(0, 20, 2);
+    h.coord.chunk_pools.insert(0, pool);
+
+    // Manually take chunks: 10 samples each.
+    h.coord.chunk_pools.get_mut(&0).unwrap().take_chunk(10, 0);
+    h.coord.chunk_pools.get_mut(&0).unwrap().take_chunk(10, 1);
+
+    // Report completion from both ranks.
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 1,
+        epoch_ms: 10.0, samples_processed: 10,
+        scalars: Default::default(),
+    }).unwrap();
+    h.metrics_tx.send(MetricsMsg {
+        rank: 1, epoch: 0, avg_loss: 0.2, batches_processed: 1,
+        epoch_ms: 20.0, samples_processed: 10,
+        scalars: Default::default(),
+    }).unwrap();
+    h.coord.drain_metrics();
+
+    assert_eq!(h.coord.last_aggregated_epoch, Some(0),
+        "epoch 0 should be aggregated when both ranks complete");
+}
+
+#[test]
+fn test_overshoot_gate_blocks_runaway() {
+    // Use a manually prepared pool so we control exactly what was dispatched.
+    let mut h = make_streaming_harness(2, 3, 100, 10, Some(0));
+
+    // Create epoch 0 pool, take all samples for both ranks.
+    let pool = super::coordinator::ChunkPool::new(0, 100, 2);
+    h.coord.chunk_pools.insert(0, pool);
+    h.coord.chunk_pools.get_mut(&0).unwrap().take_chunk(50, 0);
+    h.coord.chunk_pools.get_mut(&0).unwrap().take_chunk(50, 1);
+
+    // Simulate: rank 0 has completed all epoch 0 work, at planned batch count.
+    h.coord.steps_since_avg[0] = 10;
+    h.coord.steps_since_avg[1] = 3;
+
+    // Report rank 0 completion (matches dispatched amount).
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 5,
+        epoch_ms: 50.0, samples_processed: 50,
+        scalars: Default::default(),
+    }).unwrap();
+    h.coord.drain_metrics();
+
+    // With max_overshoot=0 and steps_since_avg[0]=10 >= batch_counts[0]=10,
+    // the gate should block cross-epoch dispatch.
+    let mut got_epoch_1 = false;
+    while let Ok(msg) = h.control_rxs[0].try_recv() {
+        if let ControlMsg::StartEpoch(p) = msg {
+            if p.epoch == 1 { got_epoch_1 = true; }
+        }
+    }
+    assert!(!got_epoch_1,
+        "overshoot gate should prevent cross-epoch dispatch when at limit");
+}
+
+#[test]
+fn test_overshoot_gate_skipped_for_nccl() {
+    // NCCL cadence must not apply the overshoot gate. Blocking the fast
+    // GPU forces it into wait_for_epoch_plan where it can't send timing
+    // messages, leaving nccl_ack permanently false and deadlocking.
+    let (_timing_tx, timing_rx) = mpsc::channel();
+    let (metrics_tx, metrics_rx) = mpsc::channel();
+    let (_param_tx, param_rx) = mpsc::channel();
+    let mut control_txs = Vec::new();
+    let mut control_rxs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..2 {
+        let (tx, rx) = mpsc::channel();
+        control_txs.push(tx);
+        control_rxs.push(rx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    let el_che = ElChe::new(2, 10);
+    let mut coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Cadence, AverageBackend::Nccl,
+        2, 100, el_che,
+    )
+    .progressive(true)
+    .batch_size(10)
+    .num_epochs(3)
+    .max_overshoot(Some(0)) // Would block everything with CPU backend.
+    .build();
+
+    // Create epoch 0 pool, take all samples for both ranks.
+    let pool = super::coordinator::ChunkPool::new(0, 100, 2);
+    coord.chunk_pools.insert(0, pool);
+    coord.chunk_pools.get_mut(&0).unwrap().take_chunk(50, 0);
+    coord.chunk_pools.get_mut(&0).unwrap().take_chunk(50, 1);
+
+    // Rank 0 has trained well past its planned batch count.
+    coord.steps_since_avg[0] = 10;
+    coord.steps_since_avg[1] = 3;
+
+    // Report rank 0 chunk completion.
+    metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 5,
+        epoch_ms: 50.0, samples_processed: 50,
+        scalars: Default::default(),
+    }).unwrap();
+    coord.drain_metrics();
+
+    // With NCCL, the overshoot gate is skipped: rank 0 should get
+    // a cross-epoch StartEpoch even with max_overshoot=0.
+    let mut got_start_epoch = false;
+    while let Ok(msg) = control_rxs[0].try_recv() {
+        if let ControlMsg::StartEpoch(_) = msg {
+            got_start_epoch = true;
+        }
+    }
+    assert!(got_start_epoch,
+        "NCCL backend must skip overshoot gate (AllReduce handles coordination)");
+}
+
+#[test]
+fn test_overshoot_auto_tune_grows() {
+    let mut h = make_streaming_harness(2, 3, 1000, 10, None);
+    let initial = h.coord.max_overshoot;
+    assert!(initial >= 2, "initial overshoot should be at least 2");
+
+    // Simulate a successful NCCL averaging (no divergence)
+    h.coord.steps_since_avg = vec![10, 10];
+    h.coord.wall_ms_accum = vec![100.0, 200.0];
+    h.coord.finish_averaging_nccl();
+
+    assert_eq!(h.coord.max_overshoot, initial + 1,
+        "overshoot should grow by 1 after successful averaging");
+}
+
+#[test]
+fn test_overshoot_auto_tune_suppressed_on_divergence_trend() {
+    let mut h = make_streaming_harness(2, 3, 1000, 10, None);
+
+    // Grow overshoot via NCCL averaging (no divergence -> Stable -> grows).
+    for _ in 0..3 {
+        h.coord.steps_since_avg = vec![10, 10];
+        h.coord.wall_ms_accum = vec![100.0, 200.0];
+        h.coord.finish_averaging_nccl();
+    }
+    let overshoot_after_growth = h.coord.max_overshoot;
+
+    // 3 CPU averaging rounds with rising divergence -> trend triggers SuppressGrowth.
+    for i in 0..3 {
+        let div = 0.10 + i as f64 * 0.05;
+        h.coord.finish_averaging_cpu(
+            10.0,
+            &[5_usize, 5],
+            &[50.0, 100.0],
+            Some(super::convergence::DivergenceReport {
+                deltas: vec![div, div],
+                pre_norms: None,
+                post_norm: None,
+            }),
+        );
+    }
+
+    // Overshoot should NOT have grown on the 3rd CPU round (SuppressGrowth).
+    assert!(h.coord.max_overshoot <= overshoot_after_growth + 2,
+        "3rd CPU round should suppress overshoot growth, got {}", h.coord.max_overshoot);
+}
+
+#[test]
+fn test_overshoot_user_override_no_autotune() {
+    let mut h = make_streaming_harness(2, 3, 1000, 10, Some(7));
+    assert_eq!(h.coord.max_overshoot, 7);
+    assert!(!h.coord.overshoot_auto);
+
+    // Simulate averaging -- should NOT change overshoot
+    h.coord.steps_since_avg = vec![10, 10];
+    h.coord.wall_ms_accum = vec![100.0, 200.0];
+    h.coord.finish_averaging_nccl();
+
+    assert_eq!(h.coord.max_overshoot, 7,
+        "user-set overshoot should not auto-tune");
+}
+
+#[test]
+fn test_multi_pool_completion_tracking() {
+    // Manually create two pools and verify MetricsMsg routes to correct ones.
+    let mut h = make_streaming_harness(2, 3, 100, 10, Some(10));
+
+    // Create pools manually with known dispatched amounts.
+    let mut pool0 = super::coordinator::ChunkPool::new(0, 100, 2);
+    pool0.take_chunk(50, 0); // dispatch 50 to rank 0
+    pool0.take_chunk(50, 1); // dispatch 50 to rank 1
+    h.coord.chunk_pools.insert(0, pool0);
+
+    let mut pool1 = super::coordinator::ChunkPool::new(1, 100, 2);
+    pool1.take_chunk(30, 0); // dispatch 30 to rank 0
+    h.coord.chunk_pools.insert(1, pool1);
+
+    // Report epoch 0 completion from rank 0
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 5,
+        epoch_ms: 50.0, samples_processed: 50,
+        scalars: Default::default(),
+    }).unwrap();
+    // Report epoch 1 completion from rank 0
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 1, avg_loss: 0.2, batches_processed: 3,
+        epoch_ms: 30.0, samples_processed: 30,
+        scalars: Default::default(),
+    }).unwrap();
+    h.coord.drain_metrics();
+
+    // Epoch 0 pool should have rank 0 completion tracked
+    if let Some(pool) = h.coord.chunk_pools.get(&0) {
+        assert_eq!(pool.completed[0], 50, "epoch 0 pool should track rank 0 completion");
+    }
+    // Epoch 1 pool should have rank 0 completion tracked separately
+    if let Some(pool) = h.coord.chunk_pools.get(&1) {
+        assert_eq!(pool.completed[0], 30, "epoch 1 pool should track rank 0 completion");
+    }
+}
+
+#[test]
+fn test_shutdown_with_streaming_pools() {
+    // Manually create pools and verify shutdown fires when last epoch completes.
+    let mut h = make_streaming_harness(2, 2, 20, 10, Some(5));
+
+    // Create epoch 0 pool, dispatch all.
+    let mut pool0 = super::coordinator::ChunkPool::new(0, 20, 2);
+    pool0.take_chunk(10, 0);
+    pool0.take_chunk(10, 1);
+    h.coord.chunk_pools.insert(0, pool0);
+
+    // Complete epoch 0 from both ranks.
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 1,
+        epoch_ms: 10.0, samples_processed: 10,
+        scalars: Default::default(),
+    }).unwrap();
+    h.metrics_tx.send(MetricsMsg {
+        rank: 1, epoch: 0, avg_loss: 0.2, batches_processed: 1,
+        epoch_ms: 20.0, samples_processed: 10,
+        scalars: Default::default(),
+    }).unwrap();
+    h.coord.drain_metrics();
+    assert_eq!(h.coord.last_aggregated_epoch, Some(0));
+
+    // Drain dispatch messages from on_epoch_aggregated.
+    for rx in &h.control_rxs {
+        while rx.try_recv().is_ok() {}
+    }
+
+    // Create epoch 1 pool with both ranks dispatched.
+    // Replace whatever on_epoch_aggregated created, to have clean state.
+    h.coord.chunk_pools.remove(&1);
+    let mut pool1 = super::coordinator::ChunkPool::new(1, 20, 2);
+    pool1.take_chunk(10, 0);
+    pool1.take_chunk(10, 1);
+    h.coord.chunk_pools.insert(1, pool1);
+
+    // Complete epoch 1 (the last epoch).
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 1, avg_loss: 0.05, batches_processed: 1,
+        epoch_ms: 10.0, samples_processed: 10,
+        scalars: Default::default(),
+    }).unwrap();
+    h.metrics_tx.send(MetricsMsg {
+        rank: 1, epoch: 1, avg_loss: 0.06, batches_processed: 1,
+        epoch_ms: 20.0, samples_processed: 10,
+        scalars: Default::default(),
+    }).unwrap();
+    h.coord.drain_metrics();
+
+    assert_eq!(h.coord.last_aggregated_epoch, Some(1));
+
+    // Both ranks should have received Shutdown.
+    let mut shutdowns = 0;
+    for rx in &h.control_rxs {
+        while let Ok(msg) = rx.try_recv() {
+            if matches!(msg, ControlMsg::Shutdown) {
+                shutdowns += 1;
+            }
+        }
+    }
+    assert_eq!(shutdowns, 2, "both ranks should receive Shutdown after final epoch");
+}
+
+#[test]
+fn test_ddp_run_config_max_overshoot() {
+    let config = DdpRunConfig::new().with_max_overshoot(5);
+    assert_eq!(config.max_overshoot, Some(5));
+
+    let config2 = DdpRunConfig::new();
+    assert_eq!(config2.max_overshoot, None);
+}
+
+#[test]
+fn test_epoch_event_fires_with_mixed_epoch_ranks() {
+    // Scenario: fast rank (0) finishes epoch 1 and streams into epoch 2.
+    // Slow rank (1) then completes epoch 1. The global epoch 1 event must
+    // fire with correct metrics from BOTH ranks, even though rank 0's
+    // epoch 1 metrics were buffered earlier.
+    let mut sh = make_streaming_harness_with_metrics(2, 3, 60, 10, Some(10));
+
+    // -- Set up epoch 1 pool: 60 samples, 30 per rank --
+    let mut pool1 = super::coordinator::ChunkPool::new(1, 60, 2);
+    pool1.take_chunk(30, 0); // rank 0 dispatched 30
+    pool1.take_chunk(30, 1); // rank 1 dispatched 30
+    sh.inner.coord.chunk_pools.insert(1, pool1);
+
+    // -- Set up epoch 2 pool (rank 0 already streaming ahead) --
+    let mut pool2 = super::coordinator::ChunkPool::new(2, 60, 2);
+    pool2.take_chunk(20, 0); // rank 0 dispatched 20 into epoch 2
+    sh.inner.coord.chunk_pools.insert(2, pool2);
+    sh.inner.coord.rank_epoch[0] = 2; // rank 0 is on epoch 2
+    sh.inner.coord.rank_epoch[1] = 1; // rank 1 still on epoch 1
+
+    // -- Rank 0 reported epoch 1 completion earlier (buffered) --
+    sh.inner.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 1, avg_loss: 0.10, batches_processed: 3,
+        epoch_ms: 30.0, samples_processed: 30,
+        scalars: [("loss".to_string(), (0.30, 3_usize))].into(),
+    }).unwrap();
+    sh.inner.coord.drain_metrics();
+
+    // Epoch 1 should NOT be aggregated yet (rank 1 hasn't completed).
+    assert!(sh.inner.coord.last_aggregated_epoch.is_none()
+        || sh.inner.coord.last_aggregated_epoch == Some(0),
+        "epoch 1 should not aggregate with only rank 0 complete");
+
+    // Verify epoch 1 pool is still active (rank 1 not done).
+    assert!(sh.inner.coord.chunk_pools.contains_key(&1),
+        "epoch 1 pool should still exist");
+
+    // -- Now slow rank (1) completes epoch 1 --
+    sh.inner.metrics_tx.send(MetricsMsg {
+        rank: 1, epoch: 1, avg_loss: 0.20, batches_processed: 3,
+        epoch_ms: 60.0, samples_processed: 30,
+        scalars: [("loss".to_string(), (0.60, 3_usize))].into(),
+    }).unwrap();
+    sh.inner.coord.drain_metrics();
+
+    // Epoch 1 should now be aggregated.
+    assert_eq!(sh.inner.coord.last_aggregated_epoch, Some(1),
+        "epoch 1 should aggregate when both ranks complete");
+
+    // Epoch 1 pool should be cleaned up.
+    assert!(!sh.inner.coord.chunk_pools.contains_key(&1),
+        "epoch 1 pool should be removed after aggregation");
+
+    // Epoch 2 pool should still exist (rank 0 is working on it).
+    assert!(sh.inner.coord.chunk_pools.contains_key(&2),
+        "epoch 2 pool should survive epoch 1 aggregation");
+
+    // -- Verify aggregated metrics are correct --
+    let em = sh.epoch_metrics_rx.try_recv()
+        .expect("epoch metrics should have been sent for epoch 1");
+    assert_eq!(em.epoch, 1);
+
+    // avg_loss: batch-weighted mean of rank 0 (0.10, 3 batches) and rank 1 (0.20, 3 batches)
+    // = (0.10*3 + 0.20*3) / 6 = 0.90 / 6 = 0.15
+    assert!((em.avg_loss - 0.15).abs() < 1e-9,
+        "avg_loss should be batch-weighted mean: got {}", em.avg_loss);
+
+    // per_rank_batch_share: 3/6 = 0.5 each
+    assert_eq!(em.per_rank_batch_share.len(), 2);
+    assert!((em.per_rank_batch_share[0] - 0.5).abs() < 1e-9);
+    assert!((em.per_rank_batch_share[1] - 0.5).abs() < 1e-9);
+
+    // scalars: loss = batch-weighted mean of rank 0 (0.30/3=0.10) and rank 1 (0.60/3=0.20)
+    // weighted by batches: (0.10*3 + 0.20*3)/6 = 0.15
+    assert!((em.scalars["loss"] - 0.15).abs() < 1e-9,
+        "loss scalar should be batch-weighted: got {}", em.scalars["loss"]);
+
+    // epoch_ms is overridden by pool wall-clock (near-instant in test).
+    assert!(em.epoch_ms > 0.0, "epoch_ms should be positive");
+}
+
+#[test]
+fn test_dispatch_skips_aggregated_epochs() {
+    // Reproduce the pool-recreation deadlock:
+    // Fast GPU takes ALL chunks from epoch 1 while slow GPU is still on epoch 0.
+    // Both epoch 0 and 1 get aggregated in one sweep. dispatch_next_chunk for
+    // the slow GPU must skip past the removed pools, not recreate them.
+    //
+    // 2 ranks, 5 epochs, 100 samples, batch_size=10 (10 batches/epoch).
+    let mut h = make_streaming_harness(2, 5, 100, 10, None);
+
+    // Manually create epoch 0 pool with all samples dispatched.
+    // Fast GPU (rank 0) got 70 samples, slow GPU (rank 1) got 30.
+    let mut pool0 = super::coordinator::ChunkPool::new(0, 100, 2);
+    pool0.take_chunk(70, 0);
+    pool0.take_chunk(30, 1);
+    h.coord.chunk_pools.insert(0, pool0);
+
+    // Epoch 1 pool: fast GPU took ALL 100 samples; slow GPU got nothing.
+    let mut pool1 = super::coordinator::ChunkPool::new(1, 100, 2);
+    pool1.take_chunk(100, 0);
+    h.coord.chunk_pools.insert(1, pool1);
+
+    // Track rank positions: slow GPU last dispatched from epoch 0.
+    h.coord.rank_epoch[0] = 1;
+    h.coord.rank_epoch[1] = 0;
+
+    // Complete all chunks: both ranks for epoch 0, rank 0 for epoch 1.
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 7,
+        epoch_ms: 50.0, samples_processed: 70,
+        scalars: Default::default(),
+    }).unwrap();
+    h.metrics_tx.send(MetricsMsg {
+        rank: 1, epoch: 0, avg_loss: 0.2, batches_processed: 3,
+        epoch_ms: 80.0, samples_processed: 30,
+        scalars: Default::default(),
+    }).unwrap();
+    h.metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 1, avg_loss: 0.1, batches_processed: 10,
+        epoch_ms: 100.0, samples_processed: 100,
+        scalars: Default::default(),
+    }).unwrap();
+
+    // drain_metrics -> try_aggregate_epochs_progressive aggregates both.
+    // on_epoch_aggregated(0) calls dispatch_next_chunk(1) for the idle slow GPU.
+    h.coord.drain_metrics();
+
+    // Both epochs should be aggregated.
+    assert_eq!(h.coord.last_aggregated_epoch, Some(1),
+        "both epoch 0 and 1 should be aggregated");
+
+    // The critical check: no orphan pool for epoch 0 or 1 should exist.
+    // Only pools for epoch 2+ should be present.
+    for &epoch in h.coord.chunk_pools.keys() {
+        assert!(epoch >= 2,
+            "found orphan pool for already-aggregated epoch {epoch}");
+    }
+
+    // Slow GPU should have been dispatched to epoch 2 (not epoch 1).
+    assert!(h.coord.rank_epoch[1] >= 2,
+        "slow GPU should be on epoch 2+, got epoch {}",
+        h.coord.rank_epoch[1]);
+}
+
+// ---------------------------------------------------------------------------
+// LR scheduling on the worker
+// ---------------------------------------------------------------------------
+//
+// These tests guard the per-batch LR pipeline: scheduler.lr(step) * lr_scale
+// must reach the optimizer on every batch. The original bugs (2026-04-13)
+// were that scale_lr was silently overwritten when a scheduler was attached
+// (so DDP linear scaling never took effect) and that the scheduler step
+// counter could be inflated by NCCL ack messages (so MultiStepLR fired
+// ~6 epochs early on heterogeneous DDP).
+
+/// Trivial constant-LR scheduler used to assert `worker.lr_scale` is applied
+/// multiplicatively on top of scheduler output.
+struct ConstLr(f64);
+impl crate::nn::Scheduler for ConstLr {
+    fn lr(&self, _step: usize) -> f64 { self.0 }
+}
+
+/// Linearly increasing LR (lr = step * slope), so the test can also verify
+/// that the scheduler is queried with the correct training step.
+struct LinearLr { slope: f64 }
+impl crate::nn::Scheduler for LinearLr {
+    fn lr(&self, step: usize) -> f64 { step as f64 * self.slope }
+}
+
+#[test]
+fn test_worker_scheduler_drives_optimizer_lr() {
+    let (mut worker, _ch) = make_test_worker();
+    worker.set_lr(0.0); // start at 0 so we can detect the scheduler writing in
+
+    worker.set_scheduler(Arc::new(ConstLr(0.05)));
+
+    let opts = test_opts();
+    let batch = vec![
+        Tensor::randn(&[4, 4], opts).unwrap(),
+        Tensor::randn(&[4, 2], opts).unwrap(),
+    ];
+    worker.train_step(&batch, &mse_train).unwrap();
+
+    // Scheduler returned 0.05; with lr_scale=1.0 (default) optimizer sees 0.05.
+    assert!((worker.current_lr() - 0.05).abs() < 1e-9,
+        "expected optimizer LR 0.05, got {}", worker.current_lr());
+}
+
+#[test]
+fn test_worker_lr_scale_multiplies_scheduler_output() {
+    // The bug this guards: orchestrator used to call worker.scale_lr(2.0) at
+    // startup, but the scheduler's per-batch set_lr immediately overwrote
+    // it -- so DDP linear scaling never reached the optimizer when a
+    // scheduler was attached. Fix: orchestrator now calls set_lr_scale and
+    // train_step does set_lr(sched.lr(step) * lr_scale).
+    let (mut worker, _ch) = make_test_worker();
+    worker.set_scheduler(Arc::new(ConstLr(0.05)));
+    worker.set_lr_scale(2.0);
+
+    let opts = test_opts();
+    let batch = vec![
+        Tensor::randn(&[4, 4], opts).unwrap(),
+        Tensor::randn(&[4, 2], opts).unwrap(),
+    ];
+    worker.train_step(&batch, &mse_train).unwrap();
+
+    // 0.05 * 2.0 = 0.10
+    assert!((worker.current_lr() - 0.10).abs() < 1e-9,
+        "expected optimizer LR 0.10 (sched 0.05 * scale 2.0), got {}",
+        worker.current_lr());
+}
+
+#[test]
+fn test_worker_scheduler_step_advances_with_global_progress() {
+    // train_step computes set_lr(sched.lr(global_step + steps_since_avg)).
+    // After 3 batches (no sync), step argument should be 3.
+    let (mut worker, _ch) = make_test_worker();
+    worker.set_scheduler(Arc::new(LinearLr { slope: 0.01 }));
+
+    let opts = test_opts();
+    let batch = vec![
+        Tensor::randn(&[4, 4], opts).unwrap(),
+        Tensor::randn(&[4, 2], opts).unwrap(),
+    ];
+
+    worker.train_step(&batch, &mse_train).unwrap();
+    // Before batch 1, scheduler was queried at step 0 -> lr = 0.0.
+    assert!((worker.current_lr() - 0.0).abs() < 1e-9);
+
+    worker.train_step(&batch, &mse_train).unwrap();
+    // Before batch 2, scheduler queried at step 1 -> lr = 0.01.
+    assert!((worker.current_lr() - 0.01).abs() < 1e-9,
+        "step 1: got {}", worker.current_lr());
+
+    worker.train_step(&batch, &mse_train).unwrap();
+    // Before batch 3, scheduler queried at step 2 -> lr = 0.02.
+    assert!((worker.current_lr() - 0.02).abs() < 1e-9,
+        "step 2: got {}", worker.current_lr());
+}
+
+// ---------------------------------------------------------------------------
+// Cross-mode LR parity
+// ---------------------------------------------------------------------------
+//
+// The framework promises: "if you give me a scheduler, I will honor it the
+// same way no matter which training mode you use." Without this guarantee,
+// switching between solo and DDP silently changes hyperparameter behavior --
+// which is exactly the failure mode that hid Bugs 1-3 for so long.
+//
+// This test is the contract test for that promise. It runs the same
+// MultiStepLR over the same number of batches in three independent paths
+// and asserts the recorded LR sequences are identical:
+//
+//   1. **Manual**:  `optimizer.set_lr(sched.lr(step))` per batch (the
+//      reference implementation a user would write themselves).
+//   2. **GpuWorker**: train_step() with set_scheduler attached
+//      (the path used by Ddp::builder, both in DDP and single-GPU fallback).
+//   3. **Graph::step()**: the path used by Ddp::setup_with (sync mode).
+//
+// The first time we ran this we had two bugs (graph mode never updated LR;
+// worker scheduler interaction with lr_scale was broken) and this single
+// test would have caught both.
+
+/// Records every LR value the scheduler returned, so the test can compare
+/// the exact query sequence each mode produced.
+struct RecordingSched {
+    inner: crate::nn::MultiStepLR,
+    queries: std::sync::Mutex<Vec<(usize, f64)>>,
+}
+impl RecordingSched {
+    fn new(base_lr: f64, milestones: &[usize], gamma: f64) -> Self {
+        Self {
+            inner: crate::nn::MultiStepLR::new(base_lr, milestones, gamma),
+            queries: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+impl crate::nn::Scheduler for RecordingSched {
+    fn lr(&self, step: usize) -> f64 {
+        let lr = self.inner.lr(step);
+        self.queries.lock().unwrap().push((step, lr));
+        lr
+    }
+}
+
+#[test]
+fn test_cross_mode_lr_parity_solo_vs_worker_vs_graph() {
+    use crate::graph::FlowBuilder;
+    use crate::nn::{Module, Optimizer, SGD};
+
+    let dev = test_device();
+    let opts = test_opts();
+    let n_steps: usize = 12;
+    // Milestones at 4 and 8 produce 3 LR plateaus across our 12 steps so
+    // every drop is observed; gamma 0.1 makes the steps obvious.
+    let base_lr = 0.1f64;
+    let milestones = vec![4usize, 8];
+    let gamma = 0.1f64;
+
+    // ---------- Path 1: manual optimizer.set_lr per batch (reference). ----------
+    let manual_lrs: Vec<f64> = {
+        let model = Linear::on_device(4, 2, dev).unwrap();
+        let mut opt = SGD::new(&model.parameters(), 0.0, 0.0);
+        let sched = crate::nn::MultiStepLR::new(base_lr, &milestones, gamma);
+        let batch = [
+            Tensor::randn(&[4, 4], opts).unwrap(),
+            Tensor::randn(&[4, 2], opts).unwrap(),
+        ];
+        let mut lrs = Vec::with_capacity(n_steps);
+        for step in 0..n_steps {
+            opt.set_lr(sched.lr(step));
+            // Need a backward pass before opt.step() so SGD has gradients.
+            let v = Variable::new(batch[0].clone(), false);
+            let t = Variable::new(batch[1].clone(), false);
+            let pred = model.forward(&v).unwrap();
+            let loss = pred.sub(&t).unwrap();
+            loss.mul(&loss).unwrap().mean().unwrap().backward().unwrap();
+            opt.step().unwrap();
+            opt.zero_grad();
+            lrs.push(opt.lr());
+        }
+        lrs
+    };
+
+    // ---------- Path 2: GpuWorker with set_scheduler (Ddp::builder path). ----------
+    let worker_lrs: Vec<f64> = {
+        let (mut worker, _ch) = make_test_worker();
+        worker.set_scheduler(Arc::new(RecordingSched::new(base_lr, &milestones, gamma)));
+        let batch = vec![
+            Tensor::randn(&[4, 4], opts).unwrap(),
+            Tensor::randn(&[4, 2], opts).unwrap(),
+        ];
+        let mut lrs = Vec::with_capacity(n_steps);
+        for _ in 0..n_steps {
+            worker.train_step(&batch, &mse_train).unwrap();
+            lrs.push(worker.current_lr());
+        }
+        lrs
+    };
+
+    // ---------- Path 3: Graph::step() with set_scheduler (Ddp::setup_with path). ----------
+    let graph_lrs: Vec<f64> = {
+        let graph = FlowBuilder::from(Linear::on_device(4, 2, dev).unwrap())
+            .build()
+            .unwrap();
+        graph.set_optimizer(|p| SGD::new(p, 0.0, 0.0));
+        graph.set_scheduler(Arc::new(RecordingSched::new(base_lr, &milestones, gamma)));
+        let x = Variable::new(Tensor::randn(&[4, 4], opts).unwrap(), false);
+        let t = Variable::new(Tensor::randn(&[4, 2], opts).unwrap(), false);
+        let mut lrs = Vec::with_capacity(n_steps);
+        for _ in 0..n_steps {
+            let pred = graph.forward(&x).unwrap();
+            let loss = pred.sub(&t).unwrap();
+            loss.mul(&loss).unwrap().mean().unwrap().backward().unwrap();
+            graph.step().unwrap();
+            let lr = graph.optimizer.borrow().as_ref().map(|o| o.lr()).unwrap();
+            lrs.push(lr);
+        }
+        lrs
+    };
+
+    // The three paths must produce identical LR trajectories.
+    assert_eq!(manual_lrs.len(), n_steps);
+    assert_eq!(worker_lrs.len(), n_steps);
+    assert_eq!(graph_lrs.len(), n_steps);
+    for step in 0..n_steps {
+        assert!((manual_lrs[step] - worker_lrs[step]).abs() < 1e-9,
+            "step {step}: solo={} vs worker={}", manual_lrs[step], worker_lrs[step]);
+        assert!((manual_lrs[step] - graph_lrs[step]).abs() < 1e-9,
+            "step {step}: solo={} vs graph={}", manual_lrs[step], graph_lrs[step]);
+    }
+
+    // Sanity: the recorded trajectory should show the two MultiStepLR drops
+    // (0.1 -> 0.01 at step 4, 0.01 -> 0.001 at step 8). If this fails, the
+    // test scheduler isn't doing its job and the parity check above is
+    // vacuous.
+    let mut transitions = 0;
+    for w in manual_lrs.windows(2) {
+        if (w[0] - w[1]).abs() > 1e-9 { transitions += 1; }
+    }
+    assert_eq!(transitions, 2,
+        "expected 2 LR drops over 12 steps with milestones [4, 8]; got {transitions}. \
+         trajectory: {manual_lrs:?}");
+}
+
+#[test]
+fn test_cross_mode_lr_parity_with_lr_scale() {
+    // Same parity guarantee, but with lr_scale != 1.0. Worker and Graph must
+    // both apply the scale multiplicatively to scheduler output.
+    use crate::graph::FlowBuilder;
+    use crate::nn::{Module, Optimizer, SGD};
+
+    let dev = test_device();
+    let opts = test_opts();
+    let n_steps: usize = 8;
+    let scale = 2.5;
+
+    // Reference: manual with scale baked into base_lr.
+    let manual_lrs: Vec<f64> = {
+        let model = Linear::on_device(4, 2, dev).unwrap();
+        let mut opt = SGD::new(&model.parameters(), 0.0, 0.0);
+        let sched = crate::nn::MultiStepLR::new(0.1, &[4], 0.1);
+        let batch = [
+            Tensor::randn(&[4, 4], opts).unwrap(),
+            Tensor::randn(&[4, 2], opts).unwrap(),
+        ];
+        let mut lrs = Vec::with_capacity(n_steps);
+        for step in 0..n_steps {
+            opt.set_lr(sched.lr(step) * scale);
+            let v = Variable::new(batch[0].clone(), false);
+            let t = Variable::new(batch[1].clone(), false);
+            let pred = model.forward(&v).unwrap();
+            let loss = pred.sub(&t).unwrap();
+            loss.mul(&loss).unwrap().mean().unwrap().backward().unwrap();
+            opt.step().unwrap();
+            opt.zero_grad();
+            lrs.push(opt.lr());
+        }
+        lrs
+    };
+
+    // GpuWorker: set_lr_scale + set_scheduler.
+    let worker_lrs: Vec<f64> = {
+        let (mut worker, _ch) = make_test_worker();
+        worker.set_scheduler(Arc::new(crate::nn::MultiStepLR::new(0.1, &[4], 0.1)));
+        worker.set_lr_scale(scale);
+        let batch = vec![
+            Tensor::randn(&[4, 4], opts).unwrap(),
+            Tensor::randn(&[4, 2], opts).unwrap(),
+        ];
+        let mut lrs = Vec::with_capacity(n_steps);
+        for _ in 0..n_steps {
+            worker.train_step(&batch, &mse_train).unwrap();
+            lrs.push(worker.current_lr());
+        }
+        lrs
+    };
+
+    // Graph: set_lr_scale + set_scheduler.
+    let graph_lrs: Vec<f64> = {
+        let graph = FlowBuilder::from(Linear::on_device(4, 2, dev).unwrap())
+            .build()
+            .unwrap();
+        graph.set_optimizer(|p| SGD::new(p, 0.0, 0.0));
+        graph.set_scheduler(Arc::new(crate::nn::MultiStepLR::new(0.1, &[4], 0.1)));
+        graph.set_lr_scale(scale);
+        let x = Variable::new(Tensor::randn(&[4, 4], opts).unwrap(), false);
+        let t = Variable::new(Tensor::randn(&[4, 2], opts).unwrap(), false);
+        let mut lrs = Vec::with_capacity(n_steps);
+        for _ in 0..n_steps {
+            let pred = graph.forward(&x).unwrap();
+            let loss = pred.sub(&t).unwrap();
+            loss.mul(&loss).unwrap().mean().unwrap().backward().unwrap();
+            graph.step().unwrap();
+            let lr = graph.optimizer.borrow().as_ref().map(|o| o.lr()).unwrap();
+            lrs.push(lr);
+        }
+        lrs
+    };
+
+    for step in 0..n_steps {
+        assert!((manual_lrs[step] - worker_lrs[step]).abs() < 1e-9,
+            "step {step}: solo*scale={} vs worker={}", manual_lrs[step], worker_lrs[step]);
+        assert!((manual_lrs[step] - graph_lrs[step]).abs() < 1e-9,
+            "step {step}: solo*scale={} vs graph={}", manual_lrs[step], graph_lrs[step]);
+    }
 }

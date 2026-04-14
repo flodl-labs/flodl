@@ -5,9 +5,98 @@ All notable changes to floDl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] - 2026-04-14
 
 ### Added
+
+#### `ddp-bench` — DDP Validation Suite
+- **New workspace member `ddp-bench/`**: End-to-end harness that reproduces published training setups to build scientifically valid solo baselines, then measures DDP/ElChe convergence quality against them.
+- **8 reference models** (`ddp-bench/src/models/`):
+  - `logistic` / `mlp` / `lenet` / `conv_ae` (MNIST)
+  - `resnet` (ResNet-20 on CIFAR-10, He et al. 2015 — paper baseline 91.25%)
+  - `resnet_graph` (FlowBuilder rewrite of ResNet-20: same parameter count, same accuracy, with graph-level observation, named parameters and tagged residual blocks)
+  - `char_rnn` (Karpathy 2015 char-RNN on Shakespeare, LSTM-256x2)
+  - `gpt_nano` (4-layer pre-norm Transformer on Shakespeare, warmup + cosine decay)
+- **8 DDP modes**: `solo-0`, `solo-1`, `nccl-{sync,cadence,async}`, `cpu-{sync,cadence,async}`. Side-by-side validation across all backend × policy combinations.
+- **Harness** (`harness.rs`): single-process and DDP launch paths, per-batch metric collection via `record_scalar`, per-epoch convergence summaries, baseline JSON I/O.
+- **Analyzer** (`analyze.rs`): compares runs against committed baselines (`baselines/structured.json`, `baselines/baseline.json`, `baselines/sync.json`) with relative-error tolerances.
+- **Reporter** (`report.rs`): generates Markdown convergence reports including loss curves and timing tables (`runs/report.md`, `ddp-bench/report.md`).
+- **Dataset downloader** (`download.rs`): on-demand download + cache for MNIST, CIFAR-10, Shakespeare. Cache lives under `data/` (gitignored).
+- CLI flags: `--list`, `--model <name|all>`, `--mode <mode|all>`, `--epochs N`, `--batch-size`, `--lr-scale F`, `--validate`, `--baseline <path>`, `--save-baseline`, `--report <path>`, `--seed`.
+
+#### Built-in Standard Datasets — `flodl::data::datasets`
+- **`Mnist`** (`data/datasets/mnist.rs`): parses IDX gzip into `[N,1,28,28]` Float32 + `[N]` Int64. `Mnist::parse(images_gz, labels_gz) -> Result<Self>`. Implements `BatchDataSet`.
+- **`Cifar10`** (`data/datasets/cifar10.rs`): parses the binary batch format into `[N,3,32,32]` Float32 + `[N]` Int64 (10 classes). Implements `BatchDataSet`.
+- **`Shakespeare`** (`data/datasets/shakespeare.rs`): char-level tokenizer for next-char prediction. `[N, seq_len]` Int64 over a 65-symbol vocabulary, plus a `decode(&[i64]) -> String` helper. Implements `BatchDataSet`.
+- All three plug directly into `DataLoader::builder(dataset)` in single-GPU and DDP modes.
+
+#### Convergence Guard — Unified Divergence Reaction
+- **`convergence` module** (`flodl/src/distributed/ddp_run/convergence.rs`): unified weight-space divergence guard for both NCCL and CPU averaging paths.
+- **`DivergenceReport`**: per-rank L2 deltas plus optional pre/post norms. Free decomposition into cosine similarities and magnitude shifts via the algebraic identity (no extra reductions).
+- **`ConvergenceAction`**: `Stable` / `SuppressGrowth` / `NudgeDown { factor }` recommendations.
+- **`ConvergenceGuard::new(policy, enabled, threshold)`**: 5-interval ring buffer. Detects 3-consecutive-rising trends above threshold and returns `SuppressGrowth` to freeze ElChe anchor/overshoot growth (rather than aggressively shrinking, which can kill convergence — overhead auto-tune handles loosening on its own).
+- **Wired into `Coordinator`** for both NCCL and CPU paths (`Sync` is no-op, `Cadence`/`Async` use trend detection). Configurable via `DdpRunConfig::with_divergence_threshold(f64)`.
+- Cross-rank divergence is now reset after every averaging event, fixing a stale-state bug that pinned the ElChe anchor at 1.
+
+#### Timeline Profiler — `monitor::timeline`
+- **`Timeline`** (`flodl/src/monitor/timeline.rs`): high-frequency (default 100ms poll, 1s broadcast) system + GPU profiler. Captures CPU, RAM, per-GPU compute utilization and VRAM as `TimelineSample`s, interleaved with training events.
+- **`EventKind`**: `EpochStart` / `EpochEnd { loss }` / `SyncStart` / `SyncEnd { duration_ms }` / `CpuAvgStart` / `CpuAvgEnd { duration_ms }` / `AnchorChanged { from, to }` / `Throttle { rank }` / `Idle { device, duration_ms }` / `Custom { label }`.
+- **API**: `Timeline::new(poll_ms)` / `with_intervals(poll_ms, broadcast_ms)` (returns `Arc<Timeline>`), `start()` / `stop()`, `event(EventKind)`, `subscribe()` for live `mpsc` updates, `summary()`, `idle_gaps(device, threshold_pct, min_ms)`, `drain()`, `sample_count()`.
+- **Output**: `save_json(path)`, `save_csv(path)`, `save_html(path)` — the HTML view (`timeline.html`) renders a swimlane visualization of CPU/GPU utilization, sync/averaging events, anchor changes and detected idle gaps. Used by `ddp-bench` for every run (`runs/<model>/<mode>/timeline.html`).
+- Enable per-job in `fdl.yaml` with `ddp.timeline: true` or `output.timeline: true`.
+
+#### Verbosity-Gated Logging — `flodl::log`
+- **`Verbosity` enum**: `Quiet (0)` / `Normal (1)` / `Verbose (2)` / `Debug (3)` / `Trace (4)`. Higher levels include lower.
+- **Macros**: `flodl::msg!("...", args)` (Normal default, `@Verbose`/`@Debug`/`@Trace` for explicit level), plus `flodl::verbose!()`, `flodl::debug!()`, `flodl::trace!()`.
+- **Routing**: Normal/Verbose go to **stdout**; Debug/Trace go to **stderr** so they remain unbuffered in Docker non-TTY environments. Errors keep using bare `eprintln!`.
+- **Zero-code config**: `FLODL_VERBOSITY=verbose cargo run` (accepts integers 0–4 or names). Programmatic override via `flodl::log::set_verbosity(Verbosity)`.
+- **CLI integration**: `fdl -v` / `-vv` / `-vvv` / `--quiet` set `FLODL_VERBOSITY` in the parent process so it flows into Docker child commands automatically.
+
+#### FlowBuilder — `also_with`
+- **`FlowBuilder::also_with(skip, main)`** (`flodl/src/graph/flow.rs`): residual connection with a custom skip path. Generalizes [`also`](../flodl/src/graph/flow.rs) for cases where the skip needs its own transform — e.g. ResNet downsample blocks where a 1×1 conv + BN matches channel/stride changes. Output is `skip(x) + main(x)`. Exercised by `ddp-bench/src/models/resnet_graph.rs` (ResNet-20 on CIFAR-10, full paper-accuracy baseline).
+
+#### `AdaptiveAvgPool2d`
+- **`AdaptiveAvgPool2d::new([h, w])`** (`flodl/src/nn/pooling.rs`): global / fixed-output-size average pooling. Counterpart to the existing `AdaptiveMaxPool2d`. `[1, 1]` gives global average pooling (common ResNet head before FC); arbitrary output sizes enable variable-size input support. Re-exported at crate root.
+
+#### Metrics — `drain_scalars`
+- **`flodl::drain_scalars() -> HashMap<String, (f64, usize)>`** (`flodl/src/distributed/ddp_run/mod.rs`): companion to the existing `record_scalar`. Flushes the thread-local accumulator and returns `(sum, count)` per tag so callers (monitors, custom loops) can average or log per-batch scalars outside the DDP coordinator path. Re-exported at crate root.
+
+#### LR Scheduling — Cross-Mode Parity
+- **`Graph::set_scheduler(Arc<dyn Scheduler>)`** and **`Graph::set_lr_scale(f64)`** (`flodl/src/graph/distributed.rs`): scheduler attached on the Graph DDP path drives the optimizer LR via `scheduler.lr(training_step) * lr_scale` on every `step()`. `training_step` advances per `step()` call. **`Graph::training_step()`** accessor exposed for monitoring.
+- **`GpuWorker::set_scheduler` / `set_lr_scale` / `current_lr`** (`flodl/src/distributed/ddp_run/worker.rs`): same mechanism on the DDP-builder path. LR computed as `scheduler.lr(global_step + steps_since_avg) * lr_scale` per batch.
+- **`DdpBuilder::scheduler(factory)`** (`flodl/src/distributed/ddp_run/orchestrator.rs:1219`): per-worker scheduler factory closure. Each rank instantiates its own scheduler (cheap to clone, no shared state). Pairs with `lr_scale_ratio` to keep all ranks in lockstep.
+- **`DdpBuilder::lr_scale_ratio(f64)`** / **`DdpRunConfig::with_lr_scale_ratio(f64)`**: when set, the framework auto-computes the per-rank `lr_scale` from `world_size` (linear scaling rule, Goyal et al. 2017). Default `0.0` (= disabled, `lr_scale = 1.0`); set to `1.0` for full linear scaling, fractional values for sub-linear. Manual override stays available via `--lr-scale` in `ddp-bench`.
+- **Cross-mode parity test** (`graph_tests.rs`): asserts that the same `MultiStepLR` produces identical LR trajectories across all three training paths — manual reference loop, `GpuWorker` (DDP builder), and `Graph::step()` — for both unscaled and `lr_scale != 1.0`.
+- **Coordinator regression**: `SyncAck` no longer inflates `steps_since_avg` and now properly satisfies `nccl_ack`, fixing a scheduler drift across NCCL averaging events.
+
+#### DDP — New Configuration Knobs
+- **`DdpBuilder::no_divergence_guard()`** / **`DdpRunConfig::with_no_divergence_guard()`**: disable the convergence guard entirely. Use during calibration runs or when the divergence trend logging is more noise than signal. Default: enabled with `divergence_threshold = 0.05`.
+- **`DdpBuilder::max_overshoot(usize)`** / **`DdpRunConfig::with_max_overshoot(usize)`**: cap how many extra batches the fastest rank can run past the slowest before the next averaging event in `Async` policy. Pairs with auto-tuning; set to bound the worst case explicitly. Async-only — the `Cadence` policy uses wall-time anchoring instead. The internal `overshoot_ceiling` (default ~3× anchor) gates the auto-tuner.
+- **`DdpBuilder::timeline(Arc<Timeline>)`** / **`DdpRunConfig::with_timeline(Arc<Timeline>)`** / **`DdpConfig::timeline(Arc<Timeline>)`** / **`Graph::timeline(Arc<Timeline>)`**: attach a shared `monitor::Timeline` so the DDP runtime injects `EpochStart/End`, `SyncStart/End`, `CpuAvgStart/End`, `AnchorChanged`, `Throttle` events into the profiler stream. All four entry points (single-GPU Graph, manual `Ddp::wrap`, `Ddp::setup`, `DdpBuilder`) accept the same `Arc<Timeline>`. Used by `ddp-bench` to produce per-run swimlane HTML.
+- **`Coordinator::builder()`** (`flodl/src/distributed/ddp_run/coordinator/mod.rs`): the coordinator now exposes a fluent builder (`progressive`, `batch_size`, `timeline`, `divergence_threshold`, `no_divergence_guard`, `overhead_target`, `max_anchor`, `checkpoint_every`, `snapshot_timeout_secs`, `epoch_metrics_tx`, `device_indices`, `num_epochs`, `partition_ratios`, `max_overshoot`, `overshoot_ceiling`, `build`). Internal — the user-facing surface is still `DdpBuilder`/`Ddp::setup` — but useful for writing custom orchestrators.
+- **Note on `max_batch_diff`**: the field shipped in 0.3.0 (per-rank lockstep limit). What's new is `DdpBuilder::max_batch_diff(usize)` as a top-level fluent setter (was only reachable via `DdpRunConfig::with_max_batch_diff`).
+
+#### CLI: `fdl run` and Project / Sub-command Manifests
+- **`fdl.yaml`** (also `fdl.yml`, `fdl.json`): committed project manifest. Declares `description`, `scripts` (named shell commands with optional `docker:` service binding) and `commands` (paths to sub-command directories that have their own `fdl.yaml`). Example at the repo root: `fdl.yml.example` (84 lines).
+- **Sub-command manifests** (e.g. `ddp-bench/fdl.yml.example`): declare `entry`, `docker`, structured `ddp` / `training` / `output` sections, and named `jobs` (presets that merge over the defaults). DDP section maps 1:1 to `DdpConfig` / `DdpRunConfig` (mode, policy, backend, anchor, max_anchor, overhead_target, divergence_threshold, max_batch_diff, speed_hint, partition_ratios, progressive, max_grad_norm, lr_scale_ratio, snapshot_timeout, checkpoint_every, timeline).
+- **Auto-bootstrap**: when only `fdl.yml.example` (or `.dist`) is present, `fdl` offers to copy it into the real, gitignored `fdl.yml` so users can customize without polluting the repo.
+- **Built-in script targets** (e.g. `fdl test`, `fdl cuda-test-all`, `fdl shell`, `fdl bench`, `fdl self-build`): any unknown command is resolved against the project's `scripts:` map and wrapped in `docker compose run --rm <service>` when a `docker:` field is set. Replaces the old `make` workflow.
+- **Sub-command dispatch**: `fdl <cmd> [<job>] [--flag ...]` resolves `<cmd>` against `commands:`, picks the named job (or defaults), merges DDP/training/output sections and forwards everything as CLI flags to the configured `entry`. Pass-through for unknown flags is preserved.
+- **Recursive help**: `fdl <cmd> --help` and `fdl <cmd> <job> --help` print resolved options and inherited defaults.
+
+#### CLI: `fdl completions` / `fdl autocomplete`
+- **`fdl completions <bash|zsh|fish>`**: emits a shell-completion script that knows about all built-in commands, the local project's `scripts:` and `commands:`, and per-sub-command jobs.
+- **`fdl autocomplete`**: dynamic, project-aware completion suggestions for the current cwd.
+- Designed to be sourced from `~/.bashrc` / `~/.zshrc` so completions update automatically as `fdl.yml` evolves.
+
+#### CLI: `fdl diagnose --json`
+- The diagnostics report now has a fully structured `--json` mode for CI pipelines and tooling: system, CUDA devices, libtorch variants, compatibility verdict.
+
+#### Docs: PyTorch Porting Guide
+- **`docs/porting.md`** (257 lines, full rewrite from the previous 7-line stub): user-facing porting guide that mirrors the AI skill (`ai/skills/port/guide.md`) and references `fdl api-ref` for the canonical type/method index.
+- **`docs/cli.md`** (130 lines): full CLI reference (setup, libtorch, init, diagnose, api-ref, install, skill, run, completions, config, verbosity flags, fdl.yaml manifest).
+- **`docs/design/run-config.md`** (296 lines): formal spec for `fdl.yaml` — schema, merge order, sub-command resolution, Docker integration, and how DDP/training/output map onto `DdpConfig` / `DdpRunConfig`.
+- Updates to `docs/pytorch_migration.md` and the CLI section of the README.
 
 #### CLI: API Reference Generator
 - **`fdl api-ref`**: Generate a structured API reference from flodl source. Extracts all public types, constructors, methods, builder patterns, trait implementations, and doc examples.
@@ -37,17 +126,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skill files embedded in the binary via `include_str!`, so it works without a repo checkout.
 - Re-running `fdl skill install` updates existing skills in place.
 
-### Fixed
-
-#### CPU Averaging Race Condition
-- **`snapshot_params()` stream sync**: Added `comm_stream.synchronize()` before reading GPU parameters for CPU averaging snapshots. Without this, `Update` + `RequestParams` messages processed in the same `handle_control()` call could read mid-copy GPU memory from a pending `load_averaged()` non-blocking transfer. The coordinator's `tick()` method can send both messages in the same tick when averaging completes and the next cycle triggers immediately.
-- **CPU backend marked as known bug**: All three CPU averaging policies (Sync/Cadence/Async) fail to converge (~8-23% accuracy vs 87-95% for NCCL). The stream sync fix was necessary but not sufficient. The deeper bug in the snapshot/average/load round-trip is under active investigation. NCCL is the only recommended backend.
-
 ### Changed
+
+#### DDP — Streaming Epochs and NCCL Cadence Boundaries
+- **Streaming epoch dispatch**: `Coordinator::dispatch_next_chunk` now streams sub-epoch chunks instead of full-epoch partitions in `Cadence` and `Async` modes, adapting to live throughput. Added a guard so the coordinator never recreates chunk pools for already-aggregated epochs (was causing a deadlock under heterogeneous cadences).
+- **NCCL cadence boundary fixes**: per-rank epoch ack handling rewritten so that the slowest rank no longer stalls the next epoch's `SyncNow` broadcast. ElChe anchor + overshoot remain anchored to the slow rank's wall time.
+- **`max_overshoot` is Async-only**: documented as such; the auto-tune is no longer evaluated for `Cadence`.
+- **Convergence safety net**: divergence signals now reset after every NCCL averaging event (was leaking stale norms across intervals and pinning the anchor at 1).
+
+#### Optimizer Module Layout
+- **`flodl/src/nn/optim.rs` (1975 lines) split into a module**: `optim/{mod, sgd, adam, rmsprop, adagrad, radam, nadam}.rs`. Public API and behavior unchanged; navigation and review surface dramatically improved.
+
+#### FFI Shim Layout
+- **`flodl-sys/shim.cpp` (4517 lines) split into themed translation units**: `ops_tensor.cpp`, `ops_nn.cpp`, `ops_math_ext.cpp`, `ops_training.cpp`, `ops_cuda.cpp`, plus a shared `helpers.h`. `shim.cpp` is now a unity-build aggregator. No FFI surface change.
+
+#### Other
 - **Rust doc warnings**: Fixed all 32 documentation link warnings (unresolved cross-module references, private item links).
 - **GitHub Actions**: Added `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` env to silence Node.js 20 deprecation warnings.
 - **Release workflow**: `gh release create` now falls back to `gh release upload --clobber` when the release already exists (tag push before workflow completes).
 - **CLI help text**: Updated to reflect broader scope (API reference, global install). Added examples for `api-ref` and `install` commands.
+
+### Fixed
+
+#### CPU Averaging Race Condition
+- **`snapshot_params()` stream sync**: Added `comm_stream.synchronize()` before reading GPU parameters for CPU averaging snapshots. Without this, `Update` + `RequestParams` messages processed in the same `handle_control()` call could read mid-copy GPU memory from a pending `load_averaged()` non-blocking transfer. The coordinator's `tick()` method can send both messages in the same tick when averaging completes and the next cycle triggers immediately.
+- **CPU averaging convergence fixed**: The stream sync fix (above) resolved the CPU averaging convergence failure from 0.3.0. All three CPU policies (Sync/Cadence/Async) now converge correctly (91-92% on CIFAR-10 ResNet-20, matching NCCL). Both backends are production-ready.
+
+#### Test Stability
+- **`test_graph_loop_leak`**: replaced absolute threshold with two-chunk growth rate comparison. Runs 100 iters then 400 iters and checks that the longer chunk doesn't grow faster -- a real leak is linear with iterations while concurrent test noise is constant. Eliminates flakiness from the shared global `live_tensor_count` atomic without inflating thresholds.
+- **NCCL/Graph distribute test isolation**: clarified ignore set so `fdl cuda-test-nccl` covers both `nccl` and `graph_distribute` patterns and `fdl cuda-test-serial` covers everything else.
+
+#### libtorch `AccumulateGrad` Stream Mismatch (DDP Workers)
+- **Warning eliminated**: `"AccumulateGrad node's stream does not match"` fired on every DDP backward pass when workers ran on a non-default training stream. Three stacked undocumented libtorch facts combined to produce it, and fixing any one of them alone was insufficient:
+  1. `AccumulateGrad` nodes capture their stream into `input_metadata` at **construction time**, not at each runtime backward call.
+  2. The node is created lazily on first `backward()` **inside the autograd engine's worker thread**, whose current stream is the device default (not the user's training stream).
+  3. `AutogradMeta` holds a `weak_ptr` to the node, so without an external strong reference it is collected between iterations and re-created on the default stream on every backward pass.
+- **`Tensor::ensure_grad_accumulator()`** (`flodl/src/tensor/mod.rs`) / **`Variable::ensure_grad_accumulator()`** (`flodl/src/autograd/variable.rs`): eagerly materialize the `AccumulateGrad` node for a leaf tensor with `requires_grad=true`, pinning its stream to the current CUDA stream at the moment of the call. Returns a `GradAccumulatorHandle` that keeps the node alive through a strong `shared_ptr<Node>` on the C++ side. No-op for non-leaf or non-`requires_grad` tensors.
+- **`GradAccumulatorHandle`** (`flodl/src/tensor/mod.rs`): opaque `Send + Sync` strong-reference handle. `Drop` frees the node (unless a backward pass still holds its own reference). Intended to be held for the lifetime of the owner, typically a DDP worker.
+- **FFI additions** (`flodl-sys/ops_training.cpp`, `shim.h`, `src/lib.rs`): `flodl_ensure_grad_accumulator(FlodlTensor, void**)` and `flodl_grad_accumulator_delete(void*)`. The C++ side calls the semi-internal libtorch API `torch::autograd::impl::grad_accumulator()` (found by reading libtorch source) and heap-allocates the returned `shared_ptr<Node>` so Rust owns its lifetime.
+- **`GpuWorker` construction reordered** (`flodl/src/distributed/ddp_run/worker.rs`): CUDA streams are now created **before** `model_factory` so every leaf tensor (parameters, buffers, initial copies, optimizer state, `AccumulateGrad` nodes) is allocated under `StreamGuard(compute_stream)` and carries the training-stream affinity from birth. New `_grad_accumulators: Vec<GradAccumulatorHandle>` field on `GpuWorker` holds strong references to every parameter's accumulator for the worker's lifetime; explicitly documented as liveness-only ownership (never read at runtime, dropping it re-introduces the bug).
+- **Validated**: 54 training runs across 6 architectures (`logistic`, `mlp`, `lenet`, `char-rnn`, `gpt-nano`, `conv-ae`) times 9 DDP modes with zero warnings in any `training.log`. Also validated across the earlier 6-mode 200-epoch `resnet_graph` run on CIFAR-10.
+- **Side effect**: unblocks CUDA Graph capture for DDP workers. Graph capture fails loudly on stream mismatches between the training stream and the accumulator stream, so prior workarounds are no longer needed.
 
 ## [0.3.0] - 2026-04-08 — Multi-GPU & Infrastructure
 

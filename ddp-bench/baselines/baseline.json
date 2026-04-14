@@ -1,0 +1,11 @@
+[
+  {"model":"linear","mode":"solo-0","loss":0.017348,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"mlp","mode":"solo-0","loss":5.173888,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"convnet","mode":"solo-0","loss":1.959861,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"lstm","mode":"solo-0","loss":2.573988,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"transformer","mode":"solo-0","loss":6.888562,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"autoencoder","mode":"solo-0","loss":0.477649,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"residual","mode":"solo-0","loss":1.257677,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"moe","mode":"solo-0","loss":5.154873,"epochs":5,"batches":1000,"batch_size":64},
+  {"model":"feedback","mode":"solo-0","loss":8.404697,"epochs":5,"batches":1000,"batch_size":64}
+]

@@ -66,10 +66,34 @@ a:hover { color: var(--cyan); }
   width: auto;
 }
 
-.nav-links { display: flex; gap: 24px; margin-left: auto; }
-.nav-links a { color: var(--dim); font-size: 14px; font-weight: 500; }
-.nav-links a:hover { color: var(--text); text-decoration: none; }
-.nav-links a.active { color: var(--text); }
+.nav-links { display: flex; gap: 24px; margin-left: auto; align-items: center; }
+.nav-links > a { color: var(--dim); font-size: 14px; font-weight: 500; }
+.nav-links > a:hover { color: var(--text); text-decoration: none; }
+.nav-links > a.active { color: var(--text); }
+
+/* nav dropdown */
+.nav-dropdown { position: relative; }
+.nav-dropdown > span {
+  color: var(--dim); font-size: 14px; font-weight: 500; cursor: pointer;
+}
+.nav-dropdown:hover > span, .nav-dropdown.active > span { color: var(--text); }
+.nav-dropdown-menu {
+  display: none; position: absolute; top: 100%; left: -8px;
+  background: var(--bg-card, #1a1a2e); border: 1px solid var(--border, #333);
+  border-radius: 6px; padding: 6px 0; min-width: 180px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 100;
+}
+/* Invisible bridge so hover doesn't break between trigger and menu */
+.nav-dropdown-menu::before {
+  content: ''; position: absolute; top: -10px; left: 0; right: 0; height: 10px;
+}
+.nav-dropdown:hover .nav-dropdown-menu { display: block; }
+.nav-dropdown-menu a {
+  display: block; padding: 6px 16px; font-size: 13px;
+  color: var(--dim) !important; white-space: nowrap;
+}
+.nav-dropdown-menu a:hover { color: var(--text) !important; background: rgba(255,255,255,0.05); }
+.nav-dropdown-menu a.active { color: var(--text) !important; }
 
 .nav-gh {
   display: inline-flex;
@@ -859,6 +883,14 @@ a:hover { color: var(--cyan); }
   }
 
   .nav-toggle { display: block; margin-left: auto; }
+
+  .nav-dropdown-menu {
+    position: static; display: block; background: none; border: none;
+    box-shadow: none; padding: 4px 0 0 0; margin-top: 0; min-width: 0;
+  }
+  .nav-dropdown > span {
+    color: var(--dim); font-size: 14px; font-weight: 500; cursor: default;
+  }
 }
 
 @media (max-width: 600px) {

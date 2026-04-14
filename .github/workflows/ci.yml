@@ -91,6 +91,22 @@ jobs:
           LIBRARY_PATH: ${{ github.workspace }}/libtorch/lib
         run: cargo clippy -- -W clippy::all
 
+      - name: Doc (strict, fails on warnings)
+        # Clippy doesn't lint doc comments -- rustdoc is the only validator
+        # for intra-doc links and HTML tags. Run doc as its own pass with
+        # warnings promoted to errors so doc-comment regressions surface in CI.
+        env:
+          LIBTORCH_PATH: ${{ github.workspace }}/libtorch
+          LD_LIBRARY_PATH: ${{ github.workspace }}/libtorch/lib
+          LIBRARY_PATH: ${{ github.workspace }}/libtorch/lib
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --no-deps --document-private-items
+          # Sanity check: build reported success, verify the top-level crate
+          # index actually got written. Catches silent failures where doc
+          # generation produces nothing useful.
+          test -f target/doc/flodl/index.html
+
   cuda-build:
     name: CUDA (build + clippy)
     runs-on: ubuntu-24.04

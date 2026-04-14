@@ -275,7 +275,7 @@ pub fn usable_cuda_devices() -> Vec<Device> {
 
     if usable.len() < devices.len() {
         let names: Vec<String> = usable.iter().map(|d| format!("{}", d)).collect();
-        eprintln!(
+        crate::verbose!(
             "[flodl] Proceeding with {}/{} devices: [{}]",
             usable.len(), devices.len(), names.join(", ")
         );

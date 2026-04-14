@@ -96,6 +96,26 @@ impl Variable {
         self.inner.borrow().data.is_leaf()
     }
 
+    /// Force creation of the AccumulateGrad node for a leaf variable
+    /// (`requires_grad=true`). The node's stream is captured from the
+    /// current CUDA stream at the moment of this call. Returns a
+    /// handle that keeps the node alive; store it for the lifetime of
+    /// the worker.
+    ///
+    /// Call this under a [`StreamGuard`](crate::distributed::cuda_stream::StreamGuard)
+    /// on the training compute stream during DDP worker setup so that
+    /// gradient accumulation runs on the same stream as subsequent
+    /// forward/backward passes. Without this, the node is created
+    /// lazily on first `backward()` — inside the autograd engine's
+    /// worker thread, whose current stream is the device default, and
+    /// libtorch fires the "AccumulateGrad node's stream does not match"
+    /// warning on every run.
+    ///
+    /// Returns `Ok(None)` for non-leaf or non-requires-grad variables.
+    pub fn ensure_grad_accumulator(&self) -> Result<Option<crate::tensor::GradAccumulatorHandle>> {
+        self.inner.borrow().data.ensure_grad_accumulator()
+    }
+
     /// Count unique autograd nodes reachable from this variable's grad_fn.
     /// Returns 0 for leaf variables. Measures graph complexity — compare
     /// against Python's equivalent to detect decomposed-op bloat.

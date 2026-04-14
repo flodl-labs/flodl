@@ -144,12 +144,12 @@ impl DdpHandle {
         Self::launch(
             model_factory, optim_factory, train_fn,
             dataset, batch_size, num_epochs,
-            policy, backend, config, None, None,
+            policy, backend, config, None, None, None,
         )
     }
 
     /// Internal launcher shared by `auto_with` and the builder.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn launch<F, M, G, O, T>(
         model_factory: F,
         optim_factory: G,
@@ -162,6 +162,7 @@ impl DdpHandle {
         config: DdpRunConfig,
         checkpoint_fn: Option<CheckpointFn<M>>,
         epoch_fn: Option<EpochFn<M>>,
+        scheduler_fn: Option<Box<dyn Fn(usize) -> Arc<dyn crate::nn::Scheduler> + Send + Sync>>,
     ) -> Result<Self>
     where
         F: Fn(Device) -> Result<M> + Send + Sync + 'static,
@@ -177,6 +178,7 @@ impl DdpHandle {
         // Single-GPU fallback: run on main thread, no coordinator
         if devices.len() < 2 {
             let dev = devices.first().copied().unwrap_or(Device::CPU);
+            let scheduler = scheduler_fn.map(|f| f(1));
             return Self::run_single(
                 &model_factory, &optim_factory, &train_fn,
                 dataset, batch_size, num_epochs, dev,
@@ -184,6 +186,7 @@ impl DdpHandle {
                 config.checkpoint_every,
                 epoch_fn,
                 config.max_grad_norm,
+                scheduler,
             );
         }
 
@@ -209,6 +212,21 @@ impl DdpHandle {
 
         let world_size = devices.len();
         let total_samples = dataset.len();
+
+        // LR scaling: factor = 1.0 + (world_size - 1) * ratio.
+        // Compensates for the LR schedule advancing faster when global_step
+        // tracks all GPUs' batches. (Goyal et al., 2017 linear scaling rule.)
+        let lr_scale_factor = if world_size > 1 && config.lr_scale_ratio > 0.0 {
+            let factor = 1.0 + (world_size as f64 - 1.0) * config.lr_scale_ratio;
+            crate::verbose!(
+                "  ddp: LR scaled by {factor:.2}x (ratio={:.2}, world_size={world_size}). \
+                 Adjust with .lr_scale_ratio()",
+                config.lr_scale_ratio,
+            );
+            factor
+        } else {
+            1.0
+        };
 
         // Build training config snapshot for monitor metadata
         let progressive = config.progressive_dispatch
@@ -276,10 +294,13 @@ impl DdpHandle {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_coord = shutdown.clone();
         let div_threshold = config.divergence_threshold;
+        let no_div_guard = config.no_divergence_guard;
         let ckpt_every = config.checkpoint_every;
         let snap_timeout = config.snapshot_timeout_secs;
         let partition_ratios = config.partition_ratios.clone();
         let max_grad_norm = config.max_grad_norm;
+        let timeline = config.timeline.clone();
+        let coord_timeline = timeline.clone();
         let coord_batch_size = batch_size;
         let seed: u64 = 42;
 
@@ -299,9 +320,14 @@ impl DdpHandle {
                 .num_epochs(num_epochs)
                 .partition_ratios(partition_ratios)
                 .progressive(progressive)
-                .batch_size(coord_batch_size);
+                .batch_size(coord_batch_size)
+                .timeline(coord_timeline.clone())
+                .max_overshoot(config.max_overshoot);
                 if let Some(dt) = div_threshold {
                     builder = builder.divergence_threshold(dt);
+                }
+                if no_div_guard {
+                    builder = builder.no_divergence_guard();
                 }
                 if let Some(n) = ckpt_every {
                     builder = builder.checkpoint_every(n);
@@ -313,17 +339,20 @@ impl DdpHandle {
                 coord.send_all_plans(0);
 
                 let poll_timeout = std::time::Duration::from_micros(100);
+                let mut loop_tick: u64 = 0;
+                let mut last_state_dump = std::time::Instant::now();
                 let loop_err = loop {
+                    loop_tick += 1;
                     if shutdown_coord.load(Ordering::Relaxed) {
-                        eprintln!("  ddp: coordinator exit: shutdown flag set (worker error?)");
+                        crate::verbose!("  ddp: coordinator exit: shutdown flag set (worker error?)");
                         break None;
                     }
                     if !coord.drain_timing_blocking(poll_timeout) {
-                        eprintln!("  ddp: coordinator exit: all timing channels disconnected");
+                        crate::verbose!("  ddp: coordinator exit: all timing channels disconnected");
                         break None;
                     }
                     if coord.active_count == 0 {
-                        eprintln!("  ddp: coordinator exit: all workers exited");
+                        crate::verbose!("  ddp: coordinator exit: all workers exited");
                         break None;
                     }
                     // on_epoch_aggregated sends Shutdown when last epoch completes.
@@ -331,6 +360,13 @@ impl DdpHandle {
                     if coord.all_epochs_done() {
                         break None;
                     }
+
+                    // Periodic state dump (every 2s) for deadlock diagnosis.
+                    if last_state_dump.elapsed().as_secs() >= 2 {
+                        last_state_dump = std::time::Instant::now();
+                        coord.debug_state_dump(loop_tick);
+                    }
+
                     coord.check_throttle();
                     if let Err(e) = coord.poll_cpu_averaging() {
                         shutdown_coord.store(true, Ordering::Relaxed);
@@ -340,7 +376,7 @@ impl DdpHandle {
                     //               -> try_aggregate_epochs -> on_epoch_aggregated
                     //                  (Sync/Cadence broadcast or Auto unblock)
                     for m in coord.drain_metrics() {
-                        eprintln!(
+                        crate::verbose!(
                             "  ddp: rank {} epoch {} | loss={:.4} batches={} time={:.0}ms",
                             m.rank, m.epoch, m.avg_loss, m.batches_processed, m.epoch_ms
                         );
@@ -382,6 +418,7 @@ impl DdpHandle {
             .map_err(|e| TensorError::new(&format!("failed to spawn coordinator: {e}")))?;
 
         // Step 5: Spawn GPU worker threads
+        let scheduler = scheduler_fn.map(|f| f(world_size));
         let model_factory = Arc::new(model_factory);
         let optim_factory = Arc::new(optim_factory);
         let train_fn = Arc::new(train_fn);
@@ -403,9 +440,12 @@ impl DdpHandle {
             let fp_tx = worker_final_txs.remove(0);
             let ckpt_fn = checkpoint_fn.clone();
             let epoch_fn_w = epoch_fn.clone();
+            let scheduler_w = scheduler.clone();
             let shutdown_w = shutdown.clone();
 
             let worker_nccl = rank_comms[rank].take();
+            let worker_tl = timeline.clone();
+            let lr_scale = lr_scale_factor;
             let config = WorkerConfig {
                 rank,
                 world_size,
@@ -416,6 +456,8 @@ impl DdpHandle {
                 batch_size,
                 seed,
                 max_grad_norm,
+                timeline: worker_tl,
+                policy,
             };
 
             let handle = std::thread::Builder::new()
@@ -445,6 +487,26 @@ impl DdpHandle {
                             fp_tx,
                             control_rx,
                         )?;
+
+                        // Apply linear LR scaling for DDP.
+                        //
+                        // With a scheduler attached, we store the factor so
+                        // it can be applied multiplicatively to the
+                        // scheduler's output every batch. Without a
+                        // scheduler, we scale the optimizer's LR once at
+                        // startup and leave it alone.
+                        if lr_scale > 1.0 {
+                            if scheduler_w.is_some() {
+                                worker.set_lr_scale(lr_scale);
+                            } else {
+                                worker.scale_lr(lr_scale);
+                            }
+                        }
+
+                        // Attach per-batch LR scheduler (global step tracking).
+                        if let Some(ref sched) = scheduler_w {
+                            worker.set_scheduler(Arc::clone(sched));
+                        }
 
                         // Training loop: coordinator-driven epochs.
                         // Workers are mode-agnostic: they wait for a plan,
@@ -548,6 +610,7 @@ impl DdpHandle {
         checkpoint_every: Option<usize>,
         epoch_fn: Option<EpochFn<M>>,
         max_grad_norm: Option<f64>,
+        scheduler: Option<Arc<dyn crate::nn::Scheduler>>,
     ) -> Result<Self>
     where
         F: Fn(Device) -> Result<M>,
@@ -558,7 +621,7 @@ impl DdpHandle {
     {
         use std::sync::atomic::AtomicBool;
 
-        eprintln!("  ddp: single device ({device:?}) | no coordination");
+        crate::verbose!("  ddp: single device ({device:?}) | no coordination");
 
         let total_samples = dataset.len();
         let tmp_model = model_factory(device)?;
@@ -595,6 +658,8 @@ impl DdpHandle {
             batch_size,
             seed: 42,
             max_grad_norm,
+            timeline: None,
+            policy: ApplyPolicy::Sync, // single-GPU fallback: no divergence measurement
         };
 
         // Channels (unused in single-GPU mode, but needed by GpuWorker)
@@ -614,6 +679,11 @@ impl DdpHandle {
             final_param_tx,
             control_rx,
         )?;
+
+        // Attach per-batch LR scheduler.
+        if let Some(sched) = scheduler {
+            worker.set_scheduler(sched);
+        }
 
         // Train directly on this thread (no coordinator, local epoch management)
         for epoch in 0..num_epochs {
@@ -862,7 +932,7 @@ impl DdpHandle {
             AverageBackend::Cpu => "cpu",
         };
 
-        eprintln!(
+        crate::verbose!(
             "  ddp: {} GPUs ({}) | {} | policy={} backend={}",
             devices.len(), mode, parts.join(" | "), policy_str, backend_str,
         );
@@ -924,6 +994,9 @@ impl DdpHandle {
         if let Some(diff) = config.max_batch_diff {
             meta["max_batch_diff"] = serde_json::json!(diff);
         }
+        if let Some(overshoot) = config.max_overshoot {
+            meta["max_overshoot"] = serde_json::json!(overshoot);
+        }
         if let Some(dt) = config.divergence_threshold {
             meta["divergence_threshold"] = serde_json::json!(dt);
         }
@@ -960,6 +1033,7 @@ impl DdpHandle {
 ///
 /// let state = handle.join()?; // blocks until training completes
 /// ```
+#[allow(clippy::type_complexity)]
 pub struct DdpBuilder<F, M, G, O, T>
 where
     F: Fn(Device) -> Result<M> + Send + Sync + 'static,
@@ -979,6 +1053,8 @@ where
     config: DdpRunConfig,
     checkpoint_fn: Option<CheckpointFn<M>>,
     epoch_fn: Option<EpochFn<M>>,
+    /// Factory receives `world_size`, returns the scheduler.
+    scheduler_fn: Option<Box<dyn Fn(usize) -> Arc<dyn crate::nn::Scheduler> + Send + Sync>>,
     _phantom: PhantomData<(M, O)>,
 }
 
@@ -1038,9 +1114,16 @@ where
         self
     }
 
-    /// Set the divergence threshold for Async mode.
+    /// Set the divergence threshold for the trend guardrail.
     pub fn divergence_threshold(mut self, threshold: f64) -> Self {
         self.config = self.config.with_divergence_threshold(threshold);
+        self
+    }
+
+    /// Disable the divergence guardrail. ElChe's overhead auto-tune
+    /// handles cadence alone. Use when you know your workload is stable.
+    pub fn no_divergence_guard(mut self) -> Self {
+        self.config = self.config.with_no_divergence_guard();
         self
     }
 
@@ -1048,6 +1131,15 @@ where
     /// `0` = strict lockstep.
     pub fn max_batch_diff(mut self, max: usize) -> Self {
         self.config = self.config.with_max_batch_diff(max);
+        self
+    }
+
+    /// Set the maximum overshoot past the planned sync point.
+    ///
+    /// Controls how far a fast GPU can stream past its planned batch count
+    /// into the next epoch's data. Default: auto-tuned from convergence.
+    pub fn max_overshoot(mut self, max: usize) -> Self {
+        self.config = self.config.with_max_overshoot(max);
         self
     }
 
@@ -1077,6 +1169,27 @@ where
         self
     }
 
+    /// Attach a high-frequency system timeline for profiling DDP behavior.
+    ///
+    /// The coordinator and workers inject training events (sync, epoch,
+    /// anchor changes, throttle) into the timeline for post-run analysis.
+    pub fn timeline(mut self, tl: std::sync::Arc<crate::monitor::Timeline>) -> Self {
+        self.config = self.config.with_timeline(tl);
+        self
+    }
+
+    /// Set the LR scaling ratio for multi-GPU training.
+    ///
+    /// Formula: `lr_factor = 1.0 + (world_size - 1) * ratio`.
+    ///
+    /// - `1.0` (default): full linear scaling (Goyal et al., 2017).
+    /// - `0.0`: no scaling.
+    /// - `0.5`: half linear scaling.
+    pub fn lr_scale_ratio(mut self, ratio: f64) -> Self {
+        self.config = self.config.with_lr_scale_ratio(ratio);
+        self
+    }
+
     /// Set the checkpoint function called on rank 0 after averaging.
     ///
     /// Receives `(version, &model)`. Errors are logged but do not stop training.
@@ -1090,16 +1203,39 @@ where
         self
     }
 
+    /// Attach a per-batch LR scheduler factory.
+    ///
+    /// The factory receives `world_size` so user-defined schedulers can
+    /// account for multi-GPU training (e.g. scale warmup duration).
+    ///
+    /// Each worker adjusts its optimizer's LR before every `optimizer.step()`:
+    ///
+    /// ```text
+    /// lr = scheduler.lr(global_step + steps_since_last_sync)
+    /// ```
+    ///
+    /// At each sync point, the coordinator broadcasts the updated global step
+    /// so all workers track the same schedule.
+    pub fn scheduler<S>(mut self, factory: S) -> Self
+    where
+        S: Fn(usize) -> Arc<dyn crate::nn::Scheduler> + Send + Sync + 'static,
+    {
+        self.scheduler_fn = Some(Box::new(factory));
+        self
+    }
+
     /// Set an epoch callback called at the start of each epoch inside each worker thread.
     ///
     /// Receives `(epoch, &mut GpuWorker<M>)`. Runs before [`run_epoch_plan`](GpuWorker::run_epoch_plan),
     /// so [`current_epoch()`](GpuWorker::current_epoch) is already correct.
     ///
-    /// Typical uses: learning rate schedules, noise curricula, dynamic loss weights.
+    /// Typical uses: noise curricula, dynamic loss weights.
+    /// For LR scheduling, prefer [`.scheduler()`](Self::scheduler) which
+    /// provides per-batch granularity with global step tracking.
     ///
     /// ```text
     /// .epoch_fn(move |epoch, worker| {
-    ///     worker.set_lr(scheduler.lr(epoch));
+    ///     // custom per-epoch logic
     /// })
     /// ```
     pub fn epoch_fn<E>(mut self, f: E) -> Self
@@ -1135,6 +1271,7 @@ where
             self.config,
             self.checkpoint_fn,
             self.epoch_fn,
+            self.scheduler_fn,
         )
     }
 }
@@ -1185,6 +1322,7 @@ impl DdpHandle {
             config: DdpRunConfig::new(),
             checkpoint_fn: None,
             epoch_fn: None,
+            scheduler_fn: None,
             _phantom: PhantomData,
         }
     }

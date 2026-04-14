@@ -34,7 +34,13 @@
     <div class="nav-links">
       <a href="{{ '/guide/' | relative_url }}" {% if page.url contains '/guide' %}class="active"{% endif %}>Guide</a>
       <a href="{{ '/guide/migration' | relative_url }}">PyTorch &rarr; Rust</a>
-      <a href="{{ '/benchmark' | relative_url }}" {% if page.url == '/benchmark' %}class="active"{% endif %}>Benchmark</a>
+      <div class="nav-dropdown{% if page.url == '/benchmark' or page.url == '/ddp-benchmark' %} active{% endif %}">
+        <span>Benchmarks &#9662;</span>
+        <div class="nav-dropdown-menu">
+          <a href="{{ '/ddp-benchmark' | relative_url }}" {% if page.url == '/ddp-benchmark' %}class="active"{% endif %}>DDP (multi-GPU)</a>
+          <a href="{{ '/benchmark' | relative_url }}" {% if page.url == '/benchmark' %}class="active"{% endif %}>Solo (flodl vs PyTorch)</a>
+        </div>
+      </div>
       <a href="{{ '/blog/' | relative_url }}" {% if page.url contains '/blog' %}class="active"{% endif %}>Blog</a>
       <a href="https://docs.rs/flodl">API Docs</a>
       <a href="https://github.com/fab2s/floDl" target="_blank" class="nav-gh">
@@ -53,7 +59,8 @@
     <a href="https://docs.rs/flodl">API Docs</a>
     <a href="https://crates.io/crates/flodl">crates.io</a>
     <a href="{{ '/guide/' | relative_url }}">Guide</a>
-    <a href="{{ '/benchmark' | relative_url }}">Benchmark</a>
+    <a href="{{ '/benchmark' | relative_url }}">Solo Benchmark</a>
+    <a href="{{ '/ddp-benchmark' | relative_url }}">DDP Benchmark</a>
     <a href="{{ '/blog/' | relative_url }}">Blog</a>
     <a href="{{ '/thesis' | relative_url }}">Thesis</a>
   </div>

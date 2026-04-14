@@ -1,4 +1,4 @@
-/target
+target/
 benchmarks/target
 Cargo.lock
 .cargo-cache/
@@ -14,6 +14,9 @@ Cargo.lock
 __pycache__/
 benchmarks/rounds/
 benchmarks/report*.txt
+ddp-bench/runs-*/
+ddp-bench/data/
+/data/
 
 # Generated guide pages (built from site/_stubs/ + docs/ by site/build_guide.py)
 site/guide/*.md
@@ -24,3 +27,10 @@ site/Gemfile.lock
 
 # libtorch variants (downloaded or built from source)
 /libtorch/
+
+# Local fdl config (fdl.yaml.example is committed; fdl copies it on first run)
+fdl.yaml
+fdl.yml
+
+mempalace.yaml
+entities.json

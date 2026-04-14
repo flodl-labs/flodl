@@ -6,7 +6,7 @@
 //!
 //! # Features
 //!
-//! - **Layers**: Linear, Conv1d/Conv2d/Conv3d, ConvTranspose1d/2d/3d, MaxPool1d/2d, AvgPool1d/2d, AdaptiveMaxPool2d, PixelShuffle/Unshuffle, Upsample, Unfold/Fold, LayerNorm, RMSNorm, GroupNorm, BatchNorm/BatchNorm2d, InstanceNorm, Dropout/Dropout2d/AlphaDropout, Embedding/EmbeddingBag, GRUCell, GRU, LSTMCell, LSTM, MultiheadAttention, Bilinear, ZeroPad2d, ReflectionPad2d
+//! - **Layers**: Linear, Conv1d/Conv2d/Conv3d, ConvTranspose1d/2d/3d, MaxPool1d/2d, AvgPool1d/2d, AdaptiveMaxPool2d, AdaptiveAvgPool2d, PixelShuffle/Unshuffle, Upsample, Unfold/Fold, LayerNorm, RMSNorm, GroupNorm, BatchNorm/BatchNorm2d, InstanceNorm, Dropout/Dropout2d/AlphaDropout, Embedding/EmbeddingBag, GRUCell, GRU, LSTMCell, LSTM, MultiheadAttention, Bilinear, ZeroPad2d, ReflectionPad2d
 //! - **Activations**: Identity, ReLU, LeakyReLU, ELU, Sigmoid, Tanh, GELU, SiLU, Softplus, Mish, SELU, Hardswish, Hardsigmoid, PReLU, Softmax, LogSoftmax, Flatten, GaussianBlur
 //! - **Losses**: MSE, CrossEntropy, BCE, BCEWithLogits, L1, SmoothL1, KLDiv, NLL, CTC, Focal, TripletMargin, CosineEmbedding, HingeEmbedding, MarginRanking, PoissonNLL
 //! - **Optimizers**: SGD (momentum), Adam, AdamW, RMSprop, Adagrad, RAdam, NAdam -- fused Adam/AdamW uses `_fused_adamw_` on CUDA for single-kernel multi-tensor updates
@@ -96,7 +96,7 @@ pub use conv_transpose3d::{ConvTranspose3d, ConvTranspose3dBuilder};
 pub use groupnorm::GroupNorm;
 pub use batchnorm::{BatchNorm, BatchNorm2d};
 pub use instancenorm::InstanceNorm;
-pub use pooling::{MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d, PixelShuffle, PixelUnshuffle, Upsample, Unfold, Fold};
+pub use pooling::{MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d, AdaptiveAvgPool2d, PixelShuffle, PixelUnshuffle, Upsample, Unfold, Fold};
 pub use bilinear::Bilinear;
 pub use attention::MultiheadAttention;
 pub use init::{xavier_uniform, xavier_normal, kaiming_uniform, kaiming_normal, uniform_bias, uniform, normal, orthogonal, trunc_normal};
@@ -225,6 +225,48 @@ pub trait Module {
     /// carried across forward passes (e.g., recurrent hidden state).
     /// Override in stateful modules.
     fn detach_state(&self) {}
+}
+
+impl Module for Box<dyn Module> {
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        (**self).forward(input)
+    }
+    fn parameters(&self) -> Vec<Parameter> {
+        (**self).parameters()
+    }
+    fn buffers(&self) -> Vec<Buffer> {
+        (**self).buffers()
+    }
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
+        (**self).sub_modules()
+    }
+    fn move_to_device(&self, device: crate::tensor::Device) {
+        (**self).move_to_device(device);
+    }
+    fn set_training(&self, training: bool) {
+        (**self).set_training(training);
+    }
+    fn trace(&self) -> Option<Variable> {
+        (**self).trace()
+    }
+    fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
+        (**self).as_named_input()
+    }
+    fn as_graph(&self) -> Option<&Graph> {
+        (**self).as_graph()
+    }
+    fn structural_hash(&self) -> Option<String> {
+        (**self).structural_hash()
+    }
+    fn reset(&self) {
+        (**self).reset();
+    }
+    fn detach_state(&self) {
+        (**self).detach_state();
+    }
 }
 
 /// Module that can receive additional named inputs via graph `using()`.

@@ -54,6 +54,23 @@ let g = FlowBuilder::from(Linear::new(8, 8)?)
 
 This is the standard residual pattern from ResNet.
 
+When the skip path also needs a transform — e.g. a 1×1 conv + BN to match
+channel or stride changes in ResNet downsample blocks — use `also_with`.
+It takes an explicit `skip` and `main` pair: `output = skip(x) + main(x)`.
+
+```rust
+let block = FlowBuilder::from(prev)
+    .also_with(
+        downsample_1x1_bn,      // skip path transform
+        conv_bn_relu_conv_bn,   // main path
+    )
+    .through(ReLU)
+    .build()?;
+```
+
+See `ddp-bench/src/models/resnet_graph.rs` for a full ResNet-20 using
+this pattern.
+
 ## Parallel branches with split/merge
 
 `split` sends the same input to multiple modules in parallel.

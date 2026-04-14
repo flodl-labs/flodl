@@ -124,6 +124,8 @@ pub(crate) struct DistributedState {
     pub last_el_che_sync: Option<std::time::Instant>,
     /// Maximum gradient norm for per-rank clipping in El Che mode.
     pub max_grad_norm: Option<f64>,
+    /// Optional system timeline for high-frequency profiling.
+    pub timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
 }
 
 impl DistributedState {
@@ -611,6 +613,12 @@ impl Ddp {
         model.set_optimizer(optimizer);
         model.set_training(true);
         model.configure_el_che(&config);
+        // Pass timeline to distributed state for event injection in step().
+        if let Some(tl) = config.timeline {
+            if let Some(ref mut state) = *model.distributed.borrow_mut() {
+                state.timeline = Some(tl);
+            }
+        }
         Ok(())
     }
 
@@ -721,7 +729,7 @@ impl Ddp {
         use crate::monitor::format_bytes;
 
         if !cuda_available() || cuda_device_count() == 0 {
-            eprintln!("  ddp: no CUDA available | CPU mode");
+            crate::verbose!("  ddp: no CUDA available | CPU mode");
             return;
         }
 
@@ -746,15 +754,15 @@ impl Ddp {
         let heterogeneous = names.windows(2).any(|w| w[0] != w[1]);
 
         if n == 1 {
-            eprintln!("  ddp: 1 GPU | {} | single-device mode", parts[0]);
+            crate::verbose!("  ddp: 1 GPU | {} | single-device mode", parts[0]);
         } else if heterogeneous {
-            eprintln!(
+            crate::verbose!(
                 "  ddp: {} GPUs (heterogeneous) | {}",
                 n,
                 parts.join(" | "),
             );
         } else {
-            eprintln!("  ddp: {} GPUs | {}", n, parts.join(" | "));
+            crate::verbose!("  ddp: {} GPUs | {}", n, parts.join(" | "));
         }
     }
 }
@@ -797,6 +805,8 @@ pub struct DdpConfig {
     /// Standard DDP does not need this because the caller clips rank 0's
     /// gradients and AllReduce averages them.
     pub max_grad_norm: Option<f64>,
+    /// Optional system timeline for high-frequency profiling.
+    pub timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
 }
 
 impl DdpConfig {
@@ -807,6 +817,7 @@ impl DdpConfig {
             overhead_target: None,
             max_anchor: None,
             max_grad_norm: None,
+            timeline: None,
         }
     }
 
@@ -850,6 +861,12 @@ impl DdpConfig {
     /// by the caller.
     pub fn max_grad_norm(mut self, max_norm: f64) -> Self {
         self.max_grad_norm = Some(max_norm);
+        self
+    }
+
+    /// Attach a system timeline for high-frequency profiling.
+    pub fn timeline(mut self, tl: std::sync::Arc<crate::monitor::Timeline>) -> Self {
+        self.timeline = Some(tl);
         self
     }
 }

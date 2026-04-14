@@ -2314,3 +2314,96 @@
         let x = Variable::new(from_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]), false);
         assert!(graph.forward(&x).is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Graph::set_scheduler -- regression guard
+    // -----------------------------------------------------------------------
+    //
+    // Original bug (2026-04-13): sync mode (Ddp::setup_with + graph.step())
+    // had no scheduler plumbing, so the optimizer LR stayed constant for the
+    // entire run regardless of what scheduler the user attached. These tests
+    // assert that set_scheduler drives the optimizer LR through step(), that
+    // training_step advances once per step(), and that lr_scale is applied
+    // multiplicatively.
+
+    /// Trivial scheduler used to assert the LR pipeline.
+    struct LinearSched(f64);
+    impl crate::nn::Scheduler for LinearSched {
+        fn lr(&self, step: usize) -> f64 { step as f64 * self.0 }
+    }
+
+    /// Build a tiny Graph + optimizer + a fake gradient so step() can run end
+    /// to end on CPU. Keeps the test cheap (no CUDA needed).
+    fn graph_with_optim(initial_lr: f64) -> (crate::graph::Graph, Variable) {
+        use crate::nn::SGD;
+        let dev = crate::tensor::test_device();
+        let graph = FlowBuilder::from(Linear::on_device(2, 1, dev).unwrap())
+            .build()
+            .unwrap();
+        graph.set_optimizer(|p| SGD::new(p, initial_lr, 0.0));
+        // Run one forward+backward so .grad() is populated and step() can do work.
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        (graph, x)
+    }
+
+    fn current_optim_lr(graph: &crate::graph::Graph) -> f64 {
+        graph.optimizer.borrow().as_ref().map(|o| o.lr()).unwrap()
+    }
+
+    #[test]
+    fn test_graph_set_scheduler_drives_optimizer_lr() {
+        let (graph, x) = graph_with_optim(0.0); // start at 0 so we detect writes
+        graph.set_scheduler(std::sync::Arc::new(LinearSched(0.1)));
+        assert_eq!(graph.training_step(), 0);
+
+        // Three step()s: scheduler queried at training_step before increment.
+        for expected_step in 0..3 {
+            // Forward + backward to populate gradients (step() needs them).
+            let y = graph.forward(&x).unwrap();
+            y.sum().unwrap().backward().unwrap();
+            graph.step().unwrap();
+            // After step(), training_step has advanced and the LR set BEFORE
+            // optimizer.step() reflects the *previous* training_step value.
+            let expected_lr = expected_step as f64 * 0.1;
+            assert!((current_optim_lr(&graph) - expected_lr).abs() < 1e-9,
+                "after step {}: expected LR {expected_lr}, got {}",
+                expected_step + 1, current_optim_lr(&graph));
+            assert_eq!(graph.training_step(), expected_step + 1);
+        }
+    }
+
+    #[test]
+    fn test_graph_lr_scale_multiplies_scheduler_output() {
+        let (graph, x) = graph_with_optim(0.0);
+        graph.set_scheduler(std::sync::Arc::new(LinearSched(0.1)));
+        graph.set_lr_scale(2.5);
+
+        let y = graph.forward(&x).unwrap();
+        y.sum().unwrap().backward().unwrap();
+        graph.step().unwrap();
+        // Step 0: scheduler returns 0.0 -> 0.0 * 2.5 = 0.0 (boring)
+        assert!(current_optim_lr(&graph).abs() < 1e-9);
+
+        let y = graph.forward(&x).unwrap();
+        y.sum().unwrap().backward().unwrap();
+        graph.step().unwrap();
+        // Step 1: scheduler returns 0.1 -> 0.1 * 2.5 = 0.25
+        assert!((current_optim_lr(&graph) - 0.25).abs() < 1e-9,
+            "expected LR 0.25 (sched 0.1 * scale 2.5), got {}",
+            current_optim_lr(&graph));
+    }
+
+    #[test]
+    fn test_graph_no_scheduler_leaves_lr_alone() {
+        // Without a scheduler, step() must NOT touch the optimizer's LR.
+        let (graph, x) = graph_with_optim(0.123);
+        // Don't attach any scheduler.
+        let y = graph.forward(&x).unwrap();
+        y.sum().unwrap().backward().unwrap();
+        graph.step().unwrap();
+        assert!((current_optim_lr(&graph) - 0.123).abs() < 1e-9,
+            "no scheduler attached: LR must be untouched, got {}",
+            current_optim_lr(&graph));
+        // training_step still increments (it's a per-step counter, scheduler-independent).
+        assert_eq!(graph.training_step(), 1);
+    }

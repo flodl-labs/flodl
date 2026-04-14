@@ -19,6 +19,7 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
 
 <p align="center">
   <a href="#if-you-know-pytorch-you-know-flodl">PyTorch Users</a> &bull;
+  <a href="https://flodl.dev/thesis"><b>Thesis</b></a> &bull;
   <a href="#getting-started">Getting Started</a> &bull;
   <a href="#the-graph-builder">Graph Builder</a> &bull;
   <a href="#graph-tree-hierarchical-composition">Graph Tree</a> &bull;
@@ -26,6 +27,7 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
   <a href="#multi-gpu-training">Multi-GPU</a> &bull;
   <a href="#pytorch-parity">Parity</a> &bull;
   <a href="#performance">Benchmarks</a> &bull;
+  <a href="https://github.com/fab2s/floDl/blob/main/ROADMAP.md">Roadmap</a> &bull;
   <a href="https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md">Migration Guide</a> &bull;
   <a href="https://github.com/fab2s/floDl/blob/main/docs/tutorials/13-data-loading.md">Data Loading</a>
 </p>
@@ -426,6 +428,42 @@ See the **[Multi-GPU Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tut
 **[Data Loading Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/13-data-loading.md)**, and
 **[DDP Reference](https://github.com/fab2s/floDl/blob/main/docs/ddp.md)**.
 
+### Validation suite — `ddp-bench`
+
+The repo ships with [`ddp-bench/`](https://github.com/fab2s/floDl/tree/main/ddp-bench),
+a workspace member that reproduces published training setups (Logistic /
+MLP / LeNet-5 / ResNet-20 / Char-RNN / GPT-nano / Conv-AE on MNIST,
+CIFAR-10, Shakespeare) to build scientifically valid solo baselines, then
+measures DDP/ElChe convergence quality against them across all 8
+backend × policy combinations:
+
+```bash
+fdl ddp-bench --list                       # list models and modes
+fdl ddp-bench quick                        # 1-epoch smoke test
+fdl ddp-bench validate                     # full sweep vs structured baselines
+fdl ddp-bench --model gpt-nano --mode nccl-cadence --epochs 50 --lr-scale 2
+fdl ddp-bench --report runs/report.md      # convergence report from saved runs
+```
+
+Every run produces a high-frequency `Timeline` (CPU/GPU utilization, sync
+events, anchor changes, idle gaps) saved as JSON / CSV / interactive HTML
+under `runs/<model>/<mode>/`.
+
+### Built-in datasets
+
+The framework ships ready-to-use parsers for common benchmarks (all
+implement `BatchDataSet`, plug straight into `DataLoader::builder`):
+
+```rust
+use flodl::data::datasets::{Cifar10, Mnist, Shakespeare};
+
+let mnist = Mnist::parse(&images_gz, &labels_gz)?;
+let cifar = Cifar10::parse(&[&batch1, &batch2, /* ... */])?;
+let text  = Shakespeare::parse(&corpus, /*seq_len=*/ 128)?;
+```
+
+`ddp-bench` downloads and caches the underlying files on first run.
+
 ## PyTorch Parity
 
 floDl covers the modules, losses, and optimizers you actually use:
@@ -602,7 +640,7 @@ supports. If `nvidia-smi` works, floDl trains on it.
 5. **[Graph Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md)** — fluent API from simple to complex
 6. **[Advanced Graphs](https://github.com/fab2s/floDl/blob/main/docs/tutorials/06-advanced-graphs.md)** — forward refs, loops, gates, switches
 7. **[Visualization](https://github.com/fab2s/floDl/blob/main/docs/tutorials/07-visualization.md)** — DOT/SVG, profiling heatmaps
-8. **[Utilities](https://github.com/fab2s/floDl/blob/main/docs/tutorials/08-utilities.md)** — checkpoints, clipping, freezing, initialization, scheduling
+8. **[Utilities](https://github.com/fab2s/floDl/blob/main/docs/tutorials/08-utilities.md)** — checkpoints, clipping, freezing, initialization, scheduling, verbosity-gated logging
 9. **[Training Monitor](https://github.com/fab2s/floDl/blob/main/docs/tutorials/09-monitor.md)** — ETA, resource tracking, live dashboard
 10. **[Graph Tree](https://github.com/fab2s/floDl/blob/main/docs/tutorials/10-graph-tree.md)** — hierarchical composition, freeze/thaw, subgraph checkpoints
 11. **[Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md)** — Ddp::setup, El Che, auto-balancing, DataLoader integration

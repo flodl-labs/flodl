@@ -8,7 +8,7 @@
 
 use rand::rngs::SmallRng;
 use rand::distr::{Distribution, Uniform};
-use rand::{Rng as RandRng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand::seq::SliceRandom;
 
 /// A lightweight, deterministic random number generator.
@@ -37,7 +37,7 @@ impl Rng {
 
     /// Create an RNG seeded from the operating system.
     pub fn from_entropy() -> Self {
-        Self { inner: SmallRng::from_os_rng() }
+        Self { inner: rand::make_rng() }
     }
 
     /// Uniform random `usize` in `[0, n)`.

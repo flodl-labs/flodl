@@ -264,6 +264,71 @@ impl FlowBuilder {
         self
     }
 
+    /// Residual connection with a custom skip path: `output = skip(stream) + main(stream)`.
+    ///
+    /// Generalizes [`also`](Self::also) for cases where the skip connection
+    /// needs a transform (e.g. 1x1 conv + BN for channel/stride changes in ResNet).
+    ///
+    /// ```text
+    /// // ResNet downsample block: skip uses 1x1 conv to match dimensions
+    /// .also_with(downsample_1x1, conv_bn_relu_conv_bn)
+    /// .through(ReLU)
+    /// ```
+    pub fn also_with(
+        mut self,
+        skip: impl Module + 'static,
+        main: impl Module + 'static,
+    ) -> Self {
+        if self.err.is_some() {
+            return self;
+        }
+        if self.current.len() != 1 {
+            self.err = Some("also_with requires single stream".into());
+            return self;
+        }
+
+        let prev = self.current[0].clone();
+        let skip_ref = self.add_module(skip);
+        let main_ref = self.add_module(main);
+        let add_ref = self.add_add_node(2);
+
+        // prev -> skip
+        self.edges.push(Edge {
+            from_node: prev.node_id.clone(),
+            from_port: prev.port.clone(),
+            to_node: skip_ref.node_id.clone(),
+            to_port: DEFAULT_INPUT.into(),
+        });
+
+        // prev -> main
+        self.edges.push(Edge {
+            from_node: prev.node_id,
+            from_port: prev.port,
+            to_node: main_ref.node_id.clone(),
+            to_port: DEFAULT_INPUT.into(),
+        });
+
+        // skip -> add input_0
+        self.edges.push(Edge {
+            from_node: skip_ref.node_id,
+            from_port: skip_ref.port,
+            to_node: add_ref.node_id.clone(),
+            to_port: "input_0".into(),
+        });
+
+        // main -> add input_1
+        self.edges.push(Edge {
+            from_node: main_ref.node_id.clone(),
+            from_port: main_ref.port.clone(),
+            to_node: add_ref.node_id.clone(),
+            to_port: "input_1".into(),
+        });
+
+        self.on_target = Some(main_ref);
+        self.current = vec![add_ref];
+        self
+    }
+
     /// Name the current stream position for later reference via [`using`](Self::using).
     ///
     /// Tags also serve as keys for observation (`collect`/`trend`), checkpoint

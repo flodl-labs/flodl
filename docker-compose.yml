@@ -14,6 +14,8 @@ services:
     working_dir: /workspace
     stdin_open: true
     tty: true
+    environment:
+      - FLODL_VERBOSITY
 
   cuda:
     build:
@@ -32,6 +34,8 @@ services:
     working_dir: /workspace
     stdin_open: true
     tty: true
+    environment:
+      - FLODL_VERBOSITY
     deploy:
       resources:
         reservations:
@@ -54,6 +58,8 @@ services:
     working_dir: /workspace
     stdin_open: true
     tty: true
+    environment:
+      - FLODL_VERBOSITY
     deploy:
       resources:
         reservations:

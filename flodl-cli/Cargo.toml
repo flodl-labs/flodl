@@ -11,6 +11,11 @@ readme = "README.md"
 keywords = ["libtorch", "pytorch", "cuda", "deep-learning", "gpu"]
 categories = ["command-line-utilities", "development-tools"]
 
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+
 [[bin]]
 name = "fdl"
 path = "src/main.rs"

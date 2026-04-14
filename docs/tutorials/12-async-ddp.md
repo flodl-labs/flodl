@@ -253,12 +253,12 @@ synchronization, Cadence will show it in the first few epochs.
 This tells you whether strict synchronization helps your specific model.
 For most workloads, Async and Cadence match or beat Sync.
 
-### CPU backend: known bug
+### CPU and NCCL backends
 
-The CPU averaging backend has a known convergence bug. All three CPU
-policies produce near-random accuracy. Do not use `AverageBackend::Cpu`
-for training. The bug is under active investigation. See the
-[DDP reference](/guide/ddp) for details.
+Both averaging backends (NCCL and CPU) are production-ready. The CPU
+convergence bug from v0.3.0 has been fixed. See the
+[DDP reference](/guide/ddp-reference) for details and the
+[DDP benchmark](/ddp-benchmark) for convergence results across all modes.
 
 ### What to compare
 
@@ -282,7 +282,7 @@ practice: fast GPUs overshoot between averaging, creating parameter
 diversity that benefits convergence. A/B test against **Cadence + Nccl**
 (strong second, more predictable sync) or **Sync + Nccl** (strict
 baseline). The **CPU backend** has a known convergence bug and should not
-be used for training. See the [DDP reference](/guide/ddp) for details.
+be used for training. See the [DDP reference](/guide/ddp-reference) for details.
 The fix is under active investigation.
 
 ## Safety guards

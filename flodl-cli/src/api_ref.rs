@@ -50,7 +50,7 @@ struct ApiRef {
 /// 1. Explicit path from --path flag
 /// 2. ./flodl/src/ (dev checkout, walk up to 5 levels)
 /// 3. Cargo registry (~/.cargo/registry/src/*/flodl-*/src/)
-/// 4. Cached download (~/.flodl/api-ref-cache/<tag>/)
+/// 4. Cached download (`~/.flodl/api-ref-cache/<tag>/`)
 /// 5. Download from latest GitHub release (cached for next time)
 pub fn find_flodl_src(explicit: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = explicit {
@@ -152,7 +152,7 @@ fn fetch_latest_tag() -> Option<String> {
     None
 }
 
-/// Cache directory for downloaded source: ~/.flodl/api-ref-cache/<tag>/
+/// Cache directory for downloaded source: `~/.flodl/api-ref-cache/<tag>/`
 fn cache_dir(tag: &str) -> Option<PathBuf> {
     let home = home_dir()?;
     let flodl_home = std::env::var("FLODL_HOME")
@@ -197,7 +197,7 @@ fn download_source(tag: &str) -> Result<PathBuf, String> {
 }
 
 /// Find flodl/src/lib.rs inside a cache directory.
-/// GitHub archives extract to <repo-name>-<tag>/ (e.g. floDl-0.3.0/).
+/// GitHub archives extract to `<repo-name>-<tag>/` (e.g. `floDl-0.3.0/`).
 fn find_src_in_cache(cache: &Path) -> Option<PathBuf> {
     if !cache.is_dir() {
         return None;
@@ -262,7 +262,7 @@ fn extract_docs(lines: &[&str], item_line: usize) -> (String, Vec<String>) {
         if line.starts_with("///") {
             let text = line.trim_start_matches("///");
             // Keep one leading space if present for indentation
-            let text = if text.starts_with(' ') { &text[1..] } else { text };
+            let text = text.strip_prefix(' ').unwrap_or(text);
             doc_lines.push(text.to_string());
         } else if line.starts_with("#[") || line.is_empty() {
             if !doc_lines.is_empty() && line.is_empty() {
@@ -356,8 +356,7 @@ fn parse_file(src_root: &Path, path: &Path) -> Vec<ApiType> {
     // Pass 1: find all pub struct declarations
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("pub struct ") {
-            let after = &trimmed["pub struct ".len()..];
+        if let Some(after) = trimmed.strip_prefix("pub struct ") {
             let name_end = after
                 .find(|c: char| !c.is_alphanumeric() && c != '_')
                 .unwrap_or(after.len());
@@ -391,8 +390,7 @@ fn parse_file(src_root: &Path, path: &Path) -> Vec<ApiType> {
         }
 
         // Also capture pub enum
-        if trimmed.starts_with("pub enum ") {
-            let after = &trimmed["pub enum ".len()..];
+        if let Some(after) = trimmed.strip_prefix("pub enum ") {
             let name_end = after
                 .find(|c: char| !c.is_alphanumeric() && c != '_')
                 .unwrap_or(after.len());
@@ -454,7 +452,7 @@ fn parse_file(src_root: &Path, path: &Path) -> Vec<ApiType> {
                     .trim_start_matches("impl ")
                     .trim_start_matches("impl<")
                     .split('>')
-                    .last()
+                    .next_back()
                     .unwrap_or("")
                     .trim();
                 // Remove generic bounds from trait name
@@ -471,13 +469,11 @@ fn parse_file(src_root: &Path, path: &Path) -> Vec<ApiType> {
                 let after_impl = impl_str
                     .trim_start_matches("impl<")
                     .split('>')
-                    .last()
-                    .unwrap_or(&impl_str["impl ".len()..]);
-                let after_impl = if after_impl.starts_with("impl ") {
-                    &after_impl["impl ".len()..]
-                } else {
-                    after_impl.trim()
-                };
+                    .next_back()
+                    .unwrap_or(impl_str.strip_prefix("impl ").unwrap_or(&impl_str));
+                let after_impl = after_impl
+                    .strip_prefix("impl ")
+                    .unwrap_or(after_impl.trim());
                 let type_name = after_impl
                     .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .next()
@@ -625,7 +621,7 @@ fn parse_source_tree(src_root: &Path) -> Vec<ApiType> {
     let mut all_types = Vec::new();
     walk_dir(src_root, src_root, &mut all_types);
     // Sort by category then name
-    all_types.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
+    all_types.sort_by(|a, b| a.category.cmp(b.category).then(a.name.cmp(&b.name)));
     all_types
 }
 
@@ -638,7 +634,7 @@ fn walk_dir(root: &Path, dir: &Path, types: &mut Vec<ApiType>) {
         let path = entry.path();
         if path.is_dir() {
             walk_dir(root, &path, types);
-        } else if path.extension().map_or(false, |e| e == "rs") {
+        } else if path.extension().is_some_and(|e| e == "rs") {
             let mut file_types = parse_file(root, &path);
             types.append(&mut file_types);
         }

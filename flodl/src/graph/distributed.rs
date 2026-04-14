@@ -116,6 +116,7 @@ impl Graph {
             last_el_che_counts: Vec::new(),
             last_el_che_sync: None,
             max_grad_norm: None,
+            timeline: None,
         };
 
         // Broadcast params from rank 0 to all replicas
@@ -180,6 +181,48 @@ impl Graph {
         }
     }
 
+    /// Attach a per-batch LR scheduler.
+    ///
+    /// When set, `step()` updates every optimizer's learning rate to
+    /// `scheduler.lr(training_step) * lr_scale` before the optimizer step.
+    /// The internal `training_step` counter increments once per `step()`
+    /// call and is independent of the recurrent-state `step_count`.
+    ///
+    /// Works for both single-GPU and distributed graphs.
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// let sched: Arc<dyn Scheduler> = Arc::new(MultiStepLR::new(0.1, &[100, 150], 0.1));
+    /// graph.set_scheduler(sched);
+    /// ```
+    pub fn set_scheduler(&self, scheduler: std::sync::Arc<dyn crate::nn::Scheduler>) {
+        *self.scheduler.borrow_mut() = Some(scheduler);
+    }
+
+    /// Set the DDP linear-scaling factor (Goyal et al., 2017) applied to the
+    /// attached scheduler's output every batch. Defaults to 1.0 (no scaling).
+    ///
+    /// Has no effect if no scheduler is attached; bake the scaling into the
+    /// optimizer's base LR instead for that case.
+    pub fn set_lr_scale(&self, scale: f64) {
+        self.lr_scale.set(scale);
+    }
+
+    /// Current training step (increments once per `step()` call). Used by the
+    /// attached scheduler, if any.
+    pub fn training_step(&self) -> usize {
+        self.training_step.get()
+    }
+
+    /// Compute the scheduled LR for the current training step, if a
+    /// scheduler is attached. Returns `None` when no scheduler is set so
+    /// the caller can leave the optimizer LR alone.
+    fn scheduled_lr(&self) -> Option<f64> {
+        let sched = self.scheduler.borrow();
+        sched.as_ref()
+            .map(|s| s.lr(self.training_step.get()) * self.lr_scale.get())
+    }
+
     /// Perform one training step.
     ///
     /// When distributed: AllReduce gradients (weighted if auto-balanced),
@@ -188,9 +231,26 @@ impl Graph {
     ///
     /// This is the single call that replaces `opt.step(); opt.zero_grad();`
     /// and makes multi-GPU training transparent.
+    ///
+    /// When a scheduler is attached via [`Self::set_scheduler`], every
+    /// optimizer's LR is updated from `scheduler.lr(training_step) *
+    /// lr_scale` before the step, and `training_step` increments by one
+    /// after.
     pub fn step(&self) -> Result<()> {
         let mut dist = self.distributed.borrow_mut();
         if let Some(ref mut state) = *dist {
+            // Auto-detect external forward/backward: El Che needs forward_batch()
+            // to populate batch counts. If counts are empty on the first step,
+            // the caller is using manual forward + backward. Disable El Che and
+            // fall through to standard AllReduce.
+            if state.el_che.is_some() && state.last_el_che_counts.iter().sum::<usize>() == 0 {
+                crate::verbose!(
+                    "  ddp: El Che disabled (external forward/backward detected). \
+                     Using standard AllReduce. To silence: DdpConfig::new().max_anchor(Some(0))"
+                );
+                state.el_che = None;
+            }
+
             if state.el_che.is_some() {
                 // El Che path: weighted AllReduce by actual per-device batch counts.
                 // Gradients were accumulated in forward_distributed_el_che().
@@ -244,6 +304,9 @@ impl Graph {
                     // Weighted AllReduce: scale by batch contribution, then Sum.
                     // Ranks with 0 batches (epoch-end clamping) have no gradients;
                     // zero them so AllReduce still produces the correct mean.
+                    if let Some(ref tl) = state.timeline {
+                        tl.event(crate::monitor::EventKind::SyncStart);
+                    }
                     let sync_start = std::time::Instant::now();
                     for group in &state.param_groups {
                         if group[0].grad().is_none() && counts[0] > 0 {
@@ -277,7 +340,15 @@ impl Graph {
                     }
                     state.sync_buffers()?;
                     let sync_ms = sync_start.elapsed().as_secs_f64() * 1000.0;
+                    if let Some(ref tl) = state.timeline {
+                        tl.event(crate::monitor::EventKind::SyncEnd { duration_ms: sync_ms });
+                    }
 
+                    if let Some(lr) = self.scheduled_lr() {
+                        for opt in &mut state.optimizers {
+                            opt.set_lr(lr);
+                        }
+                    }
                     for opt in &mut state.optimizers {
                         opt.step()?;
                     }
@@ -296,6 +367,7 @@ impl Graph {
                         vec![compute_ms; state.devices.len()]
                     };
 
+                    let old_anchor = state.el_che.as_ref().map(|e| e.anchor());
                     let updated_counts = if let Some(ref mut el_che) = state.el_che {
                         if !wall_ms.is_empty() {
                             el_che.report_timing(&wall_ms, &counts, sync_ms);
@@ -304,6 +376,17 @@ impl Graph {
                     } else {
                         None
                     };
+                    if let (Some(tl), Some(old), Some(el_che)) =
+                        (&state.timeline, old_anchor, &state.el_che)
+                    {
+                        let new = el_che.anchor();
+                        if new != old {
+                            tl.event(crate::monitor::EventKind::AnchorChanged {
+                                from: old,
+                                to: new,
+                            });
+                        }
+                    }
 
                     state.last_timing = None;
                     state.last_el_che_sync = Some(std::time::Instant::now());
@@ -321,6 +404,10 @@ impl Graph {
                 }
             } else {
                 // Standard DDP path: per-batch scatter + AllReduce
+                if let Some(ref tl) = state.timeline {
+                    tl.event(crate::monitor::EventKind::SyncStart);
+                }
+                let ddp_sync_start = std::time::Instant::now();
                 if state.is_balanced() {
                     state.all_reduce_gradients()?;
                 } else {
@@ -328,7 +415,16 @@ impl Graph {
                     state.weighted_all_reduce_gradients(batch_size)?;
                 }
                 state.sync_buffers()?;
+                if let Some(ref tl) = state.timeline {
+                    let dur = ddp_sync_start.elapsed().as_secs_f64() * 1000.0;
+                    tl.event(crate::monitor::EventKind::SyncEnd { duration_ms: dur });
+                }
 
+                if let Some(lr) = self.scheduled_lr() {
+                    for opt in &mut state.optimizers {
+                        opt.set_lr(lr);
+                    }
+                }
                 for opt in &mut state.optimizers {
                     opt.step()?;
                 }
@@ -341,12 +437,17 @@ impl Graph {
             }
         } else {
             // Single GPU
+            let scheduled = self.scheduled_lr();
             let mut opt = self.optimizer.borrow_mut();
             if let Some(ref mut optimizer) = *opt {
+                if let Some(lr) = scheduled {
+                    optimizer.set_lr(lr);
+                }
                 optimizer.step()?;
                 optimizer.zero_grad();
             }
         }
+        self.training_step.set(self.training_step.get() + 1);
         Ok(())
     }
 

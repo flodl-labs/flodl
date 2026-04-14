@@ -371,6 +371,126 @@ The skill files are embedded in the `fdl` binary, so this works anywhere,
 even without a flodl repo checkout. When run inside a repo, it uses the
 latest `ai/skills/` files from the source tree.
 
+### `fdl run` and Project Manifests (`fdl.yaml`)
+
+Inside a floDl project, `fdl` doubles as a project task runner. `fdl.yaml` 
+(also `fdl.yml`, `fdl.json`) declares named scripts and  sub-commands; 
+`fdl <name>` runs them.
+
+```yaml
+description: flodl - Rust deep learning framework
+
+scripts:
+  test:
+    description: Run all CPU tests
+    run: cargo test -- --nocapture
+    docker: dev
+  cuda-test:
+    description: Run CUDA tests (parallel)
+    run: cargo test --features cuda -- --nocapture
+    docker: cuda
+  shell:
+    run: bash
+    docker: dev
+
+commands:
+  - ddp-bench/   # sub-command with its own fdl.yaml
+```
+
+```bash
+fdl test            # runs the "test" script in the "dev" docker service
+fdl cuda-test       # runs in the "cuda" service
+fdl shell           # opens an interactive shell
+fdl ddp-bench --list # dispatches into the ddp-bench sub-command
+```
+
+When a script declares `docker: <service>`, `fdl` wraps the command in
+`docker compose run --rm <service> bash -c "..."`. Without `docker:`, it
+runs on the host. This replaces the older `make` workflow.
+
+If only `fdl.yml.example` (or `.dist`) is present in the tree, `fdl`
+offers to copy it to the real (gitignored) `fdl.yml` so users can
+customise locally without polluting the repo.
+
+#### Sub-command jobs
+
+A sub-command directory (e.g. `ddp-bench/`) has its own `fdl.yaml` with an
+`entry`, optional `docker`, structured `ddp` / `training` / `output`
+sections, and named `jobs` that merge over the defaults:
+
+```yaml
+description: DDP validation and benchmark suite
+docker: cuda
+entry: cargo run --release --features cuda --
+
+training:
+  epochs: 5
+  seed: 42
+
+ddp:
+  policy: cadence
+  backend: nccl
+  divergence_threshold: 0.05
+  lr_scale_ratio: 1.0
+
+jobs:
+  quick:
+    description: Fast smoke test
+    training: { epochs: 1 }
+    options: { model: linear, mode: solo-0, batches: 100 }
+  validate:
+    options: { model: all, mode: all, validate: true }
+```
+
+Then:
+
+```bash
+fdl ddp-bench quick                  # runs the "quick" job
+fdl ddp-bench validate --report out  # job + extra flags
+fdl ddp-bench --help                 # shows description + jobs + defaults
+fdl ddp-bench validate --help        # shows resolved options
+```
+
+The `ddp:` section maps 1:1 to flodl's `DdpConfig` / `DdpRunConfig`
+(`mode`, `policy`, `backend`, `anchor`, `max_anchor`, `overhead_target`,
+`divergence_threshold`, `max_batch_diff`, `speed_hint`, `partition_ratios`,
+`progressive`, `max_grad_norm`, `lr_scale_ratio`, `snapshot_timeout`,
+`checkpoint_every`, `timeline`). See [docs/design/run-config.md][run-config]
+for the full schema and merge semantics.
+
+[run-config]: design/run-config.md
+
+### `fdl completions` / `fdl autocomplete`
+
+Generate shell completion scripts. Project-aware: completions reflect the
+current `fdl.yaml`'s `scripts:` and `commands:` plus per-sub-command jobs.
+
+```bash
+fdl completions bash > ~/.local/share/bash-completion/completions/fdl
+fdl completions zsh  > "${fpath[1]}/_fdl"
+fdl completions fish > ~/.config/fish/completions/fdl.fish
+
+fdl autocomplete    # dynamic suggestions for the current cwd
+```
+
+Re-running `fdl completions` picks up new scripts and jobs as `fdl.yml`
+evolves.
+
+### Verbosity
+
+Global flags propagate into the framework's logging system (`flodl::log`)
+and into Docker child commands via `FLODL_VERBOSITY`:
+
+```bash
+fdl -v ddp-bench quick    # Verbose: DDP sync, cadence changes, prefetch detail
+fdl -vv cuda-test         # Debug: per-batch timing, internal loops
+fdl -vvv shell            # Trace: extreme granularity
+fdl --quiet test          # Errors only
+```
+
+Equivalent without the CLI: `FLODL_VERBOSITY=verbose cargo run`. Accepts
+integers `0`–`4` or names `quiet`/`normal`/`verbose`/`debug`/`trace`.
+
 ## Architecture
 
 The CLI is built as a pure Rust binary with **zero external crate dependencies**.

@@ -543,6 +543,8 @@ char* flodl_all_finite(FlodlTensor t, int* result);
 
 char* flodl_set_requires_grad(FlodlTensor t, int requires_grad, FlodlTensor* result);
 int flodl_requires_grad(FlodlTensor t);
+char* flodl_ensure_grad_accumulator(FlodlTensor t, void** handle_out);
+void  flodl_grad_accumulator_delete(void* handle);
 char* flodl_backward(FlodlTensor t);
 char* flodl_grad(FlodlTensor t, FlodlTensor* result);
 char* flodl_set_grad(FlodlTensor t, FlodlTensor grad);
@@ -805,6 +807,7 @@ char* flodl_cuda_stream_synchronize(void* stream);
 char* flodl_cuda_stream_wait_event(void* stream, void* event);
 int   flodl_cuda_stream_query(void* stream);
 void  flodl_cuda_stream_set_current(void* stream);
+void* flodl_cuda_stream_get_current(int device_index);
 void  flodl_cuda_stream_restore_default(int device_index);
 void  flodl_cuda_stream_delete(void* stream);
 

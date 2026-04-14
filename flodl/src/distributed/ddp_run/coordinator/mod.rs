@@ -1,153 +1,24 @@
 //! Coordinator: lightweight scheduling thread for DDP run mode.
 
 use std::sync::mpsc;
-use std::time::Instant;
 
-use crate::tensor::{Device, Result, Tensor, TensorError};
+use crate::tensor::{Device, Result};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::{
     ApplyPolicy, AverageBackend, TimingMsg, MetricsMsg,
-    ParamSnapshot, AveragedParams, ControlMsg, EpochPlan, TrainedState,
+    ParamSnapshot, ControlMsg, EpochPlan, TrainedState,
 };
 
-// ---------------------------------------------------------------------------
-// CPU averaging state machine
-// ---------------------------------------------------------------------------
+mod chunk_pool;
+mod cpu_avg;
 
-/// State machine for non-blocking CPU averaging.
-///
-/// Instead of blocking the coordinator thread during snapshot collection and
-/// averaging computation, the CPU path operates as a multi-tick state machine:
-///
-/// ```text
-/// Idle -> Collecting -> Computing -> Idle
-///          (try_recv      (thread
-///           per tick)      join)
-/// ```
-///
-/// This keeps [`Coordinator::check_throttle`] running every tick, even during
-/// averaging. Counter snapshots taken at trigger time allow correct timing
-/// attribution: batches during the averaging window carry into the next period.
-enum CpuAvgState {
-    /// No averaging in progress. `should_average()` may trigger a new cycle.
-    Idle,
-    /// Waiting for worker snapshots. `try_recv` on `param_rx` each tick.
-    Collecting {
-        snapshots: Vec<ParamSnapshot>,
-        received: Vec<bool>,
-        deadline: Instant,
-        start: Instant,
-        /// `steps_since_avg` at trigger time (for subtract-not-zero).
-        steps_snapshot: Vec<usize>,
-        /// `wall_ms_accum` at trigger time (for subtract-not-zero).
-        wall_ms_snapshot: Vec<f64>,
-    },
-    /// `average_params` + divergence check running on a background thread.
-    Computing {
-        handle: std::thread::JoinHandle<Result<CpuAvgResult>>,
-        start: Instant,
-        steps_snapshot: Vec<usize>,
-        wall_ms_snapshot: Vec<f64>,
-    },
-}
-
-/// Result from the CPU averaging compute thread.
-struct CpuAvgResult {
-    averaged: AveragedParams,
-    /// Relative divergence across replicas (for anchor correction).
-    /// None if all norms are zero.
-    divergence: Option<f64>,
-}
-
-// ---------------------------------------------------------------------------
-// Chunk pool for progressive dispatch
-// ---------------------------------------------------------------------------
-
-/// Tracks remaining unassigned samples for one epoch during progressive dispatch.
-///
-/// Instead of sending the full partition at epoch start, the coordinator hands
-/// out small chunks from this pool. Each `take_chunk` advances a monotonic
-/// cursor, guaranteeing non-overlapping slices into the global permutation.
-struct ChunkPool {
-    epoch: usize,
-    total_samples: usize,
-    /// Next unassigned offset into the global permutation.
-    cursor: usize,
-    /// Per-rank: samples dispatched (sum of all chunk sizes sent).
-    dispatched: Vec<usize>,
-    /// Per-rank: samples completed (from MetricsMsg.samples_processed).
-    completed: Vec<usize>,
-    /// Per-rank: number of chunks sent.
-    chunks_sent: Vec<usize>,
-    /// Wall-clock start of this epoch (for EpochMetrics).
-    epoch_start: Instant,
-}
-
-impl ChunkPool {
-    fn new(epoch: usize, total_samples: usize, world_size: usize) -> Self {
-        ChunkPool {
-            epoch,
-            total_samples,
-            cursor: 0,
-            dispatched: vec![0; world_size],
-            completed: vec![0; world_size],
-            chunks_sent: vec![0; world_size],
-            epoch_start: Instant::now(),
-        }
-    }
-
-    /// Take the next chunk of `size` samples from the pool.
-    ///
-    /// Returns `(offset, actual_size)` or `None` if the pool is exhausted.
-    /// Actual size may be smaller than requested if near the end.
-    fn take_chunk(&mut self, size: usize, rank: usize) -> Option<(usize, usize)> {
-        if self.cursor >= self.total_samples {
-            return None;
-        }
-        let actual = size.min(self.total_samples - self.cursor);
-        let offset = self.cursor;
-        self.cursor += actual;
-        self.dispatched[rank] += actual;
-        self.chunks_sent[rank] += 1;
-        Some((offset, actual))
-    }
-
-    /// Samples not yet assigned to any rank.
-    fn remaining(&self) -> usize {
-        self.total_samples.saturating_sub(self.cursor)
-    }
-
-    /// Record that a rank completed processing some samples.
-    fn mark_completed(&mut self, rank: usize, samples: usize) {
-        self.completed[rank] += samples;
-        debug_assert!(
-            self.completed[rank] <= self.dispatched[rank],
-            "rank {} completed {} samples but only {} were dispatched",
-            rank,
-            self.completed[rank],
-            self.dispatched[rank],
-        );
-    }
-
-    /// Samples dispatched but not yet completed for a given rank.
-    fn in_flight(&self, rank: usize) -> usize {
-        self.dispatched[rank].saturating_sub(self.completed[rank])
-    }
-
-    /// True when all samples have been dispatched AND all ranks have
-    /// reported completion for everything dispatched to them.
-    fn is_epoch_done(&self) -> bool {
-        self.cursor >= self.total_samples
-            && self.dispatched.iter().zip(&self.completed).all(|(d, c)| c >= d)
-    }
-
-    /// Epoch wall-clock time in milliseconds.
-    fn epoch_elapsed_ms(&self) -> f64 {
-        self.epoch_start.elapsed().as_secs_f64() * 1000.0
-    }
-}
+// Re-exported at `pub(super)` so `super::coordinator::ChunkPool` works in
+// `ddp_run::tests`. ChunkPool is `pub` inside its (private) module — the
+// effective visibility is set by this re-export, not by chunk_pool.rs.
+pub(super) use chunk_pool::ChunkPool;
+use cpu_avg::CpuAvgState;
 
 // ---------------------------------------------------------------------------
 // Coordinator
@@ -182,10 +53,12 @@ pub struct Coordinator {
     pub(super) el_che: crate::distributed::ddp::ElChe,
     version: u64,
     /// Per-rank steps since last averaging.
-    steps_since_avg: Vec<usize>,
+    pub(super) steps_since_avg: Vec<usize>,
+    /// Cumulative total batches across all GPUs. Updated at each sync:
+    /// `global_step += sum(steps_since_avg)`. Broadcast to workers so they
+    /// can compute per-batch LR as `scheduler.lr(global_step + local_offset)`.
+    pub(super) global_step: usize,
 
-    // Divergence monitoring (correction mechanism)
-    divergence_threshold: f64,
     /// Has ElChe been calibrated (first timing report received)?
     calibrated: bool,
 
@@ -233,12 +106,12 @@ pub struct Coordinator {
     /// Total number of epochs to train.
     num_epochs: usize,
     /// What epoch each rank is currently working on (last dispatched).
-    rank_epoch: Vec<usize>,
+    pub(super) rank_epoch: Vec<usize>,
     /// True if rank finished its epoch but is blocked by lookahead (Auto mode).
     rank_waiting: Vec<bool>,
     /// Last globally-aggregated epoch (all ranks reported).
     /// None = no epoch aggregated yet.
-    last_aggregated_epoch: Option<usize>,
+    pub(super) last_aggregated_epoch: Option<usize>,
     /// User-specified partition ratios (disables auto-rebalancing).
     partition_ratios: Option<Vec<f64>>,
     /// Cached epoch plans: computed once per epoch, consistent across ranks.
@@ -247,12 +120,54 @@ pub struct Coordinator {
     // Progressive chunk dispatch
     /// Whether progressive dispatch is enabled.
     progressive: bool,
-    /// Active chunk pool (None between epochs or when progressive is off).
-    chunk_pool: Option<ChunkPool>,
+    /// Active chunk pools keyed by epoch. Multiple pools may be active when
+    /// fast GPUs stream ahead into the next epoch's data.
+    pub(super) chunk_pools: BTreeMap<usize, ChunkPool>,
     /// Floor for chunk size (in batches). Default: 4.
     min_chunk_batches: usize,
     /// Batch size (samples per batch), needed for chunk sizing.
     batch_size: usize,
+
+    // Streaming epoch overshoot
+    /// Maximum batches past ElChe's planned sync count any GPU may execute.
+    /// Gates cross-epoch dispatch in progressive mode.
+    pub(super) max_overshoot: usize,
+    /// True when max_overshoot is auto-tuned (not user-set).
+    pub(super) overshoot_auto: bool,
+    /// Initial value for reset on convergence degradation.
+    pub(super) overshoot_initial: usize,
+    /// Absolute ceiling on max_overshoot (safety valve, applied after auto-tune).
+    overshoot_ceiling: usize,
+
+    // Divergence monitoring (per-sync-interval, reset after averaging)
+    /// Per-rank cumulative loss since last sync (monitoring/logging only,
+    /// not used for cadence decisions).
+    loss_accum: Vec<f64>,
+    /// Per-rank batch count contributing to loss_accum since last sync.
+    loss_count: Vec<usize>,
+    /// Per-rank weight-space divergence from the most recent AllReduce.
+    /// Set via `sync_divergence` in TimingMsg ack. Reset after averaging.
+    nccl_sync_divergence: Vec<Option<f64>>,
+    /// Unified convergence guard: owns ring buffer and mode-specific logic.
+    convergence_guard: super::convergence::ConvergenceGuard,
+
+    // Timeline profiling
+    /// Optional high-frequency system timeline for event injection.
+    timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
+    /// Instant when the last NCCL sync started (for duration measurement).
+    nccl_sync_start: Option<std::time::Instant>,
+
+    // NCCL sync acknowledgment
+    /// Per-rank: last worker `step_count` seen in a TimingMsg.
+    /// Monotonically increasing (workers never reset `local_step`).
+    last_step_count: Vec<usize>,
+    /// Per-rank: `last_step_count` snapshot at the time SyncNow was sent.
+    /// A rank is acknowledged when its `step_count` exceeds this threshold.
+    nccl_sync_step: Vec<usize>,
+    /// Per-rank: true once a post-sync timing message has arrived.
+    /// Without this gate, stale timing from pre-sync batches refills
+    /// `steps_since_avg` and floods AllReduce calls, deadlocking GPU streams.
+    nccl_ack: Vec<bool>,
 }
 
 /// Builder for configuring a [`Coordinator`].
@@ -268,6 +183,7 @@ pub struct CoordinatorBuilder {
     total_samples: usize,
     el_che: crate::distributed::ddp::ElChe,
     divergence_threshold: f64,
+    divergence_guard: bool,
     checkpoint_every: Option<usize>,
     snapshot_timeout_secs: u64,
     epoch_metrics_tx: Option<mpsc::Sender<super::EpochMetrics>>,
@@ -276,6 +192,11 @@ pub struct CoordinatorBuilder {
     partition_ratios: Option<Vec<f64>>,
     progressive: bool,
     batch_size: usize,
+    timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
+    /// User-set max overshoot, or None for auto.
+    max_overshoot: Option<usize>,
+    /// Absolute ceiling on max_overshoot (safety valve). Default: 15.
+    overshoot_ceiling: usize,
 }
 
 impl CoordinatorBuilder {
@@ -292,10 +213,26 @@ impl CoordinatorBuilder {
         self
     }
 
-    /// Set the divergence threshold for anchor correction.
-    /// Default: 0.05 (5% relative norm difference nudges ElChe's anchor down).
+    /// Attach a system timeline for event injection.
+    pub fn timeline(mut self, tl: Option<std::sync::Arc<crate::monitor::Timeline>>) -> Self {
+        self.timeline = tl;
+        self
+    }
+
+    /// Set the divergence threshold for the trend guardrail.
+    /// Default: 0.05 (5% relative loss divergence between ranks).
     pub fn divergence_threshold(mut self, threshold: f64) -> Self {
         self.divergence_threshold = threshold;
+        self
+    }
+
+    /// Disable the divergence guardrail entirely.
+    /// ElChe's overhead auto-tune handles cadence on its own; the guardrail
+    /// is an optional safety net that suppresses anchor growth when replicas
+    /// drift apart. Disable when you know your workload is stable or prefer
+    /// full control via ElChe's parameters.
+    pub fn no_divergence_guard(mut self) -> Self {
+        self.divergence_guard = false;
         self
     }
 
@@ -349,8 +286,29 @@ impl CoordinatorBuilder {
         self
     }
 
+    /// Set the maximum overshoot past the planned sync point.
+    /// `None` = auto-tuned. `Some(0)` = disable cross-epoch streaming.
+    pub fn max_overshoot(mut self, max: Option<usize>) -> Self {
+        self.max_overshoot = max;
+        self
+    }
+
+    /// Set the absolute ceiling on max_overshoot (safety valve).
+    /// Default: 15. Applied after all auto-tune logic.
+    pub fn overshoot_ceiling(mut self, ceiling: usize) -> Self {
+        self.overshoot_ceiling = ceiling;
+        self
+    }
+
     /// Build the coordinator.
     pub fn build(self) -> Coordinator {
+        let total_batches = self.total_samples / self.batch_size.max(1);
+        let overshoot_auto = self.max_overshoot.is_none();
+        let overshoot_initial = match self.max_overshoot {
+            Some(n) => n,
+            None => (total_batches / 100).clamp(2, 5),
+        };
+
         Coordinator {
             timing_rx: self.timing_rx,
             metrics_rx: self.metrics_rx,
@@ -364,7 +322,7 @@ impl CoordinatorBuilder {
             el_che: self.el_che,
             version: 0,
             steps_since_avg: vec![0; self.world_size],
-            divergence_threshold: self.divergence_threshold,
+            global_step: 0,
             calibrated: false,
             active_count: self.world_size,
             wall_ms_accum: vec![0.0; self.world_size],
@@ -386,9 +344,26 @@ impl CoordinatorBuilder {
             partition_ratios: self.partition_ratios,
             epoch_plan_cache: HashMap::new(),
             progressive: self.progressive,
-            chunk_pool: None,
+            chunk_pools: BTreeMap::new(),
             min_chunk_batches: 4,
             batch_size: self.batch_size.max(1),
+            max_overshoot: overshoot_initial,
+            overshoot_auto,
+            overshoot_initial,
+            overshoot_ceiling: self.overshoot_ceiling,
+            loss_accum: vec![0.0; self.world_size],
+            loss_count: vec![0; self.world_size],
+            nccl_sync_divergence: vec![None; self.world_size],
+            convergence_guard: super::convergence::ConvergenceGuard::new(
+                self.policy,
+                self.divergence_guard,
+                self.divergence_threshold,
+            ),
+            timeline: self.timeline,
+            nccl_sync_start: None,
+            last_step_count: vec![0; self.world_size],
+            nccl_sync_step: vec![0; self.world_size],
+            nccl_ack: vec![true; self.world_size],
         }
     }
 }
@@ -420,6 +395,7 @@ impl Coordinator {
             total_samples,
             el_che,
             divergence_threshold: 0.05,
+            divergence_guard: true,
             checkpoint_every: None,
             snapshot_timeout_secs: 5,
             epoch_metrics_tx: None,
@@ -428,6 +404,9 @@ impl Coordinator {
             partition_ratios: None,
             progressive: !matches!(policy, ApplyPolicy::Sync),
             batch_size: 1,
+            timeline: None,
+            max_overshoot: None,
+            overshoot_ceiling: 15,
         }
     }
 
@@ -476,6 +455,34 @@ impl Coordinator {
         self.last_aggregated_epoch.is_some_and(|e| e + 1 >= self.num_epochs)
     }
 
+    /// Emit a periodic state dump (gated by `-vv` verbosity).
+    pub fn debug_state_dump(&self, tick: u64) {
+        if !crate::log::enabled(crate::log::Verbosity::Debug) {
+            return;
+        }
+        let pools: Vec<_> = self.chunk_pools.iter()
+            .map(|(e, p)| {
+                let inf: Vec<_> = (0..self.world_size)
+                    .map(|r| format!("{}:{}/{}", r, p.completed[r], p.dispatched[r]))
+                    .collect();
+                format!("e{}(cur={}/{} [{}])", e, p.cursor, p.total_samples, inf.join(" "))
+            })
+            .collect();
+        let wall_rounded: Vec<_> = self.wall_ms_accum.iter()
+            .map(|w| (w * 10.0).round() / 10.0)
+            .collect();
+        crate::debug!(
+            "  ddp-state: tick={} steps={:?} wall={:.0?} throttled={:?} \
+             nccl_ack={:?} rank_epoch={:?} active={} last_agg={:?} avg#={} \
+             pools=[{}]",
+            tick, self.steps_since_avg, wall_rounded,
+            self.throttled, self.nccl_ack,
+            self.rank_epoch, self.active_count,
+            self.last_aggregated_epoch, self.avg_count,
+            pools.join(", "),
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Global epoch management
     // -----------------------------------------------------------------------
@@ -514,7 +521,7 @@ impl Coordinator {
             plans.push(EpochPlan { epoch, partition_offset: offset, partition_size: size });
             offset += size;
         }
-        eprintln!("  ddp: epoch {epoch} | partitions {sizes:?}");
+        crate::verbose!("  ddp: epoch {epoch} | partitions {sizes:?}");
         self.epoch_plan_cache.insert(epoch, plans.clone());
         plans
     }
@@ -547,12 +554,12 @@ impl Coordinator {
         // Without this, is_epoch_done never fires when total % batch_size != 0.
         let batch_total = (self.total_samples / self.batch_size) * self.batch_size;
         let pool = ChunkPool::new(epoch, batch_total, self.world_size);
-        self.chunk_pool = Some(pool);
+        self.chunk_pools.insert(epoch, pool);
 
         let sizes: Vec<usize> = (0..self.world_size)
-            .map(|r| self.compute_chunk_batches(r))
+            .map(|r| self.compute_chunk_batches(r, epoch))
             .collect();
-        eprintln!(
+        crate::verbose!(
             "  ddp: epoch {epoch} progressive | initial chunks (batches) {sizes:?}"
         );
         for (rank, &batch_count) in sizes.iter().enumerate() {
@@ -565,16 +572,72 @@ impl Coordinator {
     /// Computes chunk size based on calibration state, takes from the pool,
     /// and sends a `StartEpoch` plan. Does nothing if the pool is exhausted.
     fn dispatch_next_chunk(&mut self, rank: usize) {
-        let epoch = match &self.chunk_pool {
-            Some(pool) => pool.epoch,
-            None => return,
-        };
-        let batches = self.compute_chunk_batches(rank);
-        let remaining = self.chunk_pool.as_ref().map_or(0, |p| p.remaining());
-        eprintln!(
-            "  ddp: chunk -> rank {rank} | {batches} batches | {remaining} samples left"
+        let epoch = self.rank_epoch[rank];
+        // Try current epoch's pool first
+        if self.chunk_pools.get(&epoch).is_some_and(|p| p.remaining() > 0) {
+            let batches = self.compute_chunk_batches(rank, epoch);
+            let remaining = self.chunk_pools.get(&epoch).map_or(0, |p| p.remaining());
+            crate::verbose!(
+                "  ddp: chunk -> rank {rank} | {batches} batches | {remaining} samples left"
+            );
+            self.dispatch_next_chunk_with_batches(rank, epoch, batches);
+            return;
+        }
+
+        // Current pool exhausted for this rank. Try cross-epoch streaming.
+        // Skip past already-aggregated epochs: their pools were removed
+        // during try_aggregate_epochs_progressive. Re-creating them here
+        // would produce an orphan pool that blocks all future aggregation
+        // (BTreeMap iteration breaks at the first incomplete pool).
+        let first_live = self.last_aggregated_epoch
+            .map_or(0, |agg| agg + 1);
+        let next_epoch = (epoch + 1).max(first_live);
+        if next_epoch >= self.num_epochs {
+            return;
+        }
+
+        // Overshoot gate: don't dispatch if rank has exceeded its planned
+        // batch count by more than max_overshoot since the last sync.
+        // Only applies when streaming AHEAD of a not-yet-aggregated epoch.
+        // If the rank's current epoch is already aggregated, this is a normal
+        // transition (all ranks completed), not overshoot.
+        //
+        // Skip for NCCL backend: overshoot is an async/CPU concept. NCCL
+        // cadence uses AllReduce as its sole coordination mechanism; blocking
+        // the fast GPU here forces it into wait_for_epoch_plan where it can't
+        // send timing messages, leaving nccl_ack permanently false and
+        // deadlocking should_average + check_throttle.
+        if !matches!(self.backend, AverageBackend::Nccl) {
+            let current_aggregated = self.last_aggregated_epoch
+                .is_some_and(|agg| epoch <= agg);
+            if !current_aggregated {
+                let planned = self.el_che.batch_counts().get(rank).copied().unwrap_or(0);
+                if planned > 0 && self.steps_since_avg[rank] >= planned + self.max_overshoot {
+                    crate::debug!(
+                        "  ddp: overshoot gate BLOCKED rank {rank} | steps={} planned={} overshoot={} | wall_ms={:?}",
+                        self.steps_since_avg[rank], planned, self.max_overshoot, self.wall_ms_accum,
+                    );
+                    return; // At overshoot limit, wait for next AllReduce
+                }
+            }
+        }
+
+        // Create next epoch's pool on-demand
+        if !self.chunk_pools.contains_key(&next_epoch) {
+            let batch_total = (self.total_samples / self.batch_size) * self.batch_size;
+            self.chunk_pools.insert(
+                next_epoch,
+                ChunkPool::new(next_epoch, batch_total, self.world_size),
+            );
+            crate::verbose!("  ddp: streaming -> epoch {next_epoch} pool created");
+        }
+
+        let batches = self.compute_chunk_batches(rank, next_epoch);
+        let remaining = self.chunk_pools.get(&next_epoch).map_or(0, |p| p.remaining());
+        crate::verbose!(
+            "  ddp: chunk -> rank {rank} | {batches} batches | {remaining} samples left (epoch {next_epoch})"
         );
-        self.dispatch_next_chunk_with_batches(rank, epoch, batches);
+        self.dispatch_next_chunk_with_batches(rank, next_epoch, batches);
     }
 
     fn dispatch_next_chunk_with_batches(&mut self, rank: usize, epoch: usize, batches: usize) {
@@ -582,7 +645,7 @@ impl Coordinator {
         if samples == 0 {
             return;
         }
-        let (offset, actual_size) = match self.chunk_pool.as_mut() {
+        let (offset, actual_size) = match self.chunk_pools.get_mut(&epoch) {
             Some(pool) => match pool.take_chunk(samples, rank) {
                 Some(v) => v,
                 None => return,
@@ -599,8 +662,8 @@ impl Coordinator {
     }
 
     /// Compute how many batches the next chunk for `rank` should contain.
-    fn compute_chunk_batches(&self, rank: usize) -> usize {
-        let pool = match &self.chunk_pool {
+    fn compute_chunk_batches(&self, rank: usize, epoch: usize) -> usize {
+        let pool = match self.chunk_pools.get(&epoch) {
             Some(pool) => pool,
             None => return 0,
         };
@@ -722,24 +785,32 @@ impl Coordinator {
             return;
         }
 
+        if self.progressive {
+            // Streaming epochs: pools are created on-demand by dispatch_next_chunk.
+            // Re-dispatch to idle ranks (no in-flight chunks) that may be waiting
+            // for work after exhausting their previous pool.
+            for rank in 0..self.world_size {
+                let has_inflight = self.chunk_pools.values()
+                    .any(|p| p.in_flight(rank) > 0);
+                if !has_inflight {
+                    self.dispatch_next_chunk(rank);
+                }
+            }
+            return;
+        }
+
         match self.policy {
             ApplyPolicy::Sync | ApplyPolicy::Cadence => {
                 self.send_all_plans(next_global);
             }
             ApplyPolicy::Async => {
-                if self.progressive {
-                    // Progressive handles chunk dispatch; start the next
-                    // epoch's pool the same way Sync/Cadence does.
-                    self.send_all_plans(next_global);
-                } else {
-                    // Legacy per-rank dispatch already happened in on_rank_done.
-                    // Unblock ranks that were waiting due to lookahead.
-                    for rank in 0..self.world_size {
-                        if self.rank_waiting[rank] {
-                            let next = self.rank_epoch[rank] + 1;
-                            if next < self.num_epochs {
-                                self.send_rank_plan(rank, next);
-                            }
+                // Legacy per-rank dispatch already happened in on_rank_done.
+                // Unblock ranks that were waiting due to lookahead.
+                for rank in 0..self.world_size {
+                    if self.rank_waiting[rank] {
+                        let next = self.rank_epoch[rank] + 1;
+                        if next < self.num_epochs {
+                            self.send_rank_plan(rank, next);
                         }
                     }
                 }
@@ -751,10 +822,46 @@ impl Coordinator {
     /// [`Self::drain_timing_blocking`].
     fn process_timing_msg(&mut self, msg: TimingMsg) {
         match msg {
-            TimingMsg::Batch { rank, batch_ms, .. } => {
+            TimingMsg::Batch { rank, batch_ms, step_count, param_norm, batch_loss, sync_divergence } => {
                 self.steps_since_avg[rank] = self.steps_since_avg[rank].saturating_add(1);
                 self.wall_ms_accum[rank] += batch_ms;
+                self.last_step_count[rank] = self.last_step_count[rank].max(step_count);
                 self.last_batch_ms[rank] = batch_ms;
+                // Accumulate loss for monitoring (not used for cadence decisions).
+                if batch_loss > 0.0 {
+                    self.loss_accum[rank] += batch_loss;
+                    self.loss_count[rank] += 1;
+                }
+                // Capture weight-space divergence from post-sync ack.
+                if let Some(div) = sync_divergence {
+                    self.nccl_sync_divergence[rank] = Some(div);
+                }
+                let _ = param_norm; // retained in TimingMsg for monitoring
+                // Ack NCCL sync when the worker's step_count exceeds the
+                // snapshot at trigger time (proves the worker processed the
+                // SyncNow and completed the AllReduce before this batch).
+                if rank < self.nccl_ack.len()
+                    && !self.nccl_ack[rank]
+                    && step_count > self.nccl_sync_step[rank]
+                {
+                    self.nccl_ack[rank] = true;
+                }
+            }
+            TimingMsg::SyncAck { rank, step_count, divergence } => {
+                // Post-SyncNow ack: update step count for nccl_ack + capture
+                // divergence, but do NOT increment steps_since_avg. Treating
+                // this as a batch inflates global_step by one per sync per
+                // rank, firing LR schedulers early.
+                self.last_step_count[rank] = self.last_step_count[rank].max(step_count);
+                if let Some(div) = divergence {
+                    self.nccl_sync_divergence[rank] = Some(div);
+                }
+                if rank < self.nccl_ack.len()
+                    && !self.nccl_ack[rank]
+                    && step_count > self.nccl_sync_step[rank]
+                {
+                    self.nccl_ack[rank] = true;
+                }
             }
             TimingMsg::Exiting { .. } => {
                 self.active_count = self.active_count.saturating_sub(1);
@@ -800,10 +907,15 @@ impl Coordinator {
         let mut msgs = Vec::new();
         while let Ok(msg) = self.metrics_rx.try_recv() {
             if self.progressive {
-                // Progressive: accumulate into pool, dispatch next chunk
-                if let Some(ref mut pool) = self.chunk_pool {
+                // Progressive: route completion to the correct pool by epoch
+                if let Some(pool) = self.chunk_pools.get_mut(&msg.epoch) {
                     pool.mark_completed(msg.rank, msg.samples_processed);
                 }
+                crate::debug!(
+                    "  ddp: metrics rank {} epoch {} done | samples={} | pools={:?}",
+                    msg.rank, msg.epoch, msg.samples_processed,
+                    self.chunk_pools.keys().collect::<Vec<_>>(),
+                );
                 self.epoch_buffer.entry(msg.epoch).or_default().push(msg.clone());
                 // Dispatch next chunk to this rank (if pool has work)
                 self.dispatch_next_chunk(msg.rank);
@@ -848,31 +960,39 @@ impl Coordinator {
         }
     }
 
-    /// Progressive aggregation: epoch is done when the chunk pool says so.
+    /// Progressive aggregation: check all pools, fire global event for completed ones.
+    ///
+    /// Only aggregates epoch N if no earlier epoch pool is still active.
+    /// This prevents a fast GPU from streaming ahead and triggering Shutdown
+    /// for the final epoch while the slow GPU is still processing earlier work.
     fn try_aggregate_epochs_progressive(&mut self) {
-        let pool_done = self.chunk_pool.as_ref().is_some_and(|p| p.is_epoch_done());
-        if !pool_done {
-            return;
+        // Collect completed epochs in order, stopping at first incomplete pool.
+        // BTreeMap iterates in ascending key order, so if epoch 1's pool isn't
+        // done, epoch 2 won't aggregate even if its pool is done.
+        let mut completed: Vec<(usize, f64)> = Vec::new();
+        for (&epoch, pool) in &self.chunk_pools {
+            if pool.is_epoch_done() {
+                completed.push((epoch, pool.epoch_elapsed_ms()));
+            } else {
+                break; // Earlier epoch not done: can't aggregate anything after it
+            }
         }
 
-        let epoch = self.chunk_pool.as_ref().unwrap().epoch;
-        let epoch_ms = self.chunk_pool.as_ref().unwrap().epoch_elapsed_ms();
+        for (epoch, epoch_ms) in completed {
+            self.chunk_pools.remove(&epoch);
 
-        // Remove pool before processing (allows on_epoch_aggregated to create the next one)
-        self.chunk_pool = None;
-
-        if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
-            if let Some(tx) = &self.epoch_metrics_tx {
-                let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
-                // Override epoch_ms with the pool's wall-clock (not per-chunk times)
-                metrics.epoch_ms = epoch_ms;
-                let _ = tx.send(metrics);
+            if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
+                if let Some(tx) = &self.epoch_metrics_tx {
+                    let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                    metrics.epoch_ms = epoch_ms;
+                    let _ = tx.send(metrics);
+                }
+                crate::verbose!(
+                    "  ddp: epoch {epoch} progressive complete | {:.0}ms",
+                    epoch_ms,
+                );
+                self.on_epoch_aggregated(epoch);
             }
-            eprintln!(
-                "  ddp: epoch {epoch} progressive complete | {:.0}ms",
-                epoch_ms,
-            );
-            self.on_epoch_aggregated(epoch);
         }
     }
 
@@ -882,6 +1002,13 @@ impl Coordinator {
         if !matches!(self.avg_state, CpuAvgState::Idle) {
             return false;
         }
+        // Don't re-trigger NCCL averaging until all ranks have acknowledged
+        // the previous SyncNow (sent at least one timing message since).
+        if matches!(self.backend, AverageBackend::Nccl)
+            && !self.nccl_ack.iter().all(|&a| a)
+        {
+            return false;
+        }
         // Training complete: workers received Shutdown, skip stale averaging.
         if self.all_epochs_done() {
             return false;
@@ -889,6 +1016,15 @@ impl Coordinator {
         // Collectives require all ranks. If any worker has exited,
         // skip averaging to prevent NCCL deadlock or channel disconnect.
         if self.active_count < self.world_size {
+            return false;
+        }
+        // All ranks must have trained at least one batch since the last
+        // sync. A rank at 0 steps is setting up a new chunk (blocked in
+        // prefetch or batch loading) or idle in wait_for_epoch_plan.
+        // Sending SyncNow to it would deadlock: the NCCL collective
+        // blocks the participating rank's GPU while the zero-step rank
+        // can't call AllReduce until its batch setup completes.
+        if self.steps_since_avg.contains(&0) {
             return false;
         }
         match self.policy {
@@ -926,416 +1062,6 @@ impl Coordinator {
         }
     }
 
-    /// Trigger parameter averaging based on the configured backend.
-    ///
-    /// For NCCL: sends `SyncNow` to all workers, then runs the common tail
-    /// (ElChe report, version bump, counter reset) synchronously.
-    ///
-    /// For CPU: sends `RequestParams`, snapshots the current counters, and
-    /// enters the `CpuAvgState::Collecting` state. The actual collection
-    /// and averaging happen over subsequent [`Self::poll_cpu_averaging`] ticks,
-    /// keeping [`Self::check_throttle`] active throughout.
-    pub fn trigger_averaging(&mut self) -> Result<()> {
-        match self.backend {
-            AverageBackend::Nccl => {
-                for tx in &self.control_txs {
-                    let _ = tx.send(ControlMsg::SyncNow);
-                }
-                // NCCL: workers block in AllReduce, no new batches happen,
-                // so zeroing counters is correct.
-                self.finish_averaging_nccl();
-            }
-            AverageBackend::Cpu => {
-                // Snapshot counters at trigger time. Batches that arrive
-                // during collection/computing carry into the next period.
-                let steps_snapshot = self.steps_since_avg.clone();
-                let wall_ms_snapshot = self.wall_ms_accum.clone();
-
-                // Send RequestParams to all workers
-                for tx in &self.control_txs {
-                    let _ = tx.send(ControlMsg::RequestParams);
-                }
-
-                let timeout_secs = self.snapshot_timeout_secs;
-                self.avg_state = CpuAvgState::Collecting {
-                    snapshots: Vec::with_capacity(self.world_size),
-                    received: vec![false; self.world_size],
-                    deadline: Instant::now()
-                        + std::time::Duration::from_secs(timeout_secs),
-                    start: Instant::now(),
-                    steps_snapshot,
-                    wall_ms_snapshot,
-                };
-                // Return immediately; poll_cpu_averaging drives the rest.
-            }
-        }
-        Ok(())
-    }
-
-    /// Common tail for NCCL averaging: report to ElChe, bump version, zero counters.
-    ///
-    /// NCCL workers block in AllReduce so no new batches arrive during the
-    /// collective; zeroing is correct.
-    fn finish_averaging_nccl(&mut self) {
-        if self.wall_ms_accum.iter().any(|&ms| ms > 0.0) {
-            self.el_che.report_timing(&self.wall_ms_accum, &self.steps_since_avg, self.last_avg_ms);
-            self.last_avg_ms = 0.0;
-            if !self.calibrated && self.el_che.is_calibrated() {
-                self.calibrated = true;
-            }
-        }
-
-        self.version += 1;
-        self.avg_count += 1;
-
-        eprintln!(
-            "  ddp: NCCL averaging #{} complete (v{})",
-            self.avg_count, self.version
-        );
-
-        for s in &mut self.steps_since_avg {
-            *s = 0;
-        }
-        for a in &mut self.wall_ms_accum {
-            *a = 0.0;
-        }
-        for t in &mut self.throttled {
-            *t = false;
-        }
-    }
-
-    /// Common tail for CPU averaging: report snapshot counters to ElChe,
-    /// apply divergence correction, subtract snapshots from current counters
-    /// (preserve during-averaging batches).
-    pub(super) fn finish_averaging_cpu(
-        &mut self,
-        avg_ms: f64,
-        steps_snapshot: &[usize],
-        wall_ms_snapshot: &[f64],
-        divergence: Option<f64>,
-    ) {
-        self.last_avg_ms = avg_ms;
-
-        // Report the snapshot values to ElChe (accurate for the period
-        // that triggered averaging, not inflated by during-averaging batches).
-        if wall_ms_snapshot.iter().any(|&ms| ms > 0.0) {
-            self.el_che.report_timing(wall_ms_snapshot, steps_snapshot, self.last_avg_ms);
-            self.last_avg_ms = 0.0;
-            if !self.calibrated && self.el_che.is_calibrated() {
-                self.calibrated = true;
-            }
-        }
-
-        // Divergence correction: if replicas drifted apart, nudge ElChe's
-        // anchor down (tighter sync). One-directional pressure only; ElChe's
-        // overhead auto-tune handles loosening.
-        if let Some(div) = divergence {
-            if div > self.divergence_threshold {
-                let old_anchor = self.el_che.anchor();
-                self.el_che.nudge_anchor_down(0.5);
-                eprintln!(
-                    "  ddp: divergence {div:.4} > {:.4}, anchor {} -> {}",
-                    self.divergence_threshold, old_anchor, self.el_che.anchor()
-                );
-            }
-        }
-
-        self.version += 1;
-        self.avg_count += 1;
-
-        eprintln!(
-            "  ddp: CPU averaging #{} complete (v{}, {:.1}ms)",
-            self.avg_count, self.version, avg_ms
-        );
-
-        // Subtract snapshot from current counters. Residual = batches
-        // that happened during the averaging window, carried forward.
-        for (i, s) in self.steps_since_avg.iter_mut().enumerate() {
-            *s = s.saturating_sub(steps_snapshot[i]);
-        }
-        for (i, a) in self.wall_ms_accum.iter_mut().enumerate() {
-            *a = (*a - wall_ms_snapshot[i]).max(0.0);
-        }
-        for t in &mut self.throttled {
-            *t = false;
-        }
-    }
-
-    /// Abort an in-progress CPU averaging cycle and return to Idle.
-    ///
-    /// Drains stale snapshots from `param_rx` so the next cycle starts clean.
-    fn abort_cpu_averaging(&mut self) {
-        self.avg_state = CpuAvgState::Idle;
-        // Drain any in-flight snapshots from the aborted round.
-        while self.param_rx.try_recv().is_ok() {}
-    }
-
-    /// Cleanly shut down any in-progress CPU averaging before the coordinator exits.
-    ///
-    /// If in Computing state, joins the background thread (waits for it to finish)
-    /// so no detached thread holds GPU resources when the coordinator returns.
-    /// If in Collecting state, drains stale snapshots.
-    pub fn drain_avg_state(&mut self) {
-        let state = std::mem::replace(&mut self.avg_state, CpuAvgState::Idle);
-        match state {
-            CpuAvgState::Idle => {}
-            CpuAvgState::Collecting { snapshots, .. } => {
-                eprintln!(
-                    "  ddp: discarding in-progress CPU averaging \
-                     (Collecting, {}/{} snapshots received)",
-                    snapshots.len(), self.world_size
-                );
-                while self.param_rx.try_recv().is_ok() {}
-            }
-            CpuAvgState::Computing { handle, .. } => {
-                // Join the compute thread so no detached thread holds GPU resources.
-                let result = handle.join();
-                let status = match &result {
-                    Ok(Ok(_)) => "completed result discarded",
-                    Ok(Err(e)) => {
-                        eprintln!("  ddp: CPU averaging compute error: {e}");
-                        "errored"
-                    }
-                    Err(_) => "panicked",
-                };
-                eprintln!(
-                    "  ddp: discarding in-progress CPU averaging (Computing, {status})"
-                );
-                // Drain any snapshots it might have sent before we discard the result.
-                while self.param_rx.try_recv().is_ok() {}
-            }
-        }
-    }
-
-    /// Drive the CPU averaging state machine one tick.
-    ///
-    /// Called every coordinator loop iteration. Handles three states:
-    ///
-    /// - **Idle**: no-op.
-    /// - **Collecting**: `try_recv` on `param_rx` for pending snapshots.
-    ///   Transitions to Computing when all ranks have responded, or soft-aborts
-    ///   on timeout (drains stale snapshots, returns to Idle, logs warning).
-    /// - **Computing**: checks if the background thread has finished. When done,
-    ///   sends `Update` to all workers and runs `finish_averaging_cpu`.
-    ///
-    /// Returns `Ok(())` on normal progress (including soft abort).
-    /// Returns `Err` only on unrecoverable errors (compute thread panic).
-    pub fn poll_cpu_averaging(&mut self) -> Result<()> {
-        // Take ownership of the state to avoid borrow issues.
-        let state = std::mem::replace(&mut self.avg_state, CpuAvgState::Idle);
-
-        match state {
-            CpuAvgState::Idle => {
-                self.avg_state = CpuAvgState::Idle;
-            }
-            CpuAvgState::Collecting {
-                mut snapshots,
-                mut received,
-                deadline,
-                start,
-                steps_snapshot,
-                wall_ms_snapshot,
-            } => {
-                // Drain all available snapshots (non-blocking).
-                while let Ok(snap) = self.param_rx.try_recv() {
-                    if snap.rank < self.world_size && !received[snap.rank] {
-                        received[snap.rank] = true;
-                        snapshots.push(snap);
-                    }
-                    // Ignore duplicates or out-of-range ranks.
-                }
-
-                if snapshots.len() >= self.world_size {
-                    // All snapshots collected. Spawn compute thread.
-                    let version = self.version + 1;
-
-                    let handle = std::thread::Builder::new()
-                        .name("cpu-avg-compute".into())
-                        .spawn(move || {
-                            Self::compute_average_and_divergence(
-                                snapshots, version,
-                            )
-                        })
-                        .map_err(|e| TensorError::new(
-                            &format!("failed to spawn CPU averaging thread: {e}")
-                        ))?;
-
-                    self.avg_state = CpuAvgState::Computing {
-                        handle,
-                        start,
-                        steps_snapshot,
-                        wall_ms_snapshot,
-                    };
-                } else if Instant::now() >= deadline {
-                    // Timeout: soft abort.
-                    let missing: Vec<usize> = received.iter().enumerate()
-                        .filter(|(_, got)| !**got)
-                        .map(|(r, _)| r)
-                        .collect();
-                    self.abort_count += 1;
-                    eprintln!(
-                        "  ddp: CPU averaging timeout, missing ranks: {missing:?} \
-                         (abort #{}, will retry)", self.abort_count
-                    );
-                    self.abort_cpu_averaging();
-                } else {
-                    // Still waiting. Put state back.
-                    self.avg_state = CpuAvgState::Collecting {
-                        snapshots,
-                        received,
-                        deadline,
-                        start,
-                        steps_snapshot,
-                        wall_ms_snapshot,
-                    };
-                }
-            }
-            CpuAvgState::Computing {
-                handle,
-                start,
-                steps_snapshot,
-                wall_ms_snapshot,
-            } => {
-                if handle.is_finished() {
-                    let result = handle.join()
-                        .map_err(|_| TensorError::new(
-                            "CPU averaging compute thread panicked"
-                        ))??;
-
-                    let avg_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-                    // Send averaged params to all workers.
-                    for (rank, tx) in self.control_txs.iter().enumerate() {
-                        if tx.send(ControlMsg::Update(result.averaged.clone())).is_err() {
-                            eprintln!(
-                                "  ddp: failed to deliver Update to rank {rank} \
-                                 (worker channel dead)"
-                            );
-                        }
-                    }
-
-                    self.finish_averaging_cpu(
-                        avg_ms,
-                        &steps_snapshot,
-                        &wall_ms_snapshot,
-                        result.divergence,
-                    );
-                    // avg_state is already Idle from the mem::replace.
-                } else {
-                    // Still computing. Put state back.
-                    self.avg_state = CpuAvgState::Computing {
-                        handle,
-                        start,
-                        steps_snapshot,
-                        wall_ms_snapshot,
-                    };
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Compute weighted average of parameter snapshots.
-    ///
-    /// Weight each rank's contribution by its `batch_count` (number of batches
-    /// since last averaging). This ensures faster GPUs contribute more.
-    /// Buffers (e.g. BatchNorm running stats) are averaged with equal weight.
-    pub(super) fn average_params(snapshots: &[ParamSnapshot], version: u64) -> Result<AveragedParams> {
-        if snapshots.is_empty() {
-            return Err(TensorError::new("average_params: no snapshots"));
-        }
-
-        let n_params = snapshots[0].params.len();
-        let n_buffers = snapshots[0].buffers.len();
-
-        // Validate all snapshots have the same structure.
-        for (i, snap) in snapshots.iter().enumerate() {
-            if snap.params.len() != n_params {
-                return Err(TensorError::new(&format!(
-                    "average_params: rank {} has {} params, expected {}",
-                    i, snap.params.len(), n_params
-                )));
-            }
-            if snap.buffers.len() != n_buffers {
-                return Err(TensorError::new(&format!(
-                    "average_params: rank {} has {} buffers, expected {}",
-                    i, snap.buffers.len(), n_buffers
-                )));
-            }
-        }
-
-        let total_batches: usize = snapshots.iter().map(|s| s.batch_count.max(1)).sum();
-
-        // Weighted average of parameters on CPU (snapshots may be on different devices)
-        let mut avg_params = Vec::with_capacity(n_params);
-        for pi in 0..n_params {
-            let first = snapshots[0].params[pi].to_device(Device::CPU)?;
-            let acc = Tensor::zeros_like(&first)?;
-            for snap in snapshots {
-                let weight = snap.batch_count.max(1) as f64 / total_batches as f64;
-                let cpu_param = snap.params[pi].to_device(Device::CPU)?;
-                let scaled = cpu_param.mul_scalar(weight)?;
-                acc.add_(&scaled)?;
-            }
-            avg_params.push(acc);
-        }
-
-        // Average buffers (equal weight, e.g. BatchNorm running mean/var).
-        let inv_n = 1.0 / snapshots.len() as f64;
-        let mut avg_buffers = Vec::with_capacity(n_buffers);
-        for bi in 0..n_buffers {
-            let first = snapshots[0].buffers[bi].to_device(Device::CPU)?;
-            let acc = Tensor::zeros_like(&first)?;
-            for snap in snapshots {
-                let cpu_buf = snap.buffers[bi].to_device(Device::CPU)?;
-                let scaled = cpu_buf.mul_scalar(inv_n)?;
-                acc.add_(&scaled)?;
-            }
-            avg_buffers.push(acc);
-        }
-
-        Ok(AveragedParams {
-            params: avg_params,
-            buffers: avg_buffers,
-            version,
-        })
-    }
-
-    /// Compute weighted average and divergence on a background thread.
-    ///
-    /// Static method: captures only the data it needs, no `&self` borrow.
-    /// Returns `CpuAvgResult` with the averaged params and the relative
-    /// divergence across replicas (for anchor correction by ElChe).
-    fn compute_average_and_divergence(
-        snapshots: Vec<ParamSnapshot>,
-        version: u64,
-    ) -> Result<CpuAvgResult> {
-        let averaged = Self::average_params(&snapshots, version)?;
-
-        // Compute per-rank parameter L2 norm for divergence monitoring.
-        let mut norms = Vec::with_capacity(snapshots.len());
-        for snap in &snapshots {
-            let mut total_norm_sq = 0.0f64;
-            for p in &snap.params {
-                let n: f64 = p.norm()?.item()?;
-                total_norm_sq += n * n;
-            }
-            norms.push(total_norm_sq.sqrt());
-        }
-
-        let mean_norm: f64 = norms.iter().sum::<f64>() / norms.len() as f64;
-        let divergence = if mean_norm < 1e-10 {
-            None // all zeros, no meaningful divergence
-        } else {
-            Some(norms.iter()
-                .map(|n| (n - mean_norm).abs())
-                .sum::<f64>() / mean_norm)
-        };
-
-        Ok(CpuAvgResult { averaged, divergence })
-    }
-
     /// Throttle workers that have run too far ahead of the slowest rank.
     ///
     /// Sends [`ControlMsg::Throttle`] to any worker whose `steps_since_avg`
@@ -1345,6 +1071,14 @@ impl Coordinator {
     /// Tracks which ranks are already throttled to avoid sending duplicate
     /// Throttle messages (which would nest blocking loops in the worker).
     pub fn check_throttle(&mut self) {
+        // NCCL cadence uses AllReduce as its coordination mechanism.
+        // Throttle is an async/CPU concept: it blocks the fast worker waiting
+        // for SyncNow, but if the slow worker is idle (between epochs),
+        // should_average never fires and the throttled worker deadlocks.
+        if matches!(self.backend, AverageBackend::Nccl) {
+            return;
+        }
+
         let max_diff = match self.el_che.max_batch_diff() {
             Some(d) => d,
             None => return,
@@ -1361,6 +1095,9 @@ impl Coordinator {
             if should_throttle && !self.throttled[rank] {
                 let _ = self.control_txs[rank].send(ControlMsg::Throttle);
                 self.throttled[rank] = true;
+                if let Some(ref tl) = self.timeline {
+                    tl.event(crate::monitor::EventKind::Throttle { rank });
+                }
             }
         }
     }
@@ -1400,10 +1137,10 @@ impl Coordinator {
             match rx.recv_timeout(timeout) {
                 Ok(snap) => snapshots.push(snap),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    eprintln!("  ddp: timeout waiting for final snapshot from rank {rank}");
+                    crate::verbose!("  ddp: timeout waiting for final snapshot from rank {rank}");
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    eprintln!("  ddp: rank {rank} channel disconnected (worker errored)");
+                    crate::verbose!("  ddp: rank {rank} channel disconnected (worker errored)");
                 }
             }
         }
@@ -1611,172 +1348,7 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn chunk_pool_basic() {
-        let mut pool = ChunkPool::new(0, 1000, 2);
-        assert_eq!(pool.remaining(), 1000);
-        assert!(!pool.is_epoch_done());
-
-        // Take a chunk for rank 0
-        let (off, size) = pool.take_chunk(300, 0).unwrap();
-        assert_eq!(off, 0);
-        assert_eq!(size, 300);
-        assert_eq!(pool.remaining(), 700);
-
-        // Take a chunk for rank 1
-        let (off, size) = pool.take_chunk(200, 1).unwrap();
-        assert_eq!(off, 300);
-        assert_eq!(size, 200);
-        assert_eq!(pool.remaining(), 500);
-
-        // Not done yet (nothing completed)
-        assert!(!pool.is_epoch_done());
-    }
-
-    #[test]
-    fn chunk_pool_exhaustion() {
-        let mut pool = ChunkPool::new(0, 100, 2);
-
-        // Take more than available: clamped
-        let (off, size) = pool.take_chunk(80, 0).unwrap();
-        assert_eq!((off, size), (0, 80));
-
-        let (off, size) = pool.take_chunk(50, 1).unwrap();
-        assert_eq!((off, size), (80, 20)); // only 20 left
-
-        // Pool exhausted
-        assert!(pool.take_chunk(10, 0).is_none());
-        assert_eq!(pool.remaining(), 0);
-    }
-
-    #[test]
-    fn chunk_pool_is_epoch_done() {
-        let mut pool = ChunkPool::new(0, 100, 2);
-
-        pool.take_chunk(60, 0).unwrap();
-        pool.take_chunk(40, 1).unwrap();
-        assert!(pool.take_chunk(1, 0).is_none()); // exhausted
-
-        // All dispatched but nothing completed
-        assert!(!pool.is_epoch_done());
-
-        // Rank 0 completes
-        pool.mark_completed(0, 60);
-        assert!(!pool.is_epoch_done()); // rank 1 still pending
-
-        // Rank 1 completes
-        pool.mark_completed(1, 40);
-        assert!(pool.is_epoch_done());
-    }
-
-    #[test]
-    fn chunk_pool_incremental_completion() {
-        let mut pool = ChunkPool::new(0, 200, 2);
-
-        // Two chunks for rank 0
-        pool.take_chunk(50, 0).unwrap();
-        pool.take_chunk(50, 1).unwrap();
-        pool.take_chunk(60, 0).unwrap();
-        pool.take_chunk(40, 1).unwrap();
-        assert_eq!(pool.remaining(), 0);
-
-        // Complete in stages
-        pool.mark_completed(0, 50); // first chunk
-        pool.mark_completed(1, 50);
-        assert!(!pool.is_epoch_done()); // rank 0 dispatched 110, only 50 done
-
-        pool.mark_completed(0, 60); // second chunk
-        pool.mark_completed(1, 40);
-        assert!(pool.is_epoch_done());
-    }
-
-    #[test]
-    fn chunk_pool_no_overlap() {
-        let mut pool = ChunkPool::new(0, 500, 3);
-        let mut all_offsets = Vec::new();
-
-        while pool.remaining() > 0 {
-            for rank in 0..3 {
-                if let Some((off, size)) = pool.take_chunk(60, rank) {
-                    // Verify no overlap with previous chunks
-                    for &(prev_off, prev_size) in &all_offsets {
-                        let prev_end: usize = prev_off + prev_size;
-                        let this_end = off + size;
-                        assert!(off >= prev_end || this_end <= prev_off,
-                            "overlap: ({off}, {size}) vs ({prev_off}, {prev_size})");
-                    }
-                    all_offsets.push((off, size));
-                }
-            }
-        }
-
-        // Total coverage = total_samples
-        let total: usize = all_offsets.iter().map(|(_, s)| s).sum();
-        assert_eq!(total, 500);
-    }
-
-    #[test]
-    fn chunk_pool_epoch_elapsed() {
-        let pool = ChunkPool::new(0, 100, 2);
-        // Just verify it returns something reasonable (not zero, not huge)
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let ms = pool.epoch_elapsed_ms();
-        assert!((4.0..1000.0).contains(&ms), "elapsed {ms}ms");
-    }
-
-    // -----------------------------------------------------------------------
-    // ChunkPool edge cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn chunk_pool_zero_total_samples() {
-        let mut pool = ChunkPool::new(0, 0, 2);
-        assert_eq!(pool.remaining(), 0);
-        assert!(pool.take_chunk(10, 0).is_none());
-        // All dispatched (0) == all completed (0), so epoch is trivially done.
-        assert!(pool.is_epoch_done());
-    }
-
-    #[test]
-    fn chunk_pool_single_rank() {
-        let mut pool = ChunkPool::new(0, 50, 1);
-        let (off, size) = pool.take_chunk(50, 0).unwrap();
-        assert_eq!((off, size), (0, 50));
-        assert_eq!(pool.remaining(), 0);
-        assert!(!pool.is_epoch_done());
-        pool.mark_completed(0, 50);
-        assert!(pool.is_epoch_done());
-    }
-
-    #[test]
-    fn chunk_pool_take_chunk_size_zero() {
-        let mut pool = ChunkPool::new(0, 100, 2);
-        // take_chunk with size=0 should return (cursor, 0) since min(0, remaining)=0
-        // Actually, 0.min(100) = 0, cursor doesn't move, dispatched stays 0.
-        // But cursor == 0 < total_samples == 100, so it enters the body,
-        // actual = 0.min(100-0) = 0. Returns Some((0, 0)).
-        let result = pool.take_chunk(0, 0);
-        assert_eq!(result, Some((0, 0)));
-        // Cursor should not have advanced.
-        assert_eq!(pool.remaining(), 100);
-    }
-
-    #[test]
-    fn chunk_pool_in_flight_tracking() {
-        let mut pool = ChunkPool::new(0, 100, 2);
-        pool.take_chunk(40, 0).unwrap();
-        pool.take_chunk(30, 1).unwrap();
-        assert_eq!(pool.in_flight(0), 40);
-        assert_eq!(pool.in_flight(1), 30);
-
-        pool.mark_completed(0, 20);
-        assert_eq!(pool.in_flight(0), 20);
-        assert_eq!(pool.in_flight(1), 30);
-
-        pool.mark_completed(0, 20);
-        assert_eq!(pool.in_flight(0), 0);
-    }
+    use std::time::Instant;
 
     // -----------------------------------------------------------------------
     // Helper: create a Coordinator without CUDA or real GPU threads.
@@ -1959,6 +1531,10 @@ mod tests {
         let target = coord.el_che.anchor_wall_ms();
         assert!(target > 0.0, "anchor_wall_ms should be positive after calibration");
 
+        // Satisfy preconditions: steps > 0 and nccl_ack = true.
+        coord.steps_since_avg = vec![1, 1];
+        coord.nccl_ack = vec![true, true];
+
         // Not enough wall time accumulated.
         coord.wall_ms_accum[0] = target * 0.5;
         coord.wall_ms_accum[1] = target * 0.5;
@@ -2053,13 +1629,13 @@ mod tests {
         assert_eq!(coord.steps_since_avg[0], 0);
         assert_eq!(coord.wall_ms_accum[0], 0.0);
 
-        coord.process_timing_msg(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1 });
+        coord.process_timing_msg(TimingMsg::Batch { rank: 0, batch_ms: 10.0, step_count: 1, param_norm: None, batch_loss: 0.1, sync_divergence: None });
         assert_eq!(coord.steps_since_avg[0], 1);
         assert!((coord.wall_ms_accum[0] - 10.0).abs() < 1e-9);
         assert!((coord.last_batch_ms[0] - 10.0).abs() < 1e-9);
 
         // Second message accumulates.
-        coord.process_timing_msg(TimingMsg::Batch { rank: 0, batch_ms: 15.0, step_count: 2 });
+        coord.process_timing_msg(TimingMsg::Batch { rank: 0, batch_ms: 15.0, step_count: 2, param_norm: None, batch_loss: 0.1, sync_divergence: None });
         assert_eq!(coord.steps_since_avg[0], 2);
         assert!((coord.wall_ms_accum[0] - 25.0).abs() < 1e-9);
         assert!((coord.last_batch_ms[0] - 15.0).abs() < 1e-9);
@@ -2250,5 +1826,219 @@ mod tests {
         assert!((coord.wall_ms_accum[1] - 10.0).abs() < 1e-9);
         assert_eq!(coord.version, 1);
         assert_eq!(coord.avg_count, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // NCCL divergence detection (trend-based, gentle guardrail)
+    // -----------------------------------------------------------------------
+
+    /// Helper: simulate one averaging interval with given weight-space divergence.
+    fn run_interval_with_divergence(coord: &mut Coordinator, div0: f64, div1: f64) {
+        coord.nccl_sync_divergence = vec![Some(div0), Some(div1)];
+        coord.wall_ms_accum = vec![100.0, 200.0];
+        coord.steps_since_avg = vec![10, 10];
+        coord.finish_averaging_nccl();
+    }
+
+    #[test]
+    fn divergence_trend_suppresses_overshoot_growth() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Async, 1000);
+        let overshoot_before = coord.max_overshoot;
+
+        // 3 intervals with rising weight-space divergence.
+        // Interval 1: max_relative_delta = 0.05
+        run_interval_with_divergence(&mut coord, 0.03, 0.05);
+        // Interval 2: max_relative_delta = 0.13
+        run_interval_with_divergence(&mut coord, 0.08, 0.13);
+        // Interval 3: max_relative_delta = 0.23
+        run_interval_with_divergence(&mut coord, 0.15, 0.23);
+
+        // Rising trend detected -> 3rd interval suppresses growth.
+        // Overshoot should have grown for intervals 1-2 (no trend yet)
+        // but NOT for interval 3.
+        let cap = (coord.total_samples / coord.batch_size.max(1) / 50).clamp(3, 10);
+        let expected = (overshoot_before + 2).min(cap).min(coord.overshoot_ceiling);
+        assert_eq!(coord.max_overshoot, expected,
+            "3rd interval with rising trend should suppress growth");
+    }
+
+    #[test]
+    fn divergence_no_trend_allows_overshoot_growth() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Async, 1000);
+        let overshoot_before = coord.max_overshoot;
+
+        // 3 intervals with flat low divergence (no trend).
+        for _ in 0..3 {
+            run_interval_with_divergence(&mut coord, 0.005, 0.005);
+        }
+
+        let cap = (coord.total_samples / coord.batch_size.max(1) / 50).clamp(3, 10);
+        let expected = (overshoot_before + 3).min(cap).min(coord.overshoot_ceiling);
+        assert_eq!(coord.max_overshoot, expected,
+            "flat low divergence should allow normal overshoot growth");
+    }
+
+    #[test]
+    fn divergence_single_spike_does_not_suppress() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Async, 1000);
+        let overshoot_before = coord.max_overshoot;
+
+        // Single high-divergence interval (no trend, need 3 for rising).
+        run_interval_with_divergence(&mut coord, 0.5, 0.8);
+
+        assert!(coord.max_overshoot > overshoot_before,
+            "single measurement should not suppress growth");
+    }
+
+    #[test]
+    fn divergence_never_shrinks_anchor() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Cadence, 1000);
+        coord.el_che.report_timing(&[100.0, 200.0], &[10, 10], 5.0);
+        let anchor_before = coord.el_che.anchor();
+
+        // 5 intervals with rising weight-space divergence.
+        for i in 0..5 {
+            let div = 0.05 + i as f64 * 0.03; // rising
+            run_interval_with_divergence(&mut coord, div * 0.8, div);
+        }
+
+        // Anchor must NEVER decrease from divergence detection.
+        // ElChe's overhead auto-tune may change it, but nudge_anchor_down
+        // is not called from the divergence path.
+        assert!(coord.el_che.anchor() >= anchor_before,
+            "divergence must never shrink anchor: was {anchor_before}, now {}",
+            coord.el_che.anchor());
+    }
+
+    #[test]
+    fn divergence_accumulators_reset_each_interval() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Cadence, 1000);
+        coord.loss_accum = vec![5.0, 3.0];
+        coord.loss_count = vec![100, 50];
+        coord.nccl_sync_divergence = vec![Some(0.05), Some(0.03)];
+        coord.wall_ms_accum = vec![100.0, 200.0];
+        coord.steps_since_avg = vec![100, 50];
+
+        coord.finish_averaging_nccl();
+
+        assert_eq!(coord.loss_accum, vec![0.0, 0.0]);
+        assert_eq!(coord.loss_count, vec![0, 0]);
+        // nccl_sync_divergence is reset after averaging.
+        assert_eq!(coord.nccl_sync_divergence, vec![None, None]);
+    }
+
+    #[test]
+    fn divergence_history_capped_at_5() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Cadence, 1000);
+
+        for _ in 0..8 {
+            run_interval_with_divergence(&mut coord, 0.03, 0.05);
+        }
+
+        assert!(coord.convergence_guard.history().len() <= 5,
+            "history should be capped at 5, got {}", coord.convergence_guard.history().len());
+    }
+
+    #[test]
+    fn divergence_overshoot_ceiling_caps() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Async, 1000);
+        coord.overshoot_ceiling = 3;
+        coord.max_overshoot = 5;
+
+        coord.wall_ms_accum = vec![100.0, 200.0];
+        coord.steps_since_avg = vec![10, 10];
+        coord.finish_averaging_nccl();
+
+        assert!(coord.max_overshoot <= 3,
+            "overshoot {} should be capped at ceiling 3", coord.max_overshoot);
+    }
+
+    #[test]
+    fn process_timing_msg_accumulates_loss_and_norm() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Cadence, 1000);
+        assert_eq!(coord.loss_accum[0], 0.0);
+        assert_eq!(coord.loss_count[0], 0);
+
+        coord.process_timing_msg(TimingMsg::Batch {
+            rank: 0, batch_ms: 10.0, step_count: 1, param_norm: Some(5.5), batch_loss: 0.3, sync_divergence: None,
+        });
+        assert!((coord.loss_accum[0] - 0.3).abs() < 1e-9);
+        assert_eq!(coord.loss_count[0], 1);
+
+        coord.process_timing_msg(TimingMsg::Batch {
+            rank: 0, batch_ms: 10.0, step_count: 2, param_norm: None, batch_loss: 0.2, sync_divergence: None,
+        });
+        assert!((coord.loss_accum[0] - 0.5).abs() < 1e-9);
+        assert_eq!(coord.loss_count[0], 2);
+
+        // SyncNow ack (batch_loss=0.0) is skipped.
+        coord.process_timing_msg(TimingMsg::Batch {
+            rank: 0, batch_ms: 0.0, step_count: 3, param_norm: None, batch_loss: 0.0, sync_divergence: None,
+        });
+        assert_eq!(coord.loss_count[0], 2); // unchanged
+
+        assert_eq!(coord.loss_count[1], 0); // rank 1 independent
+    }
+
+    // -----------------------------------------------------------------------
+    // SyncAck handling (regression guard: do not inflate steps_since_avg)
+    // -----------------------------------------------------------------------
+
+    /// SyncAck must NOT increment steps_since_avg, otherwise every NCCL sync
+    /// inflates global_step by one batch per rank and the LR scheduler fires
+    /// early. Real bug found 2026-04-13: with ~27 syncs/epoch * 2 ranks the
+    /// inflation was 6.9% and a MultiStepLR milestone at total/2 fired at
+    /// epoch 94 instead of 100.
+    #[test]
+    fn sync_ack_does_not_inflate_steps_since_avg() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Cadence, 1000);
+
+        // Simulate 10 real batches on each rank.
+        for step in 1..=10 {
+            for rank in 0..2 {
+                coord.process_timing_msg(TimingMsg::Batch {
+                    rank, batch_ms: 5.0, step_count: step,
+                    param_norm: None, batch_loss: 0.1, sync_divergence: None,
+                });
+            }
+        }
+        assert_eq!(coord.steps_since_avg, vec![10, 10]);
+        let wall_before: Vec<f64> = coord.wall_ms_accum.clone();
+
+        // Inject a SyncAck for each rank (post-NCCL ack).
+        for rank in 0..2 {
+            coord.process_timing_msg(TimingMsg::SyncAck {
+                rank, step_count: 11, divergence: Some(0.01),
+            });
+        }
+
+        // The killer assertion: SyncAck must leave steps_since_avg untouched.
+        assert_eq!(coord.steps_since_avg, vec![10, 10],
+            "SyncAck must not be counted as a real batch");
+        // Wall-time accumulator also untouched (it's per-batch wall time).
+        assert_eq!(coord.wall_ms_accum, wall_before);
+        // But last_step_count must reflect the post-sync step.
+        assert_eq!(coord.last_step_count, vec![11, 11]);
+        // Divergence captured.
+        assert_eq!(coord.nccl_sync_divergence[0], Some(0.01));
+        assert_eq!(coord.nccl_sync_divergence[1], Some(0.01));
+    }
+
+    /// SyncAck must satisfy nccl_ack so the next averaging cycle isn't blocked.
+    #[test]
+    fn sync_ack_satisfies_nccl_ack() {
+        let mut coord = make_test_coordinator(2, ApplyPolicy::Cadence, 1000);
+        // Snapshot the step counters at sync trigger time (rank0=5, rank1=5).
+        coord.nccl_sync_step = vec![5, 5];
+        coord.nccl_ack = vec![false, false];
+
+        // Worker reports SyncAck with step_count=6 (one past snapshot).
+        for rank in 0..2 {
+            coord.process_timing_msg(TimingMsg::SyncAck {
+                rank, step_count: 6, divergence: None,
+            });
+        }
+        assert_eq!(coord.nccl_ack, vec![true, true],
+            "SyncAck with step_count > snapshot must flip nccl_ack");
     }
 }

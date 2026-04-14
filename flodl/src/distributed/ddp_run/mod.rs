@@ -64,10 +64,12 @@
 mod worker;
 mod coordinator;
 mod orchestrator;
+pub mod convergence;
 
 pub use worker::*;
 pub use coordinator::*;
 pub use orchestrator::*;
+pub use convergence::{ConvergenceAction, ConvergenceGuard, DivergenceReport};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -111,7 +113,7 @@ pub fn record_scalar(name: &str, value: f64) {
 ///
 /// Called by [`GpuWorker`] at epoch boundaries to package accumulated scalars
 /// into the [`MetricsMsg`].
-pub(crate) fn drain_scalars() -> HashMap<String, (f64, usize)> {
+pub fn drain_scalars() -> HashMap<String, (f64, usize)> {
     SCALAR_ACCUM.with(|acc| std::mem::take(&mut *acc.borrow_mut()))
 }
 
@@ -300,8 +302,11 @@ pub struct DdpRunConfig {
     pub max_anchor: Option<usize>,
     /// Initial ElChe anchor (batches before first sync). Default: 10.
     pub anchor: Option<usize>,
-    /// Divergence threshold for Async mode. Default: 0.05.
+    /// Divergence threshold for the trend guardrail. Default: 0.05.
     pub divergence_threshold: Option<f64>,
+    /// Disable the divergence guardrail entirely. Default: false (enabled).
+    /// When true, ElChe's overhead auto-tune handles cadence alone.
+    pub no_divergence_guard: bool,
     /// Maximum batch lead of fastest over slowest worker.
     /// `Some(0)` = strict lockstep. `None` = unlimited. Default: `None`.
     pub max_batch_diff: Option<usize>,
@@ -332,6 +337,36 @@ pub struct DdpRunConfig {
     /// spikes on any GPU are bounded before they propagate through
     /// AllReduce averaging.
     pub max_grad_norm: Option<f64>,
+    /// Optional high-frequency system timeline for profiling DDP behavior.
+    ///
+    /// When set, the coordinator and workers inject training events (sync,
+    /// epoch boundaries, anchor changes, throttle) into the timeline.
+    pub timeline: Option<Arc<crate::monitor::Timeline>>,
+    /// Maximum batches past the planned sync point any GPU may execute.
+    ///
+    /// Controls how aggressively fast GPUs stream into the next epoch's
+    /// data when the current epoch's pool is exhausted. This is NOT the
+    /// same as `max_batch_diff` (which limits divergence between GPUs).
+    ///
+    /// `None` = auto-tuned from convergence feedback: starts conservative
+    /// (`max(2, total_batches / 100)` capped at 5), grows by +1 after
+    /// each successful sync with good convergence, resets on divergence.
+    ///
+    /// Default: `None` (auto).
+    pub max_overshoot: Option<usize>,
+    /// LR scaling ratio for multi-GPU training. Default: `1.0`.
+    ///
+    /// Controls how much the learning rate is scaled with `world_size`.
+    /// Formula: `lr_factor = 1.0 + (world_size - 1) * ratio`.
+    ///
+    /// - `1.0` (default): full linear scaling (Goyal et al., 2017).
+    ///   With 2 GPUs, LR is doubled. Compensates for the LR schedule
+    ///   advancing faster when global_step counts all GPUs' batches.
+    /// - `0.0`: no scaling. Each GPU uses the base LR as-is.
+    /// - `0.5`: half linear scaling. With 2 GPUs, LR *= 1.5.
+    ///
+    /// Tune this if convergence degrades at higher GPU counts.
+    pub lr_scale_ratio: f64,
 }
 
 impl Default for DdpRunConfig {
@@ -348,12 +383,16 @@ impl DdpRunConfig {
             max_anchor: None,
             anchor: None,
             divergence_threshold: None,
+            no_divergence_guard: false,
             max_batch_diff: None,
             checkpoint_every: None,
             snapshot_timeout_secs: 5,
             partition_ratios: None,
             progressive_dispatch: None,
             max_grad_norm: None,
+            timeline: None,
+            max_overshoot: None,
+            lr_scale_ratio: 1.0,
         }
     }
 
@@ -375,9 +414,16 @@ impl DdpRunConfig {
         self
     }
 
-    /// Set the divergence threshold for Async mode.
+    /// Set the divergence threshold for the trend guardrail.
     pub fn with_divergence_threshold(mut self, threshold: f64) -> Self {
         self.divergence_threshold = Some(threshold);
+        self
+    }
+
+    /// Disable the divergence guardrail. ElChe's overhead auto-tune
+    /// handles cadence alone. Use when you know your workload is stable.
+    pub fn with_no_divergence_guard(mut self) -> Self {
+        self.no_divergence_guard = true;
         self
     }
 
@@ -387,6 +433,18 @@ impl DdpRunConfig {
     /// this lead are paused until the slowest catches up.
     pub fn with_max_batch_diff(mut self, max: usize) -> Self {
         self.max_batch_diff = Some(max);
+        self
+    }
+
+    /// Set the maximum overshoot past the planned sync point.
+    ///
+    /// Controls cross-epoch streaming aggressiveness. When a GPU finishes
+    /// its epoch partition, it may stream into the next epoch's data up to
+    /// this many batches past ElChe's planned sync count.
+    ///
+    /// `0` disables cross-epoch streaming. Default: auto-tuned.
+    pub fn with_max_overshoot(mut self, max: usize) -> Self {
+        self.max_overshoot = Some(max);
         self
     }
 
@@ -439,6 +497,24 @@ impl DdpRunConfig {
         self.max_grad_norm = Some(max_norm);
         self
     }
+
+    /// Attach a high-frequency system timeline for profiling DDP behavior.
+    ///
+    /// When set, the coordinator and workers inject training events
+    /// (sync, epoch, anchor changes, throttle) into the timeline.
+    pub fn with_timeline(mut self, tl: Arc<crate::monitor::Timeline>) -> Self {
+        self.timeline = Some(tl);
+        self
+    }
+
+    /// Set the LR scaling ratio for multi-GPU training.
+    ///
+    /// Formula: `lr_factor = 1.0 + (world_size - 1) * ratio`.
+    /// Default: 1.0 (full linear scaling). Set to 0.0 to disable.
+    pub fn with_lr_scale_ratio(mut self, ratio: f64) -> Self {
+        self.lr_scale_ratio = ratio;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +536,30 @@ pub enum TimingMsg {
         batch_ms: f64,
         /// Worker's local step counter (monotonically increasing).
         step_count: usize,
+        /// L2 norm of all parameters (computed periodically, not every batch).
+        param_norm: Option<f64>,
+        /// Training loss for this batch (accumulated for monitoring).
+        batch_loss: f64,
+        /// Weight-space divergence from the most recent AllReduce:
+        /// `||params_before - params_after|| / ||params_after||`.
+        /// Only set in the post-sync ack message; `None` for regular batches.
+        sync_divergence: Option<f64>,
+    },
+    /// Post-SyncNow acknowledgment: proves the worker completed the NCCL
+    /// AllReduce, without being counted as a real training batch.
+    ///
+    /// Satisfies the coordinator's `nccl_ack` check (`step_count >
+    /// nccl_sync_step`) without inflating `steps_since_avg`. Using
+    /// [`TimingMsg::Batch`] here would add a phantom batch per sync per
+    /// rank, inflating `global_step` and firing the LR scheduler early.
+    SyncAck {
+        /// Which GPU sent this.
+        rank: usize,
+        /// Worker's local step counter after the sync.
+        step_count: usize,
+        /// Weight-space divergence from the AllReduce:
+        /// `||params_before - params_after|| / ||params_after||`.
+        divergence: Option<f64>,
     },
     /// Worker is about to exit. Coordinator must stop including this rank
     /// in collectives before processing any further messages.
@@ -558,6 +658,12 @@ pub enum ControlMsg {
     /// Worker is too far ahead: block until the next real command arrives.
     /// Sent when the worker's batch lead exceeds `ElChe::max_batch_diff`.
     Throttle,
+    /// Update the worker's global step count after averaging.
+    ///
+    /// `global_step` = cumulative total batches across all GPUs up to this
+    /// sync point. Workers use this to compute per-batch LR:
+    /// `scheduler.lr(global_step + steps_since_avg)`.
+    SetGlobalStep(usize),
     /// Save a checkpoint from rank 0 after averaging.
     Checkpoint {
         /// Version number (averaging event count in multi-GPU, epoch in single-GPU).
@@ -596,6 +702,11 @@ pub struct WorkerConfig {
     pub seed: u64,
     /// Maximum gradient norm for clipping (None = no clipping).
     pub max_grad_norm: Option<f64>,
+    /// Optional system timeline for high-frequency profiling.
+    pub timeline: Option<Arc<crate::monitor::Timeline>>,
+    /// Training policy (Sync/Cadence/Async). Used to gate divergence measurement:
+    /// Sync mode skips weight-space divergence (near-zero by construction).
+    pub policy: ApplyPolicy,
 }
 
 // ---------------------------------------------------------------------------

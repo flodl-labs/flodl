@@ -25,6 +25,7 @@
 //! optimizer.step()?;
 //! ```
 
+pub mod log;
 pub mod tensor;
 pub mod autograd;
 pub mod nn;
@@ -51,6 +52,7 @@ macro_rules! modules {
     };
 }
 
+pub use log::{Verbosity, set_verbosity, verbosity};
 pub use tensor::{cuda_available, cuda_device_count, cuda_memory_info, cuda_memory_info_idx, cuda_allocated_bytes, cuda_allocated_bytes_idx, cuda_active_bytes, cuda_active_bytes_idx, cuda_peak_active_bytes, cuda_peak_active_bytes_idx, cuda_peak_reserved_bytes, cuda_peak_reserved_bytes_idx, cuda_reset_peak_stats, cuda_reset_peak_stats_idx, cuda_empty_cache, cuda_utilization, cuda_utilization_idx, cuda_device_name, cuda_device_name_idx, cuda_devices, cuda_compute_capability, probe_device, usable_cuda_devices, DeviceInfo, set_current_cuda_device, current_cuda_device, cuda_synchronize, hardware_summary, set_cudnn_benchmark, manual_seed, cuda_manual_seed_all, malloc_trim, live_tensor_count, rss_kb, Device, DType, Result, Tensor, TensorError, TensorOptions};
 #[cfg(feature = "rng")]
 pub use rng::Rng;
@@ -74,7 +76,7 @@ pub use nn::{
     ConvTranspose1d, ConvTranspose2d,
     Conv3d, Conv3dBuilder, ConvTranspose3d,
     GroupNorm, BatchNorm, BatchNorm2d, InstanceNorm,
-    MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d,
+    MaxPool2d, AvgPool2d, MaxPool1d, AvgPool1d, AdaptiveMaxPool2d, AdaptiveAvgPool2d,
     PixelShuffle, PixelUnshuffle, Upsample, Unfold, Fold, Bilinear,
     MultiheadAttention,
     mse_loss, cross_entropy_loss, bce_loss, bce_with_logits_loss, l1_loss, smooth_l1_loss, kl_div_loss,
@@ -90,7 +92,7 @@ pub use nn::{
 pub use distributed::{
     CudaEvent, CudaEventFlags, CudaStream, StreamGuard,
     NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, ElChe,
-    ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, GpuWorker,
+    ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, drain_scalars, GpuWorker,
 };
 pub use graph::{
     FlowBuilder, MergeOp, Graph, LossContext, MapBuilder, Trend, TrendGroup,

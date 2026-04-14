@@ -102,28 +102,41 @@ impl Drop for CudaStream {
 }
 
 /// RAII guard that sets a stream as the current CUDA stream and
-/// restores the default stream on drop.
+/// restores the **previous** stream on drop.
 ///
-/// Analogous to [`crate::autograd::NoGradGuard`] but for CUDA streams.
+/// Nestable: inner guards restore the outer guard's stream, not the
+/// default stream. This is critical for DDP where `sync_now_nccl`
+/// temporarily switches to `comm_stream` inside a `compute_stream` guard.
 ///
 /// ```ignore
-/// let stream = CudaStream::new(Device::CUDA(0), false)?;
+/// let compute = CudaStream::new(Device::CUDA(0), false)?;
+/// let comm = CudaStream::new(Device::CUDA(0), false)?;
 /// {
-///     let _guard = StreamGuard::new(&stream);
-///     // All CUDA ops execute on `stream`.
+///     let _outer = StreamGuard::new(&compute);
+///     // All CUDA ops on compute_stream.
+///     {
+///         let _inner = StreamGuard::new(&comm);
+///         // CUDA ops on comm_stream.
+///     }
+///     // Restored to compute_stream (not default).
 /// }
-/// // Default stream restored.
+/// // Restored to whatever was current before _outer.
 /// ```
 pub struct StreamGuard {
+    /// Previous stream pointer, restored on drop. Owned (heap-allocated by
+    /// `flodl_cuda_stream_get_current`), freed via `flodl_cuda_stream_delete`.
+    prev: *mut std::ffi::c_void,
     device_index: i32,
 }
 
 impl StreamGuard {
-    /// Set `stream` as the current CUDA stream. The default stream
-    /// is restored when this guard is dropped.
+    /// Set `stream` as the current CUDA stream. The previous stream
+    /// is saved and restored when this guard is dropped.
     pub fn new(stream: &CudaStream) -> Self {
+        let prev = unsafe { ffi::flodl_cuda_stream_get_current(stream.device_index) };
         unsafe { ffi::flodl_cuda_stream_set_current(stream.ptr) };
         StreamGuard {
+            prev,
             device_index: stream.device_index,
         }
     }
@@ -131,7 +144,12 @@ impl StreamGuard {
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        unsafe { ffi::flodl_cuda_stream_restore_default(self.device_index) };
+        if !self.prev.is_null() {
+            unsafe { ffi::flodl_cuda_stream_set_current(self.prev) };
+            unsafe { ffi::flodl_cuda_stream_delete(self.prev) };
+        } else {
+            unsafe { ffi::flodl_cuda_stream_restore_default(self.device_index) };
+        }
     }
 }
 

@@ -1,0 +1,17 @@
+[package]
+name = "ddp-bench"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+cuda = ["flodl/cuda"]
+
+[dependencies]
+flodl = { path = "../flodl" }
+flate2 = "1"
+tar = "0.4"
+ureq = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -104,9 +104,9 @@ impl ResourceSample {
 
 /// Accumulated CPU jiffies from `/proc/stat`.
 #[derive(Clone)]
-struct CpuTimes {
-    total: u64,
-    idle: u64,
+pub(super) struct CpuTimes {
+    pub(super) total: u64,
+    pub(super) idle: u64,
 }
 
 /// Per-device GPU utilization accumulator for background polling.
@@ -291,7 +291,7 @@ impl ResourceSampler {
 }
 
 /// Parse `/proc/stat` first line for CPU jiffies.
-fn read_cpu_times() -> Option<CpuTimes> {
+pub(super) fn read_cpu_times() -> Option<CpuTimes> {
     let content = fs::read_to_string("/proc/stat").ok()?;
     let line = content.lines().next()?;
     if !line.starts_with("cpu ") {
@@ -312,7 +312,7 @@ fn read_cpu_times() -> Option<CpuTimes> {
 }
 
 /// Parse `/proc/meminfo` for total and available memory.
-fn read_meminfo() -> Option<(u64, u64)> {
+pub(super) fn read_meminfo() -> Option<(u64, u64)> {
     let content = fs::read_to_string("/proc/meminfo").ok()?;
     let mut total: Option<u64> = None;
     let mut available: Option<u64> = None;
@@ -335,7 +335,7 @@ fn read_meminfo() -> Option<(u64, u64)> {
 }
 
 /// Parse a value like "  16384000 kB" into bytes.
-fn parse_kb_value(s: &str) -> Option<u64> {
+pub(super) fn parse_kb_value(s: &str) -> Option<u64> {
     let val: u64 = s.split_whitespace().next()?.parse().ok()?;
     Some(val * 1024) // kB to bytes
 }

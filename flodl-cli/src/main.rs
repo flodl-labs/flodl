@@ -7,12 +7,16 @@
 //! is managed under `~/.flodl/` (override with `$FLODL_HOME`).
 
 mod api_ref;
+mod completions;
+mod config;
 pub mod context;
 mod diagnose;
 mod init;
 mod libtorch;
+mod run;
 mod setup;
 mod skill;
+mod style;
 mod util;
 
 use std::env;
@@ -21,7 +25,16 @@ use std::process::ExitCode;
 use context::Context;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
+    let raw_args: Vec<String> = env::args().collect();
+
+    // Extract global verbosity flags before command dispatch.
+    // Sets FLODL_VERBOSITY so child processes (including Docker) inherit it.
+    let (args, verbosity) = extract_verbosity(&raw_args);
+    if let Some(v) = verbosity {
+        // SAFETY: called before any threads are spawned.
+        unsafe { env::set_var("FLODL_VERBOSITY", v.to_string()); }
+    }
+
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");
 
     match cmd {
@@ -142,20 +155,33 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "completions" => {
+            let shell = args.get(2).map(String::as_str).unwrap_or("bash");
+            let cwd = env::current_dir().unwrap_or_default();
+            let project = load_project_config(&cwd);
+            completions::generate(shell, project.as_ref().map(|(p, r)| (p, r.as_path())));
+            ExitCode::SUCCESS
+        }
+        "autocomplete" => {
+            let cwd = env::current_dir().unwrap_or_default();
+            let project = load_project_config(&cwd);
+            completions::autocomplete(project.as_ref().map(|(p, r)| (p, r.as_path())));
+            ExitCode::SUCCESS
+        }
         "help" | "--help" | "-h" => {
-            print_usage();
+            let cwd = env::current_dir().unwrap_or_default();
+            if let Some((project, root)) = load_project_config(&cwd) {
+                run::print_project_help(&project, &root, BUILTINS);
+            } else {
+                print_usage();
+            }
             ExitCode::SUCCESS
         }
         "version" | "--version" | "-V" => {
             println!("flodl-cli {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        other => {
-            eprintln!("unknown command: {}", other);
-            eprintln!();
-            print_usage();
-            ExitCode::FAILURE
-        }
+        other => dispatch_config(other, &args)
     }
 }
 
@@ -706,6 +732,98 @@ fn download_release_binary(tag: &str, home: &std::path::Path) -> Result<std::pat
 
 
 // ---------------------------------------------------------------------------
+// fdl.yaml dispatch
+// ---------------------------------------------------------------------------
+
+const BUILTINS: &[(&str, &str)] = &[
+    ("setup", "Interactive guided setup"),
+    ("libtorch", "Manage libtorch installations"),
+    ("init", "Scaffold a new floDl project"),
+    ("diagnose", "System and GPU diagnostics"),
+    ("install", "Install or update fdl globally"),
+    ("skill", "Manage AI coding assistant skills"),
+    ("api-ref", "Generate flodl API reference"),
+];
+
+fn load_project_config(cwd: &std::path::Path) -> Option<(config::ProjectConfig, std::path::PathBuf)> {
+    let config_path = config::find_config(cwd)?;
+    let root = config_path.parent()?.to_path_buf();
+    let project = config::load_project(&config_path).ok()?;
+    Some((project, root))
+}
+
+/// Try to dispatch an unknown command via fdl.yaml scripts and commands.
+fn dispatch_config(cmd: &str, args: &[String]) -> ExitCode {
+    let cwd = env::current_dir().unwrap_or_default();
+    let (project, root) = match load_project_config(&cwd) {
+        Some(pair) => pair,
+        None => {
+            eprintln!("unknown command: {cmd}");
+            eprintln!();
+            print_usage();
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Check scripts.
+    if let Some(script) = project.scripts.get(cmd) {
+        return run::exec_script(script.command(), script.docker_service(), &root);
+    }
+
+    // Check commands.
+    for cmd_path in &project.commands {
+        let short = config::command_name(cmd_path);
+        if short != cmd {
+            continue;
+        }
+
+        let cmd_dir = root.join(cmd_path);
+        let cmd_config = match config::load_command(&cmd_dir) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        // --help for the sub-command.
+        if args.get(2).map(String::as_str) == Some("--help")
+            || args.get(2).map(String::as_str) == Some("-h")
+        {
+            run::print_command_help(&cmd_config, short);
+            return ExitCode::SUCCESS;
+        }
+
+        // Check if first sub-arg matches a job name.
+        let first_sub = args.get(2).map(String::as_str);
+        let (job_name, extra_start) = match first_sub {
+            Some(name) if cmd_config.jobs.contains_key(name) => (Some(name), 3),
+            _ => (None, 2),
+        };
+
+        // Recursive help: fdl ddp-bench <job> --help
+        if let Some(jn) = &job_name {
+            let has_help = args[extra_start..]
+                .iter()
+                .any(|a| a == "--help" || a == "-h");
+            if has_help {
+                run::print_job_help(&cmd_config, short, jn);
+                return ExitCode::SUCCESS;
+            }
+        }
+
+        let extra = args[extra_start..].to_vec();
+        return run::exec_command(&cmd_config, job_name, &extra, &cmd_dir, &root);
+    }
+
+    // Not found.
+    eprintln!("unknown command: {cmd}");
+    eprintln!();
+    run::print_project_help(&project, &root, BUILTINS);
+    ExitCode::FAILURE
+}
+
+// ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
 
@@ -716,7 +834,13 @@ fn print_usage() {
     println!("Works anywhere. Uses project root when available, ~/.flodl/ otherwise.");
     println!();
     println!("USAGE:");
-    println!("    fdl <command> [options]");
+    println!("    fdl [options] <command> [command-options]");
+    println!();
+    println!("GLOBAL OPTIONS:");
+    println!("    -v                 Verbose output (DDP sync, data loading detail)");
+    println!("    -vv                Debug output (per-batch timing, loop internals)");
+    println!("    -vvv               Trace output (maximum detail)");
+    println!("    -q, --quiet        Suppress all non-error output");
     println!();
     println!("COMMANDS:");
     println!("    setup              Interactive guided setup");
@@ -750,6 +874,32 @@ fn print_usage() {
     println!("    fdl diagnose --json        # machine-readable output");
     println!("    fdl api-ref                # generate API reference");
     println!("    fdl api-ref --json         # structured JSON for tooling");
+}
+
+// ---------------------------------------------------------------------------
+// Global verbosity flags
+// ---------------------------------------------------------------------------
+
+/// Extract verbosity flags from args, returning filtered args and the
+/// `FLODL_VERBOSITY` value: Quiet=0, Normal=1, Verbose=2, Debug=3, Trace=4.
+///
+/// Supports `-v` (Verbose), `-vv` (Debug), `-vvv` (Trace), `--quiet`/`-q` (Quiet).
+/// Flags can appear anywhere in the arg list and are stripped before dispatch.
+fn extract_verbosity(args: &[String]) -> (Vec<String>, Option<u8>) {
+    let mut level: Option<u8> = None;
+    let mut filtered = Vec::with_capacity(args.len());
+
+    for arg in args {
+        match arg.as_str() {
+            "-vvv" => level = Some(4),  // Trace
+            "-vv" => level = Some(3),   // Debug
+            "-v" => level = Some(2),    // Verbose
+            "--quiet" | "-q" => level = Some(0), // Quiet
+            _ => filtered.push(arg.clone()),
+        }
+    }
+
+    (filtered, level)
 }
 
 fn print_libtorch_usage() {

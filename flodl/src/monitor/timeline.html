@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Timeline</title>
+<!-- TIMELINE_DATA -->
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;overflow-x:hidden}
+h1{padding:12px 16px;font-size:16px;color:#8be9fd;background:#16213e}
+.controls{padding:8px 16px;background:#16213e;border-bottom:1px solid #333;display:flex;gap:16px;align-items:center;font-size:12px}
+.controls label{color:#999}
+.controls input[type=range]{width:120px}
+.container{padding:16px}
+.lane{margin-bottom:12px}
+.lane-label{font-size:11px;color:#999;margin-bottom:2px;display:flex;justify-content:space-between}
+.lane-label .stat{color:#6272a4}
+canvas{display:block;width:100%;border:1px solid #333;border-radius:3px;cursor:crosshair}
+.legend{padding:8px 16px;display:flex;gap:16px;flex-wrap:wrap;font-size:11px;background:#16213e;border-top:1px solid #333}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-swatch{width:12px;height:12px;border-radius:2px}
+#tooltip{position:fixed;background:#0d1117;border:1px solid #555;padding:6px 10px;font-size:11px;pointer-events:none;display:none;z-index:100;border-radius:4px;max-width:300px;white-space:pre-line}
+.summary{padding:12px 16px;font-size:12px;background:#16213e;border-top:1px solid #333}
+.summary table{border-collapse:collapse;width:auto}
+.summary td,.summary th{padding:2px 12px 2px 0;text-align:left}
+.summary th{color:#999}
+</style>
+</head>
+<body>
+<h1>System Timeline</h1>
+<div class="controls">
+  <label>Zoom: <input type="range" id="zoom" min="1" max="20" value="1" step="0.5"></label>
+  <label>Offset: <input type="range" id="offset" min="0" max="1" value="0" step="0.001"></label>
+  <span id="cursor-info" style="color:#6272a4"></span>
+</div>
+<div class="container" id="lanes"></div>
+<div class="legend" id="legend"></div>
+<div class="summary" id="summary"></div>
+<div id="tooltip"></div>
+
+<script>
+const S = typeof TIMELINE_SAMPLES !== 'undefined' ? TIMELINE_SAMPLES : [];
+const E = typeof TIMELINE_EVENTS !== 'undefined' ? TIMELINE_EVENTS : [];
+if (!S.length) {
+  document.getElementById('lanes').innerHTML = '<p style="padding:20px;color:#999">No timeline data available.</p>';
+}
+
+const COLORS = {
+  gpu_heat: (v) => {
+    if (v < 30) return `rgb(${Math.round(v*2.5)},${Math.round(60+v*2)},${Math.round(80+v)})`;
+    if (v < 70) return `rgb(${Math.round(50+(v-30)*5)},${Math.round(180-(v-30)*2)},${Math.round(50-(v-30)*0.5)})`;
+    return `rgb(${Math.round(200+(v-70)*1.8)},${Math.round(100-(v-70)*2.5)},30)`;
+  },
+  cpu: '#8be9fd',
+  ram: '#bd93f9',
+  vram_alloc: '#ffb86c',
+  vram_used: '#ff79c6',
+  epoch_start: '#50fa7b',
+  epoch_end: '#50fa7b',
+  sync_start: '#ff5555',
+  sync_end: '#ff5555',
+  cpu_avg_start: '#f1fa8c',
+  cpu_avg_end: '#f1fa8c',
+  anchor: '#ff79c6',
+  throttle: '#ffb86c',
+  idle: 'rgba(255,85,85,0.15)',
+  custom: '#6272a4',
+};
+
+const nGpus = S.length > 0 ? S[0].gpus.length : 0;
+const totalMs = S.length > 0 ? S[S.length-1].t : 1;
+const laneH = 48;
+const DPR = window.devicePixelRatio || 1;
+
+// Build lanes
+const lanesDiv = document.getElementById('lanes');
+const canvases = [];
+
+function makeLane(label, statFn) {
+  const div = document.createElement('div');
+  div.className = 'lane';
+  const lbl = document.createElement('div');
+  lbl.className = 'lane-label';
+  lbl.innerHTML = `<span>${label}</span><span class="stat" id="stat-${canvases.length}"></span>`;
+  const c = document.createElement('canvas');
+  c.height = laneH * DPR;
+  c.style.height = laneH + 'px';
+  div.appendChild(lbl);
+  div.appendChild(c);
+  lanesDiv.appendChild(div);
+  canvases.push({canvas: c, label, statFn, ctx: c.getContext('2d')});
+  return canvases.length - 1;
+}
+
+// GPU lanes
+for (let i = 0; i < nGpus; i++) {
+  const name = `GPU ${i}`;
+  makeLane(name, () => {
+    const last = S[S.length-1];
+    if (!last) return '';
+    const g = last.gpus[i];
+    return g ? `${g.u}% | VRAM: ${fmtBytes(g.va)} alloc / ${fmtBytes(g.vu)} used / ${fmtBytes(g.vt)} total` : '';
+  });
+}
+
+// CPU lane
+makeLane('CPU', () => {
+  const last = S[S.length-1];
+  return last ? `${last.cpu.toFixed(1)}%` : '';
+});
+
+// RAM lane
+makeLane('RAM', () => {
+  const last = S[S.length-1];
+  return last ? `${fmtBytes(last.ram[0])} / ${fmtBytes(last.ram[1])}` : '';
+});
+
+function fmtBytes(b) {
+  if (b >= 1e9) return (b/1e9).toFixed(1) + ' GB';
+  if (b >= 1e6) return (b/1e6).toFixed(0) + ' MB';
+  if (b >= 1e3) return (b/1e3).toFixed(0) + ' KB';
+  return b + ' B';
+}
+
+function fmtMs(ms) {
+  if (ms >= 60000) return (ms/60000).toFixed(1) + 'm';
+  if (ms >= 1000) return (ms/1000).toFixed(1) + 's';
+  return ms.toFixed(0) + 'ms';
+}
+
+// Legend
+const legendDiv = document.getElementById('legend');
+const legendItems = [
+  ['Epoch', COLORS.epoch_start],
+  ['Sync', COLORS.sync_start],
+  ['CPU Avg', COLORS.cpu_avg_start],
+  ['Anchor', COLORS.anchor],
+  ['Throttle', COLORS.throttle],
+  ['Idle gap', '#ff5555'],
+];
+legendItems.forEach(([name, color]) => {
+  const d = document.createElement('div');
+  d.className = 'legend-item';
+  d.innerHTML = `<div class="legend-swatch" style="background:${color}"></div>${name}`;
+  legendDiv.appendChild(d);
+});
+
+// Zoom/pan state
+let zoomLevel = 1;
+let panOffset = 0;
+const zoomInput = document.getElementById('zoom');
+const offsetInput = document.getElementById('offset');
+
+zoomInput.addEventListener('input', () => { zoomLevel = parseFloat(zoomInput.value); render(); });
+offsetInput.addEventListener('input', () => { panOffset = parseFloat(offsetInput.value); render(); });
+
+function getVisibleRange(w) {
+  const visMs = totalMs / zoomLevel;
+  const maxOff = totalMs - visMs;
+  const startMs = panOffset * maxOff;
+  return [startMs, startMs + visMs];
+}
+
+function render() {
+  canvases.forEach((lane, li) => {
+    const c = lane.canvas;
+    const ctx = lane.ctx;
+    const w = c.parentElement.clientWidth;
+    c.width = w * DPR;
+    c.style.width = w + 'px';
+    ctx.scale(DPR, DPR);
+
+    const h = laneH;
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, w, h);
+
+    if (!S.length) return;
+
+    const [startMs, endMs] = getVisibleRange(w);
+    const msPerPx = (endMs - startMs) / w;
+
+    // Draw data
+    if (li < nGpus) {
+      // GPU heatmap
+      drawGpuLane(ctx, w, h, li, startMs, endMs, msPerPx);
+    } else if (li === nGpus) {
+      // CPU line
+      drawLineLane(ctx, w, h, startMs, endMs, s => s.cpu, 100, COLORS.cpu);
+    } else {
+      // RAM fill
+      drawRamLane(ctx, w, h, startMs, endMs);
+    }
+
+    // Draw idle gaps (GPU lanes only)
+    if (li < nGpus) {
+      drawIdleGaps(ctx, w, h, li, startMs, endMs);
+    }
+
+    // Draw events
+    drawEvents(ctx, w, h, startMs, endMs);
+
+    // Update stat
+    const statEl = document.getElementById('stat-' + li);
+    if (statEl && lane.statFn) statEl.textContent = lane.statFn();
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  });
+}
+
+function drawGpuLane(ctx, w, h, gpuIdx, startMs, endMs, msPerPx) {
+  // Draw heatmap bars
+  const barW = Math.max(1, Math.ceil(1 / msPerPx * (S.length > 1 ? S[1].t - S[0].t : 100)));
+  for (let si = 0; si < S.length; si++) {
+    const s = S[si];
+    if (s.t < startMs - msPerPx * barW || s.t > endMs) continue;
+    const g = s.gpus[gpuIdx];
+    if (!g) continue;
+    const x = (s.t - startMs) / (endMs - startMs) * w;
+    ctx.fillStyle = COLORS.gpu_heat(g.u);
+    ctx.fillRect(x, 0, barW + 1, h);
+  }
+
+  // VRAM overlay line (allocated)
+  ctx.beginPath();
+  ctx.strokeStyle = COLORS.vram_alloc;
+  ctx.lineWidth = 1.5;
+  let first = true;
+  for (const s of S) {
+    if (s.t < startMs || s.t > endMs) continue;
+    const g = s.gpus[gpuIdx];
+    if (!g || !g.vt) continue;
+    const x = (s.t - startMs) / (endMs - startMs) * w;
+    const y = h - (g.va / g.vt) * h;
+    if (first) { ctx.moveTo(x, y); first = false; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function drawLineLane(ctx, w, h, startMs, endMs, valueFn, maxVal, color) {
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  let first = true;
+  for (const s of S) {
+    if (s.t < startMs || s.t > endMs) continue;
+    const x = (s.t - startMs) / (endMs - startMs) * w;
+    const y = h - (valueFn(s) / maxVal) * h;
+    if (first) { ctx.moveTo(x, y); first = false; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill below
+  if (!first) {
+    ctx.lineTo(((S[S.length-1].t - startMs) / (endMs - startMs)) * w, h);
+    ctx.lineTo(((S[0].t - startMs) / (endMs - startMs)) * w, h);
+    ctx.closePath();
+    ctx.fillStyle = color.replace(')', ',0.1)').replace('rgb', 'rgba');
+    ctx.fill();
+  }
+}
+
+function drawRamLane(ctx, w, h, startMs, endMs) {
+  ctx.beginPath();
+  ctx.strokeStyle = COLORS.ram;
+  ctx.lineWidth = 1.5;
+  let first = true;
+  const maxRam = S.length ? S[0].ram[1] : 1;
+  for (const s of S) {
+    if (s.t < startMs || s.t > endMs) continue;
+    const x = (s.t - startMs) / (endMs - startMs) * w;
+    const y = h - (s.ram[0] / maxRam) * h;
+    if (first) { ctx.moveTo(x, y); first = false; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function drawIdleGaps(ctx, w, h, gpuIdx, startMs, endMs) {
+  // Find consecutive low-util samples (< 5%)
+  let gapStart = null;
+  for (let si = 0; si < S.length; si++) {
+    const s = S[si];
+    const g = s.gpus[gpuIdx];
+    if (!g) continue;
+    if (g.u < 5) {
+      if (gapStart === null) gapStart = s.t;
+    } else {
+      if (gapStart !== null) {
+        const dur = s.t - gapStart;
+        if (dur >= 200) {
+          const x1 = Math.max(0, (gapStart - startMs) / (endMs - startMs) * w);
+          const x2 = Math.min(w, (s.t - startMs) / (endMs - startMs) * w);
+          ctx.fillStyle = COLORS.idle;
+          ctx.fillRect(x1, 0, x2 - x1, h);
+        }
+        gapStart = null;
+      }
+    }
+  }
+}
+
+function drawEvents(ctx, w, h, startMs, endMs) {
+  for (const e of E) {
+    if (e.t < startMs || e.t > endMs) continue;
+    const x = (e.t - startMs) / (endMs - startMs) * w;
+    let color = COLORS.custom;
+    let dashed = false;
+
+    switch (e.k) {
+      case 'epoch_start': color = COLORS.epoch_start; break;
+      case 'epoch_end': color = COLORS.epoch_end; dashed = true; break;
+      case 'sync_start': color = COLORS.sync_start; break;
+      case 'sync_end': color = COLORS.sync_end; dashed = true; break;
+      case 'cpu_avg_start': color = COLORS.cpu_avg_start; break;
+      case 'cpu_avg_end': color = COLORS.cpu_avg_end; dashed = true; break;
+      case 'anchor': color = COLORS.anchor; break;
+      case 'throttle': color = COLORS.throttle; break;
+      case 'custom': color = COLORS.custom; break;
+      default: continue;
+    }
+
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    if (dashed) ctx.setLineDash([3, 3]);
+    else ctx.setLineDash([]);
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+// Tooltip
+const tooltip = document.getElementById('tooltip');
+const cursorInfo = document.getElementById('cursor-info');
+
+document.addEventListener('mousemove', (ev) => {
+  const target = ev.target;
+  if (target.tagName !== 'CANVAS') {
+    tooltip.style.display = 'none';
+    cursorInfo.textContent = '';
+    return;
+  }
+
+  const rect = target.getBoundingClientRect();
+  const x = ev.clientX - rect.left;
+  const w = rect.width;
+
+  const [startMs, endMs] = getVisibleRange(w);
+  const ms = startMs + (x / w) * (endMs - startMs);
+
+  cursorInfo.textContent = fmtMs(ms);
+
+  // Find nearest sample
+  let nearest = null;
+  let minDist = Infinity;
+  for (const s of S) {
+    const d = Math.abs(s.t - ms);
+    if (d < minDist) { minDist = d; nearest = s; }
+  }
+
+  // Find nearby events (within 500ms)
+  const nearEvents = E.filter(e => Math.abs(e.t - ms) < Math.max(500, (endMs - startMs) * 0.02));
+
+  if (!nearest && !nearEvents.length) {
+    tooltip.style.display = 'none';
+    return;
+  }
+
+  let text = `t = ${fmtMs(ms)}`;
+  if (nearest) {
+    text += `\nCPU: ${nearest.cpu.toFixed(1)}%`;
+    text += `\nRAM: ${fmtBytes(nearest.ram[0])} / ${fmtBytes(nearest.ram[1])}`;
+    for (const g of nearest.gpus) {
+      text += `\nGPU ${g.d}: ${g.u}%  VRAM: ${fmtBytes(g.va)} alloc`;
+    }
+  }
+  for (const e of nearEvents) {
+    text += '\n---';
+    text += `\n${fmtMs(e.t)}: ${fmtEvent(e)}`;
+  }
+
+  tooltip.textContent = text;
+  tooltip.style.display = 'block';
+  tooltip.style.left = Math.min(ev.clientX + 12, window.innerWidth - 320) + 'px';
+  tooltip.style.top = (ev.clientY + 12) + 'px';
+});
+
+document.addEventListener('mouseleave', () => {
+  tooltip.style.display = 'none';
+});
+
+function fmtEvent(e) {
+  switch (e.k) {
+    case 'epoch_start': return `Epoch ${e.epoch} start`;
+    case 'epoch_end': return `Epoch ${e.epoch} end (loss=${e.loss.toFixed(4)})`;
+    case 'sync_start': return 'AllReduce start';
+    case 'sync_end': return `AllReduce end (${e.ms.toFixed(1)}ms)`;
+    case 'cpu_avg_start': return 'CPU averaging start';
+    case 'cpu_avg_end': return `CPU averaging end (${e.ms.toFixed(1)}ms)`;
+    case 'anchor': return `Anchor: ${e.from} -> ${e.to}`;
+    case 'throttle': return `Throttle rank ${e.rank}`;
+    case 'idle': return `GPU ${e.dev} idle ${e.ms.toFixed(0)}ms`;
+    case 'custom': return e.label;
+    default: return e.k;
+  }
+}
+
+// Summary table
+function buildSummary() {
+  if (!S.length) return;
+  const div = document.getElementById('summary');
+
+  const syncStarts = E.filter(e => e.k === 'sync_start').length;
+  const syncEnds = E.filter(e => e.k === 'sync_end');
+  const avgSync = syncEnds.length ? (syncEnds.reduce((a,e) => a + e.ms, 0) / syncEnds.length) : 0;
+  const cpuAvgEnds = E.filter(e => e.k === 'cpu_avg_end');
+  const avgCpuAvg = cpuAvgEnds.length ? (cpuAvgEnds.reduce((a,e) => a + e.ms, 0) / cpuAvgEnds.length) : 0;
+  const anchors = E.filter(e => e.k === 'anchor').length;
+  const throttles = E.filter(e => e.k === 'throttle').length;
+  const epochs = E.filter(e => e.k === 'epoch_end');
+
+  let html = '<table>';
+  html += '<tr><th>Duration</th><td>' + fmtMs(totalMs) + '</td></tr>';
+  html += '<tr><th>Samples</th><td>' + S.length + ' (' + (S.length > 1 ? Math.round(totalMs / S.length) : '?') + 'ms interval)</td></tr>';
+  html += '<tr><th>Epochs</th><td>' + epochs.length + '</td></tr>';
+  html += '<tr><th>Syncs</th><td>' + syncStarts + (avgSync > 0 ? ' (avg ' + avgSync.toFixed(1) + 'ms)' : '') + '</td></tr>';
+  if (cpuAvgEnds.length) html += '<tr><th>CPU Avgs</th><td>' + cpuAvgEnds.length + ' (avg ' + avgCpuAvg.toFixed(1) + 'ms)</td></tr>';
+  if (anchors) html += '<tr><th>Anchor changes</th><td>' + anchors + '</td></tr>';
+  if (throttles) html += '<tr><th>Throttle events</th><td>' + throttles + '</td></tr>';
+
+  // Per-GPU idle
+  for (let i = 0; i < nGpus; i++) {
+    let idle = 0;
+    for (const s of S) {
+      if (s.gpus[i] && s.gpus[i].u < 5) idle++;
+    }
+    const pct = (idle / S.length * 100).toFixed(1);
+    html += '<tr><th>GPU ' + i + ' idle</th><td>' + pct + '% (' + idle + '/' + S.length + ' samples < 5%)</td></tr>';
+  }
+
+  html += '</table>';
+  div.innerHTML = html;
+}
+
+// Mouse wheel zoom
+document.addEventListener('wheel', (ev) => {
+  if (ev.target.tagName !== 'CANVAS') return;
+  ev.preventDefault();
+  const delta = ev.deltaY > 0 ? -0.5 : 0.5;
+  zoomLevel = Math.max(1, Math.min(20, zoomLevel + delta));
+  zoomInput.value = zoomLevel;
+  render();
+}, {passive: false});
+
+// Initial render
+window.addEventListener('resize', render);
+render();
+buildSummary();
+</script>
+</body>
+</html>

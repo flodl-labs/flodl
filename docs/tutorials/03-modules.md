@@ -152,6 +152,7 @@ let pooled = adaptive_avg_pool2d(&input, [1, 1])?;  // [B, C, H, W] -> [B, C, 1,
 
 // As a module
 let pool = AdaptiveMaxPool2d::new(7, 7);             // fixed 7x7 output
+let pool = AdaptiveAvgPool2d::new([1, 1]);           // global avg (ResNet head)
 let output = pool.forward(&input)?;
 ```
 

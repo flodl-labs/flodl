@@ -6,10 +6,13 @@ by keeping the entire dataset on the compute device alongside the model.
 Combined with CUDA Graphs, this enables **zero-dispatch training** -- the CPU
 does nothing during an epoch except launch pre-recorded GPU operations.
 
-**Status:** Partially implemented in v0.2.0. Resident and streaming DataLoader
-modes are shipped. CUDA Graph integration and double-buffering remain planned.
-See [Tutorial 12: DDP Builder](../tutorials/12-async-ddp.md) for the current
-data pipeline.
+**Status:** Resident and streaming DataLoader modes shipped in v0.2.0 (Phase 10).
+DDP-aware resident/streaming with per-device backend selection shipped in v0.3.0
+(Phase 11). What remains is the zero-dispatch layer: full train-step CUDA Graph
+capture (forward + backward + optimizer as one replay) and double-buffered static
+I/O tensors for the Graph path. See
+[Tutorial 12: DDP Builder](../tutorials/12-async-ddp.md) for the current data
+pipeline.
 
 ---
 
