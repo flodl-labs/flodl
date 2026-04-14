@@ -514,6 +514,28 @@ dispatch-bound architectures (transformer -31%, mlp -29%), graph routing
 **[Benchmark Report](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md)** |
 [Interactive dashboard](https://flodl.dev/benchmark)
 
+### Multi-GPU (DDP)
+
+ResNet-20 on CIFAR-10, 200 epochs -- heterogeneous GPUs (RTX 5060 Ti +
+GTX 1060, 2.5x speed ratio). Published reference: 91.25%
+([He et al. 2015](https://arxiv.org/abs/1512.03385), Table 6):
+
+| Mode | Eval | vs Published | Time | vs Solo-0 |
+|---|---:|---:|---:|---:|
+| solo-0 (fast GPU only) | 91.66% | +0.41% | 3127s | -- |
+| nccl-async | **92.44%** | **+1.19%** | 2697s | 1.2x |
+| nccl-cadence | **92.42%** | **+1.17%** | 2650s | 1.2x |
+| cpu-async | **92.43%** | **+1.18%** | 2614s | 1.2x |
+| cpu-cadence | **92.04%** | **+0.79%** | 2670s | 1.2x |
+
+Every ElChe mode surpasses published accuracy while finishing faster
+than the fast GPU alone. 200 epochs is where ElChe's proportional
+scheduling has room to calibrate and shine -- shorter models (logistic
+through gpt-nano) confirm DDP convergence across architectures.
+
+**[DDP Benchmark Report](https://github.com/fab2s/floDl/blob/main/docs/ddp-benchmark.md)** --
+full results for 8 models across 9 DDP modes
+
 ## Why Rust for Deep Learning?
 
 **Deterministic memory.** Python adds ~3-5 us of framework overhead per GPU
