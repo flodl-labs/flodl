@@ -14,6 +14,7 @@ mod diagnose;
 mod init;
 mod libtorch;
 mod run;
+mod schema_cache;
 mod setup;
 mod skill;
 mod style;
@@ -35,7 +36,8 @@ fn main() -> ExitCode {
         unsafe { env::set_var("FLODL_VERBOSITY", v.to_string()); }
     }
 
-    let cmd = args.get(1).map(String::as_str).unwrap_or("help");
+    // Bare `fdl` with no args behaves like `fdl --help`.
+    let cmd = args.get(1).map(String::as_str).unwrap_or("--help");
 
     match cmd {
         "setup" => {
@@ -59,7 +61,7 @@ fn main() -> ExitCode {
             }
         }
         "libtorch" => {
-            let sub = args.get(2).map(String::as_str).unwrap_or("help");
+            let sub = args.get(2).map(String::as_str).unwrap_or("--help");
             match sub {
                 "list" => {
                     let json = args.iter().any(|a| a == "--json");
@@ -76,7 +78,7 @@ fn main() -> ExitCode {
                     let variant = args.get(3).map(String::as_str);
                     cmd_libtorch_remove(variant)
                 }
-                "help" | "--help" | "-h" => {
+                "--help" | "-h" => {
                     print_libtorch_usage();
                     ExitCode::SUCCESS
                 }
@@ -123,7 +125,7 @@ fn main() -> ExitCode {
             cmd_install(check, dev)
         }
         "skill" => {
-            let sub = args.get(2).map(String::as_str).unwrap_or("help");
+            let sub = args.get(2).map(String::as_str).unwrap_or("--help");
             match sub {
                 "install" => {
                     let tool = args.iter().position(|a| a == "--tool")
@@ -144,7 +146,7 @@ fn main() -> ExitCode {
                     skill::list();
                     ExitCode::SUCCESS
                 }
-                "help" | "--help" | "-h" => {
+                "--help" | "-h" => {
                     skill::print_usage();
                     ExitCode::SUCCESS
                 }
@@ -168,7 +170,7 @@ fn main() -> ExitCode {
             completions::autocomplete(project.as_ref().map(|(p, r)| (p, r.as_path())));
             ExitCode::SUCCESS
         }
-        "help" | "--help" | "-h" => {
+        "--help" | "-h" => {
             let cwd = env::current_dir().unwrap_or_default();
             if let Some((project, root)) = load_project_config(&cwd) {
                 run::print_project_help(&project, &root, BUILTINS);
@@ -794,6 +796,13 @@ fn dispatch_config(cmd: &str, args: &[String]) -> ExitCode {
             return ExitCode::SUCCESS;
         }
 
+        // --refresh-schema: probe `<entry> --fdl-schema` and update the cache.
+        // Accepted anywhere in the sub-command's arg tail so users don't need
+        // to remember a specific position.
+        if args[2..].iter().any(|a| a == "--refresh-schema") {
+            return cmd_refresh_schema(&cmd_config, &cmd_dir, short);
+        }
+
         // Check if first sub-arg matches a job name.
         let first_sub = args.get(2).map(String::as_str);
         let (job_name, extra_start) = match first_sub {
@@ -821,6 +830,51 @@ fn dispatch_config(cmd: &str, args: &[String]) -> ExitCode {
     eprintln!();
     run::print_project_help(&project, &root, BUILTINS);
     ExitCode::FAILURE
+}
+
+/// `fdl <cmd> --refresh-schema`: run `<entry> --fdl-schema`, validate, cache.
+///
+/// Required for cargo-based entries, which are never auto-probed (compile
+/// latency would ruin `--help`). Users build once, then run this explicitly.
+fn cmd_refresh_schema(
+    cmd_config: &config::CommandConfig,
+    cmd_dir: &std::path::Path,
+    cmd_name: &str,
+) -> ExitCode {
+    let entry = match &cmd_config.entry {
+        Some(e) => e.as_str(),
+        None => {
+            eprintln!("error: no entry point defined in {}/fdl.yml", cmd_dir.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    eprintln!("Probing `{entry} --fdl-schema`...");
+    let schema = match schema_cache::probe(entry, cmd_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            if schema_cache::is_cargo_entry(entry) {
+                eprintln!();
+                eprintln!("Hint: cargo-based entries must be built first.");
+                eprintln!("Build with the right features, then rerun this command.");
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let cache = schema_cache::cache_path(cmd_dir, cmd_name);
+    if let Err(e) = schema_cache::write_cache(&cache, &schema) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+    eprintln!("Cached schema for `{cmd_name}` at {}", cache.display());
+    eprintln!(
+        "  {} options, {} positional args",
+        schema.options.len(),
+        schema.args.len()
+    );
+    ExitCode::SUCCESS
 }
 
 // ---------------------------------------------------------------------------
@@ -858,8 +912,9 @@ fn print_usage() {
     println!("    api-ref            Generate flodl API reference");
     println!("        --json         Output as JSON");
     println!("        --path <dir>   Explicit flodl source path");
-    println!("    help               Show this help");
     println!("    version            Show version");
+    println!();
+    println!("Run `fdl --help` or `fdl <command> --help` for details.");
     println!();
     println!("INSTALL:");
     println!("    cargo install flodl-cli    # from crates.io");

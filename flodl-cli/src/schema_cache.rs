@@ -1,0 +1,332 @@
+//! `--fdl-schema` binary contract: probe, validate, and cache.
+//!
+//! A sub-command binary that opts into the contract exposes a single
+//! `--fdl-schema` flag printing a JSON schema describing its CLI surface.
+//! `flodl-cli` caches the output under `<cmd_dir>/.fdl/schema-cache/<cmd>.json`
+//! and prefers it over any inline YAML schema declared in `fdl.yaml`.
+//!
+//! **Cargo entries** (`entry: cargo run ...`) are *not* auto-probed: invoking
+//! them forces a full compile, which is unacceptable latency for `fdl --help`.
+//! For those, users run `fdl <cmd> --refresh-schema` explicitly after a build.
+//!
+//! Cache invalidation is mtime-based: the cache file's mtime is compared
+//! against `fdl.yml` in the command dir. A cache older than its fdl.yml is
+//! considered stale. Users can also force-refresh.
+//!
+//! See `docs/design/run-config.md` — "2. Option schemas and the `--fdl-schema`
+//! contract" — for the JSON shape.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::SystemTime;
+
+use crate::config::{self, Schema};
+
+/// Directory where all schema caches live, relative to the command dir.
+const CACHE_DIR: &str = ".fdl/schema-cache";
+
+/// Resolve the cache file path for a given command dir and name.
+pub fn cache_path(cmd_dir: &Path, cmd_name: &str) -> PathBuf {
+    cmd_dir.join(CACHE_DIR).join(format!("{cmd_name}.json"))
+}
+
+/// Read a schema cache file, returning `Some` only if it parses cleanly
+/// and survives validation. Parse or validation errors are treated as
+/// "no cache" (the caller falls through to the inline/YAML schema).
+pub fn read_cache(path: &Path) -> Option<Schema> {
+    let content = fs::read_to_string(path).ok()?;
+    let schema: Schema = serde_json::from_str(&content).ok()?;
+    config::validate_schema(&schema).ok()?;
+    Some(schema)
+}
+
+/// Consider a cache "stale" if it is older than the command's fdl.yml
+/// (config changes), or older than a sentinel binary path when supplied.
+///
+/// Missing cache ⇒ stale (return true). Missing reference mtime ⇒ treat
+/// the cache as fresh (conservative: don't refresh what we can't justify).
+pub fn is_stale(cache: &Path, reference_mtimes: &[PathBuf]) -> bool {
+    let Some(cache_mtime) = mtime(cache) else {
+        return true;
+    };
+    reference_mtimes
+        .iter()
+        .filter_map(|p| mtime(p))
+        .any(|ref_m| ref_m > cache_mtime)
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Serialize a schema to the cache file, creating parent dirs as needed.
+pub fn write_cache(path: &Path, schema: &Schema) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
+    }
+    let json = serde_json::to_string_pretty(schema)
+        .map_err(|e| format!("schema serialize: {e}"))?;
+    fs::write(path, json).map_err(|e| format!("cannot write {}: {}", path.display(), e))
+}
+
+/// Probe a binary for its schema by running `<entry> --fdl-schema` via the
+/// shell and parsing stdout as JSON.
+///
+/// The entry is run with `cwd = cmd_dir` so relative paths (e.g. in
+/// `cargo run` contexts) resolve correctly. On failure returns a string
+/// error rather than panicking — callers almost always want to fall back.
+pub fn probe(entry: &str, cmd_dir: &Path) -> Result<Schema, String> {
+    if entry.trim().is_empty() {
+        return Err("entry is empty".into());
+    }
+    let invocation = format!("{entry} --fdl-schema");
+    let (shell, flag) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let output = Command::new(shell)
+        .args([flag, &invocation])
+        .current_dir(cmd_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("spawn `{invocation}`: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "`{invocation}` exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    // Tolerate leading lines of cargo chatter by locating the first `{`.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let start = stdout
+        .find('{')
+        .ok_or_else(|| "no JSON object in --fdl-schema output".to_string())?;
+    let schema: Schema = serde_json::from_str(&stdout[start..])
+        .map_err(|e| format!("--fdl-schema did not emit valid JSON: {e}"))?;
+    config::validate_schema(&schema)
+        .map_err(|e| format!("--fdl-schema output failed validation: {e}"))?;
+    Ok(schema)
+}
+
+/// Heuristic: cargo entries compile-on-run, so they are never auto-probed.
+/// Probing must be explicit (`fdl <cmd> --refresh-schema`) for those.
+pub fn is_cargo_entry(entry: &str) -> bool {
+    entry.trim_start().starts_with("cargo ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    /// Scoped test directory under `std::env::temp_dir()` that cleans up on drop.
+    /// Zero-external-dep replacement for `tempfile::tempdir()`.
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let pid = std::process::id();
+            let path = std::env::temp_dir().join(format!("fdl-test-{tag}-{pid}-{nanos}"));
+            fs::create_dir_all(&path).expect("create test dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn minimal_schema() -> Schema {
+        let mut options = BTreeMap::new();
+        options.insert(
+            "model".into(),
+            config::OptionSpec {
+                ty: "string".into(),
+                description: Some("pick a model".into()),
+                default: Some(serde_json::json!("mlp")),
+                choices: Some(vec![
+                    serde_json::json!("mlp"),
+                    serde_json::json!("resnet"),
+                ]),
+                short: Some("m".into()),
+                env: None,
+                completer: None,
+            },
+        );
+        Schema {
+            args: Vec::new(),
+            options,
+            strict: false,
+        }
+    }
+
+    #[test]
+    fn cache_roundtrip_preserves_schema() {
+        let tmp = TestDir::new("sc");
+        let path = cache_path(tmp.path(), "ddp-bench");
+        let schema = minimal_schema();
+        write_cache(&path, &schema).expect("write cache");
+
+        let read = read_cache(&path).expect("round-trip parses");
+        let orig_model = schema.options.get("model").unwrap();
+        let round_model = read.options.get("model").unwrap();
+        assert_eq!(orig_model.ty, round_model.ty);
+        assert_eq!(orig_model.short, round_model.short);
+        assert_eq!(orig_model.choices, round_model.choices);
+    }
+
+    #[test]
+    fn read_cache_rejects_invalid_json() {
+        let tmp = TestDir::new("sc");
+        let path = tmp.path().join("bad.json");
+        fs::write(&path, "not json at all").unwrap();
+        assert!(read_cache(&path).is_none());
+    }
+
+    #[test]
+    fn read_cache_rejects_validation_failure() {
+        // A schema that clears validation at struct level but fails
+        // semantic validation: shadowed fdl-level flag `--help`.
+        let tmp = TestDir::new("sc");
+        let path = tmp.path().join("bad_sem.json");
+        let body = r#"{
+            "options": {
+                "help": { "type": "bool" }
+            }
+        }"#;
+        fs::write(&path, body).unwrap();
+        assert!(read_cache(&path).is_none(),
+            "cache must not return a schema that fails validate_schema");
+    }
+
+    #[test]
+    fn is_stale_missing_cache_is_stale() {
+        let tmp = TestDir::new("sc");
+        let path = tmp.path().join("missing.json");
+        assert!(is_stale(&path, &[]));
+    }
+
+    #[test]
+    fn is_stale_compares_mtimes() {
+        let tmp = TestDir::new("sc");
+        let cache = tmp.path().join("cache.json");
+        let source = tmp.path().join("fdl.yml");
+        fs::write(&cache, "{}").unwrap();
+        // Sleep a moment then touch source so its mtime is newer.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut f = fs::File::create(&source).unwrap();
+        writeln!(f, "newer").unwrap();
+        assert!(
+            is_stale(&cache, std::slice::from_ref(&source)),
+            "source newer than cache ⇒ stale"
+        );
+    }
+
+    #[test]
+    fn is_cargo_entry_detects_common_shapes() {
+        assert!(is_cargo_entry("cargo run --release --features cuda --"));
+        assert!(is_cargo_entry("  cargo run -- "));
+        assert!(!is_cargo_entry("./target/release/ddp-bench"));
+        assert!(!is_cargo_entry("python ./train.py"));
+        assert!(!is_cargo_entry(""));
+    }
+
+    #[test]
+    fn probe_round_trips_with_mock_binary() {
+        // Build a tiny shell script that emits the schema JSON and use it
+        // as the "entry". This tests the full probe path end-to-end
+        // without pulling in cargo.
+        let tmp = TestDir::new("sc");
+        let script = tmp.path().join("mock-bin.sh");
+        let body = r#"#!/bin/sh
+cat <<'JSON'
+{
+  "options": {
+    "model": {
+      "type": "string",
+      "short": "m",
+      "description": "pick a model",
+      "default": "mlp",
+      "choices": ["mlp", "resnet"]
+    }
+  }
+}
+JSON
+"#;
+        fs::write(&script, body).unwrap();
+        // chmod +x
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perm = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&script, perm).unwrap();
+        }
+
+        let entry = script.to_string_lossy();
+        let schema = probe(&entry, tmp.path()).expect("probe should succeed");
+        let model = schema.options.get("model").expect("model opt");
+        assert_eq!(model.ty, "string");
+        assert_eq!(model.short.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn probe_rejects_non_json_output() {
+        let tmp = TestDir::new("sc");
+        let script = tmp.path().join("junk.sh");
+        fs::write(&script, "#!/bin/sh\necho not json\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perm = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&script, perm).unwrap();
+        }
+        let err = probe(&script.to_string_lossy(), tmp.path())
+            .expect_err("non-json must fail");
+        assert!(err.contains("no JSON") || err.contains("valid JSON"),
+            "err was: {err}");
+    }
+
+    #[test]
+    fn probe_rejects_semantically_invalid_schema() {
+        let tmp = TestDir::new("sc");
+        let script = tmp.path().join("bad.sh");
+        // Emits JSON that parses but declares a reserved flag.
+        let body = r#"#!/bin/sh
+cat <<'JSON'
+{ "options": { "help": { "type": "bool" } } }
+JSON
+"#;
+        fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perm = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(&script, perm).unwrap();
+        }
+        let err = probe(&script.to_string_lossy(), tmp.path())
+            .expect_err("semantic fail must propagate");
+        assert!(err.contains("validation") || err.contains("reserved"),
+            "err was: {err}");
+    }
+}

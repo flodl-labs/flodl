@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
 
-use crate::config::{self, CommandConfig, ResolvedConfig};
+use crate::config::{self, ArgSpec, CommandConfig, OptionSpec, ResolvedConfig, Schema};
 use crate::libtorch;
 use crate::style;
 
@@ -359,9 +359,11 @@ pub fn print_command_help(cmd_config: &CommandConfig, name: &str) {
         eprintln!("{}", style::bold(name));
     }
 
+    // Build a schema-aware usage line when args are declared.
+    let usage_tail = build_usage_tail(cmd_config.schema.as_ref(), !cmd_config.jobs.is_empty());
     eprintln!();
     eprintln!("{}:", style::yellow("Usage"));
-    eprintln!("    fdl {name} {} {}", style::dim("[job]"), style::dim("[options]"));
+    eprintln!("    fdl {name}{usage_tail}");
 
     if !cmd_config.jobs.is_empty() {
         eprintln!();
@@ -369,6 +371,28 @@ pub fn print_command_help(cmd_config: &CommandConfig, name: &str) {
         for (job_name, job) in &cmd_config.jobs {
             let desc = job.description.as_deref().unwrap_or("-");
             eprintln!("    {}  {}", style::green(&format!("{:<20}", job_name)), desc);
+        }
+    }
+
+    // Schema-driven args + options. Renders only when a schema block is
+    // present in fdl.yaml; the pre-existing "Defaults" section below still
+    // covers the ddp/training/output structured config.
+    if let Some(schema) = &cmd_config.schema {
+        if !schema.args.is_empty() {
+            eprintln!();
+            eprintln!("{}:", style::yellow("Arguments"));
+            for a in &schema.args {
+                eprintln!("    {}", format_arg(a));
+            }
+        }
+        if !schema.options.is_empty() {
+            eprintln!();
+            eprintln!("{}:", style::yellow("Options"));
+            for (long, spec) in &schema.options {
+                for line in format_option(long, spec) {
+                    eprintln!("    {line}");
+                }
+            }
         }
     }
 
@@ -636,4 +660,164 @@ pub fn _format_options(opts: &BTreeMap<String, serde_json::Value>) -> String {
         .map(|(k, v)| format!("--{} {}", k.replace('_', "-"), value_to_string(v)))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+// ── Schema-driven help helpers ──────────────────────────────────────────
+
+/// Build the part of "fdl <cmd>..." after the command name: positionals
+/// rendered as `<name>` (required) or `[<name>]` (optional), plus `[job]`
+/// and `[options]` when applicable.
+fn build_usage_tail(schema: Option<&Schema>, has_jobs: bool) -> String {
+    let mut parts = String::new();
+    if has_jobs {
+        parts.push(' ');
+        parts.push_str(&style::dim("[job]"));
+    }
+    if let Some(s) = schema {
+        for a in &s.args {
+            parts.push(' ');
+            parts.push_str(&format_arg_usage(a));
+        }
+    }
+    parts.push(' ');
+    parts.push_str(&style::dim("[options]"));
+    parts
+}
+
+fn format_arg_usage(a: &ArgSpec) -> String {
+    let suffix = if a.variadic { "..." } else { "" };
+    let core = format!("<{}>{suffix}", a.name);
+    if a.required && a.default.is_none() {
+        style::green(&core)
+    } else {
+        style::dim(&format!("[{core}]"))
+    }
+}
+
+fn format_arg(a: &ArgSpec) -> String {
+    let mut left = format_arg_usage(a);
+    // Target ~22-char visual width for the label column.
+    let visible = visible_width(&left);
+    if visible < 22 {
+        for _ in 0..(22 - visible) {
+            left.push(' ');
+        }
+    } else {
+        left.push(' ');
+    }
+    let mut line = left;
+    line.push_str(a.description.as_deref().unwrap_or("-"));
+    append_default_and_choices(&mut line, &a.default, &a.choices, &a.ty);
+    line
+}
+
+/// Format an option row. Returns one or more lines; `choices` list wraps
+/// onto a second indented line when present, to keep the main row readable.
+fn format_option(long: &str, spec: &OptionSpec) -> Vec<String> {
+    let flag = match &spec.short {
+        Some(s) => format!("-{s}, --{long}"),
+        None => format!("    --{long}"),
+    };
+    let placeholder = option_placeholder(&spec.ty);
+    let left = if placeholder.is_empty() {
+        style::green(&flag)
+    } else {
+        style::green(&format!("{flag} {placeholder}"))
+    };
+    let visible = visible_width_for(&flag, placeholder);
+
+    // Pad to 30 columns for alignment.
+    let pad = if visible < 30 { 30 - visible } else { 1 };
+    let mut line = format!("{left}{}", " ".repeat(pad));
+    line.push_str(spec.description.as_deref().unwrap_or("-"));
+    append_default_and_choices(&mut line, &spec.default, &spec.choices, &spec.ty);
+
+    let mut out = vec![line];
+    if let Some(env) = &spec.env {
+        out.push(format!("{}  {}", " ".repeat(32), style::dim(&format!("[env: {env}]"))));
+    }
+    out
+}
+
+fn option_placeholder(ty: &str) -> &'static str {
+    match ty {
+        "bool" => "",
+        "int" => "<N>",
+        "float" => "<F>",
+        "path" => "<PATH>",
+        "list[path]" => "<PATH>...",
+        t if t.starts_with("list[") => "<VALUE>...",
+        _ => "<VALUE>",
+    }
+}
+
+fn append_default_and_choices(
+    line: &mut String,
+    default: &Option<serde_json::Value>,
+    choices: &Option<Vec<serde_json::Value>>,
+    ty: &str,
+) {
+    if let Some(d) = default {
+        // Skip noisy defaults: bool false, empty list, null.
+        let is_empty_list = matches!(d, serde_json::Value::Array(a) if a.is_empty());
+        let is_false = matches!(d, serde_json::Value::Bool(false));
+        if !d.is_null() && !is_false && !is_empty_list {
+            line.push_str(&format!(" {}", style::dim(&format!("[default: {}]", format_value(d)))));
+        }
+    }
+    if let Some(choices) = choices {
+        if !choices.is_empty() {
+            let list = choices
+                .iter()
+                .map(format_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            line.push_str(&format!(" {}", style::dim(&format!("[possible: {list}]"))));
+        }
+    }
+    // Annotate list types so users know about repeat/comma semantics.
+    if ty.starts_with("list[") {
+        line.push_str(&format!(" {}", style::dim("(repeat or comma-separate)")));
+    }
+}
+
+fn format_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Rough visible width helper: styled strings wrap their visible content
+/// in ANSI escapes, so we use the unstyled inputs we started from.
+fn visible_width(s: &str) -> usize {
+    // The inputs we pass here come from pre-styling helpers that already
+    // know the raw length. Strip ANSI to be safe.
+    strip_ansi(s).chars().count()
+}
+
+fn visible_width_for(flag: &str, placeholder: &str) -> usize {
+    if placeholder.is_empty() {
+        flag.chars().count()
+    } else {
+        flag.chars().count() + 1 + placeholder.chars().count()
+    }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

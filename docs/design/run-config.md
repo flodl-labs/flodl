@@ -149,6 +149,20 @@ fdl <name> [args...]
   4. not found                                       -> error + suggestions
 ```
 
+## Help conventions
+
+One way to ask for help: `--help` / `-h`. No `fdl help` subcommand —
+keeps the top-level namespace clean and frees `help` from being a
+reserved name (important once scripts and jobs multiply).
+
+- `fdl`                        -> same as `fdl --help` (bare invocation is a discovery affordance)
+- `fdl --help` / `fdl -h`      -> project overview: built-ins, scripts, commands, envs
+- `fdl <cmd> --help`           -> command overview: description, jobs, options (from schema)
+- `fdl <cmd> <job> --help`     -> resolved job: merged config + remaining options
+
+`-h` is reserved at the fdl level and cannot be shadowed by a sub-command
+or entry option (see "Collision rules" below).
+
 ## Config sections
 
 Structured sections that `fdl` understands natively. They appear at
@@ -459,9 +473,20 @@ which prints its options as JSON to stdout and exits:
 ```json
 {
   "description": "DDP validation and benchmark suite for flodl",
+  "args": [
+    {
+      "name": "run-id",
+      "type": "string",
+      "description": "Run identifier to analyze",
+      "required": false,
+      "variadic": false,
+      "completer": "ls runs/"
+    }
+  ],
   "options": {
     "model": {
       "type": "string",
+      "short": "m",
       "description": "Run specific model",
       "default": "all",
       "choices": ["logistic", "mlp", "lenet", "resnet", "resnet-graph",
@@ -474,9 +499,14 @@ which prints its options as JSON to stdout and exits:
       "choices": ["solo-0", "solo-1", "nccl-sync", "nccl-cadence",
                   "nccl-async", "cpu-sync", "cpu-cadence", "cpu-async", "all"]
     },
+    "tags": {
+      "type": "list[string]",
+      "description": "Filter runs by tag (repeat or comma-separate)",
+      "default": []
+    },
     "epochs":      { "type": "int",   "description": "Override epoch count" },
     "lr-scale":    { "type": "float", "description": "Multiply default LR" },
-    "validate":    { "type": "bool",  "description": "Check against baseline" },
+    "validate":    { "type": "bool",  "short": "V", "description": "Check against baseline" },
     "baseline":    { "type": "path",  "default": "baselines/baseline.json" },
     "tolerance":   { "type": "float", "default": 0.15 },
     "seed":        { "type": "int",   "default": 42 },
@@ -485,19 +515,105 @@ which prints its options as JSON to stdout and exits:
 }
 ```
 
+### Positional args
+
+`args:` is an ordered list of positional arguments the binary (or a job)
+expects. Each entry:
+
+| Field        | Type    | Description                                           |
+|--------------|---------|-------------------------------------------------------|
+| `name`       | string  | Kebab-case identifier, rendered as `<name>` in usage  |
+| `type`       | string  | Same type set as options                              |
+| `description`| string  | Shown in `--help`                                     |
+| `required`   | bool    | Default `true`; `false` makes it optional            |
+| `variadic`   | bool    | Default `false`; collects all remaining args          |
+| `default`    | literal | Only valid when `required: false`                     |
+| `choices`    | list    | Drives completion + validation                        |
+| `completer`  | string  | Shell snippet producing completion values             |
+
+Rules:
+- Only the *last* positional may be `variadic: true`.
+- A required positional cannot follow an optional one.
+- Jobs may pin an arg value (`args: { run-id: latest }`) — the positional
+  becomes effectively fixed for that job.
+
+### Long and short option variants
+
+Options are always long-form (`--name`). Adding `"short": "x"` gives a
+short alias (`-x`). Short forms are single ASCII letters. Long forms are
+derived from the JSON key and always kebab-case.
+
+Short aliases are optional and always declared explicitly — no implicit
+first-letter mapping (that path leads to drift when a new option shares
+a prefix).
+
+### Collision rules (checked at schema-cache build time)
+
+Loud errors on any of:
+- two options share the same long name
+- two options share the same short letter
+- any option (long or short) shadows a reserved fdl-level flag
+  (`--help`, `-h`, `--env`, `-e`, `--list`, `--version`, `-V` when fdl
+  reserves it, etc.)
+- a job pins an option or arg that isn't declared in the schema
+  (only when `options.strict: true`, otherwise a warning)
+
+Loud-at-build-time is the pattern from the env-overlay section: ambiguity
+is cheapest to fix the moment it's introduced.
+
 ### Supported types
 
-| Type       | Shell form                              | Completion hint             |
-|------------|-----------------------------------------|------------------------------|
-| `string`   | `--key value`                           | `choices:` list if declared  |
-| `int`      | `--key 42`                              | none                         |
-| `float`    | `--key 0.5`                             | none                         |
-| `bool`     | `--key` (flag, no value)                | none                         |
-| `path`     | `--key ./foo`                           | file path completion         |
-| `list[T]`  | `--key a,b,c` or repeated `--key a ...` | T's completion per item      |
+| Type             | Shell form                                   | Completion hint               |
+|------------------|----------------------------------------------|-------------------------------|
+| `string`         | `--key value`                                | `choices:` list if declared   |
+| `int`            | `--key 42`                                   | none                          |
+| `float`          | `--key 0.5`                                  | none                          |
+| `bool`           | `--key` / `-k` (flag, no value)              | none                          |
+| `path`           | `--key ./foo`                                | file path completion          |
+| `list[T]`        | `--key a,b,c` or repeated `--key a --key b`  | T's completion per item       |
+
+List semantics:
+- Repeated flags *append*; comma-separated values *extend*. Both forms
+  are equivalent and may be mixed in one invocation.
+- Empty default is `[]`. A job-level list replaces the root-level list
+  (same rule as env-overlay merging — lists replace, never append).
+- `list[bool]` is not allowed (meaningless).
 
 Kept deliberately small. Richer types belong in the binary's own
 validation, not in the schema.
+
+### Defaults and precedence
+
+Defaults can appear on both options and positionals in the schema, and on
+both `#[option]` and `#[arg]` in the derive. A few rules keep the
+interactions predictable:
+
+- **Default implies optional.** A field with `default` is never
+  "required." In the derive, pair `default` with plain `T` (not
+  `Option<T>`) — the two are redundant and the derive rejects the
+  combination at compile time.
+- **`Option<T>` without `default` means "None when absent."** Use it
+  when the binary needs to distinguish "user didn't set it" from "user
+  set it to the default value."
+- **List defaults.** `Vec<T>` defaults to `[]`. Declare a non-empty
+  default explicitly (`default = &["a", "b"]`). Overlays *replace* the
+  list, same rule as everywhere else.
+- **Positional defaults.** Only valid on optional positionals
+  (`required: false` in schema, `Option<T>` or `default = ...` in
+  derive). Required positionals with a default are a contradiction and
+  fail at schema-cache build time.
+
+**Precedence chain** (highest wins):
+
+```
+argv  >  env var (via `env = "..."`)  >  job-level YAML  >  root-level
+   YAML in sub-command fdl.yaml  >  env-overlay YAML (fdl.ci.yml, ...)
+      >  schema / struct default
+```
+
+The chain is collapsed at resolve time into a single value per field
+before exec. `fdl config show` annotates each resolved value with its
+source — which is how you debug "why is it using that value."
 
 ### fdl-side behavior
 
@@ -608,14 +724,22 @@ use flodl_args::{Args, parse_or_schema};
 /// DDP validation and benchmark suite for flodl.
 #[derive(Args, Debug)]
 struct Cli {
+    /// Optional run identifier to analyze (positional)
+    #[arg(completer = "ls runs/")]
+    run_id: Option<String>,
+
+    /// Extra tags to filter by (repeat or comma-separate)
+    #[option(short = 't')]
+    tags: Vec<String>,
+
     /// Run specific model (or "all")
-    #[arg(default = "all",
-          choices = &["logistic", "mlp", "lenet", "resnet", "resnet-graph",
-                      "char-rnn", "gpt-nano", "conv-ae", "all"])]
+    #[option(short = 'm', default = "all",
+             choices = &["logistic", "mlp", "lenet", "resnet", "resnet-graph",
+                         "char-rnn", "gpt-nano", "conv-ae", "all"])]
     model: String,
 
     /// Run specific DDP mode (or "all")
-    #[arg(default = "solo-0", choices = &DdpMode::ALL_NAMES)]
+    #[option(default = "solo-0", choices = &DdpMode::ALL_NAMES)]
     mode: String,
 
     /// Override epoch count
@@ -631,11 +755,11 @@ struct Cli {
     lr_scale: Option<f64>,
 
     /// Output directory
-    #[arg(default = "runs")]
+    #[option(default = "runs")]
     output: String,
 
     /// Dataset cache directory
-    #[arg(default = "data")]
+    #[option(default = "data")]
     data_dir: std::path::PathBuf,
 
     /// Live dashboard port
@@ -648,15 +772,15 @@ struct Cli {
     save_baseline: bool,
 
     /// Baseline file
-    #[arg(default = "baselines/baseline.json")]
+    #[option(default = "baselines/baseline.json")]
     baseline: std::path::PathBuf,
 
     /// Validation tolerance (0.0-1.0)
-    #[arg(default = 0.15)]
+    #[option(default = 0.15)]
     tolerance: f64,
 
     /// RNG seed
-    #[arg(default = 42)]
+    #[option(default = 42)]
     seed: u64,
 
     /// Analyze runs and print report (optional FILE to save)
@@ -684,19 +808,51 @@ fn run(cli: Cli) -> flodl::tensor::Result<()> {
 
 ### Conventions
 
-- Doc comments (`///`) become option descriptions.
+- Doc comments (`///`) become descriptions.
+- A plain field (no attribute) is an option with a long name derived
+  from the field name. This is the common case, so it stays
+  boilerplate-free.
 - `Option<T>` means "not required."
 - `bool` means "switch" (no value).
+- `Vec<T>` is a `list[T]` option (repeat `--key` or comma-separate).
 - `Option<Option<T>>` means "optional with optional value"
   (e.g. `--report` alone vs `--report foo.md`).
 - Field names snake_case in Rust, rendered as kebab-case in argv
   (`batch_size` -> `--batch-size`).
-- `#[arg(...)]` attributes:
-  - `default = <literal>` — explicit default
-  - `choices = &[...]` — allowed values (drives completion + validation)
-  - `name = "..."` — override the CLI name (rare)
-  - `short = 'x'` — add a short form (e.g. `-v`)
-  - `env = "..."` — read from environment variable when not in argv
+
+#### `#[option(...)]` — a flag (`--name` / `-n`)
+
+Maps to the JSON schema `options:` section. Attrs:
+
+- `default = <literal>` — explicit default
+- `choices = &[...]` — allowed values (drives completion + validation)
+- `name = "..."` — override the CLI name (rare)
+- `short = 'x'` — add a short alias (`-x`). Explicit only, no implicit
+  first-letter mapping.
+- `completer = "..."` — shell snippet producing completion values
+  (escape hatch beyond `choices` and `type: path`)
+- `env = "..."` — read from environment variable when not in argv
+
+#### `#[arg(...)]` — a positional
+
+Maps to the JSON schema `args:` section. Field order in the struct
+defines positional order. Attrs:
+
+- `default = <literal>` — explicit default (requires `Option<T>` or
+  equivalent to also be optional)
+- `choices = &[...]` — allowed values
+- `name = "..."` — override the `<name>` rendered in usage
+- `completer = "..."` — shell snippet producing completion values
+
+Guardrails (compile errors):
+- `short` is not valid on `#[arg]` (positionals have no short).
+- Only the last positional may be variadic (`Vec<T>`).
+- A required positional (`T`) cannot follow an optional one
+  (`Option<T>` or one with `default`).
+
+The derive emits the same collision checks as the JSON schema (reserved
+fdl flags, duplicate longs/shorts) — build fails at compile time rather
+than at runtime.
 
 ### What ddp-bench shrinks by
 
@@ -749,14 +905,20 @@ dependency in the binary beyond this one adapter call.
 
 ## Rollout order
 
-1. **Document the schema format.** This section, written down. Done.
-2. **fdl-side rendering.** `flodl-cli/src/run.rs` learns to render the
-   JSON schema as `--help` output; `completions.rs` picks up `choices`
-   and `type: path`. Schema still has to be written by hand in the YAML
-   as an interim step. ~200 LOC.
+1. **Document the schema format.** This section, written down. Includes
+   positional args, long/short variants, list values, collision rules.
+   Done.
+2. **fdl-side rendering + completions.** `flodl-cli/src/run.rs` renders
+   the JSON schema as `--help` output (command description, jobs, args,
+   options); `completions.rs` emits `fdl completions <shell>` for bash,
+   zsh, and fish, driven by the schema (`choices`, `type: path`,
+   `completer`). Help unification lands here too: drop `fdl help`, bare
+   `fdl` defaults to `--help`. Schema written by hand in YAML as the
+   interim source. ~300 LOC.
 3. **Schema-from-binary contract.** `flodl-cli` tries `<entry>
    --fdl-schema` before falling back to the YAML schema or parsed
-   `--help`. Cache under `.fdl/schema-cache/`. ~100 LOC.
+   `--help`. Cache under `.fdl/schema-cache/`, mtime-invalidated.
+   Collision check runs at cache build time. ~100 LOC.
 4. **`flodl-args` crate.** New workspace member. Derive macro +
    `parse_or_schema()`. The biggest chunk (~500-800 LOC depending on
    dep policy).

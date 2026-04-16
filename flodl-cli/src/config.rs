@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Root project config ─────────────────────────────────────────────────
 
@@ -83,6 +83,176 @@ pub struct CommandConfig {
     pub output: Option<OutputConfig>,
     #[serde(default)]
     pub jobs: BTreeMap<String, Job>,
+    /// Inline interim schema (before `<entry> --fdl-schema` is implemented).
+    /// Drives help rendering, validation, and completions.
+    #[serde(default)]
+    pub schema: Option<Schema>,
+}
+
+// ── Schema (interim hand-written, future `<entry> --fdl-schema`) ────────
+
+/// The schema declared inline in a sub-command's fdl.yaml. Maps 1:1 to
+/// what `<entry> --fdl-schema` will later emit as JSON.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Schema {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<ArgSpec>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, OptionSpec>,
+    /// When true, the fdl layer rejects options not declared in the schema.
+    /// Consumed once schema-aware argv validation lands (rollout step 3).
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[allow(dead_code)]
+    pub strict: bool,
+}
+
+/// A flag option, `--name` / `-x`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OptionSpec {
+    #[serde(rename = "type")]
+    pub ty: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<serde_json::Value>>,
+    /// Single-letter short alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    /// Shell snippet producing completion values.
+    /// Consumed by `fdl completions <shell>` (follow-up rollout task).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
+    pub completer: Option<String>,
+}
+
+/// A positional argument.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ArgSpec {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "default_required")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub variadic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<serde_json::Value>>,
+    /// Shell snippet producing completion values.
+    /// Consumed by `fdl completions <shell>` (follow-up rollout task).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
+    pub completer: Option<String>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn default_required() -> bool {
+    true
+}
+
+/// Flags reserved at the fdl level — no sub-command option may shadow them.
+/// Kept in sync with main.rs dispatch.
+const RESERVED_LONGS: &[&str] = &[
+    "help", "version", "quiet", "env",
+];
+const RESERVED_SHORTS: &[&str] = &[
+    "h", "V", "q", "v", "e",
+];
+const VALID_TYPES: &[&str] = &[
+    "string", "int", "float", "bool", "path",
+    "list[string]", "list[int]", "list[float]", "list[path]",
+];
+
+/// Check a schema for collisions and structural issues.
+///
+/// Loud-at-load-time: ambiguity caught here is cheaper to fix than mysterious
+/// pass-through behavior at runtime.
+pub fn validate_schema(schema: &Schema) -> Result<(), String> {
+    // Options: check types, shorts, reserved flags.
+    let mut short_seen: BTreeMap<String, String> = BTreeMap::new();
+    for (long, spec) in &schema.options {
+        if !VALID_TYPES.contains(&spec.ty.as_str()) {
+            return Err(format!(
+                "option --{}: unknown type '{}' (valid: {})",
+                long,
+                spec.ty,
+                VALID_TYPES.join(", ")
+            ));
+        }
+        if RESERVED_LONGS.contains(&long.as_str()) {
+            return Err(format!(
+                "option --{long} shadows a reserved fdl-level flag"
+            ));
+        }
+        if let Some(s) = &spec.short {
+            if s.chars().count() != 1 {
+                return Err(format!(
+                    "option --{long}: `short: \"{s}\"` must be a single character"
+                ));
+            }
+            if RESERVED_SHORTS.contains(&s.as_str()) {
+                return Err(format!(
+                    "option --{long}: short -{s} shadows a reserved fdl-level flag"
+                ));
+            }
+            if let Some(prev) = short_seen.insert(s.clone(), long.clone()) {
+                return Err(format!(
+                    "options --{prev} and --{long} both declare short -{s}"
+                ));
+            }
+        }
+    }
+
+    // Args: check types, variadic-only-at-end, no-required-after-optional.
+    let mut seen_optional = false;
+    let mut name_seen: BTreeMap<String, ()> = BTreeMap::new();
+    for (i, arg) in schema.args.iter().enumerate() {
+        if !VALID_TYPES.contains(&arg.ty.as_str()) {
+            return Err(format!(
+                "arg <{}>: unknown type '{}' (valid: {})",
+                arg.name,
+                arg.ty,
+                VALID_TYPES.join(", ")
+            ));
+        }
+        if name_seen.insert(arg.name.clone(), ()).is_some() {
+            return Err(format!("duplicate positional name <{}>", arg.name));
+        }
+        if arg.variadic && i != schema.args.len() - 1 {
+            return Err(format!(
+                "arg <{}>: variadic positional must be the last one",
+                arg.name
+            ));
+        }
+        let is_optional = !arg.required || arg.default.is_some();
+        if arg.required && arg.default.is_some() {
+            return Err(format!(
+                "arg <{}>: `required: true` with a default is a contradiction",
+                arg.name
+            ));
+        }
+        if seen_optional && arg.required && arg.default.is_none() {
+            return Err(format!(
+                "arg <{}>: required positional cannot follow an optional one",
+                arg.name
+            ));
+        }
+        if is_optional {
+            seen_optional = true;
+        }
+    }
+
+    Ok(())
 }
 
 // ── Structured config sections ──────────────────────────────────────────
@@ -229,35 +399,75 @@ pub fn load_project(path: &Path) -> Result<ProjectConfig, String> {
 
 /// Load a command config from a sub-directory.
 ///
-/// Applies the same `.example`/`.dist` fallback as [`find_config`].
+/// Applies the same `.example`/`.dist` fallback as [`find_config`]. If a
+/// `schema:` block is present, validates it before returning.
 pub fn load_command(dir: &Path) -> Result<CommandConfig, String> {
-    for name in CONFIG_NAMES {
-        let path = dir.join(name);
-        if path.is_file() {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
-            return parse(&content, &path);
-        }
-    }
-    // Fallback: try .example/.dist variants.
-    for name in CONFIG_NAMES {
-        for suffix in EXAMPLE_SUFFIXES {
-            let example = dir.join(format!("{name}{suffix}"));
-            if example.is_file() {
-                let target = dir.join(name);
-                if try_copy_example(&example, &target) {
-                    let content = std::fs::read_to_string(&target)
-                        .map_err(|e| format!("cannot read {}: {}", target.display(), e))?;
-                    return parse(&content, &target);
-                }
-                // User declined: load example directly.
-                let content = std::fs::read_to_string(&example)
-                    .map_err(|e| format!("cannot read {}: {}", example.display(), e))?;
-                return parse(&content, &example);
+    let mut cfg: CommandConfig = {
+        let mut found = None;
+        for name in CONFIG_NAMES {
+            let path = dir.join(name);
+            if path.is_file() {
+                let content = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+                found = Some(parse(&content, &path)?);
+                break;
             }
         }
+        if found.is_none() {
+            for name in CONFIG_NAMES {
+                for suffix in EXAMPLE_SUFFIXES {
+                    let example = dir.join(format!("{name}{suffix}"));
+                    if example.is_file() {
+                        let target = dir.join(name);
+                        let src = if try_copy_example(&example, &target) {
+                            target
+                        } else {
+                            example
+                        };
+                        let content = std::fs::read_to_string(&src)
+                            .map_err(|e| format!("cannot read {}: {}", src.display(), e))?;
+                        found = Some(parse(&content, &src)?);
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+        }
+        found.ok_or_else(|| format!("no fdl.yml found in {}", dir.display()))?
+    };
+
+    if let Some(schema) = &cfg.schema {
+        validate_schema(schema)
+            .map_err(|e| format!("schema error in {}/fdl.yml: {e}", dir.display()))?;
     }
-    Err(format!("no fdl.yml found in {}", dir.display()))
+
+    // Cache precedence: a valid, fresh cached schema (written by `fdl <cmd>
+    // --refresh-schema`) wins over the inline YAML schema. This lets a
+    // binary become the source of truth for its own surface once it opts
+    // into the `--fdl-schema` contract. A cache that is older than the
+    // command's fdl.yml is treated as stale and skipped — the inline
+    // schema (if any) reasserts until the user refreshes.
+    let cmd_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("_");
+    let cache = crate::schema_cache::cache_path(dir, cmd_name);
+    // Reference mtimes: config files that, when edited, might invalidate
+    // the cached schema (e.g. changing `entry:` to point somewhere else).
+    let refs: Vec<std::path::PathBuf> = CONFIG_NAMES
+        .iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.exists())
+        .collect();
+    if !crate::schema_cache::is_stale(&cache, &refs) {
+        if let Some(cached) = crate::schema_cache::read_cache(&cache) {
+            cfg.schema = Some(cached);
+        }
+    }
+
+    Ok(cfg)
 }
 
 /// Resolve a command path string (e.g. "ddp-bench/") to its short name.
@@ -381,6 +591,111 @@ mod tests {
             path.display()
         );
         load_project(&path).expect("fdl.yml.example must parse as a valid ProjectConfig")
+    }
+
+    fn opt(ty: &str) -> OptionSpec {
+        OptionSpec {
+            ty: ty.into(),
+            description: None,
+            default: None,
+            choices: None,
+            short: None,
+            env: None,
+            completer: None,
+        }
+    }
+
+    fn arg(name: &str, ty: &str) -> ArgSpec {
+        ArgSpec {
+            name: name.into(),
+            ty: ty.into(),
+            description: None,
+            required: true,
+            variadic: false,
+            default: None,
+            choices: None,
+            completer: None,
+        }
+    }
+
+    #[test]
+    fn validate_schema_accepts_minimal_valid() {
+        let mut s = Schema::default();
+        s.options.insert("model".into(), opt("string"));
+        s.options.insert("epochs".into(), opt("int"));
+        s.args.push(arg("run-id", "string"));
+        validate_schema(&s).expect("minimal valid schema must pass");
+    }
+
+    #[test]
+    fn validate_schema_rejects_unknown_option_type() {
+        let mut s = Schema::default();
+        s.options.insert("bad".into(), opt("integer"));
+        let err = validate_schema(&s).expect_err("unknown type should fail");
+        assert!(err.contains("unknown type"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_schema_rejects_reserved_long() {
+        let mut s = Schema::default();
+        s.options.insert("help".into(), opt("bool"));
+        let err = validate_schema(&s).expect_err("reserved --help must fail");
+        assert!(err.contains("reserved"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_schema_rejects_reserved_short() {
+        let mut s = Schema::default();
+        let mut o = opt("string");
+        o.short = Some("h".into());
+        s.options.insert("host".into(), o);
+        let err = validate_schema(&s).expect_err("short -h must fail");
+        assert!(err.contains("reserved"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_schema_rejects_duplicate_short() {
+        let mut s = Schema::default();
+        let mut a = opt("string");
+        a.short = Some("m".into());
+        let mut b = opt("string");
+        b.short = Some("m".into());
+        s.options.insert("model".into(), a);
+        s.options.insert("mode".into(), b);
+        let err = validate_schema(&s).expect_err("duplicate -m must fail");
+        assert!(err.contains("both declare short"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_schema_rejects_non_last_variadic() {
+        let mut s = Schema::default();
+        let mut first = arg("files", "string");
+        first.variadic = true;
+        s.args.push(first);
+        s.args.push(arg("trailer", "string"));
+        let err = validate_schema(&s).expect_err("variadic-not-last must fail");
+        assert!(err.contains("variadic"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_schema_rejects_required_after_optional() {
+        let mut s = Schema::default();
+        let mut first = arg("maybe", "string");
+        first.required = false;
+        s.args.push(first);
+        s.args.push(arg("need", "string"));
+        let err = validate_schema(&s).expect_err("required-after-optional must fail");
+        assert!(err.contains("cannot follow"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_schema_rejects_required_with_default() {
+        let mut s = Schema::default();
+        let mut a = arg("x", "string");
+        a.default = Some(serde_json::json!("foo"));
+        s.args.push(a);
+        let err = validate_schema(&s).expect_err("required+default must fail");
+        assert!(err.contains("contradiction"), "err was: {err}");
     }
 
     /// Regression guard: fdl.yml.example must keep a working `doc` script.
