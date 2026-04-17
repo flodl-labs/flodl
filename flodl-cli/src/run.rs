@@ -257,6 +257,19 @@ pub fn exec_command(
         }
     };
 
+    // Strict-mode pre-flight: reject unknown flags in the user's tail
+    // before spawning the binary. fdl-generated args (from the
+    // structured ddp/training/output blocks) are intentionally skipped
+    // — those are the binary's surface, not the user's.
+    if let Some(schema) = &cmd_config.schema {
+        if schema.strict {
+            if let Err(e) = config::validate_tail_strict(extra_args, schema) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     // Resolve config: preset overrides merged with root defaults.
     let resolved = match preset_name {
         Some(name) => match cmd_config.commands.get(name) {

@@ -630,7 +630,7 @@ Loud errors on any of:
   (`--help`, `-h`, `--env`, `-e`, `--list`, `--version`, `-V` when fdl
   reserves it, etc.)
 - a preset pins an option or arg that isn't declared in the schema
-  (only when `options.strict: true`, otherwise a warning)
+  (only when `schema.strict: true`, otherwise silently forwarded)
 
 Loud-at-build-time is the pattern from the env-overlay section: ambiguity
 is cheapest to fix the moment it's introduced.
@@ -717,14 +717,32 @@ keep working.
 
 ```yaml
 # sub-command fdl.yaml
-options:
-  strict: true   # reject unknown flags at the fdl level before invoking
+schema:
+  strict: true     # reject unknown flags at the fdl level before invoking
+  options: { ... } # the declared surface
+  args: [ ... ]
 ```
 
-Default behavior stays pass-through. `strict: true` validates the argv
-against the schema. This preserves "don't break working usage" — adding
-schema support to an existing command surfaces help without risking
-runtime rejections.
+Default behavior stays pass-through. `strict: true` turns on two
+complementary checks:
+
+- **Load time.** Every preset's `options:` keys must exist in
+  `schema.options`. Typos like `options: { batchsize: 32 }` when the
+  schema declares `batch-size` error out the moment the `fdl.yml` is
+  loaded, not later when the user runs the preset.
+- **Dispatch time.** The user's extra `argv` tail is tokenized against
+  the schema before the binary is invoked. Unknown flags are rejected
+  with a "did you mean `--...`?" suggestion (edit-distance ≤ 2).
+  Positional count and type coercion stay the binary's responsibility
+  — strict is scoped to option-level typos.
+
+Reserved universals (`--help`, `--version`, `--fdl-schema`,
+`--refresh-schema`) are always allowed through, even when they are not
+declared in `schema.options`.
+
+This preserves "don't break working usage" — adding a schema to an
+existing command surfaces help without enforcing anything until
+`strict: true` is added explicitly.
 
 ### Rendered help — the payoff
 
