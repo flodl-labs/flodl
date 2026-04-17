@@ -19,6 +19,16 @@ use std::collections::BTreeMap;
 pub struct ArgsSpec {
     pub options: Vec<OptionDecl>,
     pub positionals: Vec<PositionalDecl>,
+    /// When true, unknown long/short flags are silently skipped (the
+    /// token is consumed, no error is raised), and the required-
+    /// positional check is disabled. Used by fdl's non-strict tail
+    /// validation: the binary re-parses the argv itself, so fdl's job
+    /// is to enforce declared contracts (choices on known flags,
+    /// positional choices when unambiguous) without blocking
+    /// pass-through flags the author chose to allow.
+    ///
+    /// Defaults to false so derive binaries stay strict by default.
+    pub lenient_unknowns: bool,
 }
 
 /// Declaration of a single option (long flag, optionally with short alias).
@@ -101,9 +111,20 @@ pub fn parse(spec: &ArgsSpec, args: &[String]) -> Result<ParsedArgs, String> {
                 Some((n, v)) => (n, Some(v.to_string())),
                 None => (rest, None),
             };
-            let decl = find_long(spec, name)
-                .ok_or_else(|| unknown_long_error(spec, name))?;
-            i = consume_flag(decl, inline_value, args, i, &mut out)?;
+            match find_long(spec, name) {
+                Some(decl) => {
+                    i = consume_flag(decl, inline_value, args, i, &mut out)?;
+                }
+                None if spec.lenient_unknowns => {
+                    // Unknown flag tolerated: consume just this token.
+                    // We deliberately don't look ahead to consume a
+                    // value — fdl has no way to know whether the unknown
+                    // flag takes one, and the binary will re-parse the
+                    // forwarded tail authoritatively anyway.
+                    i += 1;
+                }
+                None => return Err(unknown_long_error(spec, name)),
+            }
             continue;
         }
 
@@ -118,15 +139,29 @@ pub fn parse(spec: &ArgsSpec, args: &[String]) -> Result<ParsedArgs, String> {
                     ));
                 }
                 let c = head.chars().next().unwrap();
-                let decl = find_short(spec, c)
-                    .ok_or_else(|| format!("unknown short flag `-{c}`"))?;
-                i = consume_flag(decl, Some(inline_value.to_string()), args, i, &mut out)?;
+                match find_short(spec, c) {
+                    Some(decl) => {
+                        i = consume_flag(decl, Some(inline_value.to_string()), args, i, &mut out)?;
+                    }
+                    None if spec.lenient_unknowns => {
+                        i += 1;
+                    }
+                    None => return Err(format!("unknown short flag `-{c}`")),
+                }
                 continue;
             }
             // Cluster: each char is an independent flag. Only the last
             // may take a value (consumes next arg); all before must be
             // presence-only (takes_value = false).
             let chars: Vec<char> = rest.chars().collect();
+            if spec.lenient_unknowns && chars.iter().any(|c| find_short(spec, *c).is_none()) {
+                // If any char in the cluster is unknown, we can't
+                // safely partition the cluster (unknown `takes_value`
+                // makes cluster interpretation ambiguous). Skip the
+                // whole token and let the binary handle it.
+                i += 1;
+                continue;
+            }
             for (pos, c) in chars.iter().enumerate() {
                 let decl = find_short(spec, *c)
                     .ok_or_else(|| format!("unknown short flag `-{c}`"))?;
@@ -155,11 +190,16 @@ pub fn parse(spec: &ArgsSpec, args: &[String]) -> Result<ParsedArgs, String> {
         i += 1;
     }
 
-    // Required positional check.
-    let required_count = spec.positionals.iter().filter(|p| p.required).count();
-    if out.positionals.len() < required_count {
-        let missing = &spec.positionals[out.positionals.len()].name;
-        return Err(format!("missing required argument <{missing}>"));
+    // Required positional check. Skipped in lenient mode: orphan unknown
+    // flags may have been silently dropped, so the collected positionals
+    // are an unreliable count of what the user actually wrote. The binary
+    // will re-check arity authoritatively.
+    if !spec.lenient_unknowns {
+        let required_count = spec.positionals.iter().filter(|p| p.required).count();
+        if out.positionals.len() < required_count {
+            let missing = &spec.positionals[out.positionals.len()].name;
+            return Err(format!("missing required argument <{missing}>"));
+        }
     }
 
     // Positional choice validation.
@@ -169,7 +209,7 @@ pub fn parse(spec: &ArgsSpec, args: &[String]) -> Result<ParsedArgs, String> {
             if let Some(choices) = &d.choices {
                 if !choices.iter().any(|c| c == value) {
                     return Err(format!(
-                        "invalid value `{value}` for <{}> — allowed: {}",
+                        "invalid value `{value}` for <{}> -- allowed: {}",
                         d.name,
                         choices.join(", ")
                     ));
@@ -239,7 +279,7 @@ fn record_option(
         for part in split_list_value(v) {
             if !choices.iter().any(|c| c == part) {
                 return Err(format!(
-                    "invalid value `{part}` for `--{}` — allowed: {}",
+                    "invalid value `{part}` for `--{}` -- allowed: {}",
                     decl.long,
                     choices.join(", ")
                 ));
@@ -404,6 +444,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![value("model", None, false)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["--model", "mlp"])).unwrap();
         match out.options.get("model") {
@@ -417,6 +458,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![value("model", None, false)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["--model=mlp"])).unwrap();
         match out.options.get("model") {
@@ -430,6 +472,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![value("report", None, false)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let err = parse(&spec, &argv(&["--report"])).unwrap_err();
         assert!(err.contains("requires a value"), "got: {err}");
@@ -440,6 +483,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![value("report", None, true)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["--report"])).unwrap();
         assert!(matches!(out.options.get("report"), Some(OptionState::BarePresent)));
@@ -450,6 +494,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![flag("validate", None)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["--validate"])).unwrap();
         assert!(matches!(out.options.get("validate"), Some(OptionState::BarePresent)));
@@ -460,6 +505,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![flag("validate", None)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let err = parse(&spec, &argv(&["--validate=yes"])).unwrap_err();
         assert!(err.contains("takes no value"), "got: {err}");
@@ -470,6 +516,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![flag("verbose", Some('v'))],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["-v"])).unwrap();
         assert!(matches!(out.options.get("verbose"), Some(OptionState::BarePresent)));
@@ -480,6 +527,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![flag("a", Some('a')), flag("b", Some('b'))],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["-ab"])).unwrap();
         assert!(out.options.contains_key("a"));
@@ -491,6 +539,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![flag("a", Some('a')), value("model", Some('m'), false)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["-am", "mlp"])).unwrap();
         assert!(out.options.contains_key("a"));
@@ -505,6 +554,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![list("tags", Some('t'))],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["--tags", "a,b", "-t", "c"])).unwrap();
         match out.options.get("tags") {
@@ -520,6 +570,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![],
             positionals: vec![pos("first", true, false), pos("second", false, false)],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["a", "b"])).unwrap();
         assert_eq!(out.positionals, vec!["a".to_string(), "b".into()]);
@@ -530,6 +581,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![],
             positionals: vec![pos("first", true, false)],
+            ..ArgsSpec::default()
         };
         let err = parse(&spec, &argv(&[])).unwrap_err();
         assert!(err.contains("missing required argument"), "got: {err}");
@@ -540,6 +592,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![],
             positionals: vec![pos("files", false, true)],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["a", "b", "c"])).unwrap();
         assert_eq!(out.positionals, vec!["a".to_string(), "b".into(), "c".into()]);
@@ -550,6 +603,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![flag("verbose", None)],
             positionals: vec![pos("rest", false, true)],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["--", "--verbose", "-x"])).unwrap();
         assert!(!out.options.contains_key("verbose"));
@@ -561,6 +615,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![value("model", None, false)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let err = parse(&spec, &argv(&["--modl", "mlp"])).unwrap_err();
         assert!(err.contains("did you mean"), "got: {err}");
@@ -573,6 +628,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![model],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let err = parse(&spec, &argv(&["--model", "foobar"])).unwrap_err();
         assert!(err.contains("allowed"), "got: {err}");
@@ -583,6 +639,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![],
             positionals: vec![pos("target", true, false)],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["-"])).unwrap();
         assert_eq!(out.positionals, vec!["-".to_string()]);
@@ -593,6 +650,7 @@ mod tests {
         let spec = ArgsSpec {
             options: vec![value("model", None, false)],
             positionals: vec![],
+            ..ArgsSpec::default()
         };
         let out = parse(&spec, &argv(&["--model", "a", "--model", "b"])).unwrap();
         match out.options.get("model") {

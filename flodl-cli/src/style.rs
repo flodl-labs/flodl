@@ -115,6 +115,23 @@ pub fn dim(s: &str) -> String {
     }
 }
 
+pub fn red(s: &str) -> String {
+    if color_enabled() {
+        format!("\x1b[31m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Print a red-prefixed `error: <msg>` line to stderr.
+///
+/// Used via the [`crate::cli_error`] macro at call sites — the free
+/// function is kept public so external tooling or tests can build the
+/// same prefix without going through the macro.
+pub fn print_cli_error(msg: impl std::fmt::Display) {
+    eprintln!("{}: {msg}", red("error"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

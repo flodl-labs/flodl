@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+use crate::cli_error;
 use crate::config::{self, CommandConfig, CommandKind, OptionSpec, ProjectConfig};
 use crate::style;
 
@@ -25,6 +26,8 @@ const BUILTINS: &[&str] = &[
     "install",
     "skill",
     "api-ref",
+    "config",
+    "schema",
     "completions",
     "autocomplete",
     "version",
@@ -35,9 +38,41 @@ const LIBTORCH_SUBS: &[&str] = &[
     "download", "build", "list", "activate", "remove", "info",
 ];
 
+/// Hard-coded schema sub-commands.
+const SCHEMA_SUBS: &[&str] = &["list", "clear", "refresh"];
+
+/// Hard-coded skill sub-commands.
+const SKILL_SUBS: &[&str] = &["install", "list"];
+
+/// Hard-coded config sub-commands.
+const CONFIG_SUBS: &[&str] = &["show"];
+
+/// Flag lists for built-in commands, hand-mirrored from the `FdlArgs`
+/// structs in `main.rs`. Each entry maps a command path to its flag
+/// set. The completion generator emits one rule per path, offering
+/// these flags (plus `--help` / `-h`) once the user has typed the
+/// full path.
+///
+/// Today this covers only single-level built-ins; nested built-in
+/// sub-commands (`libtorch download`, `schema list`, ...) still fall
+/// back to just their sub-command names. Extend the table + emitters
+/// when the pattern needs to reach deeper.
+///
+/// TODO: once the `main.rs` builtin structs move to `lib.rs`, drive
+/// this from `<Struct>::schema()` directly to avoid drift.
+const BUILTIN_FLAGS: &[(&str, &[&str])] = &[
+    ("setup", &["-y", "--non-interactive", "--force"]),
+    ("diagnose", &["--json"]),
+    ("init", &["--docker"]),
+    ("install", &["--check", "--dev"]),
+    ("api-ref", &["--json", "--path"]),
+];
+
 /// Reserved top-level flags, always offered at every position.
 const TOP_FLAGS: &[&str] = &[
     "--help", "-h", "--version", "-V",
+    "--env",
+    "--ansi", "--no-ansi",
     "-v", "-vv", "-vvv", "--quiet", "-q",
 ];
 
@@ -279,7 +314,7 @@ pub fn autocomplete(project: Option<(&ProjectConfig, &Path)>) {
             );
             let cleaned = remove_completion_block(&content);
             if let Err(e) = std::fs::write(&rc_path, cleaned) {
-                eprintln!("error: cannot write {rc_path}: {e}");
+                cli_error!("cannot write {rc_path}: {e}");
                 return;
             }
         }
@@ -306,12 +341,12 @@ pub fn autocomplete(project: Option<(&ProjectConfig, &Path)>) {
         Ok(mut file) => {
             use std::io::Write;
             if let Err(e) = file.write_all(block.as_bytes()) {
-                eprintln!("error: cannot append to {rc_path}: {e}");
+                cli_error!("cannot append to {rc_path}: {e}");
                 return;
             }
         }
         Err(e) => {
-            eprintln!("error: cannot open {rc_path}: {e}");
+            cli_error!("cannot open {rc_path}: {e}");
             return;
         }
     }
@@ -461,14 +496,44 @@ fn emit_bash(data: &CompletionData) -> String {
         s.push_str("    fi\n");
     }
 
-    // libtorch sub-commands.
-    s.push_str("\n    if [[ \"$cmd\" == \"libtorch\" && $COMP_CWORD -eq 2 ]]; then\n");
-    s.push_str(&format!(
-        "        COMPREPLY=($(compgen -W \"{}\" -- \"$cur\"))\n",
-        LIBTORCH_SUBS.join(" ")
-    ));
-    s.push_str("        return\n");
-    s.push_str("    fi\n");
+    // Built-in second-level sub-commands. Same shape: when the user
+    // has typed `fdl <builtin>` and is on the next word, offer the
+    // sub-command list. Hard-coded today; would be nice to drive from
+    // a single registry once the built-ins migrate to derive-based
+    // schemas like the project commands do.
+    for (parent, subs) in [
+        ("libtorch", LIBTORCH_SUBS),
+        ("schema", SCHEMA_SUBS),
+        ("skill", SKILL_SUBS),
+        ("config", CONFIG_SUBS),
+    ] {
+        s.push_str(&format!(
+            "\n    if [[ \"$cmd\" == \"{parent}\" && $COMP_CWORD -eq 2 ]]; then\n"
+        ));
+        s.push_str(&format!(
+            "        COMPREPLY=($(compgen -W \"{}\" -- \"$cur\"))\n",
+            subs.join(" ")
+        ));
+        s.push_str("        return\n");
+        s.push_str("    fi\n");
+    }
+
+    // Single-level builtin flag completion. Once the user is past
+    // position 1 for a flag-carrying builtin (install, setup, ...)
+    // offer that builtin's flags plus --help / -h.
+    for (name, flags) in BUILTIN_FLAGS {
+        let mut flag_list: Vec<&str> = flags.to_vec();
+        flag_list.extend_from_slice(&["--help", "-h"]);
+        let joined = flag_list.join(" ");
+        s.push_str(&format!(
+            "\n    if [[ \"$cmd\" == \"{name}\" && $COMP_CWORD -ge 2 ]]; then\n"
+        ));
+        s.push_str(&format!(
+            "        COMPREPLY=($(compgen -W \"{joined}\" -- \"$cur\"))\n"
+        ));
+        s.push_str("        return\n");
+        s.push_str("    fi\n");
+    }
 
     s.push_str("}\n");
     s.push_str("complete -F _fdl_completions fdl\n");
@@ -590,17 +655,40 @@ fn emit_zsh(data: &CompletionData) -> String {
         s.push_str("            ;;\n");
     }
 
-    // libtorch sub-commands.
-    s.push_str("        libtorch)\n");
-    s.push_str("            if (( CURRENT == 3 )); then\n");
-    s.push_str("                local -a subcmds\n");
-    s.push_str(&format!(
-        "                subcmds=({})\n",
-        LIBTORCH_SUBS.join(" ")
-    ));
-    s.push_str("                _describe 'subcommand' subcmds\n");
-    s.push_str("            fi\n");
-    s.push_str("            ;;\n");
+    // Built-in second-level sub-commands.
+    for (parent, subs) in [
+        ("libtorch", LIBTORCH_SUBS),
+        ("schema", SCHEMA_SUBS),
+        ("skill", SKILL_SUBS),
+        ("config", CONFIG_SUBS),
+    ] {
+        s.push_str(&format!("        {parent})\n"));
+        s.push_str("            if (( CURRENT == 3 )); then\n");
+        s.push_str("                local -a subcmds\n");
+        s.push_str(&format!(
+            "                subcmds=({})\n",
+            subs.join(" ")
+        ));
+        s.push_str("                _describe 'subcommand' subcmds\n");
+        s.push_str("            fi\n");
+        s.push_str("            ;;\n");
+    }
+
+    // Single-level builtin flags.
+    for (name, flags) in BUILTIN_FLAGS {
+        let mut flag_list: Vec<&str> = flags.to_vec();
+        flag_list.extend_from_slice(&["--help", "-h"]);
+        s.push_str(&format!("        {name})\n"));
+        s.push_str(&format!(
+            "            _values 'option' {}\n",
+            flag_list
+                .iter()
+                .map(|f| format!("'{f}'"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        s.push_str("            ;;\n");
+    }
     s.push_str("    esac\n");
 
     s.push_str("}\n");
@@ -695,12 +783,35 @@ fn emit_fish(data: &CompletionData) -> String {
         s.push('\n');
     }
 
-    // libtorch sub-commands.
-    s.push_str("# libtorch\n");
-    for sub in LIBTORCH_SUBS {
-        s.push_str(&format!(
-            "complete -c fdl -n '__fish_seen_subcommand_from libtorch' -a '{sub}'\n"
-        ));
+    // Built-in second-level sub-commands.
+    for (parent, subs) in [
+        ("libtorch", LIBTORCH_SUBS),
+        ("schema", SCHEMA_SUBS),
+        ("skill", SKILL_SUBS),
+        ("config", CONFIG_SUBS),
+    ] {
+        s.push_str(&format!("# {parent}\n"));
+        for sub in subs {
+            s.push_str(&format!(
+                "complete -c fdl -n '__fish_seen_subcommand_from {parent}' -a '{sub}'\n"
+            ));
+        }
+    }
+
+    // Single-level builtin flags.
+    for (name, flags) in BUILTIN_FLAGS {
+        s.push_str(&format!("# {name}\n"));
+        for f in *flags {
+            if let Some(long) = f.strip_prefix("--") {
+                s.push_str(&format!(
+                    "complete -c fdl -n '__fish_seen_subcommand_from {name}' -l {long}\n"
+                ));
+            } else if let Some(short) = f.strip_prefix('-') {
+                s.push_str(&format!(
+                    "complete -c fdl -n '__fish_seen_subcommand_from {name}' -s {short}\n"
+                ));
+            }
+        }
     }
 
     s

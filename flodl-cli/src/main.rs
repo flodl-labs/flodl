@@ -7,8 +7,8 @@
 //! is managed under `~/.flodl/` (override with `$FLODL_HOME`).
 
 use flodl_cli::{
-    api_ref, completions, config, context, diagnose, dispatch, init, libtorch,
-    overlay, parse_or_schema_from, run, schema_cache, setup, skill, style, util, FdlArgs,
+    api_ref, cli_error, completions, config, context, diagnose, dispatch, init, libtorch,
+    overlay, parse_or_schema_from, run, schema, schema_cache, setup, skill, style, util, FdlArgs,
 };
 
 use dispatch::{walk_commands, WalkOutcome};
@@ -153,6 +153,30 @@ struct SkillInstallArgs {
     skill: Option<String>,
 }
 
+/// List cached `--fdl-schema` outputs.
+#[derive(FdlArgs, Debug)]
+struct SchemaListArgs {
+    /// Emit machine-readable JSON.
+    #[option]
+    json: bool,
+}
+
+/// Clear cached schemas. No command name clears all.
+#[derive(FdlArgs, Debug)]
+struct SchemaClearArgs {
+    /// Command name to clear (defaults to all).
+    #[arg]
+    cmd: Option<String>,
+}
+
+/// Re-probe each entry and rewrite the cache.
+#[derive(FdlArgs, Debug)]
+struct SchemaRefreshArgs {
+    /// Command name to refresh (defaults to all).
+    #[arg]
+    cmd: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -190,7 +214,7 @@ fn main() -> ExitCode {
             args
         }
         Err(msg) => {
-            eprintln!("error: {msg}");
+            cli_error!("{msg}");
             return ExitCode::FAILURE;
         }
     };
@@ -215,7 +239,7 @@ fn main() -> ExitCode {
     let (active_env, args) = match resolve_env(&args, &cwd, fdl_env_var.as_deref()) {
         Ok(pair) => pair,
         Err(msg) => {
-            eprintln!("error: {msg}");
+            cli_error!("{msg}");
             return ExitCode::FAILURE;
         }
     };
@@ -233,7 +257,7 @@ fn main() -> ExitCode {
             match setup::run(opts) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    cli_error!("{e}");
                     ExitCode::FAILURE
                 }
             }
@@ -249,7 +273,7 @@ fn main() -> ExitCode {
             match api_ref::run(cli.json, cli.path.as_deref()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    cli_error!("{e}");
                     ExitCode::FAILURE
                 }
             }
@@ -259,7 +283,7 @@ fn main() -> ExitCode {
             match init::run(cli.name.as_deref(), cli.docker) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    cli_error!("{e}");
                     ExitCode::FAILURE
                 }
             }
@@ -269,6 +293,7 @@ fn main() -> ExitCode {
             cmd_install(cli.check, cli.dev)
         }
         "skill" => dispatch_skill(&args),
+        "schema" => dispatch_schema(&args),
         "completions" => {
             let shell = args.get(2).map(String::as_str).unwrap_or("bash");
             let cwd = env::current_dir().unwrap_or_default();
@@ -520,7 +545,7 @@ fn dispatch_skill(args: &[String]) -> ExitCode {
             match skill::install(cli.tool.as_deref(), cli.skill.as_deref()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    cli_error!("{e}");
                     ExitCode::FAILURE
                 }
             }
@@ -539,6 +564,214 @@ fn dispatch_skill(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// schema dispatch
+// ---------------------------------------------------------------------------
+
+fn dispatch_schema(args: &[String]) -> ExitCode {
+    let sub = args.get(2).map(String::as_str).unwrap_or("--help");
+    match sub {
+        "list" => {
+            let cli: SchemaListArgs = parse_sub("fdl schema list", &args[2..]);
+            cmd_schema_list(cli.json)
+        }
+        "clear" => {
+            let cli: SchemaClearArgs = parse_sub("fdl schema clear", &args[2..]);
+            cmd_schema_clear(cli.cmd.as_deref())
+        }
+        "refresh" => {
+            let cli: SchemaRefreshArgs = parse_sub("fdl schema refresh", &args[2..]);
+            cmd_schema_refresh(cli.cmd.as_deref())
+        }
+        "--help" | "-h" => {
+            print_schema_usage();
+            ExitCode::SUCCESS
+        }
+        other => {
+            cli_error!("unknown schema command: {other}");
+            eprintln!();
+            print_schema_usage();
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_schema_list(json: bool) -> ExitCode {
+    let Some(root) = project_root_for_schema() else {
+        cli_error!("no fdl.yml found in {} or parent directories", env::current_dir().unwrap_or_default().display());
+        return ExitCode::FAILURE;
+    };
+    let caches = schema::discover_caches(&root);
+
+    if json {
+        // Keep JSON minimal and stable: array of {name, path, status}.
+        print!("[");
+        for (i, c) in caches.iter().enumerate() {
+            if i > 0 {
+                print!(",");
+            }
+            let rel = c
+                .cache_path
+                .strip_prefix(&root)
+                .unwrap_or(&c.cache_path);
+            print!(
+                "{{\"name\":\"{}\",\"path\":\"{}\",\"status\":\"{}\"}}",
+                util::system::escape_json(&c.cmd_name),
+                util::system::escape_json(&rel.to_string_lossy()),
+                match c.status() {
+                    schema::CacheStatus::Fresh => "fresh",
+                    schema::CacheStatus::Stale => "stale",
+                    schema::CacheStatus::Orphan => "orphan",
+                }
+            );
+        }
+        println!("]");
+        return ExitCode::SUCCESS;
+    }
+
+    if caches.is_empty() {
+        println!("No cached schemas under {}.", root.display());
+        println!("Run `fdl <cmd> --refresh-schema` after building to populate.");
+        return ExitCode::SUCCESS;
+    }
+
+    println!("{}:", style::yellow("Cached schemas"));
+    for c in &caches {
+        let rel = c.cache_path.strip_prefix(&root).unwrap_or(&c.cache_path);
+        let status_label = match c.status() {
+            schema::CacheStatus::Fresh => style::green("fresh"),
+            schema::CacheStatus::Stale => style::yellow("stale"),
+            schema::CacheStatus::Orphan => style::red("orphan"),
+        };
+        println!(
+            "    {}  {}  [{status_label}]",
+            style::green(&format!("{:<18}", c.cmd_name)),
+            style::dim(&rel.display().to_string()),
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_schema_clear(filter: Option<&str>) -> ExitCode {
+    let Some(root) = project_root_for_schema() else {
+        cli_error!("no fdl.yml found in {} or parent directories", env::current_dir().unwrap_or_default().display());
+        return ExitCode::FAILURE;
+    };
+    match schema::clear_caches(&root, filter) {
+        Ok(removed) if removed.is_empty() => {
+            match filter {
+                Some(name) => println!("No cached schema for `{name}`."),
+                None => println!("No cached schemas to clear."),
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(removed) => {
+            for p in &removed {
+                let rel = p.strip_prefix(&root).unwrap_or(p);
+                println!("Removed {}", rel.display());
+            }
+            println!();
+            println!("Cleared {} cache file(s).", removed.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            cli_error!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_schema_refresh(filter: Option<&str>) -> ExitCode {
+    let Some(root) = project_root_for_schema() else {
+        cli_error!("no fdl.yml found in {} or parent directories", env::current_dir().unwrap_or_default().display());
+        return ExitCode::FAILURE;
+    };
+    let results = match schema::refresh_caches(&root, filter) {
+        Ok(r) => r,
+        Err(e) => {
+            cli_error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if results.is_empty() {
+        match filter {
+            Some(name) => println!("No cached schema for `{name}`."),
+            None => println!("No cached schemas to refresh."),
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    for r in &results {
+        let rel = r.cache_path.strip_prefix(&root).unwrap_or(&r.cache_path);
+        match &r.outcome {
+            Ok(()) => {
+                ok += 1;
+                println!(
+                    "{}  {}  [{}]",
+                    style::green(&format!("{:<18}", r.cmd_name)),
+                    style::dim(&rel.display().to_string()),
+                    style::green("refreshed"),
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                println!(
+                    "{}  {}  [{}]",
+                    style::green(&format!("{:<18}", r.cmd_name)),
+                    style::dim(&rel.display().to_string()),
+                    style::red("failed"),
+                );
+                println!("    {e}");
+            }
+        }
+    }
+    println!();
+    println!("Refreshed {ok}, failed {failed}.");
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Resolve the project root (dir of nearest `fdl.yml`) for schema ops.
+/// All three sub-commands need it; factored here so each helper can
+/// cli_error! + return on missing config with one call.
+fn project_root_for_schema() -> Option<std::path::PathBuf> {
+    let cwd = env::current_dir().unwrap_or_default();
+    let base = config::find_config(&cwd)?;
+    base.parent().map(|p| p.to_path_buf())
+}
+
+fn print_schema_usage() {
+    println!("fdl schema -- inspect, clear, or refresh cached --fdl-schema outputs");
+    println!();
+    println!("{}:", style::yellow("Usage"));
+    println!("    fdl schema list [--json]");
+    println!("    fdl schema clear [<cmd>]");
+    println!("    fdl schema refresh [<cmd>]");
+    println!();
+    println!("{}:", style::yellow("Commands"));
+    println!(
+        "    {}  Show every cached schema with fresh/stale/orphan status",
+        style::green(&format!("{:<10}", "list"))
+    );
+    println!(
+        "    {}  Delete cached schema(s). No arg clears all; `<cmd>` clears one",
+        style::green(&format!("{:<10}", "clear"))
+    );
+    println!(
+        "    {}  Re-probe each entry's --fdl-schema and overwrite the cache",
+        style::green(&format!("{:<10}", "refresh"))
+    );
+    println!();
+    println!("Cached schemas live at `<cmd-dir>/.fdl/schema-cache/<cmd>.json`.");
+    println!("Cargo entries must be built before `refresh` (`cargo build ...`).");
 }
 
 // ---------------------------------------------------------------------------
@@ -628,7 +861,7 @@ fn cmd_libtorch_activate(variant: Option<&str>) -> ExitCode {
     };
 
     if !libtorch::detect::is_valid_variant(root, variant) {
-        eprintln!("error: '{variant}' is not a valid libtorch variant");
+        cli_error!("'{variant}' is not a valid libtorch variant");
         eprintln!("  Expected: libtorch/{variant}/lib/ to exist");
         eprintln!();
         eprintln!("Available variants:");
@@ -644,7 +877,7 @@ fn cmd_libtorch_activate(variant: Option<&str>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -656,7 +889,7 @@ fn cmd_libtorch_download(cli: LibtorchDownloadArgs) -> ExitCode {
 
     // --cpu and --cuda are mutually exclusive.
     if cli.cpu && cli.cuda.is_some() {
-        eprintln!("error: --cpu and --cuda are mutually exclusive");
+        cli_error!("--cpu and --cuda are mutually exclusive");
         return ExitCode::FAILURE;
     }
 
@@ -681,7 +914,7 @@ fn cmd_libtorch_download(cli: LibtorchDownloadArgs) -> ExitCode {
     match libtorch::download::run(opts) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -691,13 +924,13 @@ fn cmd_libtorch_build(cli: LibtorchBuildArgs) -> ExitCode {
     use libtorch::build::{BuildBackend, BuildOpts};
 
     if cli.jobs == 0 {
-        eprintln!("error: --jobs must be a positive number");
+        cli_error!("--jobs must be a positive number");
         return ExitCode::FAILURE;
     }
 
     // --docker and --native are mutually exclusive; absent -> Auto.
     if cli.docker && cli.native {
-        eprintln!("error: --docker and --native are mutually exclusive");
+        cli_error!("--docker and --native are mutually exclusive");
         return ExitCode::FAILURE;
     }
 
@@ -719,7 +952,7 @@ fn cmd_libtorch_build(cli: LibtorchBuildArgs) -> ExitCode {
     match libtorch::build::run(opts) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -744,7 +977,7 @@ fn cmd_libtorch_remove(variant: Option<&str>) -> ExitCode {
     match libtorch::manage::remove_variant(root, variant) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -763,7 +996,7 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
     let self_path = match env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: cannot determine own binary path: {e}");
+            cli_error!("cannot determine own binary path: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -771,7 +1004,7 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
     let home = match env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
         Some(h) => PathBuf::from(h),
         None => {
-            eprintln!("error: cannot determine home directory");
+            cli_error!("cannot determine home directory");
             return ExitCode::FAILURE;
         }
     };
@@ -805,7 +1038,7 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
 
     // Create ~/.local/bin/ if needed
     if let Err(e) = std::fs::create_dir_all(&bin_dir) {
-        eprintln!("error: cannot create {}: {}", bin_dir.display(), e);
+        cli_error!("cannot create {}: {}", bin_dir.display(), e);
         return ExitCode::FAILURE;
     }
 
@@ -873,7 +1106,7 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
                     println!("Rebuild with: cargo install --path flodl-cli (or `fdl self-build`).");
                 }
                 Err(e) => {
-                    eprintln!("error: symlink failed: {e}");
+                    cli_error!("symlink failed: {e}");
                     return ExitCode::FAILURE;
                 }
             }
@@ -970,7 +1203,7 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
 
     // Copy
     if let Err(e) = std::fs::copy(&source_path, &dest) {
-        eprintln!("error: {e}");
+        cli_error!("{e}");
         return ExitCode::FAILURE;
     }
 
@@ -1094,12 +1327,15 @@ const BUILTINS: &[(&str, &str)] = &[
     ("skill", "Manage AI coding assistant skills"),
     ("api-ref", "Generate flodl API reference"),
     ("config", "Inspect resolved project configuration"),
+    ("schema", "Inspect, clear, or refresh cached --fdl-schema outputs"),
+    ("completions", "Emit shell completion script (bash|zsh|fish)"),
+    ("autocomplete", "Install completions into the detected shell"),
 ];
 
 /// Reserved top-level names that don't appear in the help banner
-/// (internal or already covered elsewhere) but must still be treated as
+/// (already covered by `--version`/`-V`) but must still be treated as
 /// builtins for first-arg env-collision detection.
-const HIDDEN_BUILTINS: &[&str] = &["completions", "autocomplete", "version"];
+const HIDDEN_BUILTINS: &[&str] = &["version"];
 
 fn load_project_config(
     cwd: &std::path::Path,
@@ -1179,7 +1415,7 @@ fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
             ExitCode::FAILURE
         }
         WalkOutcome::Error(msg) => {
-            eprintln!("error: {msg}");
+            cli_error!("{msg}");
             ExitCode::FAILURE
         }
     }
@@ -1214,7 +1450,7 @@ fn cmd_config_show(tail: &[String], active_env: Option<&str>) -> ExitCode {
     let base = match config::find_config(&cwd) {
         Some(p) => p,
         None => {
-            eprintln!("error: no fdl.yml found in {} or parent directories", cwd.display());
+            cli_error!("no fdl.yml found in {} or parent directories", cwd.display());
             return ExitCode::FAILURE;
         }
     };
@@ -1226,7 +1462,7 @@ fn cmd_config_show(tail: &[String], active_env: Option<&str>) -> ExitCode {
     let layers = match config::resolve_config_layers(&base, target_env) {
         Ok(ls) => ls,
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             return ExitCode::FAILURE;
         }
     };
@@ -1285,7 +1521,7 @@ fn cmd_refresh_schema(
     let schema = match schema_cache::probe(entry, cmd_dir) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             if schema_cache::is_cargo_entry(entry) {
                 eprintln!();
                 eprintln!("Hint: cargo-based entries must be built first.");
@@ -1297,7 +1533,7 @@ fn cmd_refresh_schema(
 
     let cache = schema_cache::cache_path(cmd_dir, cmd_name);
     if let Err(e) = schema_cache::write_cache(&cache, &schema) {
-        eprintln!("error: {e}");
+        cli_error!("{e}");
         return ExitCode::FAILURE;
     }
     eprintln!("Cached schema for `{cmd_name}` at {}", cache.display());

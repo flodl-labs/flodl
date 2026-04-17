@@ -484,6 +484,10 @@ fn build_spec_expr(fields: &[FieldSpec]) -> TokenStream2 {
         ::flodl_cli::args::parser::ArgsSpec {
             options: vec![ #( #opts ),* ],
             positionals: vec![ #( #positionals ),* ],
+            // Derive-parsed CLIs are authoritative about their own
+            // surface — unknown flags are programmer errors, not
+            // legitimate pass-through. Stay strict.
+            lenient_unknowns: false,
         }
     }
 }

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
 
+use crate::cli_error;
 use crate::config::{self, ArgSpec, CommandConfig, OptionSpec, ResolvedConfig, Schema};
 use crate::libtorch;
 use crate::style;
@@ -191,7 +192,7 @@ fn spawn_docker_shell(command: &str, project_root: &Path) -> ExitCode {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             ExitCode::FAILURE
         }
     }
@@ -225,7 +226,7 @@ pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> E
                 Ok(s) if s.success() => ExitCode::SUCCESS,
                 Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    cli_error!("{e}");
                     ExitCode::FAILURE
                 }
             }
@@ -257,25 +258,38 @@ pub fn exec_command(
         }
     };
 
-    // Strict-mode pre-flight: reject unknown flags in the user's tail
-    // before spawning the binary. fdl-generated args (from the
-    // structured ddp/training/output blocks) are intentionally skipped
-    // — those are the binary's surface, not the user's.
+    // Tail validation pre-flight. Runs whenever a schema is present:
+    // - `choices:` on declared options → always enforced.
+    // - Unknown flags → rejected only when `schema.strict` is set
+    //   (lenient mode tolerates pass-through flags the binary may
+    //   consume directly).
+    // fdl-generated args (from the structured ddp/training/output
+    // blocks) are intentionally skipped — those are the binary's
+    // surface, not the user's.
     if let Some(schema) = &cmd_config.schema {
-        if schema.strict {
-            if let Err(e) = config::validate_tail_strict(extra_args, schema) {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
-            }
+        if let Err(e) = config::validate_tail(extra_args, schema) {
+            cli_error!("{e}");
+            return ExitCode::FAILURE;
         }
     }
 
     // Resolve config: preset overrides merged with root defaults.
     let resolved = match preset_name {
         Some(name) => match cmd_config.commands.get(name) {
-            Some(preset) => config::merge_preset(cmd_config, preset),
+            Some(preset) => {
+                // Validate *this* preset only (choices + strict unknowns).
+                // Whole-map validation is deferred so a broken sibling
+                // preset doesn't block a correct one from running.
+                if let Some(schema) = &cmd_config.schema {
+                    if let Err(e) = config::validate_preset_for_exec(name, preset, schema) {
+                        cli_error!("{e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                config::merge_preset(cmd_config, preset)
+            }
             None => {
-                eprintln!("error: unknown command '{name}'");
+                cli_error!("unknown command '{name}'");
                 eprintln!();
                 print_command_help(cmd_config, "");
                 return ExitCode::FAILURE;
@@ -319,7 +333,7 @@ pub fn exec_command(
         // Direct execution (inside container or no docker configured).
         let parts: Vec<&str> = entry.split_whitespace().collect();
         if parts.is_empty() {
-            eprintln!("error: empty entry point");
+            cli_error!("empty entry point");
             return ExitCode::FAILURE;
         }
         let program = parts[0];
@@ -342,7 +356,7 @@ pub fn exec_command(
             Ok(s) if s.success() => ExitCode::SUCCESS,
             Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
             Err(e) => {
-                eprintln!("error: failed to execute '{program}': {e}");
+                cli_error!("failed to execute '{program}': {e}");
                 ExitCode::FAILURE
             }
         }

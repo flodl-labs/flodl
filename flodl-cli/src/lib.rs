@@ -44,11 +44,24 @@ pub mod init;
 pub mod libtorch;
 pub mod overlay;
 pub mod run;
+pub mod schema;
 pub mod schema_cache;
 pub mod setup;
 pub mod skill;
 pub mod style;
 pub mod util;
+
+/// Print a red-prefixed `error: <formatted>` line to stderr.
+///
+/// Takes standard `format!` arguments. Coloring follows the `--ansi` /
+/// `--no-ansi` / `NO_COLOR` / `FORCE_COLOR` chain via
+/// [`style::color_enabled`], so pipes stay plain automatically.
+#[macro_export]
+macro_rules! cli_error {
+    ($($arg:tt)*) => {
+        $crate::style::print_cli_error(format_args!($($arg)*))
+    };
+}
 
 // ── Public API for binary authors ──────────────────────────────────────
 

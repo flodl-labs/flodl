@@ -225,12 +225,21 @@ pub struct Schema {
     ///    A typo like `options: { batchsize: 32 }` when the schema
     ///    declares `batch-size` is a loud load error.
     /// 2. *Dispatch time* — the user's extra argv tail is tokenized
-    ///    against the schema (see [`validate_tail_strict`]). Unknown
-    ///    flags error out with a "did you mean" suggestion instead of
-    ///    being silently forwarded.
+    ///    against the schema (see [`validate_tail`]). Unknown flags
+    ///    error out with a "did you mean" suggestion instead of being
+    ///    silently forwarded.
     ///
-    /// Positional count and type validation stay the binary's
-    /// responsibility — strict mode only catches option-level typos.
+    /// **Validation NOT gated by `strict`** — always-on for declared
+    /// items, so positive assertions from the schema always hold:
+    /// - `choices:` on options: the user's value and any preset YAML
+    ///   value must be in the list.
+    /// - `choices:` on positional args: the user's value must be in
+    ///   the list (when strict is off, this may mis-fire if unknown
+    ///   flags push orphan values into positional slots — opt into
+    ///   strict for clean positional handling).
+    ///
+    /// `strict` is purely about **unknown** options/args, not about
+    /// validating declared contracts.
     #[serde(default, skip_serializing_if = "is_false")]
     pub strict: bool,
 }
@@ -649,10 +658,11 @@ pub fn load_command_with_env(dir: &Path, env: Option<&str>) -> Result<CommandCon
     if let Some(schema) = &cfg.schema {
         validate_schema(schema)
             .map_err(|e| format!("schema error in {}/fdl.yml: {e}", dir.display()))?;
-        if schema.strict {
-            validate_presets_strict(&cfg.commands, schema)
-                .map_err(|e| format!("strict error in {}/fdl.yml: {e}", dir.display()))?;
-        }
+        // Preset validation (choice values + strict unknown-key rejection)
+        // is intentionally deferred to the exec path. Load-time validation
+        // would block `fdl <cmd> --help` whenever ANY preset in the config
+        // has a typo — worse UX than letting help render and erroring only
+        // when the broken preset is actually invoked.
     }
 
     // Cache precedence: a valid, fresh cached schema (written by `fdl <cmd>
@@ -760,6 +770,10 @@ pub fn schema_to_args_spec(schema: &Schema) -> crate::args::parser::ArgsSpec {
     ArgsSpec {
         options,
         positionals,
+        // Non-strict schemas accept user-forwarded flags the author
+        // didn't declare — the binary re-parses the tail anyway.
+        // Strict schemas reject anything not declared.
+        lenient_unknowns: !schema.strict,
     }
 }
 
@@ -772,16 +786,126 @@ fn strict_choices_to_strings(cs: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
-/// Validate the user's extra argv tail against a schema. Run before
-/// `run::exec_command` when `schema.strict == true`. The tokenizer from
-/// [`crate::args::parser`] is reused so "did you mean" suggestions and
-/// cluster/equals handling come for free.
-pub fn validate_tail_strict(tail: &[String], schema: &Schema) -> Result<(), String> {
+/// Validate the user's extra argv tail against a schema. Always called
+/// before `run::exec_command` — the parser's lenient-unknowns mode is
+/// keyed off `schema.strict` so choice validation on declared flags
+/// fires regardless, while unknown-flag rejection stays opt-in.
+///
+/// The tokenizer from [`crate::args::parser`] is reused so "did you
+/// mean" suggestions, cluster, and equals handling come for free.
+pub fn validate_tail(tail: &[String], schema: &Schema) -> Result<(), String> {
     let spec = schema_to_args_spec(schema);
     let mut argv = Vec::with_capacity(tail.len() + 1);
     argv.push("fdl".to_string());
     argv.extend(tail.iter().cloned());
     crate::args::parser::parse(&spec, &argv).map(|_| ())
+}
+
+/// Validate a single preset that's about to be invoked. Combines the
+/// always-on `choices:` check and, if `schema.strict`, the unknown-key
+/// rejection — scoped to just this preset, not the whole `commands:`
+/// map. Called from the exec path so typos in a sibling preset don't
+/// block `--help` for a correct one.
+pub fn validate_preset_for_exec(
+    preset_name: &str,
+    spec: &CommandSpec,
+    schema: &Schema,
+) -> Result<(), String> {
+    for (key, value) in &spec.options {
+        let Some(opt) = schema.options.get(key) else {
+            if schema.strict {
+                return Err(format!(
+                    "preset `{preset_name}` pins option `{key}` which is not declared in schema.options"
+                ));
+            }
+            continue;
+        };
+        let Some(choices) = &opt.choices else {
+            continue;
+        };
+        if !choices.iter().any(|c| values_equal(c, value)) {
+            let allowed: Vec<String> = choices
+                .iter()
+                .map(|c| match c {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect();
+            return Err(format!(
+                "preset `{preset_name}` sets option `{key}` to `{}` -- allowed: {}",
+                display_json(value),
+                allowed.join(", "),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Always-on: validate preset YAML `options:` values against declared
+/// `choices:` in the schema. An option YAML value whose key matches a
+/// declared option with a `choices:` list must be one of those choices.
+/// Keys not declared in the schema are ignored here — those are the
+/// concern of [`validate_presets_strict`] (opt-in).
+///
+/// Used for whole-map validation (e.g. from a future `fdl config lint`
+/// subcommand). The dispatch path uses [`validate_preset_for_exec`] so
+/// sibling-preset typos don't block correct invocations.
+pub fn validate_preset_values(
+    commands: &BTreeMap<String, CommandSpec>,
+    schema: &Schema,
+) -> Result<(), String> {
+    for (preset_name, spec) in commands {
+        match spec.kind() {
+            Ok(CommandKind::Preset) => {}
+            _ => continue,
+        }
+        for (key, value) in &spec.options {
+            let Some(opt) = schema.options.get(key) else {
+                continue; // unknown key — strict's problem, not ours
+            };
+            let Some(choices) = &opt.choices else {
+                continue; // no choices declared — anything goes
+            };
+            if !choices.iter().any(|c| values_equal(c, value)) {
+                let allowed: Vec<String> = choices
+                    .iter()
+                    .map(|c| match c {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                return Err(format!(
+                    "preset `{preset_name}` sets option `{key}` to `{}` -- allowed: {}",
+                    display_json(value),
+                    allowed.join(", "),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compare two JSON values for equality, treating YAML's loose-typed
+/// representation (a preset might write `batch-size: 32` as an int
+/// while the schema's choices list contains `"32"` as a string).
+fn values_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    if a == b {
+        return true;
+    }
+    // Cross-type string ↔ number comparison for YAML-friendly matching.
+    match (a, b) {
+        (serde_json::Value::String(s), other) | (other, serde_json::Value::String(s)) => {
+            s == &other.to_string()
+        }
+        _ => false,
+    }
+}
+
+fn display_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// At load time, reject preset `options:` keys that are not declared in
@@ -1006,11 +1130,11 @@ mod tests {
         assert!(err.contains("cannot follow"), "err was: {err}");
     }
 
-    // ── Strict-mode validation ──────────────────────────────────────
+    // ── Tail validation (always-on) + strict unknown-rejection ─────
 
-    fn strict_schema_with_model_option() -> Schema {
+    fn schema_with_model_option(strict: bool) -> Schema {
         let mut s = Schema {
-            strict: true,
+            strict,
             ..Schema::default()
         };
         let mut model = opt("string");
@@ -1026,43 +1150,46 @@ mod tests {
         s
     }
 
+    fn strict_schema_with_model_option() -> Schema {
+        schema_with_model_option(true)
+    }
+
     #[test]
-    fn validate_tail_strict_accepts_known_long_flag() {
+    fn validate_tail_accepts_known_long_flag() {
         let schema = strict_schema_with_model_option();
         let tail = vec!["--epochs".into(), "3".into()];
-        validate_tail_strict(&tail, &schema).expect("known flag must pass");
+        validate_tail(&tail, &schema).expect("known flag must pass");
     }
 
     #[test]
-    fn validate_tail_strict_accepts_known_short_flag() {
+    fn validate_tail_accepts_known_short_flag() {
         let schema = strict_schema_with_model_option();
         let tail = vec!["-m".into(), "mlp".into()];
-        validate_tail_strict(&tail, &schema).expect("known short must pass");
+        validate_tail(&tail, &schema).expect("known short must pass");
     }
 
     #[test]
-    fn validate_tail_strict_accepts_bool_flag() {
+    fn validate_tail_accepts_bool_flag() {
         let schema = strict_schema_with_model_option();
         let tail = vec!["--validate".into()];
-        validate_tail_strict(&tail, &schema).expect("bool flag must pass");
+        validate_tail(&tail, &schema).expect("bool flag must pass");
     }
 
     #[test]
     fn validate_tail_strict_rejects_unknown_long_flag() {
         let schema = strict_schema_with_model_option();
         let tail = vec!["--nope".into()];
-        let err = validate_tail_strict(&tail, &schema)
-            .expect_err("unknown long flag must error");
+        let err = validate_tail(&tail, &schema)
+            .expect_err("unknown long flag must error in strict mode");
         assert!(err.contains("--nope"), "err was: {err}");
     }
 
     #[test]
     fn validate_tail_strict_suggests_did_you_mean() {
-        // The args::parser shim emits "did you mean" when edit distance ≤ 2.
-        // "--epoch" is one char off "--epochs", so the suggestion should fire.
+        // "--epoch" is one char off "--epochs" — edit distance ≤ 2.
         let schema = strict_schema_with_model_option();
         let tail = vec!["--epoch".into(), "3".into()];
-        let err = validate_tail_strict(&tail, &schema).expect_err("typo must error");
+        let err = validate_tail(&tail, &schema).expect_err("typo must error");
         assert!(err.contains("did you mean"), "err was: {err}");
         assert!(err.contains("--epochs"), "suggestion missing: {err}");
     }
@@ -1071,47 +1198,82 @@ mod tests {
     fn validate_tail_strict_rejects_unknown_short_flag() {
         let schema = strict_schema_with_model_option();
         let tail = vec!["-z".into()];
-        let err = validate_tail_strict(&tail, &schema)
-            .expect_err("unknown short must error");
+        let err = validate_tail(&tail, &schema)
+            .expect_err("unknown short must error in strict mode");
         assert!(err.contains("-z"), "err was: {err}");
     }
 
     #[test]
-    fn validate_tail_strict_rejects_bad_choice() {
+    fn validate_tail_rejects_bad_choice_always_strict() {
         let schema = strict_schema_with_model_option();
         let tail = vec!["--model".into(), "lenet".into()];
-        let err = validate_tail_strict(&tail, &schema)
+        let err = validate_tail(&tail, &schema)
             .expect_err("out-of-set choice must error");
         assert!(err.contains("lenet"), "err was: {err}");
         assert!(err.contains("allowed"), "err should list allowed values: {err}");
     }
 
     #[test]
-    fn validate_tail_strict_allows_reserved_help() {
+    fn validate_tail_rejects_bad_choice_even_when_not_strict() {
+        // The main change in this rollout: `choices:` is a positive
+        // assertion by the author, so it must be enforced regardless
+        // of `schema.strict`. Only *unknown* flags relax without
+        // strict.
+        let schema = schema_with_model_option(false);
+        let tail = vec!["--model".into(), "lenet".into()];
+        let err = validate_tail(&tail, &schema)
+            .expect_err("out-of-set choice must error without strict");
+        assert!(err.contains("lenet"), "err was: {err}");
+        assert!(err.contains("allowed"), "err should list allowed values: {err}");
+    }
+
+    #[test]
+    fn validate_tail_non_strict_tolerates_unknown_flag() {
+        // Without strict, unknown flags are legitimate pass-through
+        // candidates (the binary handles them itself).
+        let schema = schema_with_model_option(false);
+        let tail = vec!["--fancy-passthrough".into(), "value".into()];
+        validate_tail(&tail, &schema)
+            .expect("unknown flag must be tolerated when strict is off");
+    }
+
+    #[test]
+    fn validate_tail_non_strict_still_checks_known_short_choices() {
+        // The declared short `-m` has choices; a bad value fails even
+        // when strict is off. Unknown options would be tolerated, but
+        // once the user reaches a declared option, its contract holds.
+        let schema = schema_with_model_option(false);
+        let tail = vec!["-m".into(), "lenet".into()];
+        let err = validate_tail(&tail, &schema)
+            .expect_err("out-of-set choice via short must error");
+        assert!(err.contains("lenet"), "err was: {err}");
+    }
+
+    #[test]
+    fn validate_tail_allows_reserved_help() {
         // Reserved universal flags must pass even though they are not
         // declared in the schema. Defense-in-depth against edge cases
         // where `--help` somehow reaches dispatch.
         let schema = strict_schema_with_model_option();
         let tail = vec!["--help".into()];
-        validate_tail_strict(&tail, &schema).expect("--help must be allowed");
+        validate_tail(&tail, &schema).expect("--help must be allowed");
     }
 
     #[test]
-    fn validate_tail_strict_allows_reserved_fdl_schema() {
-        // `fdl ddp-bench --fdl-schema` is forwarded to the binary. The
-        // FdlArgs derive handles it; strict must not reject it here.
+    fn validate_tail_allows_reserved_fdl_schema() {
+        // `fdl ddp-bench --fdl-schema` is forwarded to the binary.
         let schema = strict_schema_with_model_option();
         let tail = vec!["--fdl-schema".into()];
-        validate_tail_strict(&tail, &schema).expect("--fdl-schema must be allowed");
+        validate_tail(&tail, &schema).expect("--fdl-schema must be allowed");
     }
 
     #[test]
-    fn validate_tail_strict_passthrough_after_double_dash() {
+    fn validate_tail_passthrough_after_double_dash() {
         // `--` terminates flag parsing. Tokens after it are positionals
         // and must never trigger "unknown flag" errors.
         let schema = strict_schema_with_model_option();
         let tail = vec!["--".into(), "--arbitrary".into(), "anything".into()];
-        validate_tail_strict(&tail, &schema).expect("passthrough must work");
+        validate_tail(&tail, &schema).expect("passthrough must work");
     }
 
     #[test]
@@ -1173,6 +1335,86 @@ mod tests {
         );
         validate_presets_strict(&commands, &schema)
             .expect("run/path siblings must be ignored by preset strict check");
+    }
+
+    // ── Preset value validation (always-on `choices:`) ──────────────
+
+    #[test]
+    fn validate_preset_values_rejects_bad_choice_even_without_strict() {
+        // Schema has `choices:` on model; a preset pinning model to
+        // something outside the list must fail at load, strict or not.
+        let schema = schema_with_model_option(false);
+        let mut commands = BTreeMap::new();
+        let mut opts = BTreeMap::new();
+        opts.insert("model".into(), serde_json::json!("lenet"));
+        commands.insert(
+            "quick".into(),
+            CommandSpec {
+                options: opts,
+                ..Default::default()
+            },
+        );
+        let err = validate_preset_values(&commands, &schema)
+            .expect_err("out-of-choices preset must error");
+        assert!(err.contains("quick"), "preset name missing: {err}");
+        assert!(err.contains("model"), "option name missing: {err}");
+        assert!(err.contains("lenet"), "bad value missing: {err}");
+        assert!(err.contains("allowed"), "allowed list missing: {err}");
+    }
+
+    #[test]
+    fn validate_preset_values_accepts_in_choices_preset() {
+        let schema = schema_with_model_option(false);
+        let mut commands = BTreeMap::new();
+        let mut opts = BTreeMap::new();
+        opts.insert("model".into(), serde_json::json!("mlp"));
+        commands.insert(
+            "quick".into(),
+            CommandSpec {
+                options: opts,
+                ..Default::default()
+            },
+        );
+        validate_preset_values(&commands, &schema)
+            .expect("in-choices preset must pass");
+    }
+
+    #[test]
+    fn validate_preset_values_ignores_undeclared_keys() {
+        // Unknown keys aren't our concern here — that's for
+        // `validate_presets_strict`, which only runs under strict.
+        let schema = schema_with_model_option(false);
+        let mut commands = BTreeMap::new();
+        let mut opts = BTreeMap::new();
+        opts.insert("extra".into(), serde_json::json!("whatever"));
+        commands.insert(
+            "quick".into(),
+            CommandSpec {
+                options: opts,
+                ..Default::default()
+            },
+        );
+        validate_preset_values(&commands, &schema)
+            .expect("undeclared key must be ignored by value validator");
+    }
+
+    #[test]
+    fn validate_preset_values_ignores_options_without_choices() {
+        // `epochs` is declared as int with no `choices:`, so any value
+        // passes the choice check (type validation is a separate pass).
+        let schema = schema_with_model_option(false);
+        let mut commands = BTreeMap::new();
+        let mut opts = BTreeMap::new();
+        opts.insert("epochs".into(), serde_json::json!(999));
+        commands.insert(
+            "quick".into(),
+            CommandSpec {
+                options: opts,
+                ..Default::default()
+            },
+        );
+        validate_preset_values(&commands, &schema)
+            .expect("no-choices option must accept any value");
     }
 
     #[test]
