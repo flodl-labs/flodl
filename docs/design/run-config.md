@@ -300,15 +300,16 @@ Commands:
 ddp-bench DDP validation and benchmark suite
 
 Usage:
-    fdl ddp-bench [<command>] [options]
+    fdl ddp-bench [<preset>] [options]
 
-Commands:
-    full-sweep     All models, all DDP modes
-    nccl-async     NCCL async for all models
-    nccl-cadence   NCCL cadence for all models
-    quick          Fast smoke test (linear, 1 epoch)
-    solo-0         Solo baseline on fast GPU (all models)
-    solo-1         Solo baseline on slow GPU (all models)
+Arguments:
+    [<preset>]  Named preset, one of:
+      full-sweep     All models, all DDP modes
+      nccl-async     NCCL async for all models
+      nccl-cadence   NCCL cadence for all models
+      quick          Fast smoke test (linear, 1 epoch)
+      solo-0         Solo baseline on fast GPU (all models)
+      solo-1         Solo baseline on slow GPU (all models)
 
 Options:
     --model <VALUE>   Run a specific model  [default: all]
@@ -319,6 +320,49 @@ Entry:
     cargo run --release --features cuda --  [docker: cuda]
     Any extra [options] are forwarded to the entry point.
 ```
+
+This reflects what is actually happening: `ddp-bench` takes one
+optional positional argument (a named preset) plus options. The preset
+slot renders once with its possible values indented underneath — not
+N distinct argument rows. Preset entries share the enclosing `entry:`;
+each value just pins some option defaults and invokes the same binary.
+
+A command with `run:` or `path:` set would render under a separate
+`Commands:` section instead (it *is* a different script). When both
+kinds coexist at the same level, the usage line reads
+`[<preset>|<command>]` and two sections render side by side.
+
+### `arg-name:` override
+
+By default the preset slot is labelled `[<preset>]`. A sub-command can
+override the placeholder to match its domain vocabulary without
+affecting dispatch (presets are always looked up by name):
+
+```yaml
+# bake-off/fdl.yml
+description: Cake bake-off
+entry: cargo run --release --bin bake --
+arg-name: recipe
+
+commands:
+  chocolate: { options: { flavor: chocolate, sugar: 120 } }
+  vanilla:   { options: { flavor: vanilla,   sugar: 80  } }
+```
+
+Renders as:
+
+```
+Usage:
+    fdl bake-off [<recipe>] [options]
+
+Arguments:
+    [<recipe>]  Named preset, one of:
+      chocolate  …
+      vanilla    …
+```
+
+This is purely help cosmetics — the user still types `fdl bake-off
+chocolate` to invoke the preset.
 
 ## Design principles
 

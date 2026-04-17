@@ -352,7 +352,7 @@ fn shell_join(args: &[String]) -> String {
 
 // ── Help output ─────────────────────────────────────────────────────────
 
-/// Print help for a sub-command (its jobs and entry).
+/// Print help for a sub-command (its arguments, nested commands, and entry).
 pub fn print_command_help(cmd_config: &CommandConfig, name: &str) {
     if let Some(desc) = &cmd_config.description {
         eprintln!("{} {desc}", style::bold(name));
@@ -360,33 +360,68 @@ pub fn print_command_help(cmd_config: &CommandConfig, name: &str) {
         eprintln!("{}", style::bold(name));
     }
 
-    // Build a schema-aware usage line when args are declared.
-    let has_sub_commands = !cmd_config.commands.is_empty();
-    let usage_tail = build_usage_tail(cmd_config.schema.as_ref(), has_sub_commands);
+    // Split nested commands by kind. Presets (named option bundles for this
+    // config's entry) render as arguments; Run/Path commands render as
+    // sub-commands (they have their own behavior).
+    let (presets, sub_cmds) = split_commands_by_kind(&cmd_config.commands);
+    let has_schema_args = cmd_config
+        .schema
+        .as_ref()
+        .is_some_and(|s| !s.args.is_empty());
+
+    // Presets are one argument with a fixed list of values, not N
+    // distinct arguments. Render the slot once (as `[<preset>]` by
+    // default, or whatever the user set via `arg-name:`) and indent the
+    // named values underneath.
+    let preset_slot = cmd_config.arg_name.as_deref().unwrap_or("preset");
+
+    // Usage line. The first-positional slot reflects what is actually
+    // accepted here: preset name, sub-command name, or either.
+    let usage_tail = build_usage_tail(
+        cmd_config.schema.as_ref(),
+        !presets.is_empty(),
+        !sub_cmds.is_empty(),
+        preset_slot,
+    );
     eprintln!();
     eprintln!("{}:", style::yellow("Usage"));
     eprintln!("    fdl {name}{usage_tail}");
 
-    // Arguments: schema-declared positionals only (distinct concept from
-    // sub-commands). Sub-commands live under their own "Commands:" section
-    // below.
-    if let Some(schema) = &cmd_config.schema {
-        if !schema.args.is_empty() {
-            eprintln!();
-            eprintln!("{}:", style::yellow("Arguments"));
+    // Arguments: schema-declared positionals first (typed slots on the
+    // entry binary), then the preset slot with its value list. Both land
+    // in the first-positional slot at invocation time; presets are always
+    // consumed first by fdl's dispatcher, schema args by the binary.
+    if has_schema_args || !presets.is_empty() {
+        eprintln!();
+        eprintln!("{}:", style::yellow("Arguments"));
+        if let Some(schema) = &cmd_config.schema {
             for a in &schema.args {
                 eprintln!("    {}", format_arg(a));
             }
         }
+        if !presets.is_empty() {
+            let slot_label = format!("[<{preset_slot}>]");
+            eprintln!(
+                "    {}  Named preset, one of:",
+                style::green(&format!("{:<20}", slot_label))
+            );
+            for (pname, spec) in &presets {
+                let desc = spec.description.as_deref().unwrap_or("-");
+                eprintln!(
+                    "      {}  {}",
+                    style::green(&format!("{:<18}", pname)),
+                    desc
+                );
+            }
+        }
     }
 
-    // Commands: nested sub-commands declared in this fdl.yml (any kind —
-    // inline presets that reuse the entry, `run:` scripts, or `path:`
-    // pointers to child fdl.yml files).
-    if has_sub_commands {
+    // Commands: Run/Path kinds only — true sub-commands with their own
+    // behavior (an inline script or a nested fdl.yml).
+    if !sub_cmds.is_empty() {
         eprintln!();
         eprintln!("{}:", style::yellow("Commands"));
-        for (sub_name, sub_spec) in &cmd_config.commands {
+        for (sub_name, sub_spec) in &sub_cmds {
             let desc = sub_spec.description.as_deref().unwrap_or("-");
             eprintln!(
                 "    {}  {}",
@@ -711,13 +746,27 @@ pub fn _format_options(opts: &BTreeMap<String, serde_json::Value>) -> String {
 // ── Schema-driven help helpers ──────────────────────────────────────────
 
 /// Build the part of "fdl <cmd>..." after the command name: positionals
-/// rendered as `<name>` (required) or `[<name>]` (optional), plus
-/// `[<command>]` (when nested commands exist) and `[options]`.
-fn build_usage_tail(schema: Option<&Schema>, has_sub_commands: bool) -> String {
+/// rendered as `<name>` (required) or `[<name>]` (optional), plus a slot
+/// for the first-positional picker — `[<preset>]` when only presets exist,
+/// `[<command>]` when only sub-commands exist, `[<preset>|<command>]` when
+/// both — and `[options]`. The preset placeholder is customisable per
+/// sub-command via `arg-name:`.
+fn build_usage_tail(
+    schema: Option<&Schema>,
+    has_presets: bool,
+    has_sub_commands: bool,
+    preset_slot: &str,
+) -> String {
     let mut parts = String::new();
-    if has_sub_commands {
+    let slot = match (has_presets, has_sub_commands) {
+        (true, false) => Some(format!("[<{preset_slot}>]")),
+        (false, true) => Some("[<command>]".to_string()),
+        (true, true) => Some(format!("[<{preset_slot}>|<command>]")),
+        (false, false) => None,
+    };
+    if let Some(s) = slot {
         parts.push(' ');
-        parts.push_str(&style::dim("[<command>]"));
+        parts.push_str(&style::dim(&s));
     }
     if let Some(s) = schema {
         for a in &s.args {
@@ -728,6 +777,27 @@ fn build_usage_tail(schema: Option<&Schema>, has_sub_commands: bool) -> String {
     parts.push(' ');
     parts.push_str(&style::dim("[options]"));
     parts
+}
+
+type CommandGroup = Vec<(String, crate::config::CommandSpec)>;
+
+/// Partition a `commands:` map into (presets, sub-commands) by resolved
+/// `CommandKind`. Entries whose `kind()` errors (both run and path set)
+/// are treated as sub-commands so they still render somewhere — the
+/// error surfaces when the user tries to dispatch them.
+fn split_commands_by_kind(
+    commands: &BTreeMap<String, crate::config::CommandSpec>,
+) -> (CommandGroup, CommandGroup) {
+    use crate::config::CommandKind;
+    let mut presets = Vec::new();
+    let mut sub_cmds = Vec::new();
+    for (k, v) in commands {
+        match v.kind() {
+            Ok(CommandKind::Preset) => presets.push((k.clone(), v.clone())),
+            _ => sub_cmds.push((k.clone(), v.clone())),
+        }
+    }
+    (presets, sub_cmds)
 }
 
 fn format_arg_usage(a: &ArgSpec) -> String {

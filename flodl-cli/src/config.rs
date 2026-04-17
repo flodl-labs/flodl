@@ -49,6 +49,13 @@ pub struct CommandConfig {
     /// `run` scripts, or `path` pointers to child fdl.yml files.
     #[serde(default)]
     pub commands: BTreeMap<String, CommandSpec>,
+    /// Help-only placeholder name for the first-positional slot when
+    /// `commands:` holds presets. Defaults to "preset". Pure UX — it
+    /// does not affect dispatch (presets are always looked up by name).
+    /// Useful to match domain vocabulary, e.g. `arg-name: recipe` or
+    /// `arg-name: target`.
+    #[serde(default, rename = "arg-name")]
+    pub arg_name: Option<String>,
     /// Inline interim schema (before `<entry> --fdl-schema` is implemented).
     /// Drives help rendering, validation, and completions.
     #[serde(default)]
@@ -903,5 +910,21 @@ mod tests {
         let spec = map.get("cmd").expect("cmd missing");
         assert!(spec.run.is_none() && spec.path.is_none());
         assert_eq!(spec.kind().unwrap(), CommandKind::Path);
+    }
+
+    #[test]
+    fn command_config_arg_name_deserializes_kebab_case() {
+        // YAML uses `arg-name:`, Rust field is `arg_name`.
+        let yaml = "arg-name: recipe\nentry: echo\n";
+        let cfg: CommandConfig =
+            serde_yaml::from_str(yaml).expect("arg-name must parse");
+        assert_eq!(cfg.arg_name.as_deref(), Some("recipe"));
+    }
+
+    #[test]
+    fn command_config_arg_name_defaults_to_none() {
+        let cfg: CommandConfig =
+            serde_yaml::from_str("entry: echo\n").expect("minimal cfg must parse");
+        assert!(cfg.arg_name.is_none());
     }
 }
