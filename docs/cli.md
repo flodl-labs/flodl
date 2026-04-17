@@ -373,14 +373,23 @@ latest `ai/skills/` files from the source tree.
 
 ### `fdl run` and Project Manifests (`fdl.yaml`)
 
-Inside a floDl project, `fdl` doubles as a project task runner. `fdl.yaml` 
-(also `fdl.yml`, `fdl.json`) declares named scripts and  sub-commands; 
-`fdl <name>` runs them.
+Inside a floDl project, `fdl` doubles as a project task runner. `fdl.yaml`
+(also `fdl.yml`, `fdl.json`) declares a unified `commands:` map, and
+`fdl <name>` dispatches into it. Every entry is one of three kinds:
+
+- **Run** — `run:` is set. Executes the inline shell script, optionally
+  wrapped in `docker compose run --rm <service>`.
+- **Path** — `path:` is set (or the convention default `./<name>/` is
+  used when the entry is empty/null). Loads a child `fdl.yml` in that
+  directory and recurses.
+- **Preset** — neither `run:` nor `path:` is set. Inline `ddp:` /
+  `training:` / `output:` / `options:` fields merge over the enclosing
+  config and invoke its `entry:`. Only legal inside a sub-command.
 
 ```yaml
 description: flodl - Rust deep learning framework
 
-scripts:
+commands:
   test:
     description: Run all CPU tests
     run: cargo test -- --nocapture
@@ -392,31 +401,32 @@ scripts:
   shell:
     run: bash
     docker: dev
-
-commands:
-  - ddp-bench/   # sub-command with its own fdl.yaml
+  ddp-bench:         # convention default: loads ./ddp-bench/fdl.yml
 ```
 
 ```bash
-fdl test            # runs the "test" script in the "dev" docker service
-fdl cuda-test       # runs in the "cuda" service
-fdl shell           # opens an interactive shell
+fdl test             # runs the "test" command in the "dev" docker service
+fdl cuda-test        # runs in the "cuda" service
+fdl shell            # opens an interactive shell
 fdl ddp-bench --list # dispatches into the ddp-bench sub-command
 ```
 
-When a script declares `docker: <service>`, `fdl` wraps the command in
+When a `run:` command declares `docker: <service>`, `fdl` wraps it in
 `docker compose run --rm <service> bash -c "..."`. Without `docker:`, it
-runs on the host. This replaces the older `make` workflow.
+runs on the host. This replaces the older `make` workflow. (`docker:` is
+only valid on `run:` commands — declaring it on a `path:` or preset
+entry is rejected at load time.)
 
 If only `fdl.yml.example` (or `.dist`) is present in the tree, `fdl`
 offers to copy it to the real (gitignored) `fdl.yml` so users can
 customise locally without polluting the repo.
 
-#### Sub-command jobs
+#### Sub-command presets
 
-A sub-command directory (e.g. `ddp-bench/`) has its own `fdl.yaml` with an
-`entry`, optional `docker`, structured `ddp` / `training` / `output`
-sections, and named `jobs` that merge over the defaults:
+A sub-command directory (e.g. `ddp-bench/`) has its own `fdl.yaml` with
+an `entry`, optional `docker`, structured `ddp` / `training` / `output`
+sections, and a `commands:` map whose entries are **presets** — inline
+overrides of this config's entry:
 
 ```yaml
 description: DDP validation and benchmark suite
@@ -433,7 +443,7 @@ ddp:
   divergence_threshold: 0.05
   lr_scale_ratio: 1.0
 
-jobs:
+commands:
   quick:
     description: Fast smoke test
     training: { epochs: 1 }
@@ -445,11 +455,18 @@ jobs:
 Then:
 
 ```bash
-fdl ddp-bench quick                  # runs the "quick" job
-fdl ddp-bench validate --report out  # job + extra flags
-fdl ddp-bench --help                 # shows description + jobs + defaults
+fdl ddp-bench quick                  # runs the "quick" preset
+fdl ddp-bench validate --report out  # preset + extra flags
+fdl ddp-bench --help                 # shows description + presets + defaults
 fdl ddp-bench validate --help        # shows resolved options
 ```
+
+The sub-command's `commands:` may mix kinds freely: a preset sits
+alongside a nested `path:` (another directory) or a standalone `run:`
+helper. `fdl <cmd> --help` splits them into an **Arguments** section
+(the single preset slot, with values indented underneath — override the
+placeholder via `arg-name:`) and a **Commands** section (real
+sub-commands with their own behaviour).
 
 The `ddp:` section maps 1:1 to flodl's `DdpConfig` / `DdpRunConfig`
 (`mode`, `policy`, `backend`, `anchor`, `max_anchor`, `overhead_target`,
@@ -462,8 +479,9 @@ for the full schema and merge semantics.
 
 ### `fdl completions` / `fdl autocomplete`
 
-Generate shell completion scripts. Project-aware: completions reflect the
-current `fdl.yaml`'s `scripts:` and `commands:` plus per-sub-command jobs.
+Generate shell completion scripts. Project-aware: completions reflect
+the current `fdl.yaml`'s `commands:` (all three kinds) plus every
+sub-command's own nested entries.
 
 ```bash
 fdl completions bash > ~/.local/share/bash-completion/completions/fdl
@@ -473,8 +491,7 @@ fdl completions fish > ~/.config/fish/completions/fdl.fish
 fdl autocomplete    # dynamic suggestions for the current cwd
 ```
 
-Re-running `fdl completions` picks up new scripts and jobs as `fdl.yml`
-evolves.
+Re-running `fdl completions` picks up new entries as `fdl.yml` evolves.
 
 ### Verbosity
 

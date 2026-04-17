@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use crate::config::{self, CommandConfig, OptionSpec, ProjectConfig};
+use crate::config::{self, CommandConfig, CommandKind, OptionSpec, ProjectConfig};
 use crate::style;
 
 /// Built-in commands that are always available.
@@ -56,8 +56,25 @@ struct CompletionData {
 
 struct CommandData {
     name: String,
+    /// Presets nested under this command — offered as first-positional
+    /// values. Paired with their descriptions so zsh/fish can surface
+    /// them through `_describe` / `complete -d`.
+    presets: Vec<(String, Option<String>)>,
+    /// Real sub-commands (Run / Path kinds). Also first-positional
+    /// candidates, but without descriptions — their `fdl.yml` lives
+    /// behind another lookup, so we keep this list lean.
     sub_commands: Vec<String>,
     options: Vec<OptionCompletion>,
+}
+
+impl CommandData {
+    /// Every first-positional candidate, presets and sub-commands both.
+    /// Used by shells that can't render descriptions (bash).
+    fn first_positional_tokens(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.presets.iter().map(|(n, _)| n.clone()).collect();
+        out.extend(self.sub_commands.iter().cloned());
+        out
+    }
 }
 
 struct OptionCompletion {
@@ -104,6 +121,7 @@ impl CompletionData {
                 } else {
                     commands.push(CommandData {
                         name: name.clone(),
+                        presets: Vec::new(),
                         sub_commands: Vec::new(),
                         options: Vec::new(),
                     });
@@ -120,7 +138,26 @@ impl CompletionData {
 
 impl CommandData {
     fn from_config(name: String, cfg: &CommandConfig) -> Self {
-        let sub_commands: Vec<String> = cfg.commands.keys().cloned().collect();
+        // Split nested entries by kind so completions can treat presets
+        // (named option bundles) separately from real sub-commands (an
+        // inline run-script or another fdl.yml). Entries whose `kind()`
+        // errors (e.g. both `run:` and `path:` set) are dropped — they
+        // would fail at dispatch anyway; offering them as completions
+        // would mislead the user.
+        let mut presets: Vec<(String, Option<String>)> = Vec::new();
+        let mut sub_commands: Vec<String> = Vec::new();
+        for (sub_name, spec) in &cfg.commands {
+            match spec.kind() {
+                Ok(CommandKind::Preset) => {
+                    presets.push((sub_name.clone(), spec.description.clone()));
+                }
+                Ok(CommandKind::Run) | Ok(CommandKind::Path) => {
+                    sub_commands.push(sub_name.clone());
+                }
+                Err(_) => {}
+            }
+        }
+
         let options = cfg
             .schema
             .as_ref()
@@ -133,6 +170,7 @@ impl CommandData {
             .unwrap_or_default();
         Self {
             name,
+            presets,
             sub_commands,
             options,
         }
@@ -386,8 +424,9 @@ fn emit_bash(data: &CompletionData) -> String {
         }
         s.push_str("        esac\n");
 
-        // At position 2, offer nested sub-commands + option flags.
-        // Beyond position 2, offer option flags only (prev-value already handled).
+        // At position 2, offer first-positional candidates (presets +
+        // real sub-commands) plus option flags. Beyond position 2,
+        // offer option flags only (prev-value already handled above).
         let option_flags: Vec<String> = cmd
             .options
             .iter()
@@ -399,16 +438,17 @@ fn emit_bash(data: &CompletionData) -> String {
             v.push("-h".into());
             v.join(" ")
         };
-        let sub_cmds_str = cmd.sub_commands.join(" ");
+        let positional_tokens = cmd.first_positional_tokens();
+        let positionals_str = positional_tokens.join(" ");
 
         s.push_str("        if [[ $COMP_CWORD -eq 2 ]]; then\n");
-        if cmd.sub_commands.is_empty() {
+        if positional_tokens.is_empty() {
             s.push_str(&format!(
                 "            COMPREPLY=($(compgen -W \"{cmd_flags_str}\" -- \"$cur\"))\n"
             ));
         } else {
             s.push_str(&format!(
-                "            COMPREPLY=($(compgen -W \"{sub_cmds_str} {cmd_flags_str}\" -- \"$cur\"))\n"
+                "            COMPREPLY=($(compgen -W \"{positionals_str} {cmd_flags_str}\" -- \"$cur\"))\n"
             ));
         }
         s.push_str("            return\n");
@@ -510,14 +550,38 @@ fn emit_zsh(data: &CompletionData) -> String {
         all_flags.push("-h".into());
         let flags_joined = all_flags.join(" ");
 
-        if !cmd.sub_commands.is_empty() {
+        // Position 3: first-positional candidates. Presets carry
+        // descriptions (zsh can render them via `name:desc` pairs),
+        // real sub-commands do not.
+        if !cmd.presets.is_empty() || !cmd.sub_commands.is_empty() {
             s.push_str("            if (( CURRENT == 3 )); then\n");
-            s.push_str("                local -a subcommands\n");
-            s.push_str(&format!(
-                "                subcommands=({})\n",
-                cmd.sub_commands.join(" ")
-            ));
-            s.push_str("                _describe 'command' subcommands\n");
+            if !cmd.presets.is_empty() {
+                s.push_str("                local -a presets\n");
+                let pairs: Vec<String> = cmd
+                    .presets
+                    .iter()
+                    .map(|(n, d)| {
+                        let desc = d.as_deref().unwrap_or("preset");
+                        // Escape colons and single quotes to keep zsh
+                        // from splitting the name:desc pair.
+                        let safe = desc.replace('\'', "'\\''").replace(':', "\\:");
+                        format!("'{n}:{safe}'")
+                    })
+                    .collect();
+                s.push_str(&format!(
+                    "                presets=({})\n",
+                    pairs.join(" ")
+                ));
+                s.push_str("                _describe 'preset' presets\n");
+            }
+            if !cmd.sub_commands.is_empty() {
+                s.push_str("                local -a subcommands\n");
+                s.push_str(&format!(
+                    "                subcommands=({})\n",
+                    cmd.sub_commands.join(" ")
+                ));
+                s.push_str("                _describe 'command' subcommands\n");
+            }
             s.push_str("            fi\n");
         }
         s.push_str(&format!(
@@ -577,6 +641,15 @@ fn emit_fish(data: &CompletionData) -> String {
         s.push_str(&format!("# {name}\n", name = cmd.name));
         let cond = format!("__fish_seen_subcommand_from {}", cmd.name);
 
+        for (name, desc) in &cmd.presets {
+            let safe = desc
+                .as_deref()
+                .unwrap_or("preset")
+                .replace('\'', "\\'");
+            s.push_str(&format!(
+                "complete -c fdl -n '{cond}' -a '{name}' -d '{safe}'\n"
+            ));
+        }
         for sub in &cmd.sub_commands {
             s.push_str(&format!(
                 "complete -c fdl -n '{cond}' -a '{sub}' -d 'command'\n"
@@ -753,6 +826,101 @@ mod tests {
         assert!(out.contains("-l 'model' -s 'm'"));
         assert!(out.contains("-a 'mlp resnet'"));
         assert!(out.contains("-l 'baseline' -r -F"));
+    }
+
+    /// Build a sub-command with a mix of preset, run, and path kinds
+    /// so we can verify completions partition them correctly.
+    fn make_cmd_with_mixed_kinds() -> CommandData {
+        let mut commands: BTreeMap<String, crate::config::CommandSpec> = BTreeMap::new();
+        let mut quick_opts = BTreeMap::new();
+        quick_opts.insert("model".into(), serde_json::json!("linear"));
+        commands.insert(
+            "quick".into(),
+            crate::config::CommandSpec {
+                description: Some("fast smoke test".into()),
+                options: quick_opts,
+                ..Default::default()
+            },
+        );
+        commands.insert(
+            "helper".into(),
+            crate::config::CommandSpec {
+                description: Some("inline helper".into()),
+                run: Some("echo hi".into()),
+                ..Default::default()
+            },
+        );
+        commands.insert(
+            "nested".into(),
+            crate::config::CommandSpec {
+                path: Some("./nested/".into()),
+                ..Default::default()
+            },
+        );
+
+        let cfg = CommandConfig {
+            commands,
+            ..Default::default()
+        };
+        CommandData::from_config("parent".into(), &cfg)
+    }
+
+    #[test]
+    fn from_config_splits_presets_from_sub_commands() {
+        let cmd = make_cmd_with_mixed_kinds();
+        assert_eq!(cmd.presets.len(), 1, "one preset expected");
+        assert_eq!(cmd.presets[0].0, "quick");
+        assert_eq!(cmd.presets[0].1.as_deref(), Some("fast smoke test"));
+        // "helper" (Run) and "nested" (Path) are real sub-commands.
+        let mut subs = cmd.sub_commands.clone();
+        subs.sort();
+        assert_eq!(subs, vec!["helper".to_string(), "nested".into()]);
+    }
+
+    #[test]
+    fn zsh_emits_preset_descriptions() {
+        let data = CompletionData {
+            top_level: vec!["parent".into()],
+            commands: vec![make_cmd_with_mixed_kinds()],
+        };
+        let out = emit_zsh(&data);
+        assert!(
+            out.contains("presets=('quick:fast smoke test')"),
+            "zsh should surface preset descriptions via `name:desc` pairs; got:\n{out}"
+        );
+        assert!(
+            out.contains("subcommands=(helper nested)"),
+            "zsh should list real sub-commands separately"
+        );
+    }
+
+    #[test]
+    fn fish_emits_preset_descriptions() {
+        let data = CompletionData {
+            top_level: vec!["parent".into()],
+            commands: vec![make_cmd_with_mixed_kinds()],
+        };
+        let out = emit_fish(&data);
+        assert!(
+            out.contains("-a 'quick' -d 'fast smoke test'"),
+            "fish preset completion must carry description"
+        );
+        assert!(out.contains("-a 'helper' -d 'command'"));
+        assert!(out.contains("-a 'nested' -d 'command'"));
+    }
+
+    #[test]
+    fn bash_offers_both_kinds_as_positionals() {
+        let data = CompletionData {
+            top_level: vec!["parent".into()],
+            commands: vec![make_cmd_with_mixed_kinds()],
+        };
+        let out = emit_bash(&data);
+        assert!(
+            out.contains("quick helper nested") || out.contains("helper nested")
+                && out.contains("quick "),
+            "bash must include preset + sub-command tokens in position-2 word list"
+        );
     }
 
     #[test]

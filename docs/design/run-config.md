@@ -413,9 +413,9 @@ Two ways to select an environment:
 **Convention (first-arg detection)** — zero ceremony:
 
 ```bash
-fdl test                      # no env: uses fdl.yml, runs "test" script
+fdl test                      # no env: uses fdl.yml, runs the "test" command
 fdl ci test                   # "ci" matches fdl.ci.yml -> env overlay, runs "test"
-fdl local ddp-bench validate  # env=local, cmd=ddp-bench, job=validate
+fdl local ddp-bench validate  # env=local, cmd=ddp-bench, preset=validate
 ```
 
 **Explicit flag** — disambiguation + automation:
@@ -430,17 +430,17 @@ FDL_ENV=ci fdl test
 ```
 fdl <arg> [...]
 
-1. Does a script/command named <arg> exist?   -> Y1
+1. Does a command named <arg> exist?          -> Y1
 2. Does fdl.<arg>.yml exist in walk-up tree?  -> Y2
 
-Y1 only:    run the script/command
+Y1 only:    dispatch the command
 Y2 only:    use fdl.<arg>.yml as overlay, expect next positional = command
 Y1 + Y2:    LOUD CONFLICT — error out, show both candidates
 Neither:    unknown command
 ```
 
 The loud-conflict rule is the key. Silent precedence here would be a
-footgun (renaming a script could accidentally shadow an env). Failing
+footgun (renaming a command could accidentally shadow an env). Failing
 on ambiguity the moment it's introduced is cheap insurance.
 
 ### `inherit-from:` for non-obvious topologies
@@ -591,8 +591,8 @@ which prints its options as JSON to stdout and exits:
 
 ### Positional args
 
-`args:` is an ordered list of positional arguments the binary (or a job)
-expects. Each entry:
+`args:` is an ordered list of positional arguments the binary (or a
+preset) expects. Each entry:
 
 | Field        | Type    | Description                                           |
 |--------------|---------|-------------------------------------------------------|
@@ -608,8 +608,8 @@ expects. Each entry:
 Rules:
 - Only the *last* positional may be `variadic: true`.
 - A required positional cannot follow an optional one.
-- Jobs may pin an arg value (`args: { run-id: latest }`) — the positional
-  becomes effectively fixed for that job.
+- Presets may pin an arg value (`args: { run-id: latest }`) — the
+  positional becomes effectively fixed for that preset.
 
 ### Long and short option variants
 
@@ -629,7 +629,7 @@ Loud errors on any of:
 - any option (long or short) shadows a reserved fdl-level flag
   (`--help`, `-h`, `--env`, `-e`, `--list`, `--version`, `-V` when fdl
   reserves it, etc.)
-- a job pins an option or arg that isn't declared in the schema
+- a preset pins an option or arg that isn't declared in the schema
   (only when `options.strict: true`, otherwise a warning)
 
 Loud-at-build-time is the pattern from the env-overlay section: ambiguity
@@ -649,8 +649,8 @@ is cheapest to fix the moment it's introduced.
 List semantics:
 - Repeated flags *append*; comma-separated values *extend*. Both forms
   are equivalent and may be mixed in one invocation.
-- Empty default is `[]`. A job-level list replaces the root-level list
-  (same rule as env-overlay merging — lists replace, never append).
+- Empty default is `[]`. A preset-level list replaces the root-level
+  list (same rule as env-overlay merging — lists replace, never append).
 - `list[bool]` is not allowed (meaningless).
 
 Kept deliberately small. Richer types belong in the binary's own
@@ -680,7 +680,7 @@ interactions predictable:
 **Precedence chain** (highest wins):
 
 ```
-argv  >  env var (via `env = "..."`)  >  job-level YAML  >  root-level
+argv  >  env var (via `env = "..."`)  >  preset-level YAML  >  root-level
    YAML in sub-command fdl.yaml  >  env-overlay YAML (fdl.ci.yml, ...)
       >  schema / struct default
 ```
@@ -695,9 +695,9 @@ source — which is how you debug "why is it using that value."
    supports it. Cache output under `.fdl/schema-cache/<cmd>.json`.
 2. Cache invalidates on binary mtime change.
 3. `fdl <cmd> --help` renders from the schema (command description,
-   options table, jobs list).
-4. `fdl <cmd> <job> --help` renders the resolved options (schema +
-   job defaults + env overlay + env vars + argv).
+   options table, preset list).
+4. `fdl <cmd> <preset> --help` renders the resolved options (schema +
+   preset defaults + env overlay + env vars + argv).
 5. `fdl completions` integrates: `choices:` drive completion values,
    `type: path` drives file path completion.
 
@@ -733,13 +733,14 @@ $ fdl ddp-bench --help
 DDP validation and benchmark suite for flodl
 
 USAGE:
-    fdl ddp-bench [<job>] [OPTIONS]
+    fdl ddp-bench [<preset>] [OPTIONS]
 
-JOBS:
-    quick          Fast smoke test (linear, 1 epoch)
-    full-sweep     All models, all DDP modes
-    validate       Check convergence against structured baselines
-    nccl-cadence   NCCL cadence for all models
+ARGUMENTS:
+    [<preset>]          Named preset, one of:
+      quick             Fast smoke test (linear, 1 epoch)
+      full-sweep        All models, all DDP modes
+      validate          Check convergence against structured baselines
+      nccl-cadence      NCCL cadence for all models
 
 OPTIONS:
     --model <MODEL>         Run specific model  [default: all]
@@ -757,7 +758,7 @@ OPTIONS:
     --seed <N>              [default: 42]
     --report <PATH>         Analyze runs and write report
 
-Run 'fdl ddp-bench <job> --help' for job-specific defaults.
+Run 'fdl ddp-bench <preset> --help' for preset-specific defaults.
 ```
 
 Tab-completion:
@@ -995,8 +996,8 @@ dependency in the binary beyond this one adapter call.
    positional args, long/short variants, list values, collision rules.
    Done.
 2. **fdl-side rendering + completions.** `flodl-cli/src/run.rs` renders
-   the JSON schema as `--help` output (command description, jobs, args,
-   options); `completions.rs` emits `fdl completions <shell>` for bash,
+   the JSON schema as `--help` output (command description, presets,
+   args, options); `completions.rs` emits `fdl completions <shell>` for bash,
    zsh, and fish, driven by the schema (`choices`, `type: path`,
    `completer`). Help unification lands here too: drop `fdl help`, bare
    `fdl` defaults to `--help`. Schema written by hand in YAML as the

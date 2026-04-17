@@ -38,6 +38,7 @@ pub mod args;
 pub mod completions;
 pub mod config;
 pub mod context;
+pub mod dispatch;
 pub mod diagnose;
 pub mod init;
 pub mod libtorch;

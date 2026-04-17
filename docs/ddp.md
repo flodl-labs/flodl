@@ -1004,10 +1004,11 @@ and the builder loop above produce the same LR schedule for the same
 
 The
 [`ddp-bench/fdl.yml.example`](https://github.com/fab2s/floDl/blob/main/ddp-bench/fdl.yml.example)
-turns the matrix into named jobs:
+turns the matrix into named presets under the sub-command's `commands:`
+map:
 
 ```yaml
-jobs:
+commands:
   validate:
     description: Check convergence against structured baselines
     options: { model: all, mode: all, validate: true,

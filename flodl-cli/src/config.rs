@@ -111,8 +111,17 @@ pub enum CommandKind {
 impl CommandSpec {
     /// Classify this command. Returns an error when both `run` and `path`
     /// are declared — always a mistake, caught loudly rather than silently
-    /// picking one.
+    /// picking one. Also rejects `docker:` without `run:`: the docker
+    /// service wraps the inline run-script, so pairing it with a `path:`
+    /// pointer or a preset entry is always silent-noop territory.
     pub fn kind(&self) -> Result<CommandKind, String> {
+        if self.docker.is_some() && self.run.is_none() {
+            return Err(
+                "command declares `docker:` without `run:`; \
+                 `docker:` only wraps inline run-scripts"
+                    .to_string(),
+            );
+        }
         match (self.run.as_deref(), self.path.as_deref()) {
             (Some(_), Some(_)) => Err(
                 "command declares both `run:` and `path:`; \
@@ -900,6 +909,55 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(spec.kind().unwrap(), CommandKind::Preset);
+    }
+
+    #[test]
+    fn command_spec_kind_preset_when_only_options_set() {
+        // `options:` alone is enough to make a preset — not every preset
+        // overrides the structured ddp/training/output blocks.
+        let mut options = BTreeMap::new();
+        options.insert("model".into(), serde_json::json!("linear"));
+        let spec = CommandSpec {
+            options,
+            ..Default::default()
+        };
+        assert_eq!(spec.kind().unwrap(), CommandKind::Preset);
+    }
+
+    #[test]
+    fn command_spec_kind_path_explicit() {
+        // Explicit `path:` is a Path even if preset fields are also set;
+        // the presence of `path:` is the kind-selecting field.
+        let spec = CommandSpec {
+            path: Some("./sub/".into()),
+            ..Default::default()
+        };
+        assert_eq!(spec.kind().unwrap(), CommandKind::Path);
+    }
+
+    #[test]
+    fn command_spec_kind_rejects_docker_without_run() {
+        // `docker:` is meaningful only as a wrapper around an inline
+        // `run:` script. Pairing it with path/preset is a silent noop
+        // at dispatch time, so we reject at load.
+        let spec = CommandSpec {
+            docker: Some("cuda".into()),
+            ..Default::default()
+        };
+        let err = spec
+            .kind()
+            .expect_err("docker without run must fail");
+        assert!(err.contains("docker"), "err was: {err}");
+    }
+
+    #[test]
+    fn command_spec_kind_allows_docker_with_run() {
+        let spec = CommandSpec {
+            run: Some("cargo test".into()),
+            docker: Some("dev".into()),
+            ..Default::default()
+        };
+        assert_eq!(spec.kind().unwrap(), CommandKind::Run);
     }
 
     #[test]

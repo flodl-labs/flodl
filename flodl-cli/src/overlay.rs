@@ -313,6 +313,33 @@ mod tests {
     }
 
     #[test]
+    fn type_change_scalar_base_mapping_overlay_replaces() {
+        // Symmetry with `type_change_overlay_replaces_wholesale`: when
+        // the base is a scalar and the overlay is a mapping, the mapping
+        // wins wholesale. No attempt at cross-type merging.
+        let base = yaml(
+            r"
+            ddp: solo-0
+            ",
+        );
+        let over = yaml(
+            r"
+            ddp:
+              policy: cadence
+              anchor: 3
+            ",
+        );
+        let expected = yaml(
+            r"
+            ddp:
+              policy: cadence
+              anchor: 3
+            ",
+        );
+        assert_eq!(deep_merge(base, over), expected);
+    }
+
+    #[test]
     fn list_envs_discovers_sibling_overlays() {
         let tmp = tempdir();
         std::fs::write(tmp.path().join("fdl.yml"), "description: base").unwrap();

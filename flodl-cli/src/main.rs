@@ -7,9 +7,11 @@
 //! is managed under `~/.flodl/` (override with `$FLODL_HOME`).
 
 use flodl_cli::{
-    api_ref, completions, config, context, diagnose, init, libtorch, overlay,
-    parse_or_schema_from, run, schema_cache, setup, skill, util, FdlArgs,
+    api_ref, completions, config, context, diagnose, dispatch, init, libtorch,
+    overlay, parse_or_schema_from, run, schema_cache, setup, skill, util, FdlArgs,
 };
+
+use dispatch::{classify_path_step, PathOutcome};
 
 use std::env;
 use std::process::ExitCode;
@@ -298,20 +300,7 @@ fn resolve_env(args: &[String]) -> Result<(Option<String>, Vec<String>), String>
 }
 
 fn is_builtin_name(name: &str) -> bool {
-    matches!(
-        name,
-        "setup"
-            | "libtorch"
-            | "init"
-            | "diagnose"
-            | "install"
-            | "skill"
-            | "api-ref"
-            | "completions"
-            | "autocomplete"
-            | "config"
-            | "version"
-    )
+    BUILTINS.iter().any(|(n, _)| *n == name) || HIDDEN_BUILTINS.contains(&name)
 }
 
 fn is_project_command(base_config: &std::path::Path, name: &str) -> bool {
@@ -699,14 +688,16 @@ fn cmd_install(check_only: bool, dev: bool) -> ExitCode {
                 self_canonical.clone()
             };
 
-            // Self-loop guard: refuse to symlink dest to itself. The
-            // comparison is against the literal `dest` path (not its
-            // canonicalization) because a symlink stores the target
-            // string verbatim — if dest is already a symlink to target,
-            // `dest.canonicalize()` would resolve through it and match
-            // target, but that's a legitimate "refresh the symlink" case.
-            // A true self-loop happens when `target == dest` as strings.
-            if target == dest {
+            // Self-loop guard: refuse to symlink dest to itself.
+            //
+            // Compare the fully-resolved `target` against the resolved
+            // `dest` when it exists, and fall back to the raw `dest`
+            // path otherwise. Raw-only would miss the case where
+            // `~/.cargo/bin/fdl` already symlinks (transitively) back
+            // to `~/.local/bin/fdl`; canonical-only would fail when
+            // `dest` does not yet exist.
+            let dest_resolved = dest.canonicalize().unwrap_or_else(|_| dest.clone());
+            if target == dest_resolved || target == dest {
                 eprintln!(
                     "error: --dev cannot symlink `{}` to itself.",
                     dest.display()
@@ -948,6 +939,9 @@ fn download_release_binary(tag: &str, home: &std::path::Path) -> Result<std::pat
 // fdl.yaml dispatch
 // ---------------------------------------------------------------------------
 
+/// Built-in commands shown in `fdl --help`. Paired with their one-line
+/// descriptions. The `is_builtin_name` check uses this list + [`HIDDEN_BUILTINS`]
+/// as a single source of truth for "is this reserved?".
 const BUILTINS: &[(&str, &str)] = &[
     ("setup", "Interactive guided setup"),
     ("libtorch", "Manage libtorch installations"),
@@ -959,6 +953,11 @@ const BUILTINS: &[(&str, &str)] = &[
     ("config", "Inspect resolved project configuration"),
 ];
 
+/// Reserved top-level names that don't appear in the help banner
+/// (internal or already covered elsewhere) but must still be treated as
+/// builtins for first-arg env-collision detection.
+const HIDDEN_BUILTINS: &[&str] = &["completions", "autocomplete", "version"];
+
 fn load_project_config(
     cwd: &std::path::Path,
     env: Option<&str>,
@@ -968,6 +967,7 @@ fn load_project_config(
     let project = config::load_project_with_env(&config_path, env).ok()?;
     Some((project, root))
 }
+
 
 /// Dispatch an unknown top-level token through the unified `commands:`
 /// graph declared in fdl.yml. Handles arbitrary nesting: each step either
@@ -1023,43 +1023,39 @@ fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
                 return run::exec_script(run_cmd, spec.docker.as_deref(), &current_dir);
             }
             config::CommandKind::Path => {
-                let child_dir = spec.resolve_path(&name, &current_dir);
-                let child_cfg = match config::load_command_with_env(&child_dir, env) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("error: {e}");
+                match classify_path_step(&spec, &name, &current_dir, tail, env) {
+                    PathOutcome::LoadFailed(msg) => {
+                        eprintln!("error: {msg}");
                         return ExitCode::FAILURE;
                     }
-                };
-
-                // If the next token names a nested command, descend before
-                // handling --help / --refresh-schema — those apply to the
-                // level the user is actually asking about.
-                if let Some(next) = tail.first() {
-                    if child_cfg.commands.contains_key(next) {
-                        commands = child_cfg.commands.clone();
-                        enclosing_cfg = Some(child_cfg);
-                        current_dir = child_dir;
-                        name = next.clone();
+                    PathOutcome::Descend {
+                        child,
+                        new_dir,
+                        new_name,
+                    } => {
+                        commands = child.commands.clone();
+                        enclosing_cfg = Some(*child);
+                        current_dir = new_dir;
+                        name = new_name;
                         tail_idx += 1;
-                        continue;
+                    }
+                    PathOutcome::ShowHelp { child } => {
+                        run::print_command_help(&child, &name);
+                        return ExitCode::SUCCESS;
+                    }
+                    PathOutcome::RefreshSchema { child, child_dir } => {
+                        return cmd_refresh_schema(&child, &child_dir, &name);
+                    }
+                    PathOutcome::Exec { child, child_dir } => {
+                        return run::exec_command(
+                            &child,
+                            None,
+                            tail,
+                            &child_dir,
+                            &project_root,
+                        );
                     }
                 }
-
-                // --help at this sub-command level.
-                if tail.iter().any(|a| a == "--help" || a == "-h") {
-                    run::print_command_help(&child_cfg, &name);
-                    return ExitCode::SUCCESS;
-                }
-
-                // --refresh-schema: probe `<entry> --fdl-schema` and update cache.
-                if tail.iter().any(|a| a == "--refresh-schema") {
-                    return cmd_refresh_schema(&child_cfg, &child_dir, &name);
-                }
-
-                // No nested command match; pass the tail through to the
-                // child's entry.
-                return run::exec_command(&child_cfg, None, tail, &child_dir, &project_root);
             }
             config::CommandKind::Preset => {
                 let Some(encl) = enclosing_cfg.as_ref() else {

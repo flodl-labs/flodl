@@ -197,9 +197,9 @@ fn spawn_docker_shell(command: &str, project_root: &Path) -> ExitCode {
     }
 }
 
-// ── Script execution ────────────────────────────────────────────────────
+// ── Run-kind execution ──────────────────────────────────────────────────
 
-/// Run a script, optionally wrapped in Docker.
+/// Run an inline `run:` script, optionally wrapped in Docker.
 pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> ExitCode {
     match docker_service {
         Some(service) if !inside_docker() => {
@@ -352,31 +352,38 @@ fn shell_join(args: &[String]) -> String {
 
 // ── Help output ─────────────────────────────────────────────────────────
 
-/// Print help for a sub-command (its arguments, nested commands, and entry).
+/// Print help for a sub-command (its arguments, nested commands, and
+/// entry). Orchestrates the per-section helpers below.
 pub fn print_command_help(cmd_config: &CommandConfig, name: &str) {
+    let (presets, sub_cmds) = split_commands_by_kind(&cmd_config.commands);
+    let preset_slot = cmd_config.arg_name.as_deref().unwrap_or("preset");
+
+    print_title(cmd_config, name);
+    print_usage_line(cmd_config, name, &presets, &sub_cmds, preset_slot);
+    print_arguments_section(cmd_config, &presets, preset_slot);
+    print_sub_commands_section(&sub_cmds);
+    print_options_section(cmd_config);
+    print_entry_section(cmd_config);
+    print_defaults_section(cmd_config);
+}
+
+fn print_title(cmd_config: &CommandConfig, name: &str) {
     if let Some(desc) = &cmd_config.description {
         eprintln!("{} {desc}", style::bold(name));
     } else {
         eprintln!("{}", style::bold(name));
     }
+}
 
-    // Split nested commands by kind. Presets (named option bundles for this
-    // config's entry) render as arguments; Run/Path commands render as
-    // sub-commands (they have their own behavior).
-    let (presets, sub_cmds) = split_commands_by_kind(&cmd_config.commands);
-    let has_schema_args = cmd_config
-        .schema
-        .as_ref()
-        .is_some_and(|s| !s.args.is_empty());
-
-    // Presets are one argument with a fixed list of values, not N
-    // distinct arguments. Render the slot once (as `[<preset>]` by
-    // default, or whatever the user set via `arg-name:`) and indent the
-    // named values underneath.
-    let preset_slot = cmd_config.arg_name.as_deref().unwrap_or("preset");
-
-    // Usage line. The first-positional slot reflects what is actually
-    // accepted here: preset name, sub-command name, or either.
+fn print_usage_line(
+    cmd_config: &CommandConfig,
+    name: &str,
+    presets: &CommandGroup,
+    sub_cmds: &CommandGroup,
+    preset_slot: &str,
+) {
+    // The first-positional slot reflects what is actually accepted here:
+    // preset name, sub-command name, or either.
     let usage_tail = build_usage_tail(
         cmd_config.schema.as_ref(),
         !presets.is_empty(),
@@ -386,112 +393,131 @@ pub fn print_command_help(cmd_config: &CommandConfig, name: &str) {
     eprintln!();
     eprintln!("{}:", style::yellow("Usage"));
     eprintln!("    fdl {name}{usage_tail}");
+}
 
-    // Arguments: schema-declared positionals first (typed slots on the
-    // entry binary), then the preset slot with its value list. Both land
-    // in the first-positional slot at invocation time; presets are always
-    // consumed first by fdl's dispatcher, schema args by the binary.
-    if has_schema_args || !presets.is_empty() {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Arguments"));
-        if let Some(schema) = &cmd_config.schema {
-            for a in &schema.args {
-                eprintln!("    {}", format_arg(a));
-            }
-        }
-        if !presets.is_empty() {
-            let slot_label = format!("[<{preset_slot}>]");
-            eprintln!(
-                "    {}  Named preset, one of:",
-                style::green(&format!("{:<20}", slot_label))
-            );
-            for (pname, spec) in &presets {
-                let desc = spec.description.as_deref().unwrap_or("-");
-                eprintln!(
-                    "      {}  {}",
-                    style::green(&format!("{:<18}", pname)),
-                    desc
-                );
-            }
+fn print_arguments_section(
+    cmd_config: &CommandConfig,
+    presets: &CommandGroup,
+    preset_slot: &str,
+) {
+    // Schema-declared positionals (typed slots on the entry binary) and
+    // the preset slot (dispatched by fdl before the binary sees argv)
+    // both land in the first-positional position, so they share one
+    // section. Schema args render first; the preset slot with its
+    // value list follows.
+    let has_schema_args = cmd_config
+        .schema
+        .as_ref()
+        .is_some_and(|s| !s.args.is_empty());
+    if !has_schema_args && presets.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Arguments"));
+    if let Some(schema) = &cmd_config.schema {
+        for a in &schema.args {
+            eprintln!("    {}", format_arg(a));
         }
     }
-
-    // Commands: Run/Path kinds only — true sub-commands with their own
-    // behavior (an inline script or a nested fdl.yml).
-    if !sub_cmds.is_empty() {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Commands"));
-        for (sub_name, sub_spec) in &sub_cmds {
-            let desc = sub_spec.description.as_deref().unwrap_or("-");
+    if !presets.is_empty() {
+        let slot_label = format!("[<{preset_slot}>]");
+        eprintln!(
+            "    {}  Named preset, one of:",
+            style::green(&format!("{:<20}", slot_label))
+        );
+        for (pname, spec) in presets {
+            let desc = spec.description.as_deref().unwrap_or("-");
             eprintln!(
-                "    {}  {}",
-                style::green(&format!("{:<20}", sub_name)),
+                "      {}  {}",
+                style::green(&format!("{:<18}", pname)),
                 desc
             );
         }
     }
+}
 
-    // Schema-driven options. Renders only when a schema block is present in
-    // fdl.yaml; the "Defaults" section below covers the ddp/training/output
-    // structured config.
-    if let Some(schema) = &cmd_config.schema {
-        if !schema.options.is_empty() {
-            eprintln!();
-            eprintln!("{}:", style::yellow("Options"));
-            for (long, spec) in &schema.options {
-                for line in format_option(long, spec) {
-                    eprintln!("    {line}");
-                }
-            }
-        }
+fn print_sub_commands_section(sub_cmds: &CommandGroup) {
+    // Run/Path kinds only — true sub-commands with their own behavior
+    // (an inline script or a nested fdl.yml).
+    if sub_cmds.is_empty() {
+        return;
     }
-
-    if let Some(entry) = &cmd_config.entry {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Entry"));
-        eprintln!("    {entry}");
-        let docker_info = cmd_config
-            .docker
-            .as_ref()
-            .map(|s| format!(" {}", style::dim(&format!("[docker: {s}]"))))
-            .unwrap_or_default();
-        if !docker_info.is_empty() {
-            eprintln!("    {docker_info}");
-        }
-        eprintln!();
+    eprintln!();
+    eprintln!("{}:", style::yellow("Commands"));
+    for (sub_name, sub_spec) in sub_cmds {
+        let desc = sub_spec.description.as_deref().unwrap_or("-");
         eprintln!(
-            "    Any extra {} are forwarded to the entry point.",
-            style::dim("[options]")
+            "    {}  {}",
+            style::green(&format!("{:<20}", sub_name)),
+            desc
         );
     }
+}
 
-    // Show default config summary.
-    let has_ddp = cmd_config.ddp.is_some();
-    let has_training = cmd_config.training.is_some();
-    if has_ddp || has_training {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Defaults"));
-        if let Some(d) = &cmd_config.ddp {
-            if let Some(mode) = &d.mode {
-                eprintln!("    {}  {mode}", style::dim("ddp.mode"));
-            }
-            if let Some(anchor) = &d.anchor {
-                eprintln!("    {}  {}", style::dim("ddp.anchor"), value_to_string(anchor));
-            }
+fn print_options_section(cmd_config: &CommandConfig) {
+    // Schema-driven options. Renders only when a schema block is present
+    // in fdl.yaml; the "Defaults" section covers ddp/training/output.
+    let Some(schema) = &cmd_config.schema else {
+        return;
+    };
+    if schema.options.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Options"));
+    for (long, spec) in &schema.options {
+        for line in format_option(long, spec) {
+            eprintln!("    {line}");
         }
-        if let Some(t) = &cmd_config.training {
-            if let Some(e) = t.epochs {
-                eprintln!("    {}  {e}", style::dim("training.epochs"));
-            }
-            if let Some(bs) = t.batch_size {
-                eprintln!("    {}  {bs}", style::dim("training.batch_size"));
-            }
-            if let Some(lr) = t.lr {
-                eprintln!("    {}  {lr}", style::dim("training.lr"));
-            }
-            if let Some(seed) = t.seed {
-                eprintln!("    {}  {seed}", style::dim("training.seed"));
-            }
+    }
+}
+
+fn print_entry_section(cmd_config: &CommandConfig) {
+    let Some(entry) = &cmd_config.entry else {
+        return;
+    };
+    eprintln!();
+    eprintln!("{}:", style::yellow("Entry"));
+    eprintln!("    {entry}");
+    if let Some(service) = &cmd_config.docker {
+        eprintln!(
+            "     {}",
+            style::dim(&format!("[docker: {service}]"))
+        );
+    }
+    eprintln!();
+    eprintln!(
+        "    Any extra {} are forwarded to the entry point.",
+        style::dim("[options]")
+    );
+}
+
+fn print_defaults_section(cmd_config: &CommandConfig) {
+    if cmd_config.ddp.is_none() && cmd_config.training.is_none() {
+        return;
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Defaults"));
+    if let Some(d) = &cmd_config.ddp {
+        if let Some(mode) = &d.mode {
+            eprintln!("    {}  {mode}", style::dim("ddp.mode"));
+        }
+        if let Some(anchor) = &d.anchor {
+            eprintln!("    {}  {}", style::dim("ddp.anchor"), value_to_string(anchor));
+        }
+    }
+    if let Some(t) = &cmd_config.training {
+        if let Some(e) = t.epochs {
+            eprintln!("    {}  {e}", style::dim("training.epochs"));
+        }
+        if let Some(bs) = t.batch_size {
+            eprintln!("    {}  {bs}", style::dim("training.batch_size"));
+        }
+        if let Some(lr) = t.lr {
+            eprintln!("    {}  {lr}", style::dim("training.lr"));
+        }
+        if let Some(seed) = t.seed {
+            eprintln!("    {}  {seed}", style::dim("training.seed"));
         }
     }
 }
@@ -733,14 +759,6 @@ pub fn print_project_help(
         "Use {} for more information on a command.",
         style::dim("fdl <command> -h")
     );
-}
-
-/// Format a flat options map for display.
-pub fn _format_options(opts: &BTreeMap<String, serde_json::Value>) -> String {
-    opts.iter()
-        .map(|(k, v)| format!("--{} {}", k.replace('_', "-"), value_to_string(v)))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 // ── Schema-driven help helpers ──────────────────────────────────────────
