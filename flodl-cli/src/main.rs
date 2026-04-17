@@ -170,12 +170,14 @@ fn main() -> ExitCode {
         }
     }
 
-    // First-arg environment detection. If the first positional matches a
-    // sibling `fdl.<arg>.yml` overlay AND is not also the name of a
-    // built-in, script, or sub-command, consume it as an env selector.
-    // Ambiguous cases (both a command and an env file match) are a loud
+    // Environment selection: `--env X` > `FDL_ENV=X` > first-arg convention.
+    // Explicit selectors must resolve to an existing overlay; first-arg
+    // detection falls through when the arg matches no overlay. Ambiguous
+    // cases (a command name also matches a sibling env file) are a loud
     // error rather than silent precedence.
-    let (active_env, args) = match resolve_env(&args) {
+    let cwd = env::current_dir().unwrap_or_default();
+    let fdl_env_var = env::var("FDL_ENV").ok();
+    let (active_env, args) = match resolve_env(&args, &cwd, fdl_env_var.as_deref()) {
         Ok(pair) => pair,
         Err(msg) => {
             eprintln!("error: {msg}");
@@ -263,18 +265,124 @@ fn main() -> ExitCode {
     }
 }
 
+/// Resolve the active environment selector.
+///
+/// Precedence (highest wins):
+///   1. Explicit `--env X` / `--env=X` flag (scan-anywhere, like `-v`).
+///   2. `FDL_ENV=X` environment variable (`fdl_env`).
+///   3. First-arg convention: `fdl ci test` where `fdl.ci.yml` exists.
+///
+/// Explicit selectors (#1, #2) must resolve to an existing overlay — missing
+/// files error loudly rather than silently falling through. First-arg
+/// detection still falls through when the arg matches no overlay (it may
+/// just be a command).
+///
+/// `cwd` and `fdl_env` are injected for testability; `main` reads them from
+/// the process environment once at startup.
+fn resolve_env(
+    args: &[String],
+    cwd: &std::path::Path,
+    fdl_env: Option<&str>,
+) -> Result<(Option<String>, Vec<String>), String> {
+    // 1. Explicit flag wins — strip it from args before anything else.
+    let (args, flag_env) = extract_env_flag(args)?;
+    if let Some(ref env_name) = flag_env {
+        validate_env_exists(env_name, "--env", cwd)?;
+        return Ok((flag_env, args));
+    }
+
+    // 2. Environment variable, if set and non-empty.
+    if let Some(env_name) = fdl_env {
+        if !env_name.is_empty() {
+            validate_env_exists(env_name, "FDL_ENV", cwd)?;
+            return Ok((Some(env_name.to_string()), args));
+        }
+    }
+
+    // 3. First-arg convention — returns None if no overlay matches.
+    resolve_env_first_arg(&args, cwd)
+}
+
+/// Strip `--env <value>` / `--env=<value>` tokens from `args`.
+///
+/// Accepts either long-separated (`--env ci`) or equals-joined
+/// (`--env=ci`) form. Errors on missing value, empty value, or duplicate
+/// occurrence. Returns `(filtered_args, Some(value))` on success, or
+/// `(filtered_args, None)` when the flag is absent.
+fn extract_env_flag(args: &[String]) -> Result<(Vec<String>, Option<String>), String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut env: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--env" {
+            let value = args.get(i + 1).ok_or_else(|| {
+                "--env requires a value (e.g. `--env ci`)".to_string()
+            })?;
+            if value.is_empty() || value.starts_with('-') {
+                return Err(format!("--env requires a value, got `{value}`"));
+            }
+            if env.is_some() {
+                return Err("--env specified more than once".to_string());
+            }
+            env = Some(value.clone());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = a.strip_prefix("--env=") {
+            if env.is_some() {
+                return Err("--env specified more than once".to_string());
+            }
+            if value.is_empty() {
+                return Err("--env= requires a value (e.g. `--env=ci`)".to_string());
+            }
+            env = Some(value.to_string());
+            i += 1;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    Ok((out, env))
+}
+
+/// Confirm that `fdl.<env>.yml` exists next to the nearest base config,
+/// erroring with the source (`--env` or `FDL_ENV`) when it doesn't.
+fn validate_env_exists(
+    env_name: &str,
+    source: &str,
+    cwd: &std::path::Path,
+) -> Result<(), String> {
+    let base_config = config::find_config(cwd).ok_or_else(|| {
+        format!(
+            "{source} `{env_name}` set but no fdl.yml found in {} or parents",
+            cwd.display()
+        )
+    })?;
+    if overlay::find_env_file(&base_config, env_name).is_none() {
+        return Err(format!(
+            "{source} `{env_name}`: overlay not found \
+             (expected fdl.{env_name}.yml next to {})",
+            base_config.display()
+        ));
+    }
+    Ok(())
+}
+
 /// First-arg environment resolution. Returns `(Some(env), args_without_env)`
 /// when the first positional matches a sibling `fdl.<arg>.yml` overlay and
 /// no built-in, script, or sub-command by that name exists. Returns
 /// `(None, args)` when no env applies. Errors on ambiguity.
-fn resolve_env(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+fn resolve_env_first_arg(
+    args: &[String],
+    cwd: &std::path::Path,
+) -> Result<(Option<String>, Vec<String>), String> {
     let candidate = match args.get(1) {
         Some(a) if !a.starts_with('-') => a,
         _ => return Ok((None, args.to_vec())),
     };
 
-    let cwd = env::current_dir().unwrap_or_default();
-    let base_config = match config::find_config(&cwd) {
+    let base_config = match config::find_config(cwd) {
         Some(p) => p,
         None => return Ok((None, args.to_vec())),
     };
@@ -1222,6 +1330,7 @@ fn print_usage() {
     println!("    fdl [options] <command> [command-options]");
     println!();
     println!("GLOBAL OPTIONS:");
+    println!("    --env <name>       Use fdl.<name>.yml overlay (also: FDL_ENV=<name>)");
     println!("    -v                 Verbose output (DDP sync, data loading detail)");
     println!("    -vv                Debug output (per-batch timing, loop internals)");
     println!("    -vvv               Trace output (maximum detail)");
@@ -1308,4 +1417,215 @@ fn print_libtorch_usage() {
     println!("    activate <name>    Set active variant");
     println!("    remove <name>      Remove a variant");
     println!("    info               Show active variant details");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn args(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Zero-dep tempdir helper — matches the pattern used in overlay.rs /
+    /// dispatch.rs (no `tempfile` crate dependency in flodl-cli).
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let pid = std::process::id();
+            let dir = std::env::temp_dir().join(format!("fdl-env-test-{pid}-{n}"));
+            std::fs::create_dir_all(&dir).expect("tempdir creation");
+            TempDir(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn touch(path: &Path, contents: &str) {
+        std::fs::write(path, contents).expect("write fixture");
+    }
+
+    #[test]
+    fn extract_env_flag_absent_returns_none() {
+        let (out, env) = extract_env_flag(&args(&["fdl", "test"])).unwrap();
+        assert_eq!(out, args(&["fdl", "test"]));
+        assert!(env.is_none());
+    }
+
+    #[test]
+    fn extract_env_flag_long_separated_form() {
+        let (out, env) = extract_env_flag(&args(&["fdl", "--env", "ci", "test"])).unwrap();
+        assert_eq!(out, args(&["fdl", "test"]));
+        assert_eq!(env.as_deref(), Some("ci"));
+    }
+
+    #[test]
+    fn extract_env_flag_equals_form() {
+        let (out, env) = extract_env_flag(&args(&["fdl", "--env=ci", "test"])).unwrap();
+        assert_eq!(out, args(&["fdl", "test"]));
+        assert_eq!(env.as_deref(), Some("ci"));
+    }
+
+    #[test]
+    fn extract_env_flag_scans_anywhere() {
+        // Matches `-v`/`-q` global-flag convention: strippable from any position.
+        let (out, env) = extract_env_flag(&args(&["fdl", "test", "--env", "prod"])).unwrap();
+        assert_eq!(out, args(&["fdl", "test"]));
+        assert_eq!(env.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn extract_env_flag_missing_value_errors() {
+        let err = extract_env_flag(&args(&["fdl", "--env"])).unwrap_err();
+        assert!(err.contains("--env requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_env_flag_empty_equals_errors() {
+        let err = extract_env_flag(&args(&["fdl", "--env="])).unwrap_err();
+        assert!(err.contains("requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_env_flag_value_looks_like_flag_errors() {
+        // `fdl --env --help` almost certainly means the user forgot the value;
+        // loud error beats silently treating `--help` as the env name.
+        let err = extract_env_flag(&args(&["fdl", "--env", "--help"])).unwrap_err();
+        assert!(err.contains("--env requires a value"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_env_flag_duplicate_errors() {
+        let err = extract_env_flag(&args(&["fdl", "--env", "ci", "--env", "prod"])).unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_env_flag_duplicate_mixed_forms_errors() {
+        let err = extract_env_flag(&args(&["fdl", "--env=ci", "--env", "prod"])).unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    // --- resolve_env: precedence + error paths ----------------------------
+    //
+    // These exercise the full flag / env-var / first-arg composition with
+    // real fixture files on disk. Injecting `cwd` + `fdl_env` keeps them
+    // hermetic (no mutation of the process cwd or environment).
+
+    #[test]
+    fn resolve_env_flag_wins_over_env_var_and_first_arg() {
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+        touch(&tmp.path().join("fdl.ci.yml"), "");
+        touch(&tmp.path().join("fdl.prod.yml"), "");
+        touch(&tmp.path().join("fdl.stage.yml"), "");
+
+        // --env prod is explicit → beats FDL_ENV=stage and the `ci` first-arg.
+        let (env, rest) = resolve_env(
+            &args(&["fdl", "ci", "--env", "prod", "test"]),
+            tmp.path(),
+            Some("stage"),
+        )
+        .unwrap();
+        assert_eq!(env.as_deref(), Some("prod"));
+        // --env/--env=value tokens stripped; `ci` stays as the first-arg candidate,
+        // which resolve_env_first_arg is skipped for entirely.
+        assert_eq!(rest, args(&["fdl", "ci", "test"]));
+    }
+
+    #[test]
+    fn resolve_env_env_var_wins_over_first_arg() {
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+        touch(&tmp.path().join("fdl.ci.yml"), "");
+        touch(&tmp.path().join("fdl.stage.yml"), "");
+
+        let (env, rest) =
+            resolve_env(&args(&["fdl", "ci", "test"]), tmp.path(), Some("stage")).unwrap();
+        assert_eq!(env.as_deref(), Some("stage"));
+        // First-arg `ci` left untouched when FDL_ENV takes over.
+        assert_eq!(rest, args(&["fdl", "ci", "test"]));
+    }
+
+    #[test]
+    fn resolve_env_empty_env_var_falls_through_to_first_arg() {
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+        touch(&tmp.path().join("fdl.ci.yml"), "");
+
+        let (env, rest) = resolve_env(&args(&["fdl", "ci", "test"]), tmp.path(), Some("")).unwrap();
+        assert_eq!(env.as_deref(), Some("ci"));
+        assert_eq!(rest, args(&["fdl", "test"]));
+    }
+
+    #[test]
+    fn resolve_env_first_arg_still_works_when_no_explicit_selector() {
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+        touch(&tmp.path().join("fdl.ci.yml"), "");
+
+        let (env, rest) = resolve_env(&args(&["fdl", "ci", "test"]), tmp.path(), None).unwrap();
+        assert_eq!(env.as_deref(), Some("ci"));
+        assert_eq!(rest, args(&["fdl", "test"]));
+    }
+
+    #[test]
+    fn resolve_env_flag_errors_on_missing_overlay() {
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+
+        let err = resolve_env(&args(&["fdl", "--env", "nope", "test"]), tmp.path(), None)
+            .unwrap_err();
+        assert!(err.contains("--env"), "got: {err}");
+        assert!(err.contains("nope"), "got: {err}");
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_env_env_var_errors_on_missing_overlay() {
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+
+        let err = resolve_env(&args(&["fdl", "test"]), tmp.path(), Some("nope")).unwrap_err();
+        assert!(err.contains("FDL_ENV"), "got: {err}");
+        assert!(err.contains("nope"), "got: {err}");
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_env_equals_form_consumes_single_token() {
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+        touch(&tmp.path().join("fdl.ci.yml"), "");
+
+        let (env, rest) =
+            resolve_env(&args(&["fdl", "test", "--env=ci"]), tmp.path(), None).unwrap();
+        assert_eq!(env.as_deref(), Some("ci"));
+        assert_eq!(rest, args(&["fdl", "test"]));
+    }
+
+    #[test]
+    fn resolve_env_first_arg_unknown_falls_through() {
+        // `deploy` isn't an env overlay — leave it as the first positional.
+        let tmp = TempDir::new();
+        touch(&tmp.path().join("fdl.yml"), "");
+
+        let (env, rest) =
+            resolve_env(&args(&["fdl", "deploy", "--now"]), tmp.path(), None).unwrap();
+        assert!(env.is_none());
+        assert_eq!(rest, args(&["fdl", "deploy", "--now"]));
+    }
 }

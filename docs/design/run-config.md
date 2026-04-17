@@ -421,9 +421,15 @@ fdl local ddp-bench validate  # env=local, cmd=ddp-bench, preset=validate
 **Explicit flag** — disambiguation + automation:
 
 ```bash
-fdl --env ci test
-FDL_ENV=ci fdl test
+fdl --env ci test            # scan-anywhere: also `fdl test --env ci` / `--env=ci`
+FDL_ENV=ci fdl test          # environment variable, for CI runners + shell rc
 ```
+
+Precedence: `--env X` > `FDL_ENV=X` > first-arg convention. Explicit
+selectors (flag or env var) must resolve to an existing overlay; a missing
+`fdl.X.yml` errors loudly rather than silently falling through — the
+first-arg path only silent-falls-through because the candidate may just
+be a command name. Duplicate `--env` also errors.
 
 ### First-arg resolution rules
 
