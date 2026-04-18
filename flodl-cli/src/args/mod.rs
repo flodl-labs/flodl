@@ -78,12 +78,26 @@ pub fn parse_or_schema_from<T: FdlArgsTrait>(argv: &[String]) -> T {
 
 #[cfg(test)]
 mod env_tests {
-    //! End-to-end coverage of `#[option(env = "...")]` fallback. Each test
-    //! uses a uniquely-named env var so the process-global environment
-    //! can't cross-contaminate concurrent test runs.
+    //! End-to-end coverage of `#[option(env = "...")]` fallback.
+    //!
+    //! These tests mutate process-global `std::env` state, so they must
+    //! hold [`ENV_LOCK`] for the duration of set/parse/drop. Without the
+    //! lock, `cargo test`'s default parallel execution races on shared
+    //! env var names and produces flaky failures in CI.
+
+    use std::sync::{Mutex, MutexGuard};
 
     use crate::args::FdlArgsTrait;
     use crate::FdlArgs;
+
+    /// Serializes every test in this module. Poison is ignored because a
+    /// panicking test that leaves the lock poisoned still left the env
+    /// clean (`EnvGuard::drop` runs during unwind).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn mk_args(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
@@ -94,7 +108,8 @@ mod env_tests {
     struct EnvGuard(&'static str);
     impl EnvGuard {
         fn set(name: &'static str, value: &str) -> Self {
-            // SAFETY: tests use unique var names; no concurrent writer.
+            // SAFETY: caller holds `ENV_LOCK` for the duration of this
+            // test, so no other test thread writes env concurrently.
             unsafe { std::env::set_var(name, value); }
             EnvGuard(name)
         }
@@ -115,6 +130,7 @@ mod env_tests {
 
     #[test]
     fn env_fills_absent_option() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_PORT", "8080");
         let cli: OptArgs = OptArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
         assert_eq!(cli.port, Some(8080));
@@ -122,6 +138,7 @@ mod env_tests {
 
     #[test]
     fn argv_flag_beats_env() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_PORT", "8080");
         let cli: OptArgs =
             OptArgs::try_parse_from(&mk_args(&["prog", "--port", "9999"])).unwrap();
@@ -130,6 +147,7 @@ mod env_tests {
 
     #[test]
     fn equals_form_beats_env() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_PORT", "8080");
         let cli: OptArgs =
             OptArgs::try_parse_from(&mk_args(&["prog", "--port=9999"])).unwrap();
@@ -138,6 +156,7 @@ mod env_tests {
 
     #[test]
     fn empty_env_falls_through() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_PORT", "");
         let cli: OptArgs = OptArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
         assert_eq!(cli.port, None);
@@ -153,6 +172,7 @@ mod env_tests {
 
     #[test]
     fn env_overrides_default_on_scalar() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_RETRIES", "7");
         let cli: ScalarArgs = ScalarArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
         assert_eq!(cli.retries, 7);
@@ -160,6 +180,7 @@ mod env_tests {
 
     #[test]
     fn argv_beats_env_beats_default_on_scalar() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_RETRIES", "7");
         let cli: ScalarArgs =
             ScalarArgs::try_parse_from(&mk_args(&["prog", "--retries", "42"])).unwrap();
@@ -176,6 +197,7 @@ mod env_tests {
 
     #[test]
     fn env_value_is_validated_against_choices() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_CHOICE", "z"); // not in choices
         let err = ChoiceArgs::try_parse_from(&mk_args(&["prog"])).unwrap_err();
         assert!(
@@ -186,6 +208,7 @@ mod env_tests {
 
     #[test]
     fn env_valid_choice_accepted() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_CHOICE", "a");
         let cli: ChoiceArgs = ChoiceArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
         assert_eq!(cli.pick.as_deref(), Some("a"));
@@ -201,6 +224,7 @@ mod env_tests {
 
     #[test]
     fn short_form_suppresses_env_fallback() {
+        let _lock = env_lock();
         let _g = EnvGuard::set("FDL_TEST_SHORT", "8080");
         let cli: ShortArgs =
             ShortArgs::try_parse_from(&mk_args(&["prog", "-p", "9999"])).unwrap();
