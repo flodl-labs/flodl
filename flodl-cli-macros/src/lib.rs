@@ -61,6 +61,7 @@ fn impl_derive(input: DeriveInput) -> syn::Result<TokenStream> {
     let schema_build = build_schema_expr(&parsed, description.as_deref());
     let extract = build_extractor(ident, &parsed)?;
     let render_help = build_help_expr(&parsed, description.as_deref(), &ident.to_string());
+    let env_injection = build_env_injection(&parsed);
 
     let expanded = quote! {
         impl ::flodl_cli::FdlArgsTrait for #ident {
@@ -68,6 +69,7 @@ fn impl_derive(input: DeriveInput) -> syn::Result<TokenStream> {
                 -> ::std::result::Result<Self, ::std::string::String>
             {
                 let spec = #spec_build;
+                #env_injection
                 let parsed = ::flodl_cli::args::parser::parse(&spec, args)?;
                 #extract
             }
@@ -176,6 +178,12 @@ fn parse_field(f: &syn::Field) -> syn::Result<FieldSpec> {
                 return Err(syn::Error::new_spanned(
                     &f.ty,
                     "#[option(default = ...)] is meaningless on a bool flag (absent=false, present=true)",
+                ));
+            }
+            if matches!(shape, TypeShape::Bool) && env.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &f.ty,
+                    "#[option(env = ...)] is not supported on bare `bool` (truthy/falsy string semantics are ambiguous) — use `Option<bool>` if you need env fallback",
                 ));
             }
             if matches!(shape, TypeShape::Scalar) && default.is_none() && !matches!(shape, TypeShape::Bool) {
@@ -652,6 +660,13 @@ fn build_schema_expr(fields: &[FieldSpec], description: Option<&str>) -> TokenSt
             }
         });
 
+    // `desc_expr` is retained for future use (Schema may grow a
+    // description field). Bind it to `_` only when it has a concrete
+    // type — interpolating a bare `Option::None` into `let _ = ...;`
+    // leaves rustc unable to infer the type parameter (E0282) when
+    // the caller's surrounding context doesn't pin it down, which
+    // happened inside test modules.
+    let _ = desc_expr;
     quote! {
         {
             let mut options: ::std::collections::BTreeMap<::std::string::String, ::flodl_cli::OptionSpec> =
@@ -659,7 +674,6 @@ fn build_schema_expr(fields: &[FieldSpec], description: Option<&str>) -> TokenSt
             let mut args: ::std::vec::Vec<::flodl_cli::ArgSpec> = ::std::vec::Vec::new();
             #( #option_inserts )*
             #( #arg_pushes )*
-            let _ = #desc_expr; // description lives on Schema... but our Schema doesn't have it yet
             ::flodl_cli::Schema {
                 args,
                 options,
@@ -700,6 +714,70 @@ fn inner_ty_name(ty: &Type) -> String {
         }
     }
     String::from("_")
+}
+
+/// Emit an argv pre-processing block that, for each `#[option(env = "...")]`
+/// field absent from argv, appends `--<long> <value>` sourced from the named
+/// environment variable. After this runs, the standard parser pipeline
+/// handles the value exactly like an argv-supplied flag — choices, strict
+/// unknowns, and `FromStr` all fire unchanged.
+///
+/// Precedence (highest wins): argv flag → env var → `default`. Empty env
+/// vars fall through (consistent with `FDL_ENV` handling in `main.rs`).
+/// Boolean fields are rejected at derive time elsewhere, so we never
+/// inject `--foo` without a value.
+fn build_env_injection(fields: &[FieldSpec]) -> TokenStream2 {
+    let mut injections: Vec<TokenStream2> = Vec::new();
+    for f in fields {
+        let Some(env_name) = f.env.as_deref() else {
+            continue;
+        };
+        // Positional args (#[arg]) don't have an env path in this MVP —
+        // they're typically required and rarely env-driven. Skip them.
+        if matches!(f.kind, FieldKind::Arg) {
+            continue;
+        }
+        let long = kebab(&f.ident.to_string());
+        let long_flag = format!("--{long}");
+        let long_eq_prefix = format!("--{long}=");
+        let short_tok = match &f.short {
+            Some(c) => {
+                let short_exact = format!("-{c}");
+                quote! {
+                    || a.as_str() == #short_exact
+                }
+            }
+            None => quote! {},
+        };
+        injections.push(quote! {
+            {
+                let has_flag = __env_args.iter().any(|a: &::std::string::String| {
+                    a.as_str() == #long_flag
+                        || a.as_str().starts_with(#long_eq_prefix)
+                        #short_tok
+                });
+                if !has_flag {
+                    if let ::std::result::Result::Ok(v) = ::std::env::var(#env_name) {
+                        if !v.is_empty() {
+                            __env_args.push(::std::string::String::from(#long_flag));
+                            __env_args.push(v);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    if injections.is_empty() {
+        return quote! {};
+    }
+    quote! {
+        let __env_args: ::std::vec::Vec<::std::string::String> = {
+            let mut __env_args: ::std::vec::Vec<::std::string::String> = args.to_vec();
+            #( #injections )*
+            __env_args
+        };
+        let args: &[::std::string::String] = &__env_args[..];
+    }
 }
 
 fn build_extractor(ident: &Ident, fields: &[FieldSpec]) -> syn::Result<TokenStream2> {

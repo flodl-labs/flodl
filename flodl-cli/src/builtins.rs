@@ -343,6 +343,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+
+
     #[test]
     fn registry_has_no_duplicate_paths() {
         let mut seen = HashSet::new();

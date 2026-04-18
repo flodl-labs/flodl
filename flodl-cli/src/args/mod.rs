@@ -75,3 +75,136 @@ pub fn parse_or_schema_from<T: FdlArgsTrait>(argv: &[String]) -> T {
         }
     }
 }
+
+#[cfg(test)]
+mod env_tests {
+    //! End-to-end coverage of `#[option(env = "...")]` fallback. Each test
+    //! uses a uniquely-named env var so the process-global environment
+    //! can't cross-contaminate concurrent test runs.
+
+    use crate::args::FdlArgsTrait;
+    use crate::FdlArgs;
+
+    fn mk_args(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Scoped env-var guard — `Drop` unsets on the way out so assertions
+    /// that panic mid-test can't leak state into the next one.
+    struct EnvGuard(&'static str);
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            // SAFETY: tests use unique var names; no concurrent writer.
+            unsafe { std::env::set_var(name, value); }
+            EnvGuard(name)
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(self.0); }
+        }
+    }
+
+    /// Port the server binds to.
+    #[derive(FdlArgs, Debug)]
+    struct OptArgs {
+        /// Port override.
+        #[option(env = "FDL_TEST_PORT")]
+        port: Option<u16>,
+    }
+
+    #[test]
+    fn env_fills_absent_option() {
+        let _g = EnvGuard::set("FDL_TEST_PORT", "8080");
+        let cli: OptArgs = OptArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
+        assert_eq!(cli.port, Some(8080));
+    }
+
+    #[test]
+    fn argv_flag_beats_env() {
+        let _g = EnvGuard::set("FDL_TEST_PORT", "8080");
+        let cli: OptArgs =
+            OptArgs::try_parse_from(&mk_args(&["prog", "--port", "9999"])).unwrap();
+        assert_eq!(cli.port, Some(9999));
+    }
+
+    #[test]
+    fn equals_form_beats_env() {
+        let _g = EnvGuard::set("FDL_TEST_PORT", "8080");
+        let cli: OptArgs =
+            OptArgs::try_parse_from(&mk_args(&["prog", "--port=9999"])).unwrap();
+        assert_eq!(cli.port, Some(9999));
+    }
+
+    #[test]
+    fn empty_env_falls_through() {
+        let _g = EnvGuard::set("FDL_TEST_PORT", "");
+        let cli: OptArgs = OptArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
+        assert_eq!(cli.port, None);
+    }
+
+    /// Retry count — scalar with default + env fallback.
+    #[derive(FdlArgs, Debug)]
+    struct ScalarArgs {
+        /// Retries.
+        #[option(default = "3", env = "FDL_TEST_RETRIES")]
+        retries: u32,
+    }
+
+    #[test]
+    fn env_overrides_default_on_scalar() {
+        let _g = EnvGuard::set("FDL_TEST_RETRIES", "7");
+        let cli: ScalarArgs = ScalarArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
+        assert_eq!(cli.retries, 7);
+    }
+
+    #[test]
+    fn argv_beats_env_beats_default_on_scalar() {
+        let _g = EnvGuard::set("FDL_TEST_RETRIES", "7");
+        let cli: ScalarArgs =
+            ScalarArgs::try_parse_from(&mk_args(&["prog", "--retries", "42"])).unwrap();
+        assert_eq!(cli.retries, 42);
+    }
+
+    /// Env-sourced values must still satisfy `choices`.
+    #[derive(FdlArgs, Debug)]
+    struct ChoiceArgs {
+        /// Pick.
+        #[option(choices = &["a", "b"], env = "FDL_TEST_CHOICE")]
+        pick: Option<String>,
+    }
+
+    #[test]
+    fn env_value_is_validated_against_choices() {
+        let _g = EnvGuard::set("FDL_TEST_CHOICE", "z"); // not in choices
+        let err = ChoiceArgs::try_parse_from(&mk_args(&["prog"])).unwrap_err();
+        assert!(
+            err.contains("invalid value") && err.contains("z") && err.contains("allowed:"),
+            "env-sourced invalid choice should error like an argv one; got: {err}"
+        );
+    }
+
+    #[test]
+    fn env_valid_choice_accepted() {
+        let _g = EnvGuard::set("FDL_TEST_CHOICE", "a");
+        let cli: ChoiceArgs = ChoiceArgs::try_parse_from(&mk_args(&["prog"])).unwrap();
+        assert_eq!(cli.pick.as_deref(), Some("a"));
+    }
+
+    /// Short-form presence should suppress env fallback.
+    #[derive(FdlArgs, Debug)]
+    struct ShortArgs {
+        /// Port.
+        #[option(short = 'p', env = "FDL_TEST_SHORT")]
+        port: Option<u16>,
+    }
+
+    #[test]
+    fn short_form_suppresses_env_fallback() {
+        let _g = EnvGuard::set("FDL_TEST_SHORT", "8080");
+        let cli: ShortArgs =
+            ShortArgs::try_parse_from(&mk_args(&["prog", "-p", "9999"])).unwrap();
+        assert_eq!(cli.port, Some(9999));
+    }
+}
+
