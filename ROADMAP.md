@@ -24,6 +24,12 @@ For the historical record of shipped phases and individual changes, see
 - **ElChe cadence battle-tested** across six architecture families
   (logistic, MLP, LeNet, char-RNN, GPT-nano, conv autoencoder) plus
   ResNet-20 with deep residuals.
+- **fdl maturity pass**: zero-dep `FdlArgs` derive (flodl-cli +
+  flodl-cli-macros), `--fdl-schema` contract, ddp-bench and flodl-cli
+  migrated, multi-env overlay (`fdl.local.yml`, `fdl.ci.yml`, …) with
+  first-arg routing, deep-merge, conflict detection, and
+  `fdl config show`. See
+  [docs/design/run-config.md](docs/design/run-config.md).
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
@@ -31,12 +37,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
 ## In progress
 
-- **[started] fdl maturity pass**: `flodl-args` crate + `--fdl-schema`
-  contract + multi-env overlay. Landed first because it unblocks both
-  Phase 12 (needs `fdl.cloud.yml`) and ddp-bench expansion (needs
-  schema-driven help). See
-  [docs/design/run-config.md](docs/design/run-config.md) for the full
-  spec.
+- *(empty — ready to pull the next item from Possibilities)*
 
 (Length-1 by design. The next item pulls from Possibilities when this
 ships.)

@@ -1,80 +1,86 @@
 # fdl.yaml spec
 
-`fdl.yaml` is the project manifest for flodl projects. It defines scripts,
-sub-commands, and training configurations. `fdl` discovers it automatically
-at the project root, like `package.json` or `composer.json`.
+`fdl.yaml` is the project manifest for flodl projects. It declares a single
+`commands:` map at every level; each entry is either a path to a child
+`fdl.yml`, an inline `run:` script, or (inside a sub-command) a preset that
+reuses the enclosing `entry:` with merged config fields. `fdl` discovers
+the root manifest automatically, like `package.json` or `composer.json`.
 
 ## Quick start
 
 ```
-fdl --help                             # show scripts, commands, built-ins
-fdl build                              # run a script
-fdl ddp-bench --model mlp              # pass args to a sub-command
-fdl ddp-bench anchor-3                 # run a named job
-fdl ddp-bench anchor-3 --model mlp     # job + extra args
-fdl ddp-bench --list                   # show available jobs
+fdl --help                             # show commands + built-ins
+fdl build                              # run a `run:` command (shell script)
+fdl ddp-bench --model mlp              # pass args through to a sub-command's entry
+fdl ddp-bench quick                    # run a named preset inside ddp-bench
+fdl ddp-bench quick --epochs 3         # preset + extra pass-through args
+fdl ddp-bench --help                   # list nested commands + options
 ```
 
 ## Format
 
-YAML primary. JSON and TOML accepted, auto-detected by file extension.
-Same Rust struct, three serde deserializers.
+YAML primary. JSON accepted too (auto-detected by file extension).
+
+## One concept: `commands:`
+
+Every `fdl.yml` — root and sub — declares a single `commands:` map. The
+kind of each entry is inferred from its fields:
+
+- **Path** (child directory): the entry has `path:` set, or is empty/null
+  and the command name maps by convention to `./<name>/fdl.yml`.
+- **Run** (inline script): the entry has `run:` set. Optional `docker:`
+  routes the script through `docker compose run --rm <service>`.
+- **Preset** (inside a sub-command only): neither `path:` nor `run:` is set;
+  preset fields (`ddp:`, `training:`, `output:`, `options:`) are merged
+  onto the enclosing config's defaults and the enclosing `entry:` is
+  invoked with the merged values.
+
+`run:` and `path:` are mutually exclusive; declaring both is a load-time
+error.
 
 ## Project manifest
 
-### Root fdl.yaml
+### Root fdl.yml
 
 ```yaml
-# fdl.yaml (project root)
 description: flodl - Rust deep learning framework
 
-scripts:
-  build: make build
-  test: make test
-  clippy: make clippy
-  shell: make shell
-  cuda-test: make cuda-test
-  cuda-test-all:
-    description: Full CUDA suite including NCCL isolated tests
-    run: make cuda-test-all
-
 commands:
-  - ddp-bench/
-  - benchmarks/
+  # Convention: `commands: { <name>: }` resolves to ./<name>/fdl.yml
+  ddp-bench:
+
+  # Explicit path override
+  bench:
+    description: flodl vs PyTorch benchmarks
+    path: benchmarks/
+
+  # Inline run scripts replace the old `scripts:` block
+  build:
+    description: Build (debug)
+    run: cargo build
+    docker: dev
+  cuda-test:
+    description: Run CUDA tests (parallel, excludes NCCL/Graph)
+    run: cargo test --features cuda -- --nocapture
+    docker: cuda
+  self-build:
+    description: Rebuild fdl CLI after changes
+    run: cargo install --path flodl-cli
 ```
 
-### Scripts
-
-Named shell commands. Short form (string) or long form (with description):
-
-```yaml
-scripts:
-  build: make build                      # short form
-  cuda-test-all:                         # long form
-    description: Full CUDA suite
-    run: make cuda-test-all
-```
-
-### Commands
-
-Sub-directories with their own `fdl.yaml`. Listed by path, descriptions
-come from each child's own `fdl.yaml` (zero duplication). `fdl --help`
-assembles the full picture automatically.
-
-```yaml
-commands:
-  - ddp-bench/
-  - benchmarks/
-```
+Top-level commands must be `Run` or `Path` — `Preset` is disallowed because
+there is no enclosing `entry:` at the project root.
 
 ## Sub-command manifest
 
-Each sub-command has its own `fdl.yaml` with an `entry` point,
-optional structured config sections, and named jobs.
+Each sub-command has its own `fdl.yml` with an `entry` point, optional
+structured config sections, and nested `commands:` (which may be presets
+of this entry, deeper child paths, or further `run:` scripts).
 
 ```yaml
-# ddp-bench/fdl.yaml
+# ddp-bench/fdl.yml
 description: DDP validation and benchmark suite
+docker: cuda
 entry: cargo run --release --features cuda --
 
 ddp:
@@ -89,17 +95,7 @@ training:
 output:
   dir: runs/
 
-jobs:
-  anchor-3:
-    description: ElChe with tight sync
-    ddp: { anchor: 3 }
-
-  anchor-5:
-    ddp: { anchor: 5 }
-
-  anchor-10:
-    ddp: { anchor: 10 }
-
+commands:
   quick:
     description: Fast smoke test
     training: { epochs: 1, batches_per_epoch: 100 }
@@ -109,51 +105,83 @@ jobs:
     description: All models, all modes
     options: { model: all, mode: all }
 
-  solo-baseline:
-    description: Solo GPU reference
-    ddp: { mode: solo-0 }
-    training: { lr: 0.001 }
+  anchor-3:
+    description: ElChe with tight sync
+    ddp: { anchor: 3 }
+
+  # A `run:` command inside a sub-command is also fine — it replaces
+  # the parent entry invocation with a self-contained shell script.
+  report:
+    description: Regenerate the convergence report
+    run: python scripts/report.py
+
+  # A path can point at further nesting if you want a grandchild tree.
+  # demo:
+  #   path: examples/demo/
 ```
 
 ### Entry
 
-The default binary that bare arguments pass through to.
-`fdl ddp-bench --model mlp` becomes:
-`cargo run --release --features cuda -- --model mlp`
+The binary that bare arguments (and preset invocations) pass through to.
+`fdl ddp-bench --model mlp` becomes
+`cargo run --release --features cuda -- --model mlp`.
 
-### Jobs
+### Presets
 
-Named argument/option presets. A job merges its config with the
-root-level defaults and passes the result to the entry point.
-
-Jobs are resolved implicitly: `fdl ddp-bench anchor-3` checks
-if `anchor-3` matches a job name. If yes, apply it. If no,
-pass through as a bare argument to entry.
+A preset merges its `ddp:` / `training:` / `output:` / `options:` fields
+over the enclosing sub-command's defaults, then invokes the enclosing
+`entry:` with the merged values appended to any CLI pass-through args.
 
 ```
-fdl ddp-bench anchor-3                 # job match -> merge config
-fdl ddp-bench anchor-3 --model mlp     # job + extra CLI args
-fdl ddp-bench --model mlp --epochs 10  # no job, pure pass-through
-fdl ddp-bench --list                   # show available jobs
+fdl ddp-bench quick                    # preset match -> merge + exec entry
+fdl ddp-bench quick --model mlp        # preset + extra CLI args (CLI wins)
+fdl ddp-bench --model mlp --epochs 10  # no preset, pure pass-through
 ```
 
 ## CLI resolution
 
 ```
 fdl <name> [args...]
-  1. built-in?        (setup, init, diagnose)       -> execute
-  2. root script?     (scripts section)              -> execute
-  3. sub-command?      (commands section)             -> load child fdl.yaml
-     3a. first arg matches a job?                    -> merge config, exec entry
-     3b. otherwise                                   -> pass args to entry
-  4. not found                                       -> error + suggestions
+  1. built-in?                                     -> execute (setup, init, …)
+  2. first-arg env overlay? (fdl.<name>.yml)       -> activate overlay, shift args
+  3. commands[<name>] in root fdl.yml?             -> resolve by kind:
+       Run  -> execute `run:` (optionally in docker)
+       Path -> load child fdl.yml, recurse with args[1..]
+  4. not found                                     -> error + help listing
+
+Inside a recursion (child fdl.yml loaded):
+  a. commands[<next-arg>] present?                 -> recurse again
+       Preset -> merge fields, exec enclosing entry with tail args
+       Run    -> execute `run:`
+       Path   -> recurse into grandchild fdl.yml
+  b. else                                          -> pass args to child entry
 ```
+
+Recursion is unbounded: `fdl a b c d ...` walks the command tree as long
+as each token matches a nested `commands:` entry, and once a non-match
+token is reached (or there are no more tokens), the current level either
+runs the matched command or passes the remaining tail through to the
+entry.
+
+## Help conventions
+
+One way to ask for help: `--help` / `-h`. No `fdl help` subcommand —
+keeps the top-level namespace clean and frees `help` from being a
+reserved name.
+
+- `fdl`                         -> same as `fdl --help`
+- `fdl --help` / `fdl -h`       -> project overview: built-ins, commands, envs
+- `fdl <cmd> --help`            -> command overview: arguments, nested commands, options
+- `fdl <cmd> <sub> --help`      -> resolved preset or recursive command help
+
+`-h` is reserved at the fdl level and cannot be shadowed by a sub-command
+or entry option (see "Collision rules" below).
 
 ## Config sections
 
-Structured sections that `fdl` understands natively. They appear at
-the root level of a sub-command's `fdl.yaml` (defaults for all jobs)
-and can be overridden per job.
+Structured sections that `fdl` understands natively. They appear at the
+root level of a sub-command's `fdl.yml` (defaults for all nested preset
+commands) and can be overridden per preset.
 
 ### ddp
 
@@ -194,17 +222,18 @@ Pure scalars that map directly to CLI args or RunConfig fields.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| dir | string | runs/ | Base output directory. Job name appended. |
+| dir | string | runs/ | Base output directory. Preset name appended. |
 | timeline | bool | false | Save timeline JSON/CSV/HTML |
 | monitor | int/null | null | Dashboard port (null = disabled) |
 
 ### options
 
-Pass-through key-value pairs rendered as `--key value` on the command line.
-Used in jobs for arguments that don't have a structured section yet.
+Pass-through key-value pairs rendered as `--key value` on the command
+line. Used in preset commands for arguments that don't have a structured
+section yet.
 
 ```yaml
-jobs:
+commands:
   full-sweep:
     options: { model: all, mode: all }
 ```
@@ -222,20 +251,22 @@ model:
 
 ## Inheritance rules
 
-1. Root-level sections in a sub-command's fdl.yaml are defaults for all jobs
-2. Job-level sections deep-merge into root defaults
-3. Job-level scalar wins over root-level scalar
-4. Job-level map extends root-level map (matching keys overwritten)
-5. CLI args override everything (appended after config-derived args)
-6. `null` means "use default", not "clear the field"
+1. Structured sections at the root of a sub-command's fdl.yml are defaults
+   for all nested preset commands.
+2. Preset-level sections deep-merge into root defaults.
+3. Preset-level scalar wins over root-level scalar.
+4. Preset-level map extends root-level map (matching keys overwritten).
+5. CLI args override everything (appended after config-derived args).
+6. `null` means "use default", not "clear the field" (within a sub-command
+   config — the env-overlay layer above *does* use `null` to delete).
 
 ## Execution model
 
 ```
-fdl ddp-bench anchor-3 --model mlp
-  -> load ddp-bench/fdl.yaml
-  -> resolve job "anchor-3"
-  -> deep-merge: root ddp + root training + job overrides
+fdl ddp-bench quick --model mlp
+  -> load ddp-bench/fdl.yml
+  -> resolve commands["quick"]  (a Preset)
+  -> deep-merge: root ddp + root training + preset overrides
   -> translate structured sections to CLI args
   -> append explicit CLI args (--model mlp)
   -> exec: cargo run --release --features cuda -- [merged args] --model mlp
@@ -243,7 +274,7 @@ fdl ddp-bench anchor-3 --model mlp
 
 ## Help assembly
 
-`fdl --help` reads the root fdl.yaml and each child's description:
+`fdl --help` reads the root fdl.yml and each path-kind child's description:
 
 ```
 fdl - flodl project toolkit
@@ -252,48 +283,103 @@ Built-in:
   setup          Auto-detect hardware, download libtorch, build Docker
   init           Scaffold a new flodl project
   diagnose       Check GPU, libtorch, Docker health
-
-Scripts:
-  build          make build
-  test           make test
-  clippy         make clippy
-  shell          make shell
-  cuda-test      make cuda-test
-  cuda-test-all  Full CUDA suite including NCCL isolated tests
+  config         Inspect resolved project configuration
 
 Commands:
+  build          Build (debug)
+  clippy         Lint (including test code, workspace + ddp-bench)
+  cuda-test      Run CUDA tests (parallel, excludes NCCL/Graph)
   ddp-bench      DDP validation and benchmark suite
-  bench          flodl vs PyTorch comparison
+  shell          Interactive shell in dev container
+  test           Run all CPU tests
 ```
 
-`fdl ddp-bench --list`:
+`fdl ddp-bench --help`:
 
 ```
-ddp-bench - DDP validation and benchmark suite
+ddp-bench DDP validation and benchmark suite
 
-Jobs:
-  anchor-3       ElChe with tight sync
-  anchor-5       -
-  anchor-10      -
-  quick          Fast smoke test
-  full-sweep     All models, all modes
-  solo-baseline  Solo GPU reference
+Usage:
+    fdl ddp-bench [<preset>] [options]
 
-Entry: cargo run --release --features cuda --
-  Use --help for entry point options
+Arguments:
+    [<preset>]  Named preset, one of:
+      full-sweep     All models, all DDP modes
+      nccl-async     NCCL async for all models
+      nccl-cadence   NCCL cadence for all models
+      quick          Fast smoke test (linear, 1 epoch)
+      solo-0         Solo baseline on fast GPU (all models)
+      solo-1         Solo baseline on slow GPU (all models)
+
+Options:
+    --model <VALUE>   Run a specific model  [default: all]
+    --mode <VALUE>    Run a specific DDP mode  [default: solo-0]
+    ...
+
+Entry:
+    cargo run --release --features cuda --  [docker: cuda]
+    Any extra [options] are forwarded to the entry point.
 ```
+
+This reflects what is actually happening: `ddp-bench` takes one
+optional positional argument (a named preset) plus options. The preset
+slot renders once with its possible values indented underneath — not
+N distinct argument rows. Preset entries share the enclosing `entry:`;
+each value just pins some option defaults and invokes the same binary.
+
+A command with `run:` or `path:` set would render under a separate
+`Commands:` section instead (it *is* a different script). When both
+kinds coexist at the same level, the usage line reads
+`[<preset>|<command>]` and two sections render side by side.
+
+### `arg-name:` override
+
+By default the preset slot is labelled `[<preset>]`. A sub-command can
+override the placeholder to match its domain vocabulary without
+affecting dispatch (presets are always looked up by name):
+
+```yaml
+# bake-off/fdl.yml
+description: Cake bake-off
+entry: cargo run --release --bin bake --
+arg-name: recipe
+
+commands:
+  chocolate: { options: { flavor: chocolate, sugar: 120 } }
+  vanilla:   { options: { flavor: vanilla,   sugar: 80  } }
+```
+
+Renders as:
+
+```
+Usage:
+    fdl bake-off [<recipe>] [options]
+
+Arguments:
+    [<recipe>]  Named preset, one of:
+      chocolate  …
+      vanilla    …
+```
+
+This is purely help cosmetics — the user still types `fdl bake-off
+chocolate` to invoke the preset.
 
 ## Design principles
 
-- **Convention over configuration.** fdl.yaml at root = project manifest.
-  Sub-directories with fdl.yaml = sub-commands. No registration needed.
-- **Progressive complexity.** Simple script -> named job -> full structured config.
-  Each level is useful on its own.
-- **No premature abstraction.** Structured sections (ddp, training) exist because
-  fdl understands them. Everything else is pass-through options.
-- **Self-documenting.** `--help` and `--list` assemble from descriptions in the
-  YAML. New contributors see everything immediately.
-- **Replaces Makefile.** Scripts + commands + Docker awareness = complete project CLI.
+- **One concept, `commands:`.** No separate `scripts:`, `jobs:`, or root
+  command list. `run:` replaces scripts, `path:` replaces the old command
+  pointer list, and preset fields replace jobs.
+- **Convention over configuration.** `commands: { ddp-bench: }` implies
+  `./ddp-bench/fdl.yml`; explicit `path:` overrides.
+- **Recursive uniformity.** Every level works the same way. `fdl a b c`
+  walks `commands` maps left-to-right until a leaf (`run:` or a terminal
+  preset) is reached.
+- **No premature abstraction.** Structured sections (ddp, training) exist
+  because fdl understands them. Everything else is pass-through options.
+- **Self-documenting.** `--help` assembles from descriptions at every
+  level. New contributors see everything immediately.
+- **Replaces Makefile.** Unified commands + Docker awareness = complete
+  project CLI.
 
 ---
 
@@ -305,8 +391,10 @@ independently implementable; together they make the scale-up story
 (laptop -> workstation -> cluster -> cloud) a matter of editing YAML
 rather than rewriting code.
 
-**Status**: approved design direction, not yet implemented. Capture
-before the details drift.
+**Status**: shipped. Derive, `--fdl-schema` contract, ddp-bench and
+flodl-cli migration, and multi-env overlay are all in tree as of
+2026-04-17. The text below is retained as the canonical reference for
+how the layer is meant to behave.
 
 ## 1. Multi-environment fdl.yaml inheritance
 
@@ -325,34 +413,40 @@ Two ways to select an environment:
 **Convention (first-arg detection)** — zero ceremony:
 
 ```bash
-fdl test                      # no env: uses fdl.yml, runs "test" script
+fdl test                      # no env: uses fdl.yml, runs the "test" command
 fdl ci test                   # "ci" matches fdl.ci.yml -> env overlay, runs "test"
-fdl local ddp-bench validate  # env=local, cmd=ddp-bench, job=validate
+fdl local ddp-bench validate  # env=local, cmd=ddp-bench, preset=validate
 ```
 
 **Explicit flag** — disambiguation + automation:
 
 ```bash
-fdl --env ci test
-FDL_ENV=ci fdl test
+fdl --env ci test            # scan-anywhere: also `fdl test --env ci` / `--env=ci`
+FDL_ENV=ci fdl test          # environment variable, for CI runners + shell rc
 ```
+
+Precedence: `--env X` > `FDL_ENV=X` > first-arg convention. Explicit
+selectors (flag or env var) must resolve to an existing overlay; a missing
+`fdl.X.yml` errors loudly rather than silently falling through — the
+first-arg path only silent-falls-through because the candidate may just
+be a command name. Duplicate `--env` also errors.
 
 ### First-arg resolution rules
 
 ```
 fdl <arg> [...]
 
-1. Does a script/command named <arg> exist?   -> Y1
+1. Does a command named <arg> exist?          -> Y1
 2. Does fdl.<arg>.yml exist in walk-up tree?  -> Y2
 
-Y1 only:    run the script/command
+Y1 only:    dispatch the command
 Y2 only:    use fdl.<arg>.yml as overlay, expect next positional = command
 Y1 + Y2:    LOUD CONFLICT — error out, show both candidates
 Neither:    unknown command
 ```
 
 The loud-conflict rule is the key. Silent precedence here would be a
-footgun (renaming a script could accidentally shadow an env). Failing
+footgun (renaming a command could accidentally shadow an env). Failing
 on ambiguity the moment it's introduced is cheap insurance.
 
 ### `inherit-from:` for non-obvious topologies
@@ -366,6 +460,20 @@ inherit-from: fdl.cloud.yml   # which itself inherits from fdl.yml
 ddp:
   hosts: { regions: [eu-west, us-east, ap-south] }
 ```
+
+Resolution rules:
+
+- **Linear chain**: each file names one parent; the effective layer
+  order is `[deepest-ancestor, ..., direct-parent, this]`.
+- **Relative paths** resolve against the directory of the declaring
+  file (not the cwd). Absolute paths work as-is.
+- **Env overlays compose**: `fdl.ci.yml` with `inherit-from: fdl.cloud.yml`
+  produces `[fdl.yml, fdl.cloud.yml, fdl.ci.yml]`. Duplicate files
+  (reached via two routes) are deduplicated at first occurrence.
+- **Cycles error loudly**: `A → B → A` (or self-inheritance) surfaces
+  the full cycle in the error message.
+- **`fdl config show`** tags each leaf with the file that set it, so
+  a three-level chain's provenance is visible at a glance.
 
 ### Merge rules
 
@@ -459,9 +567,20 @@ which prints its options as JSON to stdout and exits:
 ```json
 {
   "description": "DDP validation and benchmark suite for flodl",
+  "args": [
+    {
+      "name": "run-id",
+      "type": "string",
+      "description": "Run identifier to analyze",
+      "required": false,
+      "variadic": false,
+      "completer": "ls runs/"
+    }
+  ],
   "options": {
     "model": {
       "type": "string",
+      "short": "m",
       "description": "Run specific model",
       "default": "all",
       "choices": ["logistic", "mlp", "lenet", "resnet", "resnet-graph",
@@ -474,9 +593,14 @@ which prints its options as JSON to stdout and exits:
       "choices": ["solo-0", "solo-1", "nccl-sync", "nccl-cadence",
                   "nccl-async", "cpu-sync", "cpu-cadence", "cpu-async", "all"]
     },
+    "tags": {
+      "type": "list[string]",
+      "description": "Filter runs by tag (repeat or comma-separate)",
+      "default": []
+    },
     "epochs":      { "type": "int",   "description": "Override epoch count" },
     "lr-scale":    { "type": "float", "description": "Multiply default LR" },
-    "validate":    { "type": "bool",  "description": "Check against baseline" },
+    "validate":    { "type": "bool",  "short": "V", "description": "Check against baseline" },
     "baseline":    { "type": "path",  "default": "baselines/baseline.json" },
     "tolerance":   { "type": "float", "default": 0.15 },
     "seed":        { "type": "int",   "default": 42 },
@@ -485,19 +609,105 @@ which prints its options as JSON to stdout and exits:
 }
 ```
 
+### Positional args
+
+`args:` is an ordered list of positional arguments the binary (or a
+preset) expects. Each entry:
+
+| Field        | Type    | Description                                           |
+|--------------|---------|-------------------------------------------------------|
+| `name`       | string  | Kebab-case identifier, rendered as `<name>` in usage  |
+| `type`       | string  | Same type set as options                              |
+| `description`| string  | Shown in `--help`                                     |
+| `required`   | bool    | Default `true`; `false` makes it optional            |
+| `variadic`   | bool    | Default `false`; collects all remaining args          |
+| `default`    | literal | Only valid when `required: false`                     |
+| `choices`    | list    | Drives completion + validation                        |
+| `completer`  | string  | Shell snippet producing completion values             |
+
+Rules:
+- Only the *last* positional may be `variadic: true`.
+- A required positional cannot follow an optional one.
+- Presets may pin an arg value (`args: { run-id: latest }`) — the
+  positional becomes effectively fixed for that preset.
+
+### Long and short option variants
+
+Options are always long-form (`--name`). Adding `"short": "x"` gives a
+short alias (`-x`). Short forms are single ASCII letters. Long forms are
+derived from the JSON key and always kebab-case.
+
+Short aliases are optional and always declared explicitly — no implicit
+first-letter mapping (that path leads to drift when a new option shares
+a prefix).
+
+### Collision rules (checked at schema-cache build time)
+
+Loud errors on any of:
+- two options share the same long name
+- two options share the same short letter
+- any option (long or short) shadows a reserved fdl-level flag
+  (`--help`, `-h`, `--env`, `-e`, `--list`, `--version`, `-V` when fdl
+  reserves it, etc.)
+- a preset pins an option or arg that isn't declared in the schema
+  (only when `schema.strict: true`, otherwise silently forwarded)
+
+Loud-at-build-time is the pattern from the env-overlay section: ambiguity
+is cheapest to fix the moment it's introduced.
+
 ### Supported types
 
-| Type       | Shell form                              | Completion hint             |
-|------------|-----------------------------------------|------------------------------|
-| `string`   | `--key value`                           | `choices:` list if declared  |
-| `int`      | `--key 42`                              | none                         |
-| `float`    | `--key 0.5`                             | none                         |
-| `bool`     | `--key` (flag, no value)                | none                         |
-| `path`     | `--key ./foo`                           | file path completion         |
-| `list[T]`  | `--key a,b,c` or repeated `--key a ...` | T's completion per item      |
+| Type             | Shell form                                   | Completion hint               |
+|------------------|----------------------------------------------|-------------------------------|
+| `string`         | `--key value`                                | `choices:` list if declared   |
+| `int`            | `--key 42`                                   | none                          |
+| `float`          | `--key 0.5`                                  | none                          |
+| `bool`           | `--key` / `-k` (flag, no value)              | none                          |
+| `path`           | `--key ./foo`                                | file path completion          |
+| `list[T]`        | `--key a,b,c` or repeated `--key a --key b`  | T's completion per item       |
+
+List semantics:
+- Repeated flags *append*; comma-separated values *extend*. Both forms
+  are equivalent and may be mixed in one invocation.
+- Empty default is `[]`. A preset-level list replaces the root-level
+  list (same rule as env-overlay merging — lists replace, never append).
+- `list[bool]` is not allowed (meaningless).
 
 Kept deliberately small. Richer types belong in the binary's own
 validation, not in the schema.
+
+### Defaults and precedence
+
+Defaults can appear on both options and positionals in the schema, and on
+both `#[option]` and `#[arg]` in the derive. A few rules keep the
+interactions predictable:
+
+- **Default implies optional.** A field with `default` is never
+  "required." In the derive, pair `default` with plain `T` (not
+  `Option<T>`) — the two are redundant and the derive rejects the
+  combination at compile time.
+- **`Option<T>` without `default` means "None when absent."** Use it
+  when the binary needs to distinguish "user didn't set it" from "user
+  set it to the default value."
+- **List defaults.** `Vec<T>` defaults to `[]`. Declare a non-empty
+  default explicitly (`default = &["a", "b"]`). Overlays *replace* the
+  list, same rule as everywhere else.
+- **Positional defaults.** Only valid on optional positionals
+  (`required: false` in schema, `Option<T>` or `default = ...` in
+  derive). Required positionals with a default are a contradiction and
+  fail at schema-cache build time.
+
+**Precedence chain** (highest wins):
+
+```
+argv  >  env var (via `env = "..."`)  >  preset-level YAML  >  root-level
+   YAML in sub-command fdl.yaml  >  env-overlay YAML (fdl.ci.yml, ...)
+      >  schema / struct default
+```
+
+The chain is collapsed at resolve time into a single value per field
+before exec. `fdl config show` annotates each resolved value with its
+source — which is how you debug "why is it using that value."
 
 ### fdl-side behavior
 
@@ -505,9 +715,9 @@ validation, not in the schema.
    supports it. Cache output under `.fdl/schema-cache/<cmd>.json`.
 2. Cache invalidates on binary mtime change.
 3. `fdl <cmd> --help` renders from the schema (command description,
-   options table, jobs list).
-4. `fdl <cmd> <job> --help` renders the resolved options (schema +
-   job defaults + env overlay + env vars + argv).
+   options table, preset list).
+4. `fdl <cmd> <preset> --help` renders the resolved options (schema +
+   preset defaults + env overlay + env vars + argv).
 5. `fdl completions` integrates: `choices:` drive completion values,
    `type: path` drives file path completion.
 
@@ -527,14 +737,32 @@ keep working.
 
 ```yaml
 # sub-command fdl.yaml
-options:
-  strict: true   # reject unknown flags at the fdl level before invoking
+schema:
+  strict: true     # reject unknown flags at the fdl level before invoking
+  options: { ... } # the declared surface
+  args: [ ... ]
 ```
 
-Default behavior stays pass-through. `strict: true` validates the argv
-against the schema. This preserves "don't break working usage" — adding
-schema support to an existing command surfaces help without risking
-runtime rejections.
+Default behavior stays pass-through. `strict: true` turns on two
+complementary checks:
+
+- **Load time.** Every preset's `options:` keys must exist in
+  `schema.options`. Typos like `options: { batchsize: 32 }` when the
+  schema declares `batch-size` error out the moment the `fdl.yml` is
+  loaded, not later when the user runs the preset.
+- **Dispatch time.** The user's extra `argv` tail is tokenized against
+  the schema before the binary is invoked. Unknown flags are rejected
+  with a "did you mean `--...`?" suggestion (edit-distance ≤ 2).
+  Positional count and type coercion stay the binary's responsibility
+  — strict is scoped to option-level typos.
+
+Reserved universals (`--help`, `--version`, `--fdl-schema`,
+`--refresh-schema`) are always allowed through, even when they are not
+declared in `schema.options`.
+
+This preserves "don't break working usage" — adding a schema to an
+existing command surfaces help without enforcing anything until
+`strict: true` is added explicitly.
 
 ### Rendered help — the payoff
 
@@ -543,13 +771,14 @@ $ fdl ddp-bench --help
 DDP validation and benchmark suite for flodl
 
 USAGE:
-    fdl ddp-bench [<job>] [OPTIONS]
+    fdl ddp-bench [<preset>] [OPTIONS]
 
-JOBS:
-    quick          Fast smoke test (linear, 1 epoch)
-    full-sweep     All models, all DDP modes
-    validate       Check convergence against structured baselines
-    nccl-cadence   NCCL cadence for all models
+ARGUMENTS:
+    [<preset>]          Named preset, one of:
+      quick             Fast smoke test (linear, 1 epoch)
+      full-sweep        All models, all DDP modes
+      validate          Check convergence against structured baselines
+      nccl-cadence      NCCL cadence for all models
 
 OPTIONS:
     --model <MODEL>         Run specific model  [default: all]
@@ -567,7 +796,7 @@ OPTIONS:
     --seed <N>              [default: 42]
     --report <PATH>         Analyze runs and write report
 
-Run 'fdl ddp-bench <job> --help' for job-specific defaults.
+Run 'fdl ddp-bench <preset> --help' for preset-specific defaults.
 ```
 
 Tab-completion:
@@ -585,7 +814,19 @@ $ fdl ddp-bench --baseline <TAB>
 
 ---
 
-## 3. The `flodl-args` crate: one struct, everything derived
+## 3. The `FdlArgs` derive — one struct, everything derived
+
+> **Consolidation note (2026-04-17):** An earlier revision of this doc
+> proposed a separate `flodl-args` crate, initially clap-backed. After
+> shipping the clap-backed MVP and attempting ddp-bench migration, the
+> clap attribute vocabulary (`default_value` vs `default_missing_value`,
+> `num_args = 0..=1`) leaked through to user code and clashed with the
+> "option are optional, only their value can have a default" principle
+> below. We consolidated into **flodl-cli as a lib+bin** (exposes the
+> runtime) + **flodl-cli-macros** as the proc-macro crate (one extra
+> crate is unavoidable — Rust language rule). Clap was dropped entirely;
+> flodl-cli owns the argv parser + schema emission. The `#[option]` /
+> `#[arg]` split proposed below is what the derive actually uses.
 
 ### Goal
 
@@ -608,14 +849,22 @@ use flodl_args::{Args, parse_or_schema};
 /// DDP validation and benchmark suite for flodl.
 #[derive(Args, Debug)]
 struct Cli {
+    /// Optional run identifier to analyze (positional)
+    #[arg(completer = "ls runs/")]
+    run_id: Option<String>,
+
+    /// Extra tags to filter by (repeat or comma-separate)
+    #[option(short = 't')]
+    tags: Vec<String>,
+
     /// Run specific model (or "all")
-    #[arg(default = "all",
-          choices = &["logistic", "mlp", "lenet", "resnet", "resnet-graph",
-                      "char-rnn", "gpt-nano", "conv-ae", "all"])]
+    #[option(short = 'm', default = "all",
+             choices = &["logistic", "mlp", "lenet", "resnet", "resnet-graph",
+                         "char-rnn", "gpt-nano", "conv-ae", "all"])]
     model: String,
 
     /// Run specific DDP mode (or "all")
-    #[arg(default = "solo-0", choices = &DdpMode::ALL_NAMES)]
+    #[option(default = "solo-0", choices = &DdpMode::ALL_NAMES)]
     mode: String,
 
     /// Override epoch count
@@ -631,11 +880,11 @@ struct Cli {
     lr_scale: Option<f64>,
 
     /// Output directory
-    #[arg(default = "runs")]
+    #[option(default = "runs")]
     output: String,
 
     /// Dataset cache directory
-    #[arg(default = "data")]
+    #[option(default = "data")]
     data_dir: std::path::PathBuf,
 
     /// Live dashboard port
@@ -648,15 +897,15 @@ struct Cli {
     save_baseline: bool,
 
     /// Baseline file
-    #[arg(default = "baselines/baseline.json")]
+    #[option(default = "baselines/baseline.json")]
     baseline: std::path::PathBuf,
 
     /// Validation tolerance (0.0-1.0)
-    #[arg(default = 0.15)]
+    #[option(default = 0.15)]
     tolerance: f64,
 
     /// RNG seed
-    #[arg(default = 42)]
+    #[option(default = 42)]
     seed: u64,
 
     /// Analyze runs and print report (optional FILE to save)
@@ -684,19 +933,51 @@ fn run(cli: Cli) -> flodl::tensor::Result<()> {
 
 ### Conventions
 
-- Doc comments (`///`) become option descriptions.
+- Doc comments (`///`) become descriptions.
+- A plain field (no attribute) is an option with a long name derived
+  from the field name. This is the common case, so it stays
+  boilerplate-free.
 - `Option<T>` means "not required."
 - `bool` means "switch" (no value).
+- `Vec<T>` is a `list[T]` option (repeat `--key` or comma-separate).
 - `Option<Option<T>>` means "optional with optional value"
   (e.g. `--report` alone vs `--report foo.md`).
 - Field names snake_case in Rust, rendered as kebab-case in argv
   (`batch_size` -> `--batch-size`).
-- `#[arg(...)]` attributes:
-  - `default = <literal>` — explicit default
-  - `choices = &[...]` — allowed values (drives completion + validation)
-  - `name = "..."` — override the CLI name (rare)
-  - `short = 'x'` — add a short form (e.g. `-v`)
-  - `env = "..."` — read from environment variable when not in argv
+
+#### `#[option(...)]` — a flag (`--name` / `-n`)
+
+Maps to the JSON schema `options:` section. Attrs:
+
+- `default = <literal>` — explicit default
+- `choices = &[...]` — allowed values (drives completion + validation)
+- `name = "..."` — override the CLI name (rare)
+- `short = 'x'` — add a short alias (`-x`). Explicit only, no implicit
+  first-letter mapping.
+- `completer = "..."` — shell snippet producing completion values
+  (escape hatch beyond `choices` and `type: path`)
+- `env = "..."` — read from environment variable when not in argv
+
+#### `#[arg(...)]` — a positional
+
+Maps to the JSON schema `args:` section. Field order in the struct
+defines positional order. Attrs:
+
+- `default = <literal>` — explicit default (requires `Option<T>` or
+  equivalent to also be optional)
+- `choices = &[...]` — allowed values
+- `name = "..."` — override the `<name>` rendered in usage
+- `completer = "..."` — shell snippet producing completion values
+
+Guardrails (compile errors):
+- `short` is not valid on `#[arg]` (positionals have no short).
+- Only the last positional may be variadic (`Vec<T>`).
+- A required positional (`T`) cannot follow an optional one
+  (`Option<T>` or one with `default`).
+
+The derive emits the same collision checks as the JSON schema (reserved
+fdl flags, duplicate longs/shorts) — build fails at compile time rather
+than at runtime.
 
 ### What ddp-bench shrinks by
 
@@ -749,14 +1030,20 @@ dependency in the binary beyond this one adapter call.
 
 ## Rollout order
 
-1. **Document the schema format.** This section, written down. Done.
-2. **fdl-side rendering.** `flodl-cli/src/run.rs` learns to render the
-   JSON schema as `--help` output; `completions.rs` picks up `choices`
-   and `type: path`. Schema still has to be written by hand in the YAML
-   as an interim step. ~200 LOC.
+1. **Document the schema format.** This section, written down. Includes
+   positional args, long/short variants, list values, collision rules.
+   Done.
+2. **fdl-side rendering + completions.** `flodl-cli/src/run.rs` renders
+   the JSON schema as `--help` output (command description, presets,
+   args, options); `completions.rs` emits `fdl completions <shell>` for bash,
+   zsh, and fish, driven by the schema (`choices`, `type: path`,
+   `completer`). Help unification lands here too: drop `fdl help`, bare
+   `fdl` defaults to `--help`. Schema written by hand in YAML as the
+   interim source. ~300 LOC.
 3. **Schema-from-binary contract.** `flodl-cli` tries `<entry>
    --fdl-schema` before falling back to the YAML schema or parsed
-   `--help`. Cache under `.fdl/schema-cache/`. ~100 LOC.
+   `--help`. Cache under `.fdl/schema-cache/`, mtime-invalidated.
+   Collision check runs at cache build time. ~100 LOC.
 4. **`flodl-args` crate.** New workspace member. Derive macro +
    `parse_or_schema()`. The biggest chunk (~500-800 LOC depending on
    dep policy).
@@ -770,6 +1057,11 @@ dependency in the binary beyond this one adapter call.
 
 Steps 1-3 are pure win with no new crate to maintain. Steps 4-6 are
 the ergonomic endgame. Step 7 is the scale-up story.
+
+**2026-04-17 status:** Steps 1-7 are all implemented. Source-annotated
+`fdl config show` is limited to layer-file headers (not per-line
+provenance); richer annotation, `inherit-from:`, env-var single-key
+overrides, and the explicit `--env` flag remain future-work polish.
 
 ---
 

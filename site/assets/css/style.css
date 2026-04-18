@@ -20,6 +20,62 @@
   --max-w: 1120px;
 }
 
+/* ── Light theme (optional, opt-in via <html data-theme="light">) ── */
+
+:root[data-theme="light"] {
+  --bg: #fbfbfc;
+  --bg-alt: #f2f3f7;
+  --card: #ffffff;
+  --border: #dde0e8;
+  --text: #1a1d27;
+  --dim: #5a5f72;
+  --accent: #3656c7;
+  --green: #0e9968;
+  --red: #c93c3c;
+  --yellow: #8f5b10;
+  --purple: #6e4ad0;
+  --cyan: #0b7b95;
+}
+
+/* Light-mode fix for the one hardcoded rgba(white) that assumes dark bg */
+:root[data-theme="light"] .nav-dropdown-menu a:hover { background: rgba(0,0,0,0.04); }
+
+/* ── Theme toggle button ────────────────────────── */
+
+.theme-toggle {
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 6px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+  line-height: 0;
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+  background: rgba(108, 140, 255, 0.08);
+}
+
+.theme-toggle svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.theme-toggle .sun { display: inline-block; }
+.theme-toggle .moon { display: none; }
+
+:root[data-theme="light"] .theme-toggle .sun { display: none; }
+:root[data-theme="light"] .theme-toggle .moon { display: inline-block; }
+
 html { scroll-behavior: smooth; }
 
 body {
@@ -64,17 +120,18 @@ a:hover { color: var(--cyan); }
 .logo-img {
   height: 32px;
   width: auto;
+  border-radius: 6px;
 }
 
 .nav-links { display: flex; gap: 24px; margin-left: auto; align-items: center; }
-.nav-links > a { color: var(--dim); font-size: 14px; font-weight: 500; }
+.nav-links > a { color: var(--dim); font-size: 15px; font-weight: 500; }
 .nav-links > a:hover { color: var(--text); text-decoration: none; }
 .nav-links > a.active { color: var(--text); }
 
 /* nav dropdown */
 .nav-dropdown { position: relative; }
 .nav-dropdown > span {
-  color: var(--dim); font-size: 14px; font-weight: 500; cursor: pointer;
+  color: var(--dim); font-size: 15px; font-weight: 500; cursor: pointer;
 }
 .nav-dropdown:hover > span, .nav-dropdown.active > span { color: var(--text); }
 .nav-dropdown-menu {
@@ -89,7 +146,7 @@ a:hover { color: var(--cyan); }
 }
 .nav-dropdown:hover .nav-dropdown-menu { display: block; }
 .nav-dropdown-menu a {
-  display: block; padding: 6px 16px; font-size: 13px;
+  display: block; padding: 6px 16px; font-size: 14px;
   color: var(--dim) !important; white-space: nowrap;
 }
 .nav-dropdown-menu a:hover { color: var(--text) !important; background: rgba(255,255,255,0.05); }
@@ -191,7 +248,7 @@ a:hover { color: var(--cyan); }
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-radius: 10px;
-  max-width: 580px;
+  max-width: 610px;
   margin: 0 auto;
   text-align: left;
   overflow: hidden;
@@ -272,7 +329,7 @@ a:hover { color: var(--cyan); }
 .terminal pre {
   padding: 20px;
   font-family: var(--mono);
-  font-size: 13.5px;
+  font-size: 14.5px;
   line-height: 1.7;
   overflow-x: auto;
   color: var(--text);
@@ -378,15 +435,17 @@ a:hover { color: var(--cyan); }
 .feature-icon.typing { background: rgba(103, 232, 249, 0.12); color: var(--cyan); }
 .feature-icon.docker { background: rgba(248, 113, 113, 0.12); color: var(--red); }
 .feature-icon.gpu { background: rgba(251, 191, 36, 0.12); color: var(--yellow); }
+.feature-icon.speed { background: rgba(103, 232, 249, 0.12); color: var(--cyan); }
+.feature-icon.ddp { background: rgba(167, 139, 250, 0.12); color: var(--purple); }
 
 .feature h3 {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   margin-bottom: 6px;
 }
 
 .feature p {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--dim);
   line-height: 1.5;
 }
@@ -417,7 +476,7 @@ a:hover { color: var(--cyan); }
 .showcase pre {
   padding: 20px;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.7;
   overflow-x: auto;
   color: var(--text);
@@ -448,21 +507,21 @@ a:hover { color: var(--cyan); }
 }
 
 .wyg-card h3 {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   margin-bottom: 6px;
   color: var(--text);
 }
 
 .wyg-card p {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--dim);
   line-height: 1.45;
 }
 
 .wyg-card code {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 13px;
   background: rgba(108, 140, 255, 0.1);
   padding: 1px 5px;
   border-radius: 3px;
@@ -518,7 +577,7 @@ a:hover { color: var(--cyan); }
 .sidebar-group { margin-bottom: 24px; }
 
 .sidebar-label {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -530,7 +589,7 @@ a:hover { color: var(--cyan); }
 .sidebar a {
   display: block;
   padding: 5px 8px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--dim);
   border-radius: 4px;
   transition: all 0.1s;
@@ -628,8 +687,8 @@ a:hover { color: var(--cyan); }
   margin-bottom: 8px;
 }
 
-.content p { margin-bottom: 16px; font-size: 15px; }
-.content ul, .content ol { margin-bottom: 16px; padding-left: 24px; font-size: 15px; }
+.content p { margin-bottom: 16px; font-size: 16px; }
+.content ul, .content ol { margin-bottom: 16px; padding-left: 24px; font-size: 16px; }
 .content li { margin-bottom: 4px; }
 .content li p { margin-bottom: 4px; }
 
@@ -652,7 +711,7 @@ a:hover { color: var(--cyan); }
   background: rgba(108, 140, 255, 0.1);
   padding: 1px 5px;
   border-radius: 3px;
-  color: var(--cyan);
+  color: var(--text);
 }
 
 .content pre {
@@ -670,7 +729,7 @@ a:hover { color: var(--cyan); }
   padding: 0;
   border-radius: 0;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .content hr {
@@ -778,7 +837,7 @@ a:hover { color: var(--cyan); }
 /* ── Syntax highlighting (Rouge) ────────────────── */
 
 .highlight { background: var(--bg-alt); border-radius: 8px; }
-.highlight pre { margin: 0; }
+.highlight pre { margin: 0; font-size: 14px; }
 
 /* tokens */
 .highlight .k,
@@ -889,7 +948,7 @@ a:hover { color: var(--cyan); }
     box-shadow: none; padding: 4px 0 0 0; margin-top: 0; min-width: 0;
   }
   .nav-dropdown > span {
-    color: var(--dim); font-size: 14px; font-weight: 500; cursor: default;
+    color: var(--dim); font-size: 15px; font-weight: 500; cursor: default;
   }
 }
 

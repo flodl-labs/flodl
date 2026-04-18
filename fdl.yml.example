@@ -1,6 +1,9 @@
 description: flodl - Rust deep learning framework
 
-scripts:
+commands:
+  # --- Sub-command (child fdl.yml) ---
+  ddp-bench:                    # convention: ./ddp-bench/fdl.yml
+
   # --- CPU targets ---
   build:
     description: Build (debug)
@@ -25,6 +28,10 @@ scripts:
   doc:
     description: Generate API docs (strict, fails on warnings)
     run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items && test -f target/doc/flodl/index.html
+    docker: dev
+  ci:
+    description: Run the full CI CPU job locally (build + test + clippy + doc)
+    run: cargo build && cargo test -- --nocapture && cargo clippy -- -W clippy::all && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items && test -f target/doc/flodl/index.html
     docker: dev
   shell:
     description: Interactive shell in dev container
@@ -79,6 +86,3 @@ scripts:
   self-build:
     description: Rebuild fdl CLI after changes
     run: cargo install --path flodl-cli
-
-commands:
-  - ddp-bench/

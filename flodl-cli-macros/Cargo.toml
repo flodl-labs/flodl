@@ -1,0 +1,20 @@
+[package]
+name = "flodl-cli-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Proc-macro derive for flodl-cli: #[derive(FdlArgs)] with #[option]/#[arg] attributes"
+readme = "README.md"
+keywords = ["cli", "derive", "argv", "proc-macro", "flodl"]
+categories = ["command-line-interface", "development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

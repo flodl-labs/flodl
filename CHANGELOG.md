@@ -5,6 +5,83 @@ All notable changes to floDl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.5.0] - 2026-04-18
+
+> Upgrading from 0.4.0? The only breaking changes live in `fdl.yml`
+> (`scripts:` merged into `commands:`) and in `#[derive(FdlArgs)]`
+> (a small set of reserved flag names). See
+> [UPGRADE.md](UPGRADE.md) for the step-by-step migration.
+
+### Added
+
+#### New Crate: `flodl-cli-macros`
+- **`flodl-cli-macros/`** (new workspace member): proc-macro derive crate exposing `#[derive(FdlArgs)]`, re-exported as `flodl_cli::FdlArgs`. Turns a plain struct into an argv parser plus schema and help renderer. Implements `flodl_cli::FdlArgsTrait` with `try_parse_from(&[String]) -> Result<Self, String>`, `schema() -> flodl_cli::Schema`, and `render_help() -> String`.
+- **`#[option(...)]`** named-flag attribute: `short = 'c'`, `default = "..."`, `choices = &["a", "b"]`, `env = "VAR"`, `completer = "name"`. Supported field shapes: `bool` (absent = false, present = true), `T` (scalar, requires `default`), `Option<T>` (absent = None), `Vec<T>` (repeatable).
+- **`#[arg(...)]`** positional attribute: `default`, `choices`, `variadic` (requires `Vec<T>`, must be last), `completer`.
+- **Derive-time validation**: required positionals cannot follow optional ones; variadic must be last; reserved flags cannot be shadowed (see Global Flags for the authoritative list); duplicate long/short flags error at compile time.
+- **Per-option env fallback**: `#[option(env = "WANDB_API_KEY")]` falls back to the environment variable when the flag is absent (argv > env > default). `bool` fields are exempt.
+- **Typed help via Rust docs**: doc-comments on the struct and fields flow into `render_help()` output with ANSI colouring.
+
+#### `fdl.yml` Manifest Overhaul
+- **Unified `commands:` map**: replaces the separate `scripts:` + `commands:` pair from 0.4.0. Each entry is exactly one of three kinds, chosen by which fields are set.
+- **`run:` kind**: inline shell script, optionally wrapped in `docker compose run --rm <service>` when `docker:` is set. Closed script: extra argv is **not** forwarded (use shell `$VAR` inside the script instead).
+- **`path:` kind**: pointer to a nested directory with its own `fdl.yml`. Convention default: when the entry is empty and a sibling `<name>/` directory exists, `fdl` loads `<name>/fdl.yml`. Extra argv after `fdl <cmd> ...` flows through to the nested `entry:` and is validated against the `FdlArgs` schema.
+- **preset kind**: neither `run:` nor `path:` set; inline `ddp:` / `training:` / `output:` / `options:` fields deep-merge over the enclosing sub-command's defaults and invoke its `entry:`. Only legal inside a path-kind sub-command's own `fdl.yml`.
+- **Load-time validation**: `docker:` on non-`run:` entries is rejected; unknown keys error with a clear message; kind-mismatch (e.g. both `run:` and `path:`) errors loudly.
+- **Auto-bootstrap**: when only `fdl.yml.example` or `fdl.yml.dist` is present, `fdl` offers to copy it to the real (gitignored) `fdl.yml`.
+
+#### Environment Overlays (`--env`)
+- **`--env <name>`** global flag: deep-merges `fdl.<name>.yml` over the base `fdl.yml` before resolving any command.
+- **`FDL_ENV=<name>`**: equivalent environment-variable form.
+- **First-arg convention**: `fdl ci test` applies the `ci` overlay when `fdl.ci.yml` exists AND the name does not collide with a command. Ambiguity errors loudly.
+- **Loud vs. silent fallthrough**: explicit selectors (flag, env var) fail loudly when the overlay file is missing; the first-arg convention silently falls through so existing commands are never shadowed.
+- **Per-layer origin annotations**: every merged field is tagged with the file and line that contributed it, visible via `fdl config show`.
+
+#### New Top-Level Commands
+- **`fdl config show [env]`**: prints the fully-resolved YAML config with per-layer origin annotations. Useful for previewing overlay behaviour before running a long job. Equivalent forms: `fdl config show ci`, `fdl --env ci config show`, `fdl ci config show`.
+- **`fdl schema list`** / **`clear [<cmd>]`** / **`refresh [<cmd>]`**: manage the per-command schema cache that powers help, completion, and validation. `list --json` for machine-readable output. Fresh / stale / orphan status is reported for every cached entry.
+- **`--fdl-schema`** (hidden probe flag): every binary built with `#[derive(FdlArgs)]` responds with a JSON description of its flags. `fdl` calls it as a subprocess and caches the result at `<cmd-dir>/.fdl/schema-cache/<cmd>.json`.
+- **`--refresh-schema`** per-invocation flag: refreshes a single entry's cache on the next call without running `fdl schema refresh` explicitly. Handy during development.
+
+#### Global Flags
+- **`--env <name>`**: apply overlay (see above).
+- **`--ansi`** / **`--no-ansi`**: force or disable ANSI color output, overriding TTY and `NO_COLOR` auto-detection.
+- **Reserved flag set** (`--help`, `--version`, `--quiet`, `--env`, `-h`, `-V`, `-q`, `-v`, `-e`): cannot be shadowed by `FdlArgs`-derived structs. Enforced at derive time for clear errors.
+- **`--help` is never blocked**: validation lives strictly on the exec path, scoped to the single command being invoked. Running `fdl <cmd> --help` never triggers manifest-wide validation.
+
+#### Value-Aware Completions
+- **`choices:` drives completion**: flag completion returns the declared set, e.g. `fdl libtorch download --cuda <TAB>` offers `12.6 12.8`; `fdl ddp-bench quick --model <TAB>` offers values from the `FdlArgs` schema.
+- **Project-aware**: generated scripts reflect the current `fdl.yml`'s `commands:` (all three kinds) plus every sub-command's own nested entries.
+- **`fdl autocomplete`**: one-shot installer that detects the user's shell and writes the completion script to the right location.
+
+#### Styled Output
+- **ANSI-coloured help**: `render_help()` assembles colour-annotated help from doc-comments and attribute metadata. Styles are centralised in `flodl-cli/src/style.rs`.
+- **Help layout for presets**: preset sub-commands render under an **Arguments** heading as a single synthetic slot with values indented beneath (placeholder overridable via `arg-name:`); regular sub-commands render under **Commands** (run / path kinds only).
+
+#### Schema Cache (`flodl-cli/src/schema_cache.rs`)
+- Per-project cache at `<cmd-dir>/.fdl/schema-cache/<cmd>.json`, populated on first use of a `path:`-kind sub-command and refreshed on demand. Cache entries carry mtime + binary hash so `fdl schema list` can flag stale (binary newer than cache) and orphan (command removed from `fdl.yml`) states.
+
+### Changed
+
+#### Docs
+- **`docs/cli.md`** rewritten: restructured around three contexts: standalone (no project), inside an `fdl.yml` project, inside the flodl source checkout. Standalone libtorch-manager examples now lead with PyTorch C++ (CMake / `CMAKE_PREFIX_PATH`) alongside the existing tch-rs walkthrough.
+- **`docs/design/run-config.md`** expanded: formal schema for `fdl.yml`, sub-command resolution, overlay merge semantics, and the DDP / training / output to `DdpConfig` / `DdpRunConfig` mapping.
+- **`docs/design/msf-cadence-control.md`** (new, 669 lines): design spec for the MSF cadence-control layer.
+- **`flodl-cli/README.md`** rewritten: leads with "this is the flodl CLI"; standalone libtorch manager framed as a secondary use case.
+- **`flodl-cli-macros/README.md`** (new): attribute reference for `#[derive(FdlArgs)]`.
+- **Root `README.md`**: short pointer box advertising `fdl` as a standalone libtorch manager for tch-rs and PyTorch C++ users.
+
+#### Dogfooding
+- **`ddp-bench/src/main.rs`** ported to `#[derive(FdlArgs)]`: typed flags, shared schema with `fdl`, help / completion / validation all come from the derived parser. Replaces the hand-rolled argv handling.
+- **`fdl.yml.example`** and **`ddp-bench/fdl.yml.example`** updated to the unified `commands:` shape with the three-kind distinction.
+
+### Removed
+
+- **`scripts:` key in `fdl.yml`**: merged into the unified `commands:` map. Any 0.4.0 `fdl.yml` that used `scripts:` must move its entries into `commands:` with an explicit `run:` field. The three-kind `commands:` model (`run:` / `path:` / preset) is now the long-term stable manifest surface; no further breaking changes to its shape are scheduled.
+- **Shadowing of reserved CLI flags in `#[derive(FdlArgs)]` structs**: `--help`, `--version`, `--quiet`, `--env`, `-h`, `-V`, `-q`, `-v`, `-e` are now reserved and enforced at derive time. Structs in 0.4.0 that named fields with any of these flags silently overrode them; in 0.5.0 they fail to compile. Rename any affected fields.
+
 ## [0.4.0] - 2026-04-14
 
 ### Added

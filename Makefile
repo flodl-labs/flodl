@@ -18,11 +18,14 @@ docs-rs:
 	@mkdir -p .cargo-cache-docsrs .cargo-git-docsrs .target-docsrs
 	$(COMPOSE) run --rm docs-rs bash -c "\
 		rustup install nightly 2>&1 | tail -1 && \
-		cargo +nightly rustdoc --lib \
+		cargo +nightly rustdoc --lib -p flodl \
 			--no-default-features --features rng \
 			--config 'build.rustflags=[\"--cfg\", \"docsrs\"]' \
-			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]' \
-			-Zrustdoc-scrape-examples"
+			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]' && \
+		cargo +nightly rustdoc --lib -p flodl-cli \
+			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]' && \
+		cargo +nightly rustdoc --lib -p flodl-cli-macros \
+			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]'"
 
 # --- Site (host python + docker compose up/down) ---
 

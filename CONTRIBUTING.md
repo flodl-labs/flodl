@@ -4,25 +4,28 @@ Thank you for your interest in floDl. Contributions are welcome and appreciated.
 
 ## Getting Started
 
-floDl builds against libtorch via FFI, so all development happens inside Docker:
+floDl builds against libtorch via FFI, so all development happens inside
+Docker. Everything is driven by the `fdl` CLI:
 
 ```bash
 git clone https://github.com/fab2s/floDl.git
 cd floDl
-make image      # build dev container (Rust + libtorch)
-make shell      # interactive shell inside the container
-make test       # run all tests
-make clippy     # lint
+./fdl setup     # detect hardware, download libtorch, build dev container
+./fdl shell     # interactive shell inside the container
+./fdl test      # run all tests (CPU)
+./fdl clippy    # lint (includes test code)
 ```
 
 You do **not** need Rust or libtorch installed on the host machine.
+`fdl --help` lists every command; `fdl.yml.example` shows the manifest
+that declares them.
 
 ## Development Workflow
 
 1. Fork the repository and create your branch from `main`.
-2. Make your changes inside the dev container (`make shell`).
-3. Run `make test` to verify all tests pass.
-4. Run `make clippy` to ensure zero warnings.
+2. Make your changes inside the dev container (`fdl shell`).
+3. Run `fdl test` to verify all tests pass.
+4. Run `fdl clippy` to ensure zero warnings.
 5. Open a pull request.
 
 ## Code Style
@@ -63,9 +66,9 @@ Open an issue to discuss before investing significant effort on these.
 Every PR should pass the existing test suite on **both CPU and CUDA**:
 
 ```bash
-make test          # CPU tests
-make cuda-test     # CUDA tests (requires NVIDIA GPU + Container Toolkit)
-make test-all      # CPU first, then CUDA if a GPU is available
+fdl test            # CPU tests
+fdl cuda-test       # CUDA tests (parallel, excludes NCCL/Graph)
+fdl cuda-test-all   # full CUDA suite (parallel + NCCL isolated + serial)
 ```
 
 All tests use `test_device()` / `test_opts()` from `tensor.rs` so the same
@@ -108,10 +111,11 @@ Rust with `--cfg docsrs` and no libtorch — things that build fine in the dev
 container can fail there.
 
 ```bash
-make docs-rs    # simulates docs.rs build in a disposable container
+make docs-rs    # simulates docs.rs build for every publishable crate
 ```
 
-This catches:
+Since 0.5.0 this covers all three published crates (`flodl`, `flodl-cli`,
+`flodl-cli-macros`) in one disposable container. It catches:
 - Broken intra-doc links (`rustdoc::broken_intra_doc_links`)
 - Dependencies that don't compile on nightly with `--cfg docsrs`
 - Example scraping failures (examples need libtorch)
@@ -119,6 +123,24 @@ This catches:
 
 crates.io is immutable — a broken publish means bumping the version. Run this
 before every `cargo publish`.
+
+### Matching GitHub CI locally
+
+`make docs-rs` mirrors docs.rs. For GitHub CI parity (which runs stable Rust
+workspace-wide with `-D warnings` on rustdoc), use the `fdl` shortcuts:
+
+```bash
+fdl doc         # strict rustdoc pass (matches CI's "Doc" step)
+fdl ci          # full CI CPU job: build + test + clippy + doc
+```
+
+`fdl doc` is fast and catches rustdoc regressions. `fdl ci` is the complete
+CPU-job equivalent -- run it before pushing any PR that might fail CI.
+`fdl test` alone will not catch rustdoc warnings.
+
+The Makefile still exposes a few targets that pre-date `fdl` (useful
+when `fdl` itself is broken); treat it as a fallback, not the primary
+workflow.
 
 ## License
 

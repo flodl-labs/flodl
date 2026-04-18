@@ -670,20 +670,18 @@ in that a different config would have converged faster (or at all).
 | Async | Nccl | **Best overall (recommended)** | Best | Best with clipping | Low |
 | Cadence | Nccl | Strong second, predictable sync | Good | Good | Low |
 | Sync | Nccl | Strict sync baseline | Baseline | Good | Lowest |
-| Async | Cpu | **Known bug** -- do not use | -- | Broken | -- |
-| Cadence | Cpu | **Known bug** -- do not use | -- | Broken | -- |
-| Sync | Cpu | **Known bug** -- do not use | -- | Broken | -- |
+| Async | Cpu | Non-blocking GPUs, fault-tolerant | Good | Good | Medium |
+| Cadence | Cpu | Non-blocking for heterogeneous clusters | Good | Good | Medium |
+| Sync | Cpu | Strict sync without GPU barrier | Baseline | Good | Medium |
 
-> **CPU backend: known convergence bug.** The CPU averaging path has a known
-> bug that prevents convergence. All three CPU policies produce near-random
-> accuracy (~8-23% vs 87-95% for NCCL on the same model). The root cause is
-> under active investigation: the snapshot/average/load round-trip degrades
-> parameters on each cycle, with more frequent averaging causing more damage
-> (CPU sync at ~8% is worse than CPU async at ~23%). One race condition has
-> been fixed (`snapshot_params` reading mid-copy data), but the deeper issue
-> remains. **Use NCCL for all production and research training.** The CPU
-> backend is included for future use once the bug is resolved. A comprehensive
-> benchmark suite across all configurations is in progress.
+> **CPU backend: when to use it.** The CPU backend trades GPU-to-GPU DMA for
+> a snapshot / CPU-average / distribute round-trip. It costs O(W * M) CPU RAM
+> (W = world size, M = model size), and no GPU ever blocks on a collective
+> barrier. Fault tolerance is via a 5-second timeout: a dead worker unwedges
+> the coordinator instead of stalling the cluster. Throughput is competitive
+> with NCCL on small models and marginally behind on large ones. Use it when
+> NCCL is unavailable, when you want non-blocking GPUs, or for A/B testing
+> against NCCL on the same model and seed.
 
 ### Recommended workflow
 
@@ -692,7 +690,7 @@ in that a different config would have converged faster (or at all).
 2. A/B test against Cadence + Nccl for 3-5 epochs (strong second)
 3. A/B test against Sync + Nccl if you want a strict-sync baseline
 4. Full training run with the winning NCCL combo
-5. CPU backend has a known convergence bug -- do not use until resolved
+5. Swap in `AverageBackend::Cpu` if you want non-blocking GPUs or NCCL is unavailable
 ```
 
 The code change between runs is one line:
@@ -707,8 +705,8 @@ The code change between runs is one line:
 // Run C -- strict sync baseline
 .policy(ApplyPolicy::Sync).backend(AverageBackend::Nccl)
 
-// Run D -- CPU backend: KNOWN BUG, do not use until resolved
-// .policy(ApplyPolicy::Async).backend(AverageBackend::Cpu)
+// Run D -- CPU backend (non-blocking GPUs, fault-tolerant)
+.policy(ApplyPolicy::Async).backend(AverageBackend::Cpu)
 ```
 
 ### Decision tree
@@ -724,9 +722,10 @@ Convergence not stable enough?
 Want a strict-sync baseline?
   --> A/B test Sync + Nccl for 3-5 epochs, compare loss curves.
 
-No NCCL available?
-  --> CPU backend has a known convergence bug. Do not use for training.
-      The bug is under active investigation. See the CPU backend note above.
+No NCCL available, or want non-blocking GPUs?
+  --> AverageBackend::Cpu with any policy. Competitive on small models,
+      marginally slower on large ones, never blocks GPUs, tolerates dead
+      workers via the 5s timeout.
 ```
 
 ---
@@ -787,17 +786,20 @@ let state_c = c.join()?;
 ### NCCL vs CPU backend
 
 NCCL uses hardware-level GPU-to-GPU AllReduce with implicit synchronization.
-It is validated across all three policies and is the only backend you should
-use for training.
+All GPUs block at the barrier, zero extra memory is required, hardware DMA
+moves the tensors. Abort handles unblock stuck collectives if a worker dies
+mid-op.
 
-The CPU backend has a **known convergence bug**. The snapshot/average/load
-round-trip (GPU to CPU copy, CPU-side averaging, CPU to GPU copy) degrades
-parameters on each cycle. More frequent averaging causes more damage: CPU
-sync (~8% accuracy) is worse than CPU async (~23%), while NCCL achieves
-87-95% on the same model and data. One race condition in `snapshot_params`
-has been fixed, but the root cause remains under investigation. The CPU
-backend is included in the codebase for completeness and will be fixed in a
-future release.
+The CPU backend uses a snapshot / CPU-average / distribute round-trip. It
+costs O(W * M) CPU RAM (W = world size, M = model size) and two GPU-to-CPU
+copies per averaging event, but no GPU ever blocks on a barrier. Fault
+tolerance comes from a 5-second timeout that unwedges the coordinator if a
+worker goes dark.
+
+Both backends are validated across all three policies. NCCL is typically
+faster on large models (no CPU round-trip); CPU is competitive or faster on
+small models (no GPU barrier) and the better choice when you need
+non-blocking GPUs, fault tolerance, or NCCL is unavailable.
 
 ---
 
@@ -1004,10 +1006,11 @@ and the builder loop above produce the same LR schedule for the same
 
 The
 [`ddp-bench/fdl.yml.example`](https://github.com/fab2s/floDl/blob/main/ddp-bench/fdl.yml.example)
-turns the matrix into named jobs:
+turns the matrix into named presets under the sub-command's `commands:`
+map:
 
 ```yaml
-jobs:
+commands:
   validate:
     description: Check convergence against structured baselines
     options: { model: all, mode: all, validate: true,

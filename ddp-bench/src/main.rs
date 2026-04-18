@@ -11,7 +11,79 @@ mod harness;
 mod models;
 mod report;
 
+use flodl_cli::{parse_or_schema, FdlArgs};
+
 use config::{DdpMode, RunConfig};
+
+/// DDP validation and benchmark suite for flodl.
+#[derive(FdlArgs, Debug)]
+struct Cli {
+    /// Run specific model (name or "all").
+    #[option]
+    model: Option<String>,
+
+    /// Run specific DDP mode (name or "all").
+    #[option]
+    mode: Option<String>,
+
+    /// Override epoch count.
+    #[option]
+    epochs: Option<usize>,
+
+    /// Override batches per epoch.
+    #[option]
+    batches: Option<usize>,
+
+    /// Override batch size.
+    #[option]
+    batch_size: Option<usize>,
+
+    /// Multiply default LR (auto-scales when epochs > default).
+    #[option]
+    lr_scale: Option<f64>,
+
+    /// Output directory.
+    #[option(default = "runs")]
+    output: String,
+
+    /// Dataset cache directory.
+    #[option(default = "data")]
+    data_dir: std::path::PathBuf,
+
+    /// Live dashboard port.
+    #[option]
+    monitor: Option<u16>,
+
+    /// Check results against baselines.
+    #[option]
+    validate: bool,
+
+    /// Save results as baseline.
+    #[option]
+    save_baseline: bool,
+
+    /// Baseline file.
+    #[option(default = "baselines/baseline.json")]
+    baseline: String,
+
+    /// Validation tolerance, 0.0-1.0.
+    #[option(default = "0.15")]
+    tolerance: f64,
+
+    /// RNG seed.
+    #[option(default = "42")]
+    seed: u64,
+
+    /// Analyze saved runs and write a markdown report (skips training).
+    /// Bare `--report` uses the default path; pass a path to override.
+    /// Use `-` for stdout.
+    #[option(default = "runs/report.md")]
+    report: Option<String>,
+
+    /// Show available models and modes, then exit.
+    #[option]
+    list: bool,
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -21,107 +93,35 @@ fn main() {
 }
 
 fn run() -> flodl::tensor::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let cli: Cli = parse_or_schema();
 
-    // Parse arguments
-    let mut model_filter: Option<String> = None;
-    let mut mode_filter: Option<String> = None;
-    let mut epochs: Option<usize> = None;
-    let mut batches: Option<usize> = None;
-    let mut batch_size: Option<usize> = None;
-    let mut output = "runs".to_string();
-    let mut data_dir = std::path::PathBuf::from("data");
-    let mut monitor_port: Option<u16> = None;
-    let mut validate = false;
-    let mut save_baseline = false;
-    let mut baseline_path = "baselines/baseline.json".to_string();
-    let mut tolerance: f64 = 0.15; // 15% relative tolerance
-    let mut seed: u64 = 42;
-    let mut lr_scale: Option<f64> = None;
-    let mut list = false;
-    let mut do_report = false;
-    let mut report_file: Option<String> = None;
+    // Map parsed fields to the variable names the rest of this function
+    // already uses. Thin bridge keeps the business logic bit-for-bit
+    // identical to before the flodl-cli migration.
+    let model_filter = cli.model.clone();
+    let mode_filter = cli.mode.clone();
+    let epochs = cli.epochs;
+    let batches = cli.batches;
+    let batch_size = cli.batch_size;
+    let output = cli.output.clone();
+    let data_dir = cli.data_dir.clone();
+    let monitor_port = cli.monitor;
+    let validate = cli.validate;
+    let save_baseline = cli.save_baseline;
+    let baseline_path = cli.baseline.clone();
+    let tolerance = cli.tolerance;
+    let seed = cli.seed;
+    let lr_scale = cli.lr_scale;
+    let list = cli.list;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--model" => {
-                i += 1;
-                model_filter = Some(args[i].clone());
-            }
-            "--mode" => {
-                i += 1;
-                mode_filter = Some(args[i].clone());
-            }
-            "--epochs" => {
-                i += 1;
-                epochs = Some(args[i].parse().expect("invalid --epochs"));
-            }
-            "--batches" => {
-                i += 1;
-                batches = Some(args[i].parse().expect("invalid --batches"));
-            }
-            "--batch-size" => {
-                i += 1;
-                batch_size = Some(args[i].parse().expect("invalid --batch-size"));
-            }
-            "--output" => {
-                i += 1;
-                output = args[i].clone();
-            }
-            "--data-dir" => {
-                i += 1;
-                data_dir = std::path::PathBuf::from(&args[i]);
-            }
-            "--monitor" => {
-                i += 1;
-                monitor_port = Some(args[i].parse().expect("invalid --monitor"));
-            }
-            "--validate" => {
-                validate = true;
-            }
-            "--save-baseline" => {
-                save_baseline = true;
-            }
-            "--baseline" => {
-                i += 1;
-                baseline_path = args[i].clone();
-            }
-            "--tolerance" => {
-                i += 1;
-                tolerance = args[i].parse().expect("invalid --tolerance");
-            }
-            "--seed" => {
-                i += 1;
-                seed = args[i].parse().expect("invalid --seed");
-            }
-            "--list" => {
-                list = true;
-            }
-            "--report" => {
-                do_report = true;
-                // Optional: next arg can be a file path (if it doesn't start with --)
-                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                    i += 1;
-                    report_file = Some(args[i].clone());
-                }
-            }
-        "--lr-scale" => {
-                i += 1;
-                lr_scale = Some(args[i].parse().expect("invalid --lr-scale"));
-            }
-            "--help" | "-h" => {
-                print_help();
-                return Ok(());
-            }
-            other => {
-                eprintln!("unknown argument: {other}");
-                print_help();
-                std::process::exit(1);
-            }
-        }
-        i += 1;
-    }
+    // --report: None=training mode (no report); Some("-")=report to stdout;
+    // Some(path)=report to file. Bare `--report` yields Some("runs/report.md")
+    // via the declared default.
+    let (do_report, report_file) = match cli.report.as_deref() {
+        None => (false, None),
+        Some("-") => (true, None),
+        Some(path) => (true, Some(path.to_string())),
+    };
 
     if list {
         eprintln!("Models:");
@@ -370,40 +370,3 @@ fn run() -> flodl::tensor::Result<()> {
     Ok(())
 }
 
-fn print_help() {
-    eprintln!("ddp-bench: DDP validation and benchmark suite for flodl\n");
-    eprintln!("Usage: ddp-bench [OPTIONS]\n");
-    eprintln!("Options:");
-    eprintln!("  --model <NAME|all>   Run specific model (default: all)");
-    eprintln!("  --mode <MODE|all>    Run specific DDP mode (default: all)");
-    eprintln!("  --epochs <N>         Override epoch count");
-    eprintln!("  --batches <N>        Override batches per epoch");
-    eprintln!("  --batch-size <N>     Override batch size");
-    eprintln!("  --lr-scale <F>       Multiply default LR (auto-scales when epochs > default)");
-    eprintln!("  --output <DIR>       Output directory (default: runs/)");
-    eprintln!("  --data-dir <PATH>    Dataset cache directory (default: data/)");
-    eprintln!("  --monitor <PORT>     Live dashboard port");
-    eprintln!("  --validate           Check results against baselines");
-    eprintln!("  --save-baseline      Save results as baseline");
-    eprintln!("  --baseline <PATH>    Baseline file (default: baselines/baseline.json)");
-    eprintln!("  --tolerance <F>      Validation tolerance, 0.0-1.0 (default: 0.15)");
-    eprintln!("  --seed <N>           RNG seed (default: 42)");
-    eprintln!("  --report [FILE]      Analyze runs/ and print report (or save to FILE)");
-    eprintln!("  --list               Show available models and modes");
-    eprintln!("  --help               Show this help");
-    eprintln!("\nModels:");
-    for name in models::model_names() {
-        eprintln!("  {name}");
-    }
-    eprintln!("\nModes:");
-    for name in DdpMode::all_names() {
-        eprintln!("  {name}");
-    }
-    eprintln!("\nExamples:");
-    eprintln!("  ddp-bench --model linear --mode solo-0 --epochs 2");
-    eprintln!("  ddp-bench --model convnet --mode nccl-cadence --monitor 3000");
-    eprintln!("  ddp-bench --model all --mode all --validate");
-    eprintln!("  ddp-bench --report                                 # all runs");
-    eprintln!("  ddp-bench --report --model linear                  # one model");
-    eprintln!("  ddp-bench --report --model linear --mode nccl-cadence  # one case");
-}

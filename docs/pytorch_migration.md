@@ -1621,5 +1621,5 @@ See the [DDP Reference](ddp.md) for complete API documentation.
 
 - [Porting Guide](porting.md) -- AI-assisted porting with `fdl` and the `/port` skill
 - [CLI documentation](cli.md) -- project scaffolding (`fdl init`), libtorch management, `fdl api-ref`
-- [Graph builder tutorial](tutorials/06-graph-builder.md) -- FlowBuilder patterns in depth
+- [Graph builder tutorial](tutorials/05-graph-builder.md) -- FlowBuilder patterns in depth
 - [DDP Reference](ddp.md) -- multi-GPU training

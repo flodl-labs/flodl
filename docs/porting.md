@@ -219,19 +219,62 @@ for epoch in 0..num_epochs {
 }
 ```
 
-With Graph's integrated data loader, this simplifies further:
+## Multi-GPU (DDP)
+
+If your PyTorch script uses `torch.nn.parallel.DistributedDataParallel`,
+`torch.nn.DataParallel`, `torchrun`, or `mp.spawn`, flodl gives you two
+entry points that unify data loading and training. Both auto-detect
+available CUDA devices and fall back to single-GPU/CPU when fewer than
+2 GPUs are present, so the same code runs everywhere.
+
+### Graph DDP -- one-liner
+
+For Graph models, `Ddp::setup()` replaces the whole distributed-init
+ceremony. The training loop is identical for 1 or N GPUs:
 
 ```rust
-model.train();
+let model = FlowBuilder::from(Linear::new(784, 256)?)
+    .through(ReLU::new())
+    .through(Linear::new(256, 10)?)
+    .build()?;
+
+// One call: detect GPUs, replicate, set optimizer, enable training mode
+Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+
+model.set_data_loader(loader, "image");
+
 for epoch in 0..num_epochs {
     for batch in model.epoch(epoch) {
         let batch = batch?;
         let pred = model.forward_batch(&batch)?;
-        let loss = mse_loss(&pred, &batch["target"].into())?;
-        model.step(&loss)?;  // backward + optimizer + zero_grad
+        let loss = cross_entropy_loss(&pred, &batch["label"].into())?;
+        loss.backward()?;
+        model.step()?;   // AllReduce + buffer sync + optimizer + zero_grad
     }
 }
 ```
+
+### DDP Builder -- any Module, A/B-testable
+
+For non-Graph modules or when you want to benchmark sync strategies:
+
+```rust
+let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(10)
+    .policy(ApplyPolicy::Cadence)      // Sync | Cadence | Async
+    .backend(AverageBackend::Nccl)     // Nccl | Cpu
+    .run()?;
+
+let state = ddp.join()?;               // averaged params + buffers on CPU
+```
+
+ElChe cadence auto-detects heterogeneous GPU speeds and lets the faster
+card run ahead while the slow one anchors synchronization. See the
+[DDP Reference](ddp.md) for policies, backends, convergence guard,
+metrics, and live-monitor wiring, and [DDP Benchmark](ddp-benchmark.md)
+for results on mixed consumer hardware.
 
 ## Key differences from PyTorch
 
@@ -252,6 +295,6 @@ for epoch in 0..num_epochs {
 
 - [Full porting guide](https://github.com/fab2s/floDl/blob/main/ai/skills/port/guide.md) (30+ modules, all patterns)
 - [API reference](cli.md#fdl-api-ref) (via `fdl api-ref`)
-- [Graph builder tutorial](tutorials/06-graph-builder.md)
+- [Graph builder tutorial](tutorials/05-graph-builder.md)
 - [Training tutorial](tutorials/04-training.md)
 - [CLI documentation](cli.md) (project setup, libtorch management)

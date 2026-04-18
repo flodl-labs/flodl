@@ -1,33 +1,17 @@
 ---
 layout: default
-title: Out of the cave
-description: "A Rust deep learning framework on libtorch. Up to 31% faster than PyTorch, fluent graph builder, heterogeneous multi-GPU DDP, deterministic memory."
+title: flodl
+description: "A Rust deep learning framework on libtorch. Fluent graph API, heterogeneous multi-GPU DDP that beats published baselines, up to 31% faster than PyTorch. One curl to try it."
 ---
 
 <section class="hero">
   <img src="{{ '/assets/images/logo.png' | relative_url }}" alt="floDl" class="hero-logo">
-  <h1>Out of the cave.</h1>
-
-  <div class="cave-narrative">
-    <p class="cave-dark">
-      We trained models in the dark. Loss numbers trickled through a Python
-      interpreter, minutes late. The GPU spiked and stalled behind a wall we
-      couldn't see through. We stared at nvidia-smi and hoped.
-    </p>
-    <p class="cave-dark">We learned to call this normal.</p>
-    <p class="cave-turn">Then one day, we walked out.</p>
-    <p class="cave-light">
-      Light &mdash; a live dashboard drawing loss curves as they happen, GPU and
-      VRAM breathing in real time. Speed &mdash; the same CUDA kernels, but the
-      GPU never starves. Nothing sits between you and the metal. Clarity &mdash;
-      every epoch lands the instant it finishes. No buffering. No hoping.
-    </p>
-    <p class="cave-close">You can't go back.</p>
-  </div>
+  <h1>flodl</h1>
 
   <p class="tagline">
-    flodl is a native deep learning framework. Rust on libtorch.<br>
-    It doesn't replace your GPU &mdash; it gets out of its way.
+    A Rust deep learning framework on libtorch.<br>
+    Fluent graph API. Heterogeneous multi-GPU DDP. Up to 31% faster than PyTorch.
+    <br>One curl to try it.
   </p>
 
   <p class="hero-badges">
@@ -50,7 +34,7 @@ description: "A Rust deep learning framework on libtorch. Up to 31% faster than 
     <pre id="terminalPre"><span class="prompt">$ </span><span class="cm">curl</span> <span class="flag">-sL</span> <span class="url">https://flodl.dev/fdl</span> <span class="flag">-o</span> fdl <span class="flag">&amp;&amp;</span> <span class="cm">chmod</span> +x fdl
 <span class="prompt">$ </span>./fdl setup       <span class="comment"># detect GPUs, download libtorch, configure build</span>
 <span class="prompt">$ </span>./fdl init <span id="name1">my-project</span>
-<span class="prompt">$ </span><span class="cm">cd</span> <span id="name2">my-project</span> <span class="flag">&amp;&amp;</span> <span class="cm">make</span> run</pre>
+<span class="prompt">$ </span><span class="cm">cd</span> <span id="name2">my-project</span> <span class="flag">&amp;&amp;</span> ./fdl run</pre>
   </div>
 
   <script>
@@ -65,7 +49,6 @@ description: "A Rust deep learning framework on libtorch. Up to 31% faster than 
       name2.textContent = v;
     });
 
-    // auto-size input to content
     function resize() {
       input.style.width = Math.max(input.value.length, 6) + 3 + 'ch';
     }
@@ -77,7 +60,7 @@ description: "A Rust deep learning framework on libtorch. Up to 31% faster than 
   function copyCommands() {
     var btn = document.getElementById('copyBtn');
     var n = document.getElementById('projName').value.replace(/[^a-zA-Z0-9_-]/g, '') || 'my-project';
-    var text = 'curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl\n./fdl setup\n./fdl init ' + n + '\ncd ' + n + ' && make run';
+    var text = 'curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl\n./fdl setup\n./fdl init ' + n + '\ncd ' + n + ' && ./fdl run';
     navigator.clipboard.writeText(text).then(function() {
       btn.textContent = 'Copied!';
       btn.classList.add('copied');
@@ -96,37 +79,172 @@ description: "A Rust deep learning framework on libtorch. Up to 31% faster than 
       View on GitHub
     </a>
   </div>
+
+  <p class="hero-manifesto-link" style="margin-top: 1.2rem; font-size: 0.9rem; opacity: 0.7;">
+    <a href="{{ '/out-of-the-cave' | relative_url }}">Read the manifesto &rarr;</a>
+  </p>
 </section>
 
 <hr class="divider">
 
-<!-- What you get -->
+<!-- Coming from PyTorch? -->
 <section class="section">
-  <h2 class="section-title">What you get</h2>
-  <p class="section-sub">One command scaffolds a complete project. Edit <code>src/main.rs</code> and train.</p>
+  <h2 class="section-title">Coming from PyTorch?</h2>
+  <p class="section-sub">Three ways to land. Pick the one that fits how you work.</p>
 
   <div class="what-you-get">
     <div class="wyg-card">
-      <h3>Annotated training template</h3>
-      <p>A working model with graph builder, optimizer, scheduler, gradient clipping, and monitor. Every line has a PyTorch comment.</p>
+      <h3>1. Install the CLI</h3>
+      <p>One curl, zero Rust on your host. <code>fdl</code> auto-detects your GPU, downloads the matching libtorch, and scaffolds a Docker-ready project.</p>
+      <p><a href="{{ '/guide/cli' | relative_url }}">fdl reference &rarr;</a></p>
     </div>
     <div class="wyg-card">
-      <h3>Docker setup included</h3>
-      <p>CPU and CUDA Dockerfiles, <code>docker-compose.yml</code>, and a <code>Makefile</code> with <code>make build</code>, <code>make test</code>, <code>make run</code>.</p>
+      <h3>2. Let an AI port it</h3>
+      <p>Drop your PyTorch script into your AI coding assistant. In Claude Code, run <code>/port</code>. In any other tool, point the agent at the skill guide. The skill reads the source, classifies each block (model, data, training, DDP), maps to flodl, and writes a complete Rust project.</p>
+      <p><a href="{{ '/guide/porting' | relative_url }}">Porting guide &rarr;</a></p>
     </div>
     <div class="wyg-card">
-      <h3>Fast rebuild cycle</h3>
-      <p>floDl is pre-optimized at <code>opt-level = 3</code> in dev builds. After the first compile, your code rebuilds in ~2s.</p>
+      <h3>3. See the full mapping</h3>
+      <p>Every PyTorch module, loss, optimizer, scheduler, and training pattern mapped to its flodl equivalent. For the hands-on reader.</p>
+      <p><a href="{{ '/guide/migration' | relative_url }}">PyTorch migration &rarr;</a></p>
+    </div>
+  </div>
+
+  <p class="section-sub" style="margin-top: 2rem;">The training loop is the one you already know:</p>
+
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem;">
+    <div class="showcase">
+      <div class="showcase-header">
+        <span>PyTorch</span>
+      </div>
+      <pre><span class="kw">model</span>.<span class="fn">train</span>()
+<span class="kw">for</span> epoch <span class="kw">in</span> <span class="fn">range</span>(num_epochs):
+    <span class="kw">for</span> batch <span class="kw">in</span> loader:
+        optimizer.<span class="fn">zero_grad</span>()
+        pred = model(batch[<span class="num">0</span>])
+        loss = criterion(pred, batch[<span class="num">1</span>])
+        loss.<span class="fn">backward</span>()
+        optimizer.<span class="fn">step</span>()</pre>
+    </div>
+    <div class="showcase">
+      <div class="showcase-header">
+        <span>flodl</span>
+      </div>
+      <pre>model.<span class="fn">train</span>();
+<span class="kw">for</span> epoch <span class="kw">in</span> <span class="num">0</span>..num_epochs {
+    <span class="kw">for</span> batch <span class="kw">in</span> loader.<span class="fn">epoch</span>(epoch) {
+        <span class="kw">let</span> batch = batch?;
+        optimizer.<span class="fn">zero_grad</span>();
+        <span class="kw">let</span> pred = model.<span class="fn">forward</span>(&amp;batch[<span class="num">0</span>].<span class="fn">into</span>())?;
+        <span class="kw">let</span> loss = <span class="fn">cross_entropy_loss</span>(&amp;pred, &amp;batch[<span class="num">1</span>].<span class="fn">into</span>())?;
+        loss.<span class="fn">backward</span>()?;
+        optimizer.<span class="fn">step</span>()?;
+    }
+}</pre>
     </div>
   </div>
 </section>
 
 <hr class="divider">
 
-<!-- Code showcase -->
+<!-- fdl works without flodl too -->
+<section class="section">
+  <h2 class="section-title">Not writing Rust yet? <code>fdl</code> still helps.</h2>
+  <p class="section-sub">
+    The CLI is its own published crate. Outside a flodl checkout it's a
+    first-class <strong>libtorch manager</strong> for <a href="https://github.com/LaurentMazare/tch-rs">tch-rs</a>
+    and <strong>PyTorch C++</strong> users -- the installer PyTorch itself never shipped.
+    One binary, zero native dependencies, works before anything else is set up.
+  </p>
+
+  <div class="what-you-get" style="margin-top: 1.5rem;">
+    <div class="wyg-card">
+      <h3>GPU-aware downloads</h3>
+      <p>Reads <code>nvidia-smi</code>, picks cu126 / cu128 / CPU automatically, installs side-by-side, activates one with a single command.</p>
+      <pre style="margin-top: 0.5rem; font-size: 12px; background: var(--bg-alt); padding: 0.6rem 0.8rem; border-radius: 6px;">fdl libtorch download --cuda 12.8
+fdl libtorch list
+fdl libtorch activate precompiled/cu128</pre>
+    </div>
+    <div class="wyg-card">
+      <h3>Custom-arch source builds</h3>
+      <p>GTX 1060 + RTX 5060 Ti in one host? No single pre-built variant covers both. <code>fdl libtorch build</code> compiles PyTorch from source with the exact archs you need, Docker-isolated by default.</p>
+      <pre style="margin-top: 0.5rem; font-size: 12px; background: var(--bg-alt); padding: 0.6rem 0.8rem; border-radius: 6px;">fdl libtorch build --archs "6.1;12.0"
+fdl libtorch build --native --jobs 8</pre>
+    </div>
+    <div class="wyg-card">
+      <h3>Drop straight into tch-rs / C++</h3>
+      <p>Point <code>LIBTORCH</code> or <code>CMAKE_PREFIX_PATH</code> at the active variant and build. No more scraping URLs from the PyTorch get-started page.</p>
+      <pre style="margin-top: 0.5rem; font-size: 12px; background: var(--bg-alt); padding: 0.6rem 0.8rem; border-radius: 6px;">export LIBTORCH=$FLODL_HOME/libtorch/precompiled/cu128
+cargo add tch
+cargo build</pre>
+    </div>
+  </div>
+
+  <p style="margin-top: 1.2rem;">
+    <a href="{{ '/guide/cli' | relative_url }}#1-standalone-no-project-required" class="btn btn-outline" style="font-size: 14px;">
+      Standalone reference &rarr;
+    </a>
+    <a href="https://crates.io/crates/flodl-cli" target="_blank" class="btn btn-outline" style="font-size: 14px;">
+      flodl-cli on crates.io &rarr;
+    </a>
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- fdl config show: explainable config -->
+<section class="section">
+  <h2 class="section-title">Explainable config, per environment</h2>
+  <p class="section-sub">
+    Deep-merge <code>fdl.ci.yml</code> or <code>fdl.local.yml</code> on top of the base manifest with
+    <code>--env</code>. <code>fdl config show</code> prints the resolved result with per-layer origin
+    annotations -- you see exactly which file, which line, contributed each field before running
+    a long job.
+  </p>
+
+  <div class="terminal" style="max-width: 720px; margin: 1.5rem auto 0;">
+    <div class="terminal-bar">
+      <span class="terminal-dot"></span>
+      <span class="terminal-dot"></span>
+      <span class="terminal-dot"></span>
+      <span class="terminal-title">fdl --env ci config show</span>
+    </div>
+    <pre><span class="prompt">$ </span><span class="cm">fdl</span> <span class="flag">--env</span> ci config show
+<span class="comment"># resolved manifest, base + overlay</span>
+docker: dev                     <span class="comment"># fdl.yml:2</span>
+ddp:
+  policy: cadence               <span class="comment"># fdl.yml:8</span>
+  backend: <span class="url">cpu</span>                  <span class="comment"># fdl.ci.yml:3 (override)</span>
+  divergence_threshold: 0.05    <span class="comment"># fdl.yml:10</span>
+training:
+  epochs: <span class="url">1</span>                     <span class="comment"># fdl.ci.yml:6 (override)</span>
+  seed: 42                      <span class="comment"># fdl.yml:13</span>
+  batch_size: 32                <span class="comment"># fdl.yml:14</span>
+commands:
+  quick:                        <span class="comment"># fdl.yml:18 (preset)</span>
+    training: { epochs: 1 }
+    options: { model: linear, batches: 100 }</pre>
+  </div>
+
+  <p class="section-sub" style="margin-top: 1.5rem; font-size: 0.95rem;">
+    Three equivalent ways to apply an overlay: <code>fdl --env ci test</code>,
+    <code>FDL_ENV=ci fdl test</code>, or just <code>fdl ci test</code> when the name
+    doesn't collide with a command. Explicit selectors fail loudly on missing
+    files; the first-arg convention falls through so existing commands are never
+    shadowed.
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- Build your model -->
 <section class="section">
   <h2 class="section-title">Build your model</h2>
-  <p class="section-sub">The fluent graph builder reads as data flow. Residuals, parallel branches, loops, and routing compose cleanly.</p>
+  <p class="section-sub">
+    The fluent graph builder reads as data flow.
+    <code>from</code> / <code>through</code> / <code>also</code> / <code>split</code> / <code>merge</code> / <code>loop_body</code> / <code>tag</code> / <code>using</code>
+    compose into residuals, parallel heads, loops, and cross-connections.
+  </p>
 
   <div class="showcase">
     <div class="showcase-header">
@@ -141,71 +259,20 @@ description: "A Rust deep learning framework on libtorch. Up to 31% faster than 
     .<span class="fn">through</span>(<span class="ty">Linear</span>::<span class="fn">new</span>(<span class="num">32</span>, <span class="num">1</span>)?)        <span class="cm">// output projection</span>
     .<span class="fn">build</span>()?;
 
-<span class="cm">// That's a trainable model. Train it like PyTorch:</span>
-<span class="kw">let</span> params = model.<span class="fn">parameters</span>();
-<span class="kw">let mut</span> optimizer = <span class="ty">Adam</span>::<span class="fn">new</span>(&amp;params, <span class="num">0.001</span>);
-model.<span class="fn">set_training</span>(<span class="kw">true</span>);
-
-<span class="kw">for</span> epoch <span class="kw">in</span> <span class="num">0</span>..num_epochs {
-    optimizer.<span class="fn">zero_grad</span>();
-    <span class="kw">let</span> pred = model.<span class="fn">forward</span>(&amp;input)?;
-    <span class="kw">let</span> loss = <span class="fn">mse_loss</span>(&amp;pred, &amp;target)?;
-    loss.<span class="fn">backward</span>()?;
-    <span class="fn">clip_grad_norm</span>(&amp;params, <span class="num">1.0</span>)?;
-    optimizer.<span class="fn">step</span>()?;
-}</pre>
+<span class="cm">// The same model composes into multi-head, gated, or looped shapes without</span>
+<span class="cm">// writing a forward() method. Every .tag() makes a point observable.</span></pre>
   </div>
+
+  <p style="margin-top: 1.2rem;">
+    <a href="{{ '/guide/graph-builder' | relative_url }}" class="btn btn-outline" style="font-size: 14px;">
+      Graph builder reference &rarr;
+    </a>
+  </p>
 </section>
 
 <hr class="divider">
 
-<!-- Features -->
-<section class="section">
-  <h2 class="section-title">Why floDl</h2>
-  <p class="section-sub">A Rust-native framework for researchers who care about what happens between the GPU kernels. Read the <a href="{{ '/thesis' | relative_url }}">trajectory thesis</a>.</p>
-
-  <div class="features">
-    <div class="feature">
-      <div class="feature-icon mem">&#9881;</div>
-      <h3>Deterministic memory</h3>
-      <p>Tensor memory freed by <code>Drop</code> the instant it leaves scope. No GC, no finalizers, no VRAM budget heuristics. Five phases of memory management replaced by <code>impl Drop for Tensor</code>.</p>
-    </div>
-    <div class="feature">
-      <div class="feature-icon graph">&#9670;</div>
-      <h3>Fluent graph builder</h3>
-      <p>Describe architectures as readable data flow. <code>from</code>/<code>through</code>/<code>also</code>/<code>split</code>/<code>merge</code>/<code>loop_body</code>/<code>gate</code>/<code>switch</code> compose into anything &mdash; residual nets to mixture-of-experts.</p>
-    </div>
-    <div class="feature">
-      <div class="feature-icon monitor">&#9671;</div>
-      <h3>Built-in training monitor</h3>
-      <p>Live web dashboard with metrics charts, CPU/GPU/VRAM tracking, and ETA. Zero external dependencies. <code>monitor.serve(3000)</code> and open a browser.</p>
-    </div>
-    <div class="feature">
-      <div class="feature-icon pytorch">&#8652;</div>
-      <h3>PyTorch parity</h3>
-      <p>Same libtorch GPU kernels. Same training loop pattern. Linear, Conv2d, LayerNorm, BatchNorm, GRU/LSTM cells, all standard losses and optimizers.</p>
-    </div>
-    <div class="feature">
-      <div class="feature-icon gpu">&#9889;</div>
-      <h3>Wide GPU support</h3>
-      <p>Links libtorch's stable C API, not a specific CUDA toolkit version. Older GPUs (Pascal, Maxwell) work out of the box &mdash; no version pinning required. If <code>nvidia-smi</code> runs, floDl can train on it.</p>
-    </div>
-    <div class="feature">
-      <div class="feature-icon typing">&#10003;</div>
-      <h3>Compile-time safety</h3>
-      <p>Every fallible op returns <code>Result&lt;T&gt;</code>. The borrow checker prevents data races. No silent error propagation, no nil pointer panics.</p>
-    </div>
-    <div class="feature">
-      <div class="feature-icon docker">&#9638;</div>
-      <h3>Easy setup</h3>
-      <p>One command to set up everything: <code>fdl setup</code> detects your GPUs, downloads libtorch, and configures your build. No Rust needed. <a href="/guide/cli">Full CLI reference</a>.</p>
-    </div>
-  </div>
-</section>
-
-<hr class="divider">
-
-<!-- Benchmark highlights -->
+<!-- Speed: single GPU -->
 <section class="section" style="text-align: center;">
   <h2 class="section-title">Up to 31% faster than PyTorch</h2>
   <p class="section-sub">
@@ -228,22 +295,180 @@ model.<span class="fn">set_training</span>(<span class="kw">true</span>);
     </table>
     <p class="bench-note">
       RTX 5060 Ti, GPU at 3090 MHz. v0.3.0 vs PyTorch 2.10.0. The convnet tie proves both
-      frameworks dispatch identical CUDA kernels &mdash; the speed gap is pure framework overhead.
+      frameworks dispatch identical CUDA kernels. The speed gap is pure framework overhead.
     </p>
   </div>
-
-  <div class="dash-embed" style="margin-top: 2rem;">
-    <iframe src="{{ '/assets/benchmark-dashboard.html' | relative_url }}"
-            title="flodl benchmark training dashboard"
-            loading="lazy"></iframe>
-  </div>
-  <p class="bench-note" style="margin-top: 0.5rem;">
-    Live dashboard from an earlier FBRL letter model run (v0.1.1, GTX 1060) &mdash; 19% faster with the training monitor running.
-  </p>
 
   <p style="margin-top: 1.2rem;">
     <a href="{{ '/benchmark' | relative_url }}" class="btn btn-outline" style="font-size: 14px;">
       Full benchmark report &rarr;
     </a>
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- Multi-GPU: convergence + speed -->
+<section class="section" style="text-align: center;">
+  <h2 class="section-title">Multi-GPU that beats published baselines</h2>
+  <p class="section-sub">
+    A mixed consumer cluster reaches better CIFAR-10 accuracy than
+    He et al. (2015), in less wall time than the fastest single GPU.
+    Same training loop. One knob.
+  </p>
+
+  <div class="bench-table" style="max-width: 720px; margin: 1.5rem auto; text-align: left;">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>He et al. 2015</th>
+          <th>Single RTX 5060 Ti</th>
+          <th>Mixed 5060 Ti + 1060 6GB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>CIFAR-10 eval</strong></td>
+          <td>91.25%</td>
+          <td>91.66%</td>
+          <td><strong>92.42%</strong></td>
+        </tr>
+        <tr>
+          <td><strong>Wall time</strong></td>
+          <td>-</td>
+          <td>3,127 s</td>
+          <td><strong>2,650 s</strong></td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="bench-note">
+      ResNet-20 on CIFAR-10, Graph builder, <code>nccl-cadence</code> policy.
+      Published baseline: <a href="https://arxiv.org/abs/1512.03385">He et al. 2015</a>, Table 6.
+      The slower GPU contributes useful work instead of slowing the cluster down.
+    </p>
+  </div>
+
+  <p class="section-sub" style="margin-top: 2rem;">
+    ElChe cadence auto-detects per-GPU speed. The slow device anchors
+    synchronization; the fast one ranges ahead and fills what would be idle
+    time. Three policies &times; two backends, A/B-testable in one line.
+  </p>
+
+  <div class="showcase" style="max-width: 720px; margin: 1.5rem auto; text-align: left;">
+    <div class="showcase-header">
+      <span>Graph DDP: one line, identical loop for 1 or N GPUs</span>
+    </div>
+    <pre><span class="ty">Ddp</span>::<span class="fn">setup</span>(&amp;model, &amp;builder, |p| <span class="ty">Adam</span>::<span class="fn">new</span>(p, <span class="num">0.001</span>))?;
+
+<span class="kw">for</span> batch <span class="kw">in</span> model.<span class="fn">epoch</span>(<span class="num">0</span>) {
+    <span class="kw">let</span> batch = batch?;
+    <span class="kw">let</span> loss = model.<span class="fn">forward_batch</span>(&amp;batch)?.<span class="fn">mse</span>(&amp;target)?;
+    loss.<span class="fn">backward</span>()?;
+    model.<span class="fn">step</span>()?;      <span class="cm">// AllReduce + sync + optimizer + zero_grad</span>
+}</pre>
+  </div>
+
+  <div class="showcase" style="max-width: 720px; margin: 1.5rem auto; text-align: left;">
+    <div class="showcase-header">
+      <span>DDP Builder: any Module, A/B-testable policies and backends</span>
+    </div>
+    <pre><span class="kw">let</span> ddp = <span class="ty">Ddp</span>::<span class="fn">builder</span>(model_factory, optim_factory, train_fn)
+    .<span class="fn">dataset</span>(dataset)
+    .<span class="fn">batch_size</span>(<span class="num">32</span>)
+    .<span class="fn">num_epochs</span>(<span class="num">10</span>)
+    .<span class="fn">policy</span>(<span class="ty">ApplyPolicy</span>::<span class="ty">Cadence</span>)      <span class="cm">// Sync | Cadence | Async</span>
+    .<span class="fn">backend</span>(<span class="ty">AverageBackend</span>::<span class="ty">Nccl</span>)     <span class="cm">// Nccl | Cpu</span>
+    .<span class="fn">run</span>()?;
+
+<span class="kw">let</span> state = ddp.<span class="fn">join</span>()?;            <span class="cm">// averaged params + buffers on CPU</span></pre>
+  </div>
+
+  <p style="margin-top: 1.2rem;">
+    <a href="{{ '/ddp-benchmark' | relative_url }}" class="btn btn-outline" style="font-size: 14px;">
+      DDP benchmark report &rarr;
+    </a>
+    <a href="{{ '/guide/ddp-reference' | relative_url }}" class="btn btn-outline" style="font-size: 14px;">
+      DDP reference &rarr;
+    </a>
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- Built-in observability -->
+<section class="section" style="text-align: center;">
+  <h2 class="section-title">Training you can actually see</h2>
+  <p class="section-sub">
+    A live web dashboard with loss curves, GPU and VRAM tracking, per-rank
+    throughput, and ETA. Zero external dependencies. <code>monitor.serve(3000)</code>
+    and open a browser.
+  </p>
+
+  <div class="dash-embed" style="margin-top: 2rem; max-width: 900px; margin-left: auto; margin-right: auto;">
+    <iframe src="{{ '/assets/benchmark-dashboard.html' | relative_url }}"
+            title="flodl benchmark training dashboard"
+            loading="lazy"></iframe>
+  </div>
+  <p class="bench-note" style="margin-top: 0.5rem;">
+    Live dashboard from an earlier FBRL letter model run (v0.1.1, GTX 1060),
+    19% faster with the training monitor running.
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- Why flodl -->
+<section class="section">
+  <h2 class="section-title">Why flodl</h2>
+  <p class="section-sub">A Rust-native framework for researchers who care about what happens between the GPU kernels.</p>
+
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon mem">&#9881;</div>
+      <h3>Deterministic memory</h3>
+      <p>Tensor memory freed by <code>Drop</code> the instant it leaves scope. No GC, no finalizers, no VRAM budget heuristics. Five phases of PyTorch memory management replaced by <code>impl Drop for Tensor</code>.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon gpu">&#9889;</div>
+      <h3>Wide GPU support</h3>
+      <p>Links libtorch's stable C API, not a specific CUDA toolkit version. Pascal through Blackwell work out of the box, no version pinning. If <code>nvidia-smi</code> runs, flodl can train on it.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon pytorch">&#8652;</div>
+      <h3>Full PyTorch parity</h3>
+      <p>Linear, Conv1d/2d/3d, LayerNorm, BatchNorm, RMSNorm, GroupNorm, LSTM, GRU, MultiheadAttention, 15 losses, 7 optimizers, 8 schedulers. Same semantics, same training loop.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon docker">&#9638;</div>
+      <h3>Production tooling</h3>
+      <p><code>fdl</code> CLI for hardware detection and libtorch management. Dockerfiles and Makefile scaffolded. Architecture-validated checkpoints. Live dashboard. Timeline profiler. No glue code required.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon speed">&#9889;</div>
+      <h3>Up to 31% faster</h3>
+      <p>Same libtorch kernels, no Python interpreter tax. 8 wins of 10 on a locked-GPU interleaved benchmark vs PyTorch 2.10, zero regressions. The convnet tie proves it's framework overhead removed, not a kernel change.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon ddp">&#9672;</div>
+      <h3>Heterogeneous DDP</h3>
+      <p>Mix any CUDA GPUs, identical training loop for 1 or N. ElChe cadence lets the fast card range ahead while the slow one anchors sync. A 5060 Ti + 1060 cluster reaches 92.42% on CIFAR-10 ResNet-20 in less wall time than the 5060 Ti alone.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- Manifesto teaser -->
+<section class="section" style="text-align: center; max-width: 720px; margin-left: auto; margin-right: auto;">
+  <p class="section-sub" style="font-style: italic; font-size: 1.05rem;">
+    We started this because training in the dark stopped being normal.
+    Loss numbers trickling through a Python interpreter, GPUs stalling
+    behind a wall we couldn't see through. One day, we walked out.
+  </p>
+
+  <p style="margin-top: 1.5rem;">
+    <a href="{{ '/out-of-the-cave' | relative_url }}" class="btn btn-outline">Read the manifesto</a>
+    <a href="{{ '/thesis' | relative_url }}" class="btn btn-outline">The trajectory thesis</a>
   </p>
 </section>

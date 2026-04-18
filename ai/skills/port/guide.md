@@ -103,6 +103,7 @@ Read the entire PyTorch script and classify each block by intent:
 | Inference | `model.eval(); with torch.no_grad()` | eval mode, no_grad |
 | Device management | `.to(device)`, `.cuda()` | device transfers |
 | Mixed precision | `torch.cuda.amp` | autocast, GradScaler |
+| Distributed training | `DistributedDataParallel`, `DataParallel`, `torch.distributed`, `torchrun`, `mp.spawn` | `init_process_group`, `dist.barrier`, `dist.all_reduce`, DDP wrapping |
 
 ## Phase 3: Map by Intent
 
@@ -323,6 +324,94 @@ for epoch in 0..num_epochs {
     }
 }
 ```
+
+### Distributed Training (DDP)
+
+flodl has two DDP entry points. Both auto-detect available CUDA devices
+and fall back to single-GPU/CPU when fewer than 2 GPUs are present, so
+the same code runs everywhere.
+
+**Graph models -- `Ddp::setup()` (one-liner, unified data loading + training):**
+
+```python
+# PyTorch
+dist.init_process_group("nccl", rank=rank, world_size=world_size)
+model = model.to(rank)
+model = DistributedDataParallel(model, device_ids=[rank])
+sampler = DistributedSampler(dataset)
+loader = DataLoader(dataset, batch_size=32, sampler=sampler)
+
+for epoch in range(num_epochs):
+    sampler.set_epoch(epoch)
+    for batch in loader:
+        optimizer.zero_grad()
+        loss = criterion(model(batch[0]), batch[1])
+        loss.backward()
+        optimizer.step()
+```
+
+```rust
+// flodl -- Graph DDP
+let model = FlowBuilder::from(/* ... */).build()?;
+
+// One call: detect GPUs, replicate, set optimizer, enable training mode
+Ddp::setup(&model, &builder, |p| Adam::new(p, 1e-3))?;
+model.set_data_loader(loader, "input");
+
+for epoch in 0..num_epochs {
+    for batch in model.epoch(epoch) {
+        let batch = batch?;
+        let pred = model.forward_batch(&batch)?;
+        let loss = cross_entropy_loss(&pred, &batch["label"].into())?;
+        loss.backward()?;
+        model.step()?;   // AllReduce + buffer sync + optimizer + zero_grad
+    }
+}
+```
+
+**Non-Graph modules -- `Ddp::builder()` (thread-per-GPU, A/B-testable):**
+
+```rust
+// flodl -- DDP Builder
+let ddp = Ddp::builder(
+        |dev| MyModel::on_device(dev),
+        |params| Adam::new(params, 1e-3),
+        |model, batch| {
+            let input = Variable::new(batch[0].clone(), false);
+            let target = Variable::new(batch[1].clone(), false);
+            let pred = model.forward(&input)?;
+            cross_entropy_loss(&pred, &target)
+        },
+    )
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(num_epochs)
+    .policy(ApplyPolicy::Cadence)       // Sync | Cadence | Async
+    .backend(AverageBackend::Nccl)      // Nccl | Cpu
+    .run()?;
+
+let state = ddp.join()?;                // averaged params + buffers on CPU
+```
+
+**Key translations:**
+
+| PyTorch | flodl |
+|---------|-------|
+| `dist.init_process_group(...)` | handled inside `Ddp::setup` / `Ddp::builder` |
+| `DistributedDataParallel(model, device_ids=[rank])` | `Ddp::setup(&model, &builder, opt_factory)?` (Graph) or `Ddp::builder(...).run()?` (Module) |
+| `DistributedSampler(dataset)` | Built-in: DataLoader is DDP-aware, partitions automatically |
+| `sampler.set_epoch(epoch)` | Not needed (flodl handles deterministic per-epoch partitioning) |
+| `torchrun --nproc_per_node=N` | Not needed (flodl is single-process, multi-thread) |
+| `dist.all_reduce(tensor)` | handled inside `model.step()` / builder run loop |
+| `dist.barrier()` | handled inside `model.step()` / builder run loop |
+
+**Heterogeneous clusters:** flodl's ElChe cadence auto-detects per-GPU
+speed and lets faster cards run ahead while the slow one anchors
+synchronization. Use `.policy(ApplyPolicy::Cadence)` on `Ddp::builder`,
+or pass a `DdpConfig` with `.speed_hint(rank, ratio)` to `Ddp::setup_with`.
+
+For the full DDP surface (policies, backends, convergence guard, metrics,
+live monitor integration, troubleshooting), see `docs/ddp.md`.
 
 ### Data Loading
 

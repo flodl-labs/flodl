@@ -34,6 +34,20 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
 
 ---
 
+> **What's new in 0.5.0** -- the `fdl` CLI maturity pass. New proc-macro
+> crate [`flodl-cli-macros`](https://crates.io/crates/flodl-cli-macros)
+> adds `#[derive(FdlArgs)]` -- any Rust binary gets typed argv parsing,
+> JSON schema, shell completions, and env-var fallback for free.
+> `fdl.yml` consolidates to a single `commands:` map with three clean
+> kinds (`run:` / `path:` / preset). New
+> [`--env` overlays](docs/cli.md#environment-overlays) and
+> [`fdl config show`](docs/cli.md#fdl-config) surface per-environment
+> config with per-field origin annotations, so you can see the
+> resolved YAML before running a two-hour job. Migration from 0.4.0:
+> see [UPGRADE.md](UPGRADE.md).
+
+---
+
 ## If You Know PyTorch, You Know floDl
 
 <table>
@@ -99,8 +113,8 @@ reference](docs/cli.md) for all commands.
 ```bash
 curl -sL https://flodl.dev/init.sh | sh -s my-project
 cd my-project
-make build    # first build (~5 min, downloads libtorch)
-make run      # train the model
+./fdl build   # first build (~5 min, downloads libtorch)
+./fdl run     # train the model
 ```
 
 **Native** -- [Rust](https://rustup.rs/) 1.85+ and libtorch:
@@ -111,6 +125,14 @@ cargo add flodl && cargo build
 ```
 
 For CUDA: `cargo add flodl --features cuda` + [CUDA toolkit](https://developer.nvidia.com/cuda-downloads).
+
+> **Using tch-rs or PyTorch C++?** `fdl` also works as a standalone
+> libtorch manager outside of flodl: download any CPU/CUDA variant,
+> switch between installs, compile from source for mixed GPU
+> architectures (e.g. sm_61 + sm_120 in one build), and emit a
+> machine-readable diagnostics report. No flodl buy-in required.
+> See [docs/cli.md § Standalone](docs/cli.md#1-standalone-no-project-required)
+> and the [`flodl-cli` crate](https://crates.io/crates/flodl-cli).
 
 Both paths generate an annotated training template. Edit `src/main.rs` to
 build your model:

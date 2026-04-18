@@ -1,13 +1,16 @@
-//! Job resolution and command execution.
+//! Command resolution and execution.
 //!
-//! Merges structured config sections into CLI arguments,
-//! resolves jobs, and spawns the target process.
+//! Merges structured config sections into CLI arguments, resolves named
+//! command presets, and spawns the target process (directly or through
+//! Docker when a `docker:` service is declared).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
 
-use crate::config::{self, CommandConfig, ResolvedConfig};
+use crate::builtins;
+use crate::cli_error;
+use crate::config::{self, ArgSpec, CommandConfig, OptionSpec, ResolvedConfig, Schema};
 use crate::libtorch;
 use crate::style;
 
@@ -190,15 +193,15 @@ fn spawn_docker_shell(command: &str, project_root: &Path) -> ExitCode {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
         Err(e) => {
-            eprintln!("error: {e}");
+            cli_error!("{e}");
             ExitCode::FAILURE
         }
     }
 }
 
-// ── Script execution ────────────────────────────────────────────────────
+// ── Run-kind execution ──────────────────────────────────────────────────
 
-/// Run a script, optionally wrapped in Docker.
+/// Run an inline `run:` script, optionally wrapped in Docker.
 pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> ExitCode {
     match docker_service {
         Some(service) if !inside_docker() => {
@@ -224,7 +227,7 @@ pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> E
                 Ok(s) if s.success() => ExitCode::SUCCESS,
                 Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    cli_error!("{e}");
                     ExitCode::FAILURE
                 }
             }
@@ -234,13 +237,13 @@ pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> E
 
 // ── Command execution ───────────────────────────────────────────────────
 
-/// Execute a sub-command, optionally with a named job.
+/// Execute a sub-command, optionally with a named preset (inline command).
 ///
 /// `project_root` is needed to resolve Docker compose context and
 /// compute the relative workdir for containerized execution.
 pub fn exec_command(
     cmd_config: &CommandConfig,
-    job_name: Option<&str>,
+    preset_name: Option<&str>,
     extra_args: &[String],
     cmd_dir: &Path,
     project_root: &Path,
@@ -256,12 +259,38 @@ pub fn exec_command(
         }
     };
 
-    // Resolve config: job overrides merged with root defaults.
-    let resolved = match job_name {
-        Some(name) => match cmd_config.jobs.get(name) {
-            Some(job) => config::merge_job(cmd_config, job),
+    // Tail validation pre-flight. Runs whenever a schema is present:
+    // - `choices:` on declared options → always enforced.
+    // - Unknown flags → rejected only when `schema.strict` is set
+    //   (lenient mode tolerates pass-through flags the binary may
+    //   consume directly).
+    // fdl-generated args (from the structured ddp/training/output
+    // blocks) are intentionally skipped — those are the binary's
+    // surface, not the user's.
+    if let Some(schema) = &cmd_config.schema {
+        if let Err(e) = config::validate_tail(extra_args, schema) {
+            cli_error!("{e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    // Resolve config: preset overrides merged with root defaults.
+    let resolved = match preset_name {
+        Some(name) => match cmd_config.commands.get(name) {
+            Some(preset) => {
+                // Validate *this* preset only (choices + strict unknowns).
+                // Whole-map validation is deferred so a broken sibling
+                // preset doesn't block a correct one from running.
+                if let Some(schema) = &cmd_config.schema {
+                    if let Err(e) = config::validate_preset_for_exec(name, preset, schema) {
+                        cli_error!("{e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                config::merge_preset(cmd_config, preset)
+            }
             None => {
-                eprintln!("error: unknown job '{name}'");
+                cli_error!("unknown command '{name}'");
                 eprintln!();
                 print_command_help(cmd_config, "");
                 return ExitCode::FAILURE;
@@ -294,7 +323,7 @@ pub fn exec_command(
             format!("cd {workdir} && {entry} {args_str}")
         };
 
-        if job_name.is_some() {
+        if preset_name.is_some() {
             eprintln!("fdl: [{service}] {inner}");
         }
 
@@ -305,13 +334,13 @@ pub fn exec_command(
         // Direct execution (inside container or no docker configured).
         let parts: Vec<&str> = entry.split_whitespace().collect();
         if parts.is_empty() {
-            eprintln!("error: empty entry point");
+            cli_error!("empty entry point");
             return ExitCode::FAILURE;
         }
         let program = parts[0];
         let entry_args = &parts[1..];
 
-        if job_name.is_some() {
+        if preset_name.is_some() {
             let preview: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             eprintln!("fdl: {entry} {}", preview.join(" "));
         }
@@ -328,7 +357,7 @@ pub fn exec_command(
             Ok(s) if s.success() => ExitCode::SUCCESS,
             Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
             Err(e) => {
-                eprintln!("error: failed to execute '{program}': {e}");
+                cli_error!("failed to execute '{program}': {e}");
                 ExitCode::FAILURE
             }
         }
@@ -351,108 +380,230 @@ fn shell_join(args: &[String]) -> String {
 
 // ── Help output ─────────────────────────────────────────────────────────
 
-/// Print help for a sub-command (its jobs and entry).
+/// Print help for a `run:`-kind command. Shows the inline script that
+/// will execute and the Docker service (if any). `run:` commands do not
+/// forward argv, so there are no flags or positionals to document.
+pub fn print_run_help(name: &str, description: Option<&str>, run: &str, docker: Option<&str>) {
+    if let Some(desc) = description {
+        eprintln!("{} {desc}", style::bold(name));
+    } else {
+        eprintln!("{}", style::bold(name));
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Usage"));
+    eprintln!("    fdl {name}");
+    eprintln!();
+    eprintln!("{}:", style::yellow("Runs"));
+    if let Some(svc) = docker {
+        eprintln!("    {} {svc} -c {run:?}", style::dim("docker compose run --rm"));
+    } else {
+        eprintln!("    {run}");
+    }
+    eprintln!();
+    eprintln!(
+        "{} run:-kind commands do not forward argv; the script runs as declared.",
+        style::dim("Note:"),
+    );
+}
+
+/// Print help for a sub-command (its arguments, nested commands, and
+/// entry). Orchestrates the per-section helpers below.
 pub fn print_command_help(cmd_config: &CommandConfig, name: &str) {
+    let (presets, sub_cmds) = split_commands_by_kind(&cmd_config.commands);
+    let preset_slot = cmd_config.arg_name.as_deref().unwrap_or("preset");
+
+    print_title(cmd_config, name);
+    print_usage_line(cmd_config, name, &presets, &sub_cmds, preset_slot);
+    print_arguments_section(cmd_config, &presets, preset_slot);
+    print_sub_commands_section(&sub_cmds);
+    print_options_section(cmd_config);
+    print_entry_section(cmd_config);
+    print_defaults_section(cmd_config);
+}
+
+fn print_title(cmd_config: &CommandConfig, name: &str) {
     if let Some(desc) = &cmd_config.description {
         eprintln!("{} {desc}", style::bold(name));
     } else {
         eprintln!("{}", style::bold(name));
     }
+}
 
+fn print_usage_line(
+    cmd_config: &CommandConfig,
+    name: &str,
+    presets: &CommandGroup,
+    sub_cmds: &CommandGroup,
+    preset_slot: &str,
+) {
+    // The first-positional slot reflects what is actually accepted here:
+    // preset name, sub-command name, or either.
+    let usage_tail = build_usage_tail(
+        cmd_config.schema.as_ref(),
+        !presets.is_empty(),
+        !sub_cmds.is_empty(),
+        preset_slot,
+    );
     eprintln!();
     eprintln!("{}:", style::yellow("Usage"));
-    eprintln!("    fdl {name} {} {}", style::dim("[job]"), style::dim("[options]"));
+    eprintln!("    fdl {name}{usage_tail}");
+}
 
-    if !cmd_config.jobs.is_empty() {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Jobs"));
-        for (job_name, job) in &cmd_config.jobs {
-            let desc = job.description.as_deref().unwrap_or("-");
-            eprintln!("    {}  {}", style::green(&format!("{:<20}", job_name)), desc);
+fn print_arguments_section(
+    cmd_config: &CommandConfig,
+    presets: &CommandGroup,
+    preset_slot: &str,
+) {
+    // Schema-declared positionals (typed slots on the entry binary) and
+    // the preset slot (dispatched by fdl before the binary sees argv)
+    // both land in the first-positional position, so they share one
+    // section. Schema args render first; the preset slot with its
+    // value list follows.
+    let has_schema_args = cmd_config
+        .schema
+        .as_ref()
+        .is_some_and(|s| !s.args.is_empty());
+    if !has_schema_args && presets.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Arguments"));
+    if let Some(schema) = &cmd_config.schema {
+        for a in &schema.args {
+            eprintln!("    {}", format_arg(a));
         }
     }
-
-    if let Some(entry) = &cmd_config.entry {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Entry"));
-        eprintln!("    {entry}");
-        let docker_info = cmd_config
-            .docker
-            .as_ref()
-            .map(|s| format!(" {}", style::dim(&format!("[docker: {s}]"))))
-            .unwrap_or_default();
-        if !docker_info.is_empty() {
-            eprintln!("    {docker_info}");
-        }
-        eprintln!();
+    if !presets.is_empty() {
+        let slot_label = format!("[<{preset_slot}>]");
         eprintln!(
-            "    Any extra {} are forwarded to the entry point.",
-            style::dim("[options]")
+            "    {}  Named preset, one of:",
+            style::green(&format!("{:<20}", slot_label))
         );
-    }
-
-    // Show default config summary.
-    let has_ddp = cmd_config.ddp.is_some();
-    let has_training = cmd_config.training.is_some();
-    if has_ddp || has_training {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Defaults"));
-        if let Some(d) = &cmd_config.ddp {
-            if let Some(mode) = &d.mode {
-                eprintln!("    {}  {mode}", style::dim("ddp.mode"));
-            }
-            if let Some(anchor) = &d.anchor {
-                eprintln!("    {}  {}", style::dim("ddp.anchor"), value_to_string(anchor));
-            }
-        }
-        if let Some(t) = &cmd_config.training {
-            if let Some(e) = t.epochs {
-                eprintln!("    {}  {e}", style::dim("training.epochs"));
-            }
-            if let Some(bs) = t.batch_size {
-                eprintln!("    {}  {bs}", style::dim("training.batch_size"));
-            }
-            if let Some(lr) = t.lr {
-                eprintln!("    {}  {lr}", style::dim("training.lr"));
-            }
-            if let Some(seed) = t.seed {
-                eprintln!("    {}  {seed}", style::dim("training.seed"));
-            }
+        for (pname, spec) in presets {
+            let desc = spec.description.as_deref().unwrap_or("-");
+            eprintln!(
+                "      {}  {}",
+                style::green(&format!("{:<18}", pname)),
+                desc
+            );
         }
     }
 }
 
-/// Print help for a specific job within a sub-command.
-pub fn print_job_help(cmd_config: &CommandConfig, cmd_name: &str, job_name: &str) {
-    let job = match cmd_config.jobs.get(job_name) {
-        Some(j) => j,
+fn print_sub_commands_section(sub_cmds: &CommandGroup) {
+    // Run/Path kinds only — true sub-commands with their own behavior
+    // (an inline script or a nested fdl.yml).
+    if sub_cmds.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Commands"));
+    for (sub_name, sub_spec) in sub_cmds {
+        let desc = sub_spec.description.as_deref().unwrap_or("-");
+        eprintln!(
+            "    {}  {}",
+            style::green(&format!("{:<20}", sub_name)),
+            desc
+        );
+    }
+}
+
+fn print_options_section(cmd_config: &CommandConfig) {
+    // Schema-driven options. Renders only when a schema block is present
+    // in fdl.yaml; the "Defaults" section covers ddp/training/output.
+    let Some(schema) = &cmd_config.schema else {
+        return;
+    };
+    if schema.options.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Options"));
+    for (long, spec) in &schema.options {
+        for line in format_option(long, spec) {
+            eprintln!("    {line}");
+        }
+    }
+}
+
+fn print_entry_section(cmd_config: &CommandConfig) {
+    let Some(entry) = &cmd_config.entry else {
+        return;
+    };
+    eprintln!();
+    eprintln!("{}:", style::yellow("Entry"));
+    eprintln!("    {entry}");
+    if let Some(service) = &cmd_config.docker {
+        eprintln!(
+            "     {}",
+            style::dim(&format!("[docker: {service}]"))
+        );
+    }
+    eprintln!();
+    eprintln!(
+        "    Any extra {} are forwarded to the entry point.",
+        style::dim("[options]")
+    );
+}
+
+fn print_defaults_section(cmd_config: &CommandConfig) {
+    if cmd_config.ddp.is_none() && cmd_config.training.is_none() {
+        return;
+    }
+    eprintln!();
+    eprintln!("{}:", style::yellow("Defaults"));
+    if let Some(d) = &cmd_config.ddp {
+        if let Some(mode) = &d.mode {
+            eprintln!("    {}  {mode}", style::dim("ddp.mode"));
+        }
+        if let Some(anchor) = &d.anchor {
+            eprintln!("    {}  {}", style::dim("ddp.anchor"), value_to_string(anchor));
+        }
+    }
+    if let Some(t) = &cmd_config.training {
+        if let Some(e) = t.epochs {
+            eprintln!("    {}  {e}", style::dim("training.epochs"));
+        }
+        if let Some(bs) = t.batch_size {
+            eprintln!("    {}  {bs}", style::dim("training.batch_size"));
+        }
+        if let Some(lr) = t.lr {
+            eprintln!("    {}  {lr}", style::dim("training.lr"));
+        }
+        if let Some(seed) = t.seed {
+            eprintln!("    {}  {seed}", style::dim("training.seed"));
+        }
+    }
+}
+
+/// Print help for a named preset command nested inside a sub-command.
+pub fn print_preset_help(cmd_config: &CommandConfig, cmd_name: &str, preset_name: &str) {
+    let preset = match cmd_config.commands.get(preset_name) {
+        Some(s) => s,
         None => {
-            eprintln!("unknown job: {job_name}");
+            eprintln!("unknown command: {preset_name}");
             return;
         }
     };
 
     // Title.
-    let desc = job
-        .description
-        .as_deref()
-        .unwrap_or("(no description)");
+    let desc = preset.description.as_deref().unwrap_or("(no description)");
     eprintln!(
         "{} {} {}",
         style::bold(cmd_name),
-        style::green(job_name),
+        style::green(preset_name),
         desc
     );
 
     eprintln!();
     eprintln!("{}:", style::yellow("Usage"));
     eprintln!(
-        "    fdl {cmd_name} {job_name} {}",
+        "    fdl {cmd_name} {preset_name} {}",
         style::dim("[extra options]")
     );
 
-    // Show the merged config that this job produces.
-    let resolved = config::merge_job(cmd_config, job);
+    // Show the merged config that this preset produces.
+    let resolved = config::merge_preset(cmd_config, preset);
 
     eprintln!();
     eprintln!("{}:", style::yellow("Effective config"));
@@ -522,7 +673,7 @@ pub fn print_job_help(cmd_config: &CommandConfig, cmd_name: &str, job_name: &str
 
     eprintln!();
     eprintln!(
-        "Extra {} after the job name are appended to the command.",
+        "Extra {} after the command name are appended to the entry.",
         style::dim("[options]")
     );
 }
@@ -545,8 +696,9 @@ fn print_config_value(label: &str, val: &Option<serde_json::Value>) {
 pub fn print_project_help(
     project: &config::ProjectConfig,
     project_root: &Path,
-    builtins: &[(&str, &str)],
+    active_env: Option<&str>,
 ) {
+    let visible_builtins = builtins::visible_top_level();
     if let Some(desc) = &project.description {
         eprintln!("{} {}", style::bold("fdl"), desc);
     } else {
@@ -572,6 +724,10 @@ pub fn print_project_help(
         style::green(&format!("{:<18}", "-V, --version"))
     );
     eprintln!(
+        "    {}  Use fdl.<name>.yml overlay (also: FDL_ENV=<name>)",
+        style::green(&format!("{:<18}", "--env <name>"))
+    );
+    eprintln!(
         "    {}  Verbose output",
         style::green(&format!("{:<18}", "-v"))
     );
@@ -587,39 +743,80 @@ pub fn print_project_help(
         "    {}  Suppress non-error output",
         style::green(&format!("{:<18}", "-q, --quiet"))
     );
+    eprintln!(
+        "    {}  Force ANSI color (bypass TTY / NO_COLOR detection)",
+        style::green(&format!("{:<18}", "--ansi"))
+    );
+    eprintln!(
+        "    {}  Disable ANSI color output",
+        style::green(&format!("{:<18}", "--no-ansi"))
+    );
 
     // Built-in commands.
     eprintln!();
     eprintln!("{}:", style::yellow("Built-in"));
-    for (name, desc) in builtins {
+    for (name, desc) in &visible_builtins {
         eprintln!("    {}  {desc}", style::green(&format!("{:<18}", name)));
     }
 
-    // Scripts.
-    if !project.scripts.is_empty() {
-        eprintln!();
-        eprintln!("{}:", style::yellow("Scripts"));
-        for (name, script) in &project.scripts {
-            eprintln!(
-                "    {}  {}",
-                style::green(&format!("{:<18}", name)),
-                script.description()
-            );
-        }
-    }
-
-    // Commands (load each child's description).
+    // Commands: unified section. Each entry in `project.commands` is one
+    // of: an inline `run:` script, a `path:` (or convention-default)
+    // pointer to a child fdl.yml, or — at nested levels only — an inline
+    // preset. Descriptions come from the `CommandSpec`; for `path:`
+    // commands missing their own description, fall back to loading the
+    // child fdl.yml's description.
     if !project.commands.is_empty() {
         eprintln!();
         eprintln!("{}:", style::yellow("Commands"));
-        for cmd_path in &project.commands {
-            let short = config::command_name(cmd_path);
-            let cmd_dir = project_root.join(cmd_path);
-            let desc = config::load_command(&cmd_dir)
-                .ok()
-                .and_then(|c| c.description)
-                .unwrap_or_else(|| "(sub-command)".into());
-            eprintln!("    {}  {desc}", style::green(&format!("{:<18}", short)));
+        for (name, spec) in &project.commands {
+            let desc: String = match spec.description.clone() {
+                Some(d) => d,
+                None => {
+                    // For path-kind entries, fall back to the child config's
+                    // own description so `commands: { ddp-bench: }` still
+                    // shows a useful blurb.
+                    let is_path_kind = spec.run.is_none();
+                    if is_path_kind {
+                        let child_dir = spec.resolve_path(name, project_root);
+                        config::load_command_with_env(&child_dir, active_env)
+                            .ok()
+                            .and_then(|c| c.description)
+                            .unwrap_or_else(|| "(sub-command)".into())
+                    } else {
+                        spec.run
+                            .as_deref()
+                            .unwrap_or("(command)")
+                            .to_string()
+                    }
+                }
+            };
+            eprintln!("    {}  {desc}", style::green(&format!("{:<18}", name)));
+        }
+    }
+
+    // Available environments (sibling fdl.<env>.yml files at project root).
+    if let Some(base_config) = config::find_config(project_root) {
+        let envs = crate::overlay::list_envs(&base_config);
+        if !envs.is_empty() {
+            eprintln!();
+            eprintln!("{}:", style::yellow("Environments"));
+            for e in &envs {
+                let active_marker = if Some(e.as_str()) == active_env {
+                    style::green(" (active)")
+                } else {
+                    String::new()
+                };
+                eprintln!(
+                    "    {}  Overlay from fdl.{}.yml{active_marker}",
+                    style::green(&format!("{:<18}", e)),
+                    e
+                );
+            }
+            eprintln!();
+            eprintln!(
+                "Use {} to run a command with an environment overlay.",
+                style::dim("fdl <env> <command>")
+            );
         }
     }
 
@@ -630,10 +827,197 @@ pub fn print_project_help(
     );
 }
 
-/// Format a flat options map for display.
-pub fn _format_options(opts: &BTreeMap<String, serde_json::Value>) -> String {
-    opts.iter()
-        .map(|(k, v)| format!("--{} {}", k.replace('_', "-"), value_to_string(v)))
-        .collect::<Vec<_>>()
-        .join(" ")
+// ── Schema-driven help helpers ──────────────────────────────────────────
+
+/// Build the part of `fdl <cmd>...` after the command name: positionals
+/// rendered as `<name>` (required) or `[<name>]` (optional), plus a slot
+/// for the first-positional picker — `[<preset>]` when only presets exist,
+/// `[<command>]` when only sub-commands exist, `[<preset>|<command>]` when
+/// both — and `[options]`. The preset placeholder is customisable per
+/// sub-command via `arg-name:`.
+fn build_usage_tail(
+    schema: Option<&Schema>,
+    has_presets: bool,
+    has_sub_commands: bool,
+    preset_slot: &str,
+) -> String {
+    let mut parts = String::new();
+    let slot = match (has_presets, has_sub_commands) {
+        (true, false) => Some(format!("[<{preset_slot}>]")),
+        (false, true) => Some("[<command>]".to_string()),
+        (true, true) => Some(format!("[<{preset_slot}>|<command>]")),
+        (false, false) => None,
+    };
+    if let Some(s) = slot {
+        parts.push(' ');
+        parts.push_str(&style::dim(&s));
+    }
+    if let Some(s) = schema {
+        for a in &s.args {
+            parts.push(' ');
+            parts.push_str(&format_arg_usage(a));
+        }
+    }
+    parts.push(' ');
+    parts.push_str(&style::dim("[options]"));
+    parts
+}
+
+type CommandGroup = Vec<(String, crate::config::CommandSpec)>;
+
+/// Partition a `commands:` map into (presets, sub-commands) by resolved
+/// `CommandKind`. Entries whose `kind()` errors (both run and path set)
+/// are treated as sub-commands so they still render somewhere — the
+/// error surfaces when the user tries to dispatch them.
+fn split_commands_by_kind(
+    commands: &BTreeMap<String, crate::config::CommandSpec>,
+) -> (CommandGroup, CommandGroup) {
+    use crate::config::CommandKind;
+    let mut presets = Vec::new();
+    let mut sub_cmds = Vec::new();
+    for (k, v) in commands {
+        match v.kind() {
+            Ok(CommandKind::Preset) => presets.push((k.clone(), v.clone())),
+            _ => sub_cmds.push((k.clone(), v.clone())),
+        }
+    }
+    (presets, sub_cmds)
+}
+
+fn format_arg_usage(a: &ArgSpec) -> String {
+    let suffix = if a.variadic { "..." } else { "" };
+    let core = format!("<{}>{suffix}", a.name);
+    if a.required && a.default.is_none() {
+        style::green(&core)
+    } else {
+        style::dim(&format!("[{core}]"))
+    }
+}
+
+fn format_arg(a: &ArgSpec) -> String {
+    let mut left = format_arg_usage(a);
+    // Target ~22-char visual width for the label column.
+    let visible = visible_width(&left);
+    if visible < 22 {
+        for _ in 0..(22 - visible) {
+            left.push(' ');
+        }
+    } else {
+        left.push(' ');
+    }
+    let mut line = left;
+    line.push_str(a.description.as_deref().unwrap_or("-"));
+    append_default_and_choices(&mut line, &a.default, &a.choices, &a.ty);
+    line
+}
+
+/// Format an option row. Returns one or more lines; `choices` list wraps
+/// onto a second indented line when present, to keep the main row readable.
+fn format_option(long: &str, spec: &OptionSpec) -> Vec<String> {
+    let flag = match &spec.short {
+        Some(s) => format!("-{s}, --{long}"),
+        None => format!("    --{long}"),
+    };
+    let placeholder = option_placeholder(&spec.ty);
+    let left = if placeholder.is_empty() {
+        style::green(&flag)
+    } else {
+        style::green(&format!("{flag} {placeholder}"))
+    };
+    let visible = visible_width_for(&flag, placeholder);
+
+    // Pad to 30 columns for alignment.
+    let pad = if visible < 30 { 30 - visible } else { 1 };
+    let mut line = format!("{left}{}", " ".repeat(pad));
+    line.push_str(spec.description.as_deref().unwrap_or("-"));
+    append_default_and_choices(&mut line, &spec.default, &spec.choices, &spec.ty);
+
+    let mut out = vec![line];
+    if let Some(env) = &spec.env {
+        out.push(format!("{}  {}", " ".repeat(32), style::dim(&format!("[env: {env}]"))));
+    }
+    out
+}
+
+fn option_placeholder(ty: &str) -> &'static str {
+    match ty {
+        "bool" => "",
+        "int" => "<N>",
+        "float" => "<F>",
+        "path" => "<PATH>",
+        "list[path]" => "<PATH>...",
+        t if t.starts_with("list[") => "<VALUE>...",
+        _ => "<VALUE>",
+    }
+}
+
+fn append_default_and_choices(
+    line: &mut String,
+    default: &Option<serde_json::Value>,
+    choices: &Option<Vec<serde_json::Value>>,
+    ty: &str,
+) {
+    if let Some(d) = default {
+        // Skip noisy defaults: bool false, empty list, null.
+        let is_empty_list = matches!(d, serde_json::Value::Array(a) if a.is_empty());
+        let is_false = matches!(d, serde_json::Value::Bool(false));
+        if !d.is_null() && !is_false && !is_empty_list {
+            line.push_str(&format!(" {}", style::dim(&format!("[default: {}]", format_value(d)))));
+        }
+    }
+    if let Some(choices) = choices {
+        if !choices.is_empty() {
+            let list = choices
+                .iter()
+                .map(format_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            line.push_str(&format!(" {}", style::dim(&format!("[possible: {list}]"))));
+        }
+    }
+    // Annotate list types so users know about repeat/comma semantics.
+    if ty.starts_with("list[") {
+        line.push_str(&format!(" {}", style::dim("(repeat or comma-separate)")));
+    }
+}
+
+fn format_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Rough visible width helper: styled strings wrap their visible content
+/// in ANSI escapes, so we use the unstyled inputs we started from.
+fn visible_width(s: &str) -> usize {
+    // The inputs we pass here come from pre-styling helpers that already
+    // know the raw length. Strip ANSI to be safe.
+    strip_ansi(s).chars().count()
+}
+
+fn visible_width_for(flag: &str, placeholder: &str) -> usize {
+    if placeholder.is_empty() {
+        flag.chars().count()
+    } else {
+        flag.chars().count() + 1 + placeholder.chars().count()
+    }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

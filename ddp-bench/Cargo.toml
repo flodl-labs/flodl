@@ -10,6 +10,7 @@ cuda = ["flodl/cuda"]
 
 [dependencies]
 flodl = { path = "../flodl" }
+flodl-cli = { path = "../flodl-cli" }
 flate2 = "1"
 tar = "0.4"
 ureq = "3"

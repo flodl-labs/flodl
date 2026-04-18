@@ -13,8 +13,8 @@ libtorch directory.
 
 **Fix (Docker — recommended):** All builds should run in the Docker container.
 ```bash
-make build    # CPU
-make cuda-build  # CUDA
+fdl build        # CPU
+fdl cuda-build   # CUDA
 ```
 
 **Fix (host):** Use the download script to install libtorch and set up paths:
@@ -117,8 +117,8 @@ GPU not available to Docker. For CPU-only development:
 
 **Fix:** Use CPU targets instead:
 ```bash
-make build   # not cuda-build
-make test    # not cuda-test
+fdl build    # not cuda-build
+fdl test     # not cuda-test
 ```
 
 ---
@@ -218,7 +218,7 @@ directly. Retrain or export from PyTorch as numpy and reconstruct tensors.
 
 Graphviz is not installed.
 
-**Fix (Docker):** The floDl Docker images include graphviz. Use `make shell`.
+**Fix (Docker):** The floDl Docker images include graphviz. Use `fdl shell`.
 
 **Fix (host):**
 ```bash

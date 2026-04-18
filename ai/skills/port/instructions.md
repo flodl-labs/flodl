@@ -61,6 +61,10 @@ Read the entire PyTorch script. Classify every block:
 - **Optimizer**: optimizer and scheduler setup
 - **Checkpoint**: save/load patterns
 - **Inference**: eval mode, no_grad blocks
+- **Distributed**: `torch.distributed.*`, `DistributedDataParallel`,
+  `DataParallel`, `torchrun` launcher, `mp.spawn`, `init_process_group`,
+  `dist.barrier`, `dist.all_reduce`. Flag this explicitly -- it changes
+  the target entry point in Step 4.
 - **Utility**: logging, metrics, visualization
 
 List what you found before starting to port.
@@ -84,6 +88,20 @@ Before writing code, decide:
 
 4. **Project structure**: One `src/main.rs` for simple scripts. Separate
    modules for complex projects.
+
+5. **Distributed?** If Step 3 flagged a Distributed block, route the
+   training loop through flodl's DDP entry points instead of the manual
+   `forward / backward / step` loop. flodl unifies data loading and
+   training under DDP:
+   - **Graph model** -> `Ddp::setup(&model, &builder, |p| Adam::new(p, lr))?`.
+     Training loop becomes `for batch in model.epoch(e) { ...
+     loss.backward()?; model.step()?; }`. Same loop runs on 1 or N GPUs.
+   - **Non-Graph Module** -> `Ddp::builder(model_factory, optim_factory,
+     train_fn).dataset(...).batch_size(...).num_epochs(...).run()?`.
+     Thread-per-GPU. `.policy(ApplyPolicy::Cadence)` and
+     `.backend(AverageBackend::Nccl)` are swappable for A/B testing.
+   - See `ai/skills/port/guide.md` Phase 3 "Distributed Training" for the
+     full mapping and `docs/ddp.md` for the reference.
 
 ## Step 5: Generate the Port
 
