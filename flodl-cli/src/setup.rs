@@ -350,13 +350,13 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
         let has_cuda_lt = detect::read_active(root)
             .is_some_and(|i| i.cuda_version.as_deref() != Some("none"));
         if !gpus.is_empty() && has_cuda_lt {
-            println!("    make cuda-test       # run GPU tests");
-            println!("    make cuda-build      # compile with CUDA");
-            println!("    make cuda-shell      # interactive shell");
+            println!("    fdl cuda-test        # run GPU tests");
+            println!("    fdl cuda-build       # compile with CUDA");
+            println!("    fdl cuda-shell       # interactive shell");
         } else {
-            println!("    make test            # run tests");
-            println!("    make build           # compile");
-            println!("    make shell           # interactive shell");
+            println!("    fdl test             # run tests");
+            println!("    fdl build            # compile");
+            println!("    fdl shell            # interactive shell");
         }
     }
 
@@ -384,6 +384,10 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
     println!("    fdl diagnose         # verify GPU compatibility");
     println!("    fdl init my-project  # scaffold a new project");
     println!();
+
+    if !opts.non_interactive {
+        crate::util::install_prompt::offer_global_install();
+    }
 
     Ok(())
 }

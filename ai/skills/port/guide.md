@@ -8,32 +8,32 @@ scripts to flodl. Tool-agnostic: works with any AI coding assistant.
 Before porting code, make sure the user has a build environment. The `fdl`
 CLI handles everything:
 
-### Option A: Native build (Rust on host)
+### Option A: Mounted libtorch (recommended)
 
 ```bash
 fdl init my-model            # scaffold with mounted libtorch
 cd my-model
-fdl setup                    # detect GPUs, download libtorch, build image
-make build                   # verify it compiles
+./fdl setup                  # detect GPUs, download libtorch, build image
+./fdl build                  # verify it compiles
 ```
 
 This generates:
 - `Cargo.toml` with flodl dependency and optimized profiles
 - `src/main.rs` with a training template (replace with ported code)
-- `Makefile` with build/test/run/shell targets
+- `fdl.yml.example` with build/test/run/shell/cuda-* commands (copied to gitignored `fdl.yml` on first use)
 - `Dockerfile` and `docker-compose.yml` (builds run in Docker)
+- `./fdl` bootstrap script (use it straight away, or `./fdl install` to get it on PATH)
 - `.gitignore`
-- `download-libtorch.sh` for self-contained libtorch setup
 
-All builds run inside Docker even in native mode, so the host only needs
-Docker and Make. No Rust installation required on the host.
+All builds run inside Docker, so the host only needs Docker.
+No Rust installation required on the host.
 
-### Option B: Standalone Docker (no Rust, no libtorch on host)
+### Option B: Standalone Docker (no libtorch on host)
 
 ```bash
 fdl init my-model --docker   # libtorch baked into Docker image
 cd my-model
-make build                   # everything happens in Docker
+./fdl build                  # everything happens in Docker
 ```
 
 Same files as Option A, but the Dockerfile downloads libtorch during
@@ -65,9 +65,9 @@ the right libtorch variant:
 ### Where the ported code goes
 
 After scaffolding, replace `src/main.rs` with the ported flodl code.
-The Makefile targets (`make build`, `make test`, `make cuda-test`) work
-immediately. For multi-file projects, add modules under `src/` and
-update `Cargo.toml` if needed.
+The `fdl.yml` commands (`./fdl build`, `./fdl test`, `./fdl cuda-test`)
+work immediately. For multi-file projects, add modules under `src/`
+and update `Cargo.toml` if needed.
 
 ## Phase 1: Bootstrap API Knowledge
 

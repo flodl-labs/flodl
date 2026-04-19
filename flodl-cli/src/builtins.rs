@@ -49,14 +49,22 @@ pub struct ApiRefArgs {
 }
 
 /// Scaffold a new floDl project.
+///
+/// Three modes, mutually exclusive:
+///   default (no flag) — Docker with host-mounted libtorch (recommended)
+///   --docker          — Docker with libtorch baked into the image
+///   --native          — no Docker, host-provided libtorch + cargo
 #[derive(crate::FdlArgs, Debug)]
 pub struct InitArgs {
     /// New project directory name.
     #[arg]
     pub name: Option<String>,
-    /// Generate a Docker-based scaffold (libtorch baked into the image).
+    /// Generate a Docker scaffold with libtorch baked into the image.
     #[option]
     pub docker: bool,
+    /// Generate a native scaffold (no Docker; libtorch provided on the host).
+    #[option]
+    pub native: bool,
 }
 
 /// Install or update fdl globally (~/.local/bin/fdl).

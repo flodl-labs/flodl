@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_init_destroy() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_broadcast() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_all_reduce_sum() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_all_reduce_avg() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_all_reduce_on_streams() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_rank_comm_init_and_reduce() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_rank_comm_on_stream() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_nccl_rank_comm_multi_tensor_batch() {
         if !require_multi_gpu() { return; }
         let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());

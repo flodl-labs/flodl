@@ -107,12 +107,25 @@ Write-Host ('=== Locking GPU clocks to {0} MHz ===' -f $Clock) -ForegroundColor 
 Write-Host ''
 
 try {
+    # --- Resolve repo root inside WSL ---
+    # The script lives in benchmarks/; repo root is its parent. wslpath
+    # handles any checkout location (native WSL \\wsl.localhost\... or
+    # Windows-mounted drives /mnt/c/...) without hard-coding.
+    $scriptParent = (Resolve-Path "$PSScriptRoot\..").Path
+    $wslRepo = (& wsl wslpath -a $scriptParent).Trim()
+    if ([string]::IsNullOrEmpty($wslRepo)) {
+        Write-Host 'ERROR: wslpath did not resolve the repo root.' -ForegroundColor Red
+        Write-Host ('  Windows path was: {0}' -f $scriptParent)
+        exit 1
+    }
+
     # --- Run benchmarks in WSL2 ---
-    # CLOCK= (empty) skips the lock attempt inside WSL since we handle it here.
-    Write-Host ('=== Starting bench-publish in WSL2, {0} rounds ===' -f $Rounds) -ForegroundColor Cyan
-    $wslCmd = 'cd /home/peta/src/fab2s/ai/rdl; make bench-publish ROUNDS={0} CLOCK={1}' -f $Rounds, $Clock
+    # Clock is passed through so run.sh tags the report metadata with
+    # "locked at X MHz (host)" — the actual lock already happened above.
+    Write-Host ('=== Starting bench-publish in WSL2, {0} rounds ({1}) ===' -f $Rounds, $wslRepo) -ForegroundColor Cyan
+    $wslCmd = 'cd {0}; fdl bench publish --rounds {1} --lock-clocks {2}' -f $wslRepo, $Rounds, $Clock
     if ($Output -ne '') {
-        $wslCmd += ' OUTPUT={0}' -f $Output
+        $wslCmd += ' --output {0}' -f $Output
     }
     wsl -e bash -c $wslCmd
 }

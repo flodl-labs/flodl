@@ -10,7 +10,7 @@
 
 COMPOSE = docker compose
 
-.PHONY: docs-rs site site-stop test-init clean
+.PHONY: docs-rs site site-stop test-init release-check clean
 
 # --- docs.rs validation (host-side mkdir + nightly toolchain) ---
 
@@ -37,15 +37,39 @@ site-stop:
 	$(COMPOSE) down jekyll
 
 # --- Smoke test: init.sh end-to-end ---
+#
+# Scaffolds a project with --docker (explicit to avoid the interactive
+# prompt), then verifies the expected files landed and docker compose
+# accepts the generated config. Uses $FDL_BIN to run the locally-built
+# binary rather than the last-released one on GitHub.
+#
+# We do NOT run `./fdl build` here -- that downloads a release binary
+# and pulls base images, which is too heavy for a smoke test. Build
+# correctness is covered by `fdl test`.
 
 test-init:
 	@echo "=== Testing init.sh scaffold ==="
-	@cd /tmp && rm -rf flodl-init-test && sh $(CURDIR)/init.sh flodl-init-test
-	@cd /tmp/flodl-init-test && make image
-	@cd /tmp/flodl-init-test && docker compose run --rm dev \
-		sh -c "touch \$$CARGO_HOME/registry/.write-test && rm \$$CARGO_HOME/registry/.write-test && echo 'write ok'"
+	@cargo build --release -p flodl-cli >/dev/null
+	@cd /tmp && rm -rf flodl-init-test && \
+		FDL_BIN=$(CURDIR)/target/release/fdl \
+		sh $(CURDIR)/init.sh flodl-init-test --docker
+	@for f in Cargo.toml src/main.rs fdl.yml.example fdl .gitignore \
+	          Dockerfile.cpu Dockerfile.cuda docker-compose.yml; do \
+		test -f /tmp/flodl-init-test/$$f || { echo "missing: $$f"; exit 1; }; \
+	done
+	@test -x /tmp/flodl-init-test/fdl || { echo "fdl bootstrap not executable"; exit 1; }
+	@cd /tmp/flodl-init-test && docker compose config >/dev/null
 	@rm -rf /tmp/flodl-init-test
 	@echo "=== init.sh smoke test passed ==="
+
+# --- Release readiness ---
+#
+# Runs every ci/release/NN-*.sh check and prints a pass/fail summary.
+# See docs/release.md for what each script verifies and how to fix a
+# failing check.
+
+release-check:
+	@sh ci/release/run-all.sh
 
 # --- Cleanup ---
 

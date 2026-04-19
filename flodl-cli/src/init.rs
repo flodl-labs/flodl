@@ -1,14 +1,24 @@
 //! `fdl init <name>` -- scaffold a new floDl project.
 //!
-//! Two modes:
-//! - Default: mounted libtorch (same model as the main flodl repo)
-//! - `--docker`: standalone Docker scaffold (libtorch baked into images)
+//! Three modes, selected by flag or interactive prompt:
+//! - `Mounted` (default): Docker with libtorch host-mounted at runtime.
+//! - `Docker` (`--docker`): Docker with libtorch baked into the image.
+//! - `Native` (`--native`): no Docker; libtorch and cargo provided on the host.
 
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-pub fn run(name: Option<&str>, docker: bool) -> Result<(), String> {
+use crate::util::prompt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Mounted,
+    Docker,
+    Native,
+}
+
+pub fn run(name: Option<&str>, docker: bool, native: bool) -> Result<(), String> {
     let name = name.ok_or("usage: fdl init <project-name>")?;
     validate_name(name)?;
 
@@ -16,43 +26,97 @@ pub fn run(name: Option<&str>, docker: bool) -> Result<(), String> {
         return Err(format!("'{}' already exists", name));
     }
 
+    if docker && native {
+        return Err("--docker and --native are mutually exclusive".into());
+    }
+    let mode = if docker {
+        Mode::Docker
+    } else if native {
+        Mode::Native
+    } else {
+        pick_mode_interactively()
+    };
+
     let crate_name = name.replace('-', "_");
     let flodl_dep = resolve_flodl_dep();
 
     fs::create_dir_all(format!("{}/src", name))
         .map_err(|e| format!("cannot create directory: {}", e))?;
 
-    if docker {
-        scaffold_docker(name, &crate_name, &flodl_dep)?;
-    } else {
-        scaffold_mounted(name, &crate_name, &flodl_dep)?;
+    match mode {
+        Mode::Mounted => scaffold_mounted(name, &crate_name, &flodl_dep)?,
+        Mode::Docker => scaffold_docker(name, &crate_name, &flodl_dep)?,
+        Mode::Native => scaffold_native(name, &crate_name, &flodl_dep)?,
     }
 
-    // Shared files
+    // Shared across all modes.
     write_file(
         &format!("{}/src/main.rs", name),
         &main_rs_template(),
     )?;
     write_file(
         &format!("{}/.gitignore", name),
-        &gitignore_template(docker),
+        &gitignore_template(mode),
     )?;
+    write_file(
+        &format!("{}/fdl.yml.example", name),
+        &fdl_yml_example_template(name, mode),
+    )?;
+    write_fdl_bootstrap(name)?;
 
+    print_next_steps(name, mode);
+    crate::util::install_prompt::offer_global_install();
+    Ok(())
+}
+
+/// Ask the user interactively which mode to generate. Falls through to
+/// `Mounted` when no TTY is attached (the same default as passing no flag
+/// to `--non-interactive` tooling).
+fn pick_mode_interactively() -> Mode {
+    println!();
+    if !prompt::ask_yn("Use Docker for builds?", true) {
+        return Mode::Native;
+    }
+    // 1-based: 1 = mounted (default), 2 = baked-in.
+    let choice = prompt::ask_choice(
+        "libtorch location",
+        &[
+            "Mounted from host (recommended: lighter image, swap CUDA variants)",
+            "Baked into the Docker image (zero host dependencies)",
+        ],
+        1,
+    );
+    match choice {
+        2 => Mode::Docker,
+        _ => Mode::Mounted,
+    }
+}
+
+fn print_next_steps(name: &str, mode: Mode) {
     println!();
     println!("Project '{}' created. Next steps:", name);
     println!();
     println!("  cd {}", name);
-    if docker {
-        println!("  make build    # first build (downloads libtorch, ~5 min)");
-        println!("  make test     # run tests");
-        println!("  make run      # train the model");
-    } else {
-        println!("  ./fdl setup   # detect hardware + download libtorch");
-        println!("  make test     # run tests");
-        println!("  make run      # train the model");
+    match mode {
+        Mode::Mounted => {
+            println!("  ./fdl setup   # detect hardware + download libtorch");
+            println!("  ./fdl build   # build the project");
+        }
+        Mode::Docker => {
+            println!("  ./fdl build   # first build (downloads libtorch, ~5 min)");
+        }
+        Mode::Native => {
+            println!("  ./fdl libtorch download --cpu     # or --cuda 12.8");
+            println!("  ./fdl build                       # cargo build on the host");
+        }
     }
-    println!("  make shell    # interactive shell");
+    println!("  ./fdl test    # run tests");
+    println!("  ./fdl run     # train the model");
+    if mode != Mode::Native {
+        println!("  ./fdl shell   # interactive shell");
+    }
     println!();
+    println!("`./fdl --help` lists every command defined in fdl.yml.");
     println!("Edit src/main.rs to build your model.");
     println!();
     println!("Guides:");
@@ -60,7 +124,19 @@ pub fn run(name: Option<&str>, docker: bool) -> Result<(), String> {
     println!("  Graph Tree:        https://flodl.dev/guide/graph-tree");
     println!("  PyTorch migration: https://flodl.dev/guide/migration");
     println!("  Troubleshooting:   https://flodl.dev/guide/troubleshooting");
+}
 
+fn write_fdl_bootstrap(name: &str) -> Result<(), String> {
+    let fdl_script = include_str!("../assets/fdl");
+    write_file(&format!("{}/fdl", name), fdl_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(
+            format!("{}/fdl", name),
+            fs::Permissions::from_mode(0o755),
+        );
+    }
     Ok(())
 }
 
@@ -118,10 +194,6 @@ fn scaffold_docker(name: &str, crate_name: &str, flodl_dep: &str) -> Result<(), 
         &format!("{}/docker-compose.yml", name),
         &docker_compose_template(crate_name, true),
     )?;
-    write_file(
-        &format!("{}/Makefile", name),
-        MAKEFILE_DOCKER,
-    )?;
     Ok(())
 }
 
@@ -146,23 +218,20 @@ fn scaffold_mounted(name: &str, crate_name: &str, flodl_dep: &str) -> Result<(),
         &format!("{}/docker-compose.yml", name),
         &docker_compose_template(crate_name, false),
     )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Native scaffold (no Docker; libtorch and cargo live on the host)
+// ---------------------------------------------------------------------------
+
+fn scaffold_native(name: &str, crate_name: &str, flodl_dep: &str) -> Result<(), String> {
     write_file(
-        &format!("{}/Makefile", name),
-        MAKEFILE_MOUNTED,
+        &format!("{}/Cargo.toml", name),
+        &cargo_toml_template(crate_name, flodl_dep),
     )?;
-
-    // Copy fdl bootstrap into the project for self-contained setup
-    let fdl_script = include_str!("../assets/fdl");
-    write_file(&format!("{}/fdl", name), fdl_script)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(
-            format!("{}/fdl", name),
-            fs::Permissions::from_mode(0o755),
-        );
-    }
-
+    // Intentionally no Dockerfile*/docker-compose.yml -- the user opted out
+    // of Docker. They can switch later by regenerating or adding their own.
     Ok(())
 }
 
@@ -272,32 +341,46 @@ fn main() -> Result<()> {
     .into()
 }
 
-fn gitignore_template(docker: bool) -> String {
+fn gitignore_template(mode: Mode) -> String {
     let mut s = String::from(
         "/target
 *.fdl
 *.log
 *.csv
 *.html
+
+# Local fdl config (fdl.yml.example is committed; fdl copies it on first run)
+fdl.yml
+fdl.yaml
 ",
     );
-    if docker {
-        s.push_str(
-            ".cargo-cache/
+    match mode {
+        Mode::Docker => {
+            // libtorch is baked into the image, nothing on host to ignore.
+            s.push_str(
+                ".cargo-cache/
 .cargo-git/
 .cargo-cache-cuda/
 .cargo-git-cuda/
 ",
-        );
-    } else {
-        s.push_str(
-            ".cargo-cache/
+            );
+        }
+        Mode::Mounted => {
+            // Mounted libtorch + separate cargo caches per docker service.
+            s.push_str(
+                ".cargo-cache/
 .cargo-git/
 .cargo-cache-cuda/
 .cargo-git-cuda/
 libtorch/
 ",
-        );
+            );
+        }
+        Mode::Native => {
+            // No docker, no container caches. libtorch/ is still ignored
+            // because `./fdl libtorch download` installs it locally.
+            s.push_str("libtorch/\n");
+        }
     }
     s
 }
@@ -504,196 +587,100 @@ WORKDIR /workspace
 "#;
 
 // ---------------------------------------------------------------------------
-// Makefile templates
+// fdl.yml.example template
 // ---------------------------------------------------------------------------
 
-const MAKEFILE_DOCKER: &str = r#"# Development commands -- all builds run inside Docker.
-#
-# Quick start:
-#   make build   -- compile (CPU)
-#   make test    -- run tests
-#   make run     -- cargo run
-#   make shell   -- interactive shell in container
-#
-# GPU (requires NVIDIA Container Toolkit):
-#   make cuda-build / cuda-test / cuda-run / cuda-shell
+/// The scaffold ships `fdl.yml.example` (committed) and fdl auto-copies it to
+/// the gitignored `fdl.yml` on first use. Docker modes attach `docker:` to
+/// every command; native mode drops `docker:` so the commands run directly
+/// on the host. Libtorch env vars (`LIBTORCH_HOST_PATH`, `CUDA_VERSION`,
+/// `CUDA_TAG`, etc.) are derived from `libtorch/.active` by
+/// `flodl-cli/src/run.rs::libtorch_env` before each `docker compose run`
+/// (Docker modes) or exported into the child process (native mode).
+fn fdl_yml_example_template(project_name: &str, mode: Mode) -> String {
+    let use_docker = matches!(mode, Mode::Mounted | Mode::Docker);
+    let (cpu_svc, cuda_svc) = if use_docker {
+        ("\n    docker: dev", "\n    docker: cuda")
+    } else {
+        ("", "")
+    };
+    let cuda_note = if use_docker {
+        "(requires NVIDIA Container Toolkit)"
+    } else {
+        "(requires a matching CUDA toolkit on the host)"
+    };
+    let preamble = if use_docker {
+        "# Run any of these with `./fdl <cmd>` (or `fdl <cmd>` once installed\n\
+         # globally via `./fdl install`). Libtorch env vars are derived from\n\
+         # `libtorch/.active` automatically; missing libtorch surfaces as a\n\
+         # clean linker error, with `./fdl setup` one call away."
+    } else {
+        "# Native mode: commands run on the host. Make sure libtorch is\n\
+         # installed (`./fdl libtorch download --cpu` or `--cuda 12.8`)\n\
+         # and that `$LIBTORCH` / `$LD_LIBRARY_PATH` are exported so\n\
+         # cargo can link. `./fdl libtorch info` prints the commands you\n\
+         # need after a download."
+    };
 
-COMPOSE = docker compose
-RUN     = $(COMPOSE) run --rm dev
-RUN_GPU = $(COMPOSE) run --rm cuda
+    let shell_block = if use_docker {
+        format!(
+            r#"  shell:
+    description: Interactive shell (CPU container)
+    run: bash{cpu_svc}
 
-.PHONY: build test run check clippy shell image clean \
-        cuda-image cuda-build cuda-test cuda-run cuda-shell
+"#
+        )
+    } else {
+        // Native mode: no container to drop into; users open their own shell.
+        String::new()
+    };
 
-# --- CPU targets ---
+    let cuda_shell_block = if use_docker {
+        format!(
+            r#"  cuda-shell:
+    description: Interactive shell (CUDA container)
+    run: bash{cuda_svc}
+"#
+        )
+    } else {
+        String::new()
+    };
 
-image:
-	@mkdir -p .cargo-cache .cargo-git
-	$(COMPOSE) build dev
+    format!(
+        r#"description: {project_name}
 
-build: image
-	$(RUN) cargo build
+{preamble}
 
-test: image
-	$(RUN) cargo test -- --nocapture
-
-run: image
-	$(RUN) cargo run
-
-check: image
-	$(RUN) cargo check
-
-clippy: image
-	$(RUN) cargo clippy -- -W clippy::all
-
-shell: image
-	$(COMPOSE) run --rm dev bash
-
-# --- CUDA targets ---
-
-cuda-image:
-	@mkdir -p .cargo-cache-cuda .cargo-git-cuda
-	$(COMPOSE) build cuda
-
-cuda-build: cuda-image
-	$(RUN_GPU) cargo build --features cuda
-
-cuda-test: cuda-image
-	$(RUN_GPU) cargo test --features cuda -- --nocapture
-
-cuda-run: cuda-image
-	$(RUN_GPU) cargo run --features cuda
-
-cuda-shell: cuda-image
-	$(COMPOSE) run --rm cuda bash
-
-# --- Cleanup ---
-
-clean:
-	$(COMPOSE) down -v --rmi local
-"#;
-
-const MAKEFILE_MOUNTED: &str = r#"# Development commands -- all builds run inside Docker.
-# libtorch is mounted from the host libtorch/ directory.
-#
-# Quick start:
-#   make setup   -- detect hardware, download libtorch, build image
-#   make build   -- compile (CPU)
-#   make test    -- run tests
-#   make run     -- cargo run
-#   make shell   -- interactive shell
-#
-# GPU (requires NVIDIA Container Toolkit):
-#   make cuda-build / cuda-test / cuda-run / cuda-shell
-
-COMPOSE = docker compose
-
-# --- libtorch auto-detection ---
-LIBTORCH_ACTIVE := $(shell cat libtorch/.active 2>/dev/null | tr -d '[:space:]')
-LIBTORCH_HOST_PATH := $(if $(LIBTORCH_ACTIVE),./libtorch/$(LIBTORCH_ACTIVE),)
-ARCH_FILE := $(if $(LIBTORCH_HOST_PATH),$(LIBTORCH_HOST_PATH)/.arch,)
-ARCH_CUDA := $(shell grep '^cuda=' $(ARCH_FILE) 2>/dev/null | cut -d= -f2)
-
-ifeq ($(ARCH_CUDA),none)
-  _CUDA_VER :=
-else ifneq ($(ARCH_CUDA),)
-  _CUDA_VER := $(ARCH_CUDA).0
-else
-  _CUDA_VER := 12.8.0
-endif
-CUDA_VERSION ?= $(_CUDA_VER)
-CUDA_TAG     ?= $(shell echo "$(CUDA_VERSION)" | cut -d. -f1,2)
-
-LIBTORCH_CPU_PATH := ./libtorch/precompiled/cpu
-
-export LIBTORCH_HOST_PATH
-export LIBTORCH_CPU_PATH
-export CUDA_VERSION
-export CUDA_TAG
-
-RUN     = $(COMPOSE) run --rm dev
-RUN_GPU = $(COMPOSE) run --rm cuda
-
-.PHONY: build test run check clippy shell image clean \
-        cuda-image cuda-build cuda-test cuda-run cuda-shell \
-        setup _require-libtorch _require-libtorch-cuda
-
-# --- libtorch guards ---
-
-_require-libtorch:
-	@if [ ! -d "$(LIBTORCH_CPU_PATH)/lib" ]; then \
-		echo ""; \
-		echo "ERROR: No CPU libtorch found."; \
-		echo "  Run: make setup"; \
-		echo "  Or:  ./fdl libtorch download --cpu"; \
-		echo ""; \
-		exit 1; \
-	fi
-
-_require-libtorch-cuda:
-	@if [ -z "$(LIBTORCH_HOST_PATH)" ] || [ ! -d "$(LIBTORCH_HOST_PATH)/lib" ]; then \
-		echo ""; \
-		echo "ERROR: No active CUDA libtorch found."; \
-		echo "  Run: make setup"; \
-		echo "  Or:  ./fdl libtorch download --cuda 12.8"; \
-		echo ""; \
-		exit 1; \
-	fi
-
-# --- CPU targets ---
-
-image:
-	@mkdir -p .cargo-cache .cargo-git
-	@if ! docker image inspect $$(basename $$(pwd))-dev:latest >/dev/null 2>&1; then \
-		$(COMPOSE) build dev; \
-	fi
-
-build: image _require-libtorch
-	$(RUN) cargo build
-
-test: image _require-libtorch
-	$(RUN) cargo test -- --nocapture
-
-run: image _require-libtorch
-	$(RUN) cargo run
-
-check: image _require-libtorch
-	$(RUN) cargo check
-
-clippy: image _require-libtorch
-	$(RUN) cargo clippy -- -W clippy::all
-
-shell: image
-	$(COMPOSE) run --rm dev bash
-
-# --- CUDA targets ---
-
-cuda-image:
-	@mkdir -p .cargo-cache-cuda .cargo-git-cuda
-	$(COMPOSE) build cuda
-
-cuda-build: cuda-image _require-libtorch-cuda
-	$(RUN_GPU) cargo build --features cuda
-
-cuda-test: cuda-image _require-libtorch-cuda
-	$(RUN_GPU) cargo test --features cuda -- --nocapture
-
-cuda-run: cuda-image _require-libtorch-cuda
-	$(RUN_GPU) cargo run --features cuda
-
-cuda-shell: cuda-image
-	$(COMPOSE) run --rm cuda bash
-
-# --- Setup ---
-
-setup:
-	./fdl setup --non-interactive
-
-# --- Cleanup ---
-
-clean:
-	$(COMPOSE) down -v --rmi local
-"#;
+commands:
+  # --- CPU ---
+  build:
+    description: Build (debug)
+    run: cargo build{cpu_svc}
+  test:
+    description: Run CPU tests
+    run: cargo test -- --nocapture{cpu_svc}
+  run:
+    description: cargo run
+    run: cargo run{cpu_svc}
+  check:
+    description: Type-check without building
+    run: cargo check{cpu_svc}
+  clippy:
+    description: Lint
+    run: cargo clippy -- -W clippy::all{cpu_svc}
+{shell_block}  # --- CUDA {cuda_note} ---
+  cuda-build:
+    description: Build with CUDA feature
+    run: cargo build --features cuda{cuda_svc}
+  cuda-test:
+    description: Run CUDA tests
+    run: cargo test --features cuda -- --nocapture{cuda_svc}
+  cuda-run:
+    description: cargo run --features cuda
+    run: cargo run --features cuda{cuda_svc}
+{cuda_shell_block}"#
+    )
+}
 
 // ---------------------------------------------------------------------------
 // File writing helper

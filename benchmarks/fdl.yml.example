@@ -1,0 +1,20 @@
+description: flodl vs PyTorch benchmark suite
+docker: bench
+entry: bash run.sh
+
+# Options come from `run.sh --fdl-schema` — flodl-cli auto-probes on first use
+# and caches the result under benchmarks/.fdl/schema-cache/. Running
+# `fdl bench --help` shows the available flags.
+
+commands:
+  publish:
+    description: Publication run (10 interleaved rounds, 15s warmup)
+    options: { rounds: 10, warmup-secs: 15 }
+
+  cpu:
+    description: CPU-only quick run
+    options: { cpu: true }
+
+  cpu-publish:
+    description: Publication run on CPU (10 interleaved rounds, 15s warmup)
+    options: { cpu: true, rounds: 10, warmup-secs: 15 }

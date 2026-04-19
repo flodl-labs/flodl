@@ -1117,7 +1117,7 @@ fn test_async_ddp_single_gpu_fallback() {
 }
 
 #[test]
-#[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+#[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
 fn test_async_ddp_multi_gpu_nccl() {
     if crate::tensor::usable_cuda_devices().len() < 2 {
         return;
@@ -1578,7 +1578,7 @@ fn run_2gpu_training(
 }
 
 #[test]
-#[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+#[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
 fn test_async_ddp_2gpu_cpu_backend_loss_decreases() {
     if crate::tensor::usable_cuda_devices().len() < 2 {
         return;
@@ -1607,7 +1607,7 @@ fn test_async_ddp_2gpu_cpu_backend_loss_decreases() {
 }
 
 #[test]
-#[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+#[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
 fn test_async_ddp_2gpu_nccl_backend_loss_decreases() {
     if crate::tensor::usable_cuda_devices().len() < 2 {
         return;
@@ -1631,7 +1631,7 @@ fn test_async_ddp_2gpu_nccl_backend_loss_decreases() {
 }
 
 #[test]
-#[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+#[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
 fn test_async_ddp_ab_cpu_vs_nccl() {
     if crate::tensor::usable_cuda_devices().len() < 2 {
         return;

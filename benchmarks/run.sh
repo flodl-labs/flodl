@@ -29,6 +29,28 @@
 # For publication: --rounds 10 --lock-clocks <base_freq>
 # Expects to run inside the bench Docker container.
 
+# --- fdl schema handshake ---
+# Emit the CLI surface as JSON when probed by flodl-cli. Must fire before
+# `set -euo pipefail` and any real work so `fdl bench --help` stays fast.
+# Shape matches flodl-cli::config::Schema — see flodl-cli/src/schema_cache.rs.
+if [ "${1:-}" = "--fdl-schema" ]; then
+    cat <<'JSON'
+{
+  "options": {
+    "cpu":         { "type": "bool",   "description": "CPU-only mode (no CUDA)" },
+    "rounds":      { "type": "int",    "description": "Number of interleaved rounds", "default": 1 },
+    "lock-clocks": { "type": "int",    "description": "Lock GPU clocks to this frequency (MHz); on WSL2 the host locks instead" },
+    "warmup-secs": { "type": "int",    "description": "GPU warmup duration in seconds",                "default": 10 },
+    "output":      { "type": "path",   "description": "Write the comparison report to FILE" },
+    "tier1":       { "type": "bool",   "description": "Run only tier-1 (standard architectures)" },
+    "tier2":       { "type": "bool",   "description": "Run only tier-2 (graph-builder architectures)" },
+    "bench":       { "type": "string", "description": "Run a single benchmark by name" }
+  }
+}
+JSON
+    exit 0
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

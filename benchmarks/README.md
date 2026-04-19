@@ -7,19 +7,23 @@ the benchmarks measure framework overhead, not kernel speed.
 ## Quick start
 
 ```bash
-make bench                # CUDA benchmarks (all tiers)
-make bench-cpu            # CPU-only
-make bench ARGS="--tier1" # tier 1 only
-make bench ARGS="--bench mlp"  # single benchmark
+fdl bench                        # CUDA benchmarks (all tiers)
+fdl bench cpu                    # CPU-only
+fdl bench --tier1                # tier 1 only
+fdl bench --bench mlp            # single benchmark
 ```
 
-Everything runs in Docker. No local Rust or Python required.
+Everything runs in Docker. No local Rust or Python required. Full option
+list: `fdl bench --help` (auto-populated from `run.sh --fdl-schema`).
 
 ## Publication mode
 
 ```bash
-make bench-publish ROUNDS=10 CLOCK=2407
+fdl bench publish --lock-clocks 2407
 ```
+
+The `publish` preset sets `--rounds 10 --warmup-secs 15`; override any
+flag on the command line (e.g. `--rounds 20 --output …`).
 
 This enables the full methodology designed for reproducible, publishable
 results:
