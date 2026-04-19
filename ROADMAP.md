@@ -37,7 +37,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
 ## In progress
 
-- *(empty — ready to pull the next item from Possibilities)*
+- **HuggingFace fine-tuning** `[started]`: safetensors loader, `tokenizers`
+  crate integration, LoRA adapters, pre-built architectures (BERT first,
+  LLaMA next). Fine-tune published models on heterogeneous consumer GPUs
+  with ElChe. Scaffolded as sibling crate `flodl-hf`. See
+  [docs/design/cloud-ddp.md](docs/design/cloud-ddp.md) for the downstream
+  ElChe tie-in.
 
 (Length-1 by design. The next item pulls from Possibilities when this
 ships.)
@@ -70,9 +75,13 @@ not a commitment; only moving one to In Progress is.
 - **Model parallelism**: tensor / pipeline parallelism for models that
   exceed single-GPU VRAM.
 - **Higher-order gradients**: differentiate through backward.
-- **HuggingFace fine-tuning**: safetensors loader, `tokenizers` crate
-  integration, LoRA adapters, pre-built architectures (LLaMA, BERT).
-  Fine-tune published models on heterogeneous consumer GPUs with ElChe.
+- **flodl-manager CLI evolution**: `fdl add <crate>` with flodl-aware
+  feature selection (e.g. `fdl add hf --for bert|vit|offline`), argv
+  forwarding on `fdl build`/`fdl clippy` so feature matrices can be
+  exercised without falling back to raw `docker compose run`, and
+  model-info / doctor commands. Makes fdl a true DL package manager on
+  top of cargo. Gaps discovered while scaffolding `flodl-hf` in
+  2026-04-20.
 
 ---
 
