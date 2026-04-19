@@ -3,13 +3,13 @@
 # Use this when pre-built libtorch doesn't cover your GPU mix.
 # Example: sm_61 (GTX 1060) + sm_120 (RTX 5060 Ti) needs a custom build.
 #
-# Build:  make build-libtorch
+# Build:  fdl libtorch build
 # Time:   2-6 hours depending on CPU cores
 #
 # The TORCH_CUDA_ARCH_LIST arg controls which GPU architectures are compiled.
-# `make build-libtorch` auto-detects this from your installed GPUs.
+# `fdl libtorch build` auto-detects this from your installed GPUs.
 #
-# This is a builder-only image. The Makefile extracts the built libtorch
+# This is a builder-only image. fdl extracts the built libtorch
 # to libtorch/builds/<arch>/ via docker cp.
 
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04

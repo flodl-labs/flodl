@@ -2,7 +2,7 @@
 # Run all missing ddp-bench cases sequentially.
 # gpt-nano/sync and resnet/sync are skipped (not Graph-based models).
 set -e
-cd /home/peta/src/fab2s/ai/rdl
+cd "$(dirname "$0")/.."
 
 echo "=== Starting missing runs at $(date) ==="
 

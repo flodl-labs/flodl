@@ -449,7 +449,7 @@
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-all"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
     fn test_graph_distribute_adapts_to_hardware() {
         use crate::graph::FlowBuilder;
         use crate::nn::Linear;
@@ -525,7 +525,7 @@
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
     fn test_ddp_auto_multi_gpu() {
         if !require_multi_gpu() {
             return;
@@ -1038,7 +1038,7 @@
     // -- El Che CUDA integration tests (multi-GPU, NCCL) ----------------------
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
     fn test_el_che_full_training_loop() {
         if !require_multi_gpu() {
             return;
@@ -1121,7 +1121,7 @@
     }
 
     #[test]
-    #[ignore = "NCCL init needs exclusive GPU; run with: make cuda-test-nccl"]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
     fn test_el_che_tagged_outputs_gathered() {
         if !require_multi_gpu() {
             return;

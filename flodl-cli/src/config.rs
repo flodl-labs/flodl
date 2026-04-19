@@ -666,11 +666,11 @@ pub fn load_command_with_env(dir: &Path, env: Option<&str>) -> Result<CommandCon
     }
 
     // Cache precedence: a valid, fresh cached schema (written by `fdl <cmd>
-    // --refresh-schema`) wins over the inline YAML schema. This lets a
-    // binary become the source of truth for its own surface once it opts
-    // into the `--fdl-schema` contract. A cache that is older than the
-    // command's fdl.yml is treated as stale and skipped — the inline
-    // schema (if any) reasserts until the user refreshes.
+    // --refresh-schema` or auto-probed below) wins over the inline YAML
+    // schema. This lets a binary become the source of truth for its own
+    // surface once it opts into the `--fdl-schema` contract. A cache that
+    // is older than the command's fdl.yml is treated as stale and skipped
+    // — the inline schema (if any) reasserts until a refresh happens.
     let cmd_name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -686,6 +686,24 @@ pub fn load_command_with_env(dir: &Path, env: Option<&str>) -> Result<CommandCon
     if !crate::schema_cache::is_stale(&cache, &refs) {
         if let Some(cached) = crate::schema_cache::read_cache(&cache) {
             cfg.schema = Some(cached);
+        }
+    } else if let Some(entry) = cfg.entry.as_deref() {
+        // Auto-probe non-cargo entries when the cache is stale or missing.
+        // Cargo entries are deliberately skipped — `cargo run --fdl-schema`
+        // triggers a full compile which is unacceptable latency for `-h`.
+        // Scripts and pre-built binaries are expected to handle the flag
+        // cheaply (emit JSON and exit), so probing them on demand is safe.
+        // Probe failures are swallowed: an entry that doesn't implement
+        // `--fdl-schema` simply falls through to the inline schema (or no
+        // schema) — help still renders.
+        if !crate::schema_cache::is_cargo_entry(entry) {
+            if let Ok(probed) = crate::schema_cache::probe(entry, dir) {
+                // Best-effort cache write: if the dir is read-only, the
+                // schema still applies to this invocation, we just re-probe
+                // next time. Non-fatal.
+                let _ = crate::schema_cache::write_cache(&cache, &probed);
+                cfg.schema = Some(probed);
+            }
         }
     }
 
@@ -1707,5 +1725,76 @@ mod tests {
         std::fs::write(&base, "inherit-from: shared.yml\npolicy: override\n").unwrap();
         let layers = resolve_config_layers(&base, None).unwrap();
         assert_eq!(filenames(&layers), vec!["shared.yml", "fdl.yml"]);
+    }
+
+    #[test]
+    fn load_command_auto_probes_non_cargo_entry_and_writes_cache() {
+        // Script-kind entry + missing cache: load_command should invoke
+        // `<entry> --fdl-schema`, apply the result to cfg.schema, and
+        // write it to .fdl/schema-cache/<name>.json for next time.
+        let tmp = TempDir::new();
+        let cmd_dir = tmp.0.join("mybench");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+
+        let script = cmd_dir.join("emit.sh");
+        let body = "#!/bin/sh\n\
+                    if [ \"$1\" = \"--fdl-schema\" ]; then\n\
+                      cat <<'JSON'\n\
+                    { \"options\": { \"rounds\": { \"type\": \"int\", \"description\": \"N\" } } }\n\
+                    JSON\n\
+                      exit 0\n\
+                    fi\n";
+        std::fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        std::fs::write(cmd_dir.join("fdl.yml"), "entry: sh emit.sh\n").unwrap();
+
+        let cfg = load_command(&cmd_dir).expect("load ok");
+        let schema = cfg.schema.expect("auto-probe must populate schema");
+        assert!(schema.options.contains_key("rounds"));
+
+        // Second load reads the freshly-written cache (same content).
+        let cached_path = crate::schema_cache::cache_path(&cmd_dir, "mybench");
+        assert!(cached_path.is_file(), "cache file should exist");
+    }
+
+    #[test]
+    fn load_command_skips_auto_probe_for_cargo_entries() {
+        // Cargo entries are deliberately not probed — a `cargo run
+        // --fdl-schema` would compile the whole crate before help
+        // renders. Missing cache + cargo entry ⇒ no schema, help
+        // still renders (just without options).
+        let tmp = TempDir::new();
+        let cmd_dir = tmp.0.join("cargo-cmd");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::write(cmd_dir.join("fdl.yml"), "entry: cargo run --\n").unwrap();
+
+        let cfg = load_command(&cmd_dir).expect("load ok");
+        assert!(
+            cfg.schema.is_none(),
+            "cargo entry must not be auto-probed (compile latency would ruin --help)"
+        );
+        let cached = crate::schema_cache::cache_path(&cmd_dir, "cargo-cmd");
+        assert!(!cached.exists(), "no cache should be written for cargo entries");
+    }
+
+    #[test]
+    fn load_command_auto_probe_failure_falls_through_silently() {
+        // An entry that ignores --fdl-schema (or errors) must not break
+        // help rendering. cfg.schema stays None, no cache written.
+        let tmp = TempDir::new();
+        let cmd_dir = tmp.0.join("silent");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        // `/bin/true` ignores any args and exits 0 with empty stdout; probe
+        // will reject "no JSON object" and Err — we want that swallowed.
+        // Quoted so YAML doesn't parse the bareword `true` as a boolean.
+        std::fs::write(cmd_dir.join("fdl.yml"), "entry: \"/bin/true\"\n").unwrap();
+
+        let cfg = load_command(&cmd_dir).expect("load must succeed despite probe error");
+        assert!(cfg.schema.is_none());
     }
 }

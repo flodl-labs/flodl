@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-04-19
+
+### Added
+
+#### `fdl init --native` and interactive mode selection
+- **Three scaffold modes**, mutually exclusive: default (Docker with host-mounted libtorch), `--docker` (Docker with libtorch baked into the image), `--native` (no Docker; libtorch and cargo on the host).
+- **Interactive prompt** via `util::prompt::ask_yn` + `ask_choice` when no flag is passed and a TTY is available: asks whether to use Docker, then (if yes) whether libtorch should be host-mounted or baked in. Non-interactive invocations default to mounted.
+- **Native scaffold** skips `Dockerfile` / `Dockerfile.cuda` / `docker-compose.yml`; `fdl.yml.example` omits the `docker:` field so every command runs directly on the host. Next-steps message points at `./fdl libtorch download --cpu` / `--cuda 12.8` for host-side libtorch provisioning.
+
+#### Release-readiness suite (`make release-check`)
+- **`ci/release/`** (new): eight self-contained shell scripts each verifying one release-gate invariant, plus a `run-all.sh` orchestrator. Scripts: `01-git` (clean tree, tag available), `02-version-sync` (Cargo.toml matches a dated CHANGELOG header), `03-lint-docs` (stale `make` refs, hardcoded user paths, dangling `fdl <cmd>` references in docs), `04-shell` (`sh -n` / `bash -n` picks interpreter from shebang, optional `shellcheck`), `05-ci` (delegates to `fdl ci`), `06-scaffold` (delegates to `make test-init`), `07-docs-rs` (delegates to `make docs-rs`), `08-publish-dry` (`cargo publish --dry-run` per workspace crate in dep order).
+- **`make release-check`**: orchestrator target that prints a pass/fail summary and exits non-zero on any failure. Designed to catch the exact bug class this release fixed (removed `make bench*` / `bench-cpu` leftovers across docs and source code).
+- **`docs/release.md`** (new): release process doc — pre-flight checklist, script table, common failures, post-tag steps (`git push --tags`, `cargo publish` dep order).
+- **Side-fixes uncovered by the linter and folded in**: `flodl-cli/src/libtorch/{build,download}.rs` printing `Run 'make cuda-test' to verify.` → `fdl cuda-test`; 23 `#[ignore = "... run with: make cuda-test-*"]` test attribute messages across `flodl/src/distributed/*.rs` and `flodl/src/nn/cuda_graph.rs` → `fdl cuda-test-*`; `Dockerfile.cuda.source` + embedded copy comments referencing `make build-libtorch` → `fdl libtorch build`.
+
+#### Post-init / post-setup "install globally?" prompt
+- **`util::install_prompt::offer_global_install`**: new helper that fires at the end of `fdl init` and (interactive) `fdl setup`. Offers to promote the running binary to `~/.local/bin/fdl` so subsequent invocations can drop the `./` prefix. Skips itself when already installed at the target path, when a different `fdl` is already there, or when `HOME` is unresolvable. Declining prints a single-line reminder (`(later: ./fdl install)`).
+
+#### Auto-probe for non-cargo entries
+- **`flodl-cli/src/config.rs::load_command`**: when a sub-command's schema cache is stale or missing **and** its `entry:` is not a cargo command, `fdl` probes `<entry> --fdl-schema` automatically and caches the result under `<cmd-dir>/.fdl/schema-cache/<cmd>.json`. Scripts and pre-built binaries become first-class schema sources without an explicit `fdl schema refresh` round-trip on a fresh clone. Cargo entries remain explicit-only: `cargo run --fdl-schema` triggers a full compile, which is unacceptable latency for `fdl <cmd> --help`.
+- Probe failures are swallowed: an entry that doesn't implement `--fdl-schema` simply falls through to the inline YAML schema (or no schema). Help always renders.
+- New tests in `config::tests`: `load_command_auto_probes_non_cargo_entry_and_writes_cache`, `load_command_skips_auto_probe_for_cargo_entries`, `load_command_auto_probe_failure_falls_through_silently`.
+
+### Changed
+
+#### Scaffold is now fdl-native
+- **`fdl.yml.example`** (new, committed): shipped by every scaffold mode with 8-10 commands (the exact set depends on mode). fdl auto-copies it to the gitignored `fdl.yml` on first run.
+- **`./fdl` bootstrap** now shipped in **all three modes** (previously mounted-only): `./fdl install` promotes it to `~/.local/bin/fdl`.
+- **Scaffold `.gitignore`** now ignores `fdl.yml` and `fdl.yaml` alongside the existing cargo/libtorch paths.
+- **`fdl init` next-steps message** rewritten: `./fdl build / test / run / shell` replaces the old `make build / test / run / shell`, with a mode-specific first step (`./fdl setup`, `./fdl build`, or `./fdl libtorch download --cpu`).
+- **`fdl setup`** post-install hints: `make cuda-test / cuda-build / cuda-shell` and `make test / build / shell` became the `fdl` equivalents.
+
+#### `init.sh` reduced to a thin `fdl` proxy
+- **Dropped**: the separate Docker/make dependency checks (fdl itself handles these where they still apply; scaffolded projects no longer need `make`), the hardcoded `--docker` flag, and the custom post-scaffold instructions.
+- **Kept**: the "download the pre-compiled binary, fall back to `cargo build`" bootstrap for the `curl ... | sh -s <name>` path. After obtaining the binary the script simply `exec "$CLI" init "$@"`, so every flag (`--docker`, `--native`, the interactive prompt) behaves the same as running `fdl init` directly.
+- **`$FDL_BIN`** (new, opt-in): when set to an executable path, `init.sh` skips the download and execs that binary instead. Used by `make test-init` to smoke-test the current checkout rather than the last-released binary on GitHub.
+- **`make test-init`** rewritten: builds `flodl-cli` via cargo, scaffolds a `--docker` project through `init.sh` with `$FDL_BIN` pointed at the fresh binary, verifies every expected file is present, and runs `docker compose config` as a generated-config sanity check. Dropped the previous `make image` + live-container cargo-cache-write step (the scaffold no longer ships a `Makefile`, and the real integration path is exercised by `fdl test` separately).
+
+#### `download-libtorch.sh` reduced to a thin `fdl libtorch download` proxy
+- **Dropped**: the entire platform detection / URL construction / zip extraction / `.arch` and `.active` writer / shell-setup-instructions machinery (305 lines of logic duplicated from `flodl-cli/src/libtorch/download.rs`).
+- **Kept**: the bootstrap-fdl-binary flow + `$FDL_BIN` override (same pattern as `init.sh`). After obtaining the binary: `exec "$CLI" libtorch download "$@"`.
+- **Legacy `--project` flag**: filtered out with a `note:` to stderr. `fdl libtorch download` auto-detects whether to install into the project's `./libtorch/` or `$FLODL_HOME/libtorch/` based on where it's invoked from, so the explicit flag is redundant.
+
+#### Benchmark pipeline: `fdl bench` is now the entry point
+- **`benchmarks/fdl.yml`** (new): entry-kind sub-command with three presets: `publish` (10 interleaved rounds, 15s warmup), `cpu` (CPU-only quick run), and `cpu-publish`. Replaces the two root-level `run:`-kind commands.
+- **`benchmarks/run.sh`** emits its option schema via `--fdl-schema`, handled at the top of the file before `set -euo pipefail`. `fdl bench --help` now lists `--rounds`, `--lock-clocks`, `--warmup-secs`, `--output`, `--cpu`, `--tier1`, `--tier2`, `--bench <NAME>`.
+- **Root `fdl.yml` / `fdl.yml.example`**: `bench:` is now a path-kind pointer to `./benchmarks/`; `bench-cpu` removed (superseded by the `cpu` preset).
+- **`benchmarks/bench-publish.ps1`** calls `fdl bench publish --rounds X --lock-clocks Y --output Z` instead of the removed `make bench-publish` target. Repo root inside WSL is discovered via `wsl wslpath -a (Resolve-Path "$PSScriptRoot\..").Path`, no hardcoded path.
+- **`ddp-bench/run-missing.sh`**: hardcoded repo path replaced with `cd "$(dirname "$0")/.."`.
+- **`docs/benchmark.md`**: four `make bench*` invocations rewritten as `fdl bench [<preset>]` plus a pointer to `fdl bench --help`.
+
+#### Documentation and repo hygiene
+- **`docs/cli.md`** `fdl init` section: three-mode invocation, updated file list (`fdl.yml.example` + `./fdl` bootstrap), removed the "scaffold ships a Makefile by default" caveat.
+- **`docs/cli.md`** `fdl schema` / `--fdl-schema` section reframed around the two opt-in paths: `#[derive(FdlArgs)]` for Rust binaries, manual JSON emit for scripts and pre-built tools (with `benchmarks/run.sh` cited as the reference example). Clarifies that non-cargo entries auto-probe on first use, while cargo entries still require an explicit `fdl schema refresh` after rebuilds.
+- **`docs/cli.md`** Benchmarks section (flodl-source-checkout context): updated to the `fdl bench [<preset>]` surface.
+- **`ai/skills/port/guide.md`** + embedded copy **`flodl-cli/assets/skills/port-guide.md`**: Phase 0 rewritten to reflect the fdl-native scaffold (`./fdl build / test / cuda-test` instead of `make *`). "Option A" is now labelled "Mounted libtorch (recommended)".
+- **`benchmarks/README.md`**: quick-start and publication-mode invocations rewritten for `fdl bench [<preset>]`.
+- **`.github/pull_request_template.md`**: `make test` / `make clippy` checkboxes swapped for `fdl test` / `fdl clippy`.
+- **Blog posts** (`site/_posts/2026-03-25-benchmarks.md`, `site/_posts/2026-03-31-benchmark-update.md`): short update notes added pointing at `docs/benchmark.md` for the current `fdl bench [<preset>]` invocations. Original prose preserved for historical accuracy.
+
+### Removed
+
+- Root `fdl.yml` / `fdl.yml.example`: `bench-cpu` command (use `fdl bench cpu` instead).
+- **Scaffolded `Makefile`** (both `MAKEFILE_DOCKER` and `MAKEFILE_MOUNTED` in `flodl-cli/src/init.rs`): projects generated by `fdl init` are now fdl-native. The commands the Makefile used to wrap (`build`, `test`, `run`, `check`, `clippy`, `shell`, `cuda-*`) now live in the scaffolded `fdl.yml.example`. The libtorch env-var derivation that lived in the mounted Makefile is handled once inside `flodl-cli/src/run.rs::libtorch_env` for every dispatch.
+
 ## [0.5.0] - 2026-04-18
 
 > Upgrading from 0.4.0? The only breaking changes live in `fdl.yml`

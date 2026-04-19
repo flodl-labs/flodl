@@ -352,31 +352,44 @@ installer / activator / diagnostics tool in this mode.
 
 ### `fdl init`
 
-Scaffold a new floDl project with everything you need to start training.
+Scaffold a new floDl project. Three modes, mutually exclusive — pick via
+flag, or accept the interactive prompt when none is passed:
 
 ```bash
-fdl init my-model            # mounted libtorch (recommended)
-fdl init my-model --docker   # standalone Docker (libtorch baked in)
+fdl init my-model            # default: Docker with host-mounted libtorch (prompts if interactive)
+fdl init my-model --docker   # Docker with libtorch baked into the image
+fdl init my-model --native   # no Docker; libtorch and cargo on the host
 ```
 
-Both modes generate:
+In all three modes the scaffold generates:
 
 - `Cargo.toml` -- flodl dependency and optimized profiles.
 - `src/main.rs` -- complete training template.
-- `Makefile` -- `build` / `test` / `run` / `shell` targets wrapping Docker.
-- `Dockerfile(s)` -- mode-specific (mounted vs. baked-in libtorch).
-- `docker-compose.yml`.
+- `fdl.yml.example` -- committed manifest; fdl copies it to a gitignored
+  `fdl.yml` on first use. Declares `build` / `test` / `run` / `check` /
+  `clippy` (and `shell` / `cuda-shell` in Docker modes) plus the `cuda-*`
+  siblings.
+- `./fdl` -- self-contained bootstrap script (`./fdl install` promotes it
+  to `~/.local/bin/fdl`).
 - `.gitignore`.
 
-The mounted mode also ships a self-contained `fdl` bootstrap script so
-new contributors don't need a global install.
+Docker modes additionally generate:
 
-> The scaffold ships a **Makefile** by default, not an `fdl.yml`.
-> The Makefile wraps Docker for the common tasks, which is enough for
-> most projects. To adopt the manifest workflow (preset sub-commands,
-> env overlays, schema introspection, shell completions), add an
-> `fdl.yml` at the project root -- see
-> [Inside a floDl project](#2-inside-a-flodl-project-the-fdlyml-manifest).
+- `Dockerfile` / `Dockerfile.cuda` (mounted variant) or
+  `Dockerfile.cpu` / `Dockerfile.cuda` (baked variant).
+- `docker-compose.yml`.
+
+Native mode skips all the Docker files — commands run on the host. Point
+`$LIBTORCH` / `$LD_LIBRARY_PATH` at a libtorch install (use
+`./fdl libtorch download --cpu` or `--cuda 12.8`) and `./fdl build`
+dispatches straight to `cargo build`.
+
+> The scaffold is fdl-native: there is no Makefile. Every task lives in
+> `fdl.yml` and runs via `./fdl <cmd>`. Libtorch environment variables
+> (`LIBTORCH_HOST_PATH`, `CUDA_VERSION`, `CUDA_TAG`) are derived from
+> `libtorch/.active` by flodl-cli before each dispatch — the logic that
+> used to live in the scaffolded Makefile now lives in one place inside
+> the binary.
 
 ### `fdl diagnose`
 
@@ -689,10 +702,12 @@ declaring it on a `path:` or preset entry is rejected at load time.
 
 ### Declaring flags in Rust
 
-Binaries can declare their argv surface with `#[derive(FdlArgs)]`. `fdl`
-probes each cargo-backed entry with a hidden `--fdl-schema` flag, caches
-the resulting JSON under `<cmd-dir>/.fdl/schema-cache/<cmd>.json`, and
-uses it to drive:
+Binaries can declare their argv surface with `#[derive(FdlArgs)]`. The
+derive wires a hidden `--fdl-schema` flag that emits JSON describing
+every option and positional; `fdl` runs the entry with that flag
+(explicitly via `fdl schema refresh` for cargo entries, automatically
+for script/pre-built-binary entries), caches the JSON under
+`<cmd-dir>/.fdl/schema-cache/<cmd>.json`, and uses it to drive:
 
 - `fdl <cmd> --help` -- typed, color-annotated help rendered from the
   doc-comments and attributes.
@@ -906,10 +921,20 @@ overlay behaviour before running a long job.
 
 ### `fdl schema` and `--fdl-schema`
 
-Every binary whose argv struct uses `#[derive(FdlArgs)]` responds to a
-hidden `--fdl-schema` flag by emitting a JSON description of its
-arguments and options. `fdl` uses this to power help, completion, and
-validation for project commands, caching the result per-command.
+Any entry that responds to a hidden `--fdl-schema` flag by emitting a
+JSON description of its arguments and options becomes a self-describing
+sub-command. `fdl` uses the result to power help, completion, and
+validation, caching the output per-command.
+
+Two ways to opt in:
+
+- **Rust binaries** -- `#[derive(FdlArgs)]` wires `--fdl-schema`
+  automatically (see [Declaring flags in Rust](#declaring-flags-in-rust)).
+- **Scripts and pre-built tools** -- emit the JSON yourself. A few lines
+  of shell/Python/whatever at the top of the entry, exit 0 before any
+  real work. The shape is the same JSON object that the derive macro
+  emits (`{"options": {...}, "args": [...], "strict": bool}`). See
+  `benchmarks/run.sh` for a reference implementation.
 
 ```bash
 fdl schema list              # every cached schema with fresh/stale/orphan status
@@ -922,9 +947,15 @@ fdl schema refresh ddp-bench # refresh one
 
 Cached schemas live at `<cmd-dir>/.fdl/schema-cache/<cmd>.json`.
 
+**Non-cargo entries auto-probe** on first use (or when the cache goes
+stale after an `fdl.yml` edit). Scripts and pre-built binaries get
+their schema into the cache without any manual step -- `fdl <cmd>
+--help` on a fresh clone just works.
+
 **Cargo entries must be built before `refresh`** -- `fdl` runs the
 entry's `--fdl-schema` as a subprocess, which requires the binary to
-exist. Rebuild the target first, then refresh:
+exist. To avoid the compile latency ruining `--help`, cargo entries
+are **never** auto-probed: you refresh explicitly after rebuilding.
 
 ```bash
 cargo build --release --features cuda
@@ -976,9 +1007,17 @@ fdl cuda-test-all         # full suite: parallel + NCCL isolated + serial
 
 ### Benchmarks
 
+`bench` is a `path:`-kind sub-command rooted at `./benchmarks/`. Presets
+are defined in `benchmarks/fdl.yml`; options come from
+`benchmarks/run.sh --fdl-schema` and are auto-cached on first use.
+
 ```bash
-fdl bench                 # flodl vs PyTorch (CUDA)
-fdl bench-cpu             # CPU-only benchmarks
+fdl bench                              # quick single-round run (CUDA)
+fdl bench publish                      # publication run (10 interleaved rounds, 15s warmup)
+fdl bench cpu                          # CPU-only quick run
+fdl bench cpu-publish                  # CPU-only publication run
+
+fdl bench --rounds 20 --output ...     # ad-hoc flags (listed by `fdl bench -h`)
 ```
 
 ### DDP validation suite

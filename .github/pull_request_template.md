@@ -6,6 +6,6 @@
 
 <!-- Tests added/modified, manual verification, etc. -->
 
-- [ ] `make test` passes
-- [ ] `make clippy` clean
+- [ ] `fdl test` passes
+- [ ] `fdl clippy` clean
 - [ ] New tests added (if applicable)

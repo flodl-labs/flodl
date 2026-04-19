@@ -72,15 +72,9 @@ commands:
     run: bash
     docker: cuda
 
-  # --- Benchmarks ---
+  # --- Benchmarks (see ./benchmarks/fdl.yml) ---
   bench:
-    description: Run flodl vs PyTorch benchmarks
-    run: benchmarks/run.sh
-    docker: bench
-  bench-cpu:
-    description: Run CPU-only benchmarks
-    run: benchmarks/run.sh --cpu
-    docker: bench
+    path: ./benchmarks/
 
   # --- fdl CLI ---
   self-build:

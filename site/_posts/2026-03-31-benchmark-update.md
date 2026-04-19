@@ -153,6 +153,10 @@ compounds with the per-epoch speed advantage.
 
 ## Reproduce
 
+> **Update (flodl 0.5.1):** `make bench*` became `fdl bench [<preset>]`.
+> See [docs/benchmark.md](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md#reproduce)
+> for the current invocations.
+
 ```bash
 git clone https://github.com/fab2s/floDl.git
 cd floDl

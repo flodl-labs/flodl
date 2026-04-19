@@ -318,17 +318,20 @@ git clone https://github.com/fab2s/floDl.git
 cd floDl
 
 # Quick single-round benchmark
-make bench
+fdl bench
 
-# Publication benchmark (10 interleaved rounds, locked clocks)
-make bench-publish
+# Publication benchmark (10 interleaved rounds, 15s warmup)
+fdl bench publish
 
 # CPU-only
-make bench-cpu
+fdl bench cpu
 
 # Custom configuration
-make bench-publish ROUNDS=20 CLOCK=2407 OUTPUT=benchmarks/report.txt
+fdl bench publish --rounds 20 --lock-clocks 2407 --output benchmarks/report.txt
 ```
+
+`fdl bench --help` lists every available flag — the schema is published by
+`benchmarks/run.sh --fdl-schema` and auto-cached on first use.
 
 Each round runs the full Rust suite then the full Python suite (alternating
 order). Results are merged across rounds with median-of-medians aggregation.

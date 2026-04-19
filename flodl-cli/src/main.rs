@@ -126,7 +126,7 @@ fn main() -> ExitCode {
         }
         "init" => {
             let cli: InitArgs = parse_sub("fdl init", &args[1..]);
-            match init::run(cli.name.as_deref(), cli.docker) {
+            match init::run(cli.name.as_deref(), cli.docker, cli.native) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     cli_error!("{e}");

@@ -1745,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "GPU probe needs CUDA; run with: make cuda-test-all"]
+    #[ignore = "GPU probe needs CUDA; run with: fdl cuda-test-all"]
     fn test_probe_device_cuda() {
         if !test_device().is_cuda() { return; }
         // Device 0 should always work in a CUDA build
@@ -1753,7 +1753,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "GPU diagnostics need CUDA; run with: make cuda-test-all"]
+    #[ignore = "GPU diagnostics need CUDA; run with: fdl cuda-test-all"]
     fn test_cuda_devices_has_compute_capability() {
         if !test_device().is_cuda() { return; }
         let devices = cuda_devices();
@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "GPU diagnostics need CUDA; run with: make cuda-test-all"]
+    #[ignore = "GPU diagnostics need CUDA; run with: fdl cuda-test-all"]
     fn test_usable_cuda_devices() {
         if !test_device().is_cuda() { return; }
         let usable = usable_cuda_devices();
