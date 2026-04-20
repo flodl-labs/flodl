@@ -5,3 +5,7 @@ commands:
     description: Regenerate tests/fixtures/bert_base_uncased_parity.safetensors against HuggingFace reference
     run: python scripts/parity_bert.py
     docker: hf-parity
+
+  example:
+    description: Runnable examples (see `fdl flodl-hf example` for the list)
+    path: ./examples/

@@ -1,0 +1,10 @@
+description: flodl-hf runnable examples
+
+commands:
+  bert-embed:
+    description: Load bert-base-uncased and embed a batch of text (closed-loop text → pooled output)
+    run: cargo run --release --example bert_embed
+    docker: dev
+
+  # Adding an example is three lines plus an entry in flodl-hf/Cargo.toml
+  # (`[[example]] name = "..." required-features = [...]`).
