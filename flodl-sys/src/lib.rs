@@ -520,6 +520,15 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // --- Scaled dot-product attention ---
+
+    pub fn flodl_scaled_dot_product_attention(
+        query: FlodlTensor, key: FlodlTensor, value: FlodlTensor,
+        attn_mask: FlodlTensor,
+        dropout_p: f64, is_causal: i32, scale: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Device ---
 
     pub fn flodl_to_device(

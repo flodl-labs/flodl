@@ -926,6 +926,31 @@ pub fn grid_sample(
     Ok(Variable::wrap(result))
 }
 
+/// Fused scaled dot-product attention with autograd support.
+///
+/// Thin autograd wrapper around libtorch's `at::scaled_dot_product_attention`.
+/// Backward is handled by libtorch's native autograd (same pattern as
+/// [`embedding`]); Q/K/V weights receive gradients automatically when they
+/// are `Variable`s produced by `Linear::forward` etc.
+///
+/// Shapes and semantics match [`Tensor::scaled_dot_product_attention`].
+pub fn scaled_dot_product_attention(
+    query: &Variable,
+    key: &Variable,
+    value: &Variable,
+    attn_mask: Option<&Tensor>,
+    dropout_p: f64,
+    is_causal: bool,
+    scale: Option<f64>,
+) -> Result<Variable> {
+    let result = Tensor::scaled_dot_product_attention(
+        &query.data(), &key.data(), &value.data(),
+        attn_mask,
+        dropout_p, is_causal, scale,
+    )?;
+    Ok(Variable::wrap(result))
+}
+
 /// Plain embedding lookup with autograd support.
 ///
 /// `weight`: learnable embedding table (Variable).

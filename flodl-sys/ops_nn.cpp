@@ -351,6 +351,42 @@ extern "C" char* flodl_grid_sample(FlodlTensor input, FlodlTensor grid,
     }
 }
 
+// --- Scaled dot-product attention ---
+// Fused self/cross attention — libtorch picks flash / mem-efficient / math
+// at runtime based on inputs, hardware, and dtype. One kernel call replaces
+// the naive matmul+softmax+matmul chain in most cases.
+//
+// Shapes:
+//   query: [*, Lq, E]   key: [*, Lk, E]   value: [*, Lk, Ev]
+//   attn_mask (nullable): [*, Lq, Lk] or broadcastable; additive (float) or
+//     boolean. Pass nullptr for no mask.
+//   result: [*, Lq, Ev]
+//
+// `dropout_p` applies to attention probs (post-softmax); 0.0 disables.
+// `scale <= 0.0` is a sentinel meaning "use default 1/sqrt(last_dim)".
+extern "C" char* flodl_scaled_dot_product_attention(
+    FlodlTensor query, FlodlTensor key, FlodlTensor value,
+    FlodlTensor attn_mask,
+    double dropout_p, int is_causal, double scale,
+    FlodlTensor* result) {
+    try {
+        c10::optional<at::Tensor> mask;
+        if (attn_mask != nullptr) {
+            mask = unwrap(attn_mask);
+        }
+        c10::optional<double> scale_opt;
+        if (scale > 0.0) {
+            scale_opt = scale;
+        }
+        *result = wrap(at::scaled_dot_product_attention(
+            unwrap(query), unwrap(key), unwrap(value),
+            mask, dropout_p, is_causal != 0, scale_opt));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Dtype casting ---
 
 extern "C" char* flodl_to_dtype(FlodlTensor t, int dtype, FlodlTensor* result) {

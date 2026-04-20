@@ -17,10 +17,11 @@
 //! matches safetensors checkpoint keys exactly. No remapping needed at load
 //! time.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
-use flodl::{Device, FlowBuilder, Graph, Result, Variable};
+use flodl::{scaled_dot_product_attention, Device, FlowBuilder, Graph, Result, Variable};
 
 use crate::path::{prefix_params, HfPath};
 
@@ -194,22 +195,28 @@ impl Module for BertPooler {
 
 // ── BertSelfAttention ────────────────────────────────────────────────────
 
-/// Naive scaled-dot-product self-attention with separate Q/K/V projections.
+/// Self-attention with separate Q/K/V projections and fused scaled-dot-
+/// product attention.
 ///
-/// Kernel count matches PyTorch HF default (no fused SDPA). Parameter
-/// layout matches HF BERT's `attention.self.{query,key,value}` exactly.
-/// The forward is unmasked; attention masks will be threaded in alongside
-/// real checkpoint loading.
+/// Uses [`flodl::scaled_dot_product_attention`] (libtorch's
+/// `at::scaled_dot_product_attention`) for the Q·Kᵀ/√d → softmax → ·V
+/// chain — one kernel in most cases, dispatched to flash / mem-efficient
+/// / math by libtorch at runtime.
+///
+/// Parameter layout matches HF BERT's `attention.self.{query,key,value}`
+/// exactly. The forward is unmasked; `attn_mask` will be threaded in
+/// alongside real checkpoint loading when the pooler and tokenizer land.
 pub struct BertSelfAttention {
     query: Linear,
     key: Linear,
     value: Linear,
-    /// Dropout applied to the attention probability matrix after softmax,
-    /// per HF. No learnable parameters.
-    probs_dropout: Dropout,
+    /// Dropout probability for attention probabilities. Threaded into SDPA
+    /// via the fused kernel's `dropout_p` parameter; zero at eval time.
+    /// No learnable parameters here; cell carries the training flag.
+    attn_dropout_prob: f64,
+    training: Cell<bool>,
     num_heads: i64,
     head_dim: i64,
-    scale: f64,
 }
 
 impl BertSelfAttention {
@@ -224,10 +231,10 @@ impl BertSelfAttention {
             query: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
             key:   Linear::on_device(config.hidden_size, config.hidden_size, device)?,
             value: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            probs_dropout: Dropout::new(config.attention_probs_dropout_prob),
+            attn_dropout_prob: config.attention_probs_dropout_prob,
+            training: Cell::new(true),
             num_heads: config.num_attention_heads,
             head_dim,
-            scale: 1.0 / (head_dim as f64).sqrt(),
         })
     }
 
@@ -246,13 +253,17 @@ impl BertSelfAttention {
             .reshape(&[batch, seq, self.num_heads, self.head_dim])?
             .transpose(1, 2)?;
 
-        let k_t = k.transpose(2, 3)?;
-        let scores = q.matmul(&k_t)?.mul_scalar(self.scale)?;
-        let probs = self.probs_dropout.forward(&scores.softmax(-1)?)?;
-        let context = probs.matmul(&v)?
-            .transpose(1, 2)?
-            .reshape(&[batch, seq, self.num_heads * self.head_dim])?;
-        Ok(context)
+        let dropout_p = if self.training.get() { self.attn_dropout_prob } else { 0.0 };
+        let context = scaled_dot_product_attention(
+            &q, &k, &v,
+            /*attn_mask=*/None,
+            dropout_p,
+            /*is_causal=*/false,
+            /*scale=*/None,
+        )?;
+
+        context.transpose(1, 2)?
+            .reshape(&[batch, seq, self.num_heads * self.head_dim])
     }
 
     fn parameters(&self) -> Vec<Parameter> {
@@ -264,7 +275,7 @@ impl BertSelfAttention {
     }
 
     fn set_training(&self, training: bool) {
-        self.probs_dropout.set_training(training);
+        self.training.set(training);
     }
 }
 
