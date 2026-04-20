@@ -73,7 +73,7 @@ impl HfPath {
         HfPath { path: format!("{}.{}", self.path, seg) }
     }
 
-    /// Fallible version of [`sub`].
+    /// Fallible version of [`HfPath::sub`].
     pub fn try_sub<S: ToString>(&self, segment: S) -> Result<Self> {
         let seg = segment.to_string();
         validate_segment(&seg)?;
@@ -89,7 +89,7 @@ impl HfPath {
         format!("{}.{}", self.path, name)
     }
 
-    /// Fallible version of [`leaf`].
+    /// Fallible version of [`HfPath::leaf`].
     pub fn try_leaf(&self, name: &str) -> Result<String> {
         validate_segment(name)?;
         Ok(format!("{}.{}", self.path, name))

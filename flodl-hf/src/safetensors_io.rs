@@ -91,6 +91,24 @@ impl LoadValidation {
     /// clean, otherwise a [`TensorError`] whose message lists every
     /// disagreement (truncated to the first 20 entries per bucket).
     pub fn into_result(self) -> Result<()> {
+        self.into_result_impl(false)
+    }
+
+    /// Like [`into_result`](Self::into_result), but unused checkpoint keys
+    /// don't count as an error — only missing keys and shape mismatches
+    /// do. Used when loading a base model out of a checkpoint that also
+    /// contains task-specific heads (e.g. pulling `BertModel` weights
+    /// out of a `BertForPreTraining` checkpoint — the MLM / NSP head
+    /// tensors are "unused" from `BertModel`'s point of view but their
+    /// presence is expected, not an error).
+    pub fn into_result_allow_unused(self) -> Result<()> {
+        self.into_result_impl(true)
+    }
+
+    fn into_result_impl(mut self, allow_unused: bool) -> Result<()> {
+        if allow_unused {
+            self.unused.clear();
+        }
         if self.is_ok() {
             return Ok(());
         }
@@ -216,16 +234,74 @@ pub fn expected_from_graph(graph: &Graph) -> Vec<ExpectedParam> {
 /// transformer zoo doesn't ship integer-weight tensors, so the common
 /// path only needs floats.
 pub fn load_safetensors_into_graph(graph: &Graph, bytes: &[u8]) -> Result<()> {
+    load_safetensors_into_graph_with_rename(graph, bytes, |k| k.to_string())
+}
+
+/// Same as [`load_safetensors_into_graph`] but applies `rename` to every
+/// checkpoint key before matching against the graph.
+///
+/// `rename(checkpoint_key) -> canonical_key` lets callers paper over
+/// legacy HF naming (e.g. `LayerNorm.gamma` → `LayerNorm.weight`). Use
+/// [`bert_legacy_key_rename`] for the standard BERT mapping.
+pub fn load_safetensors_into_graph_with_rename<F>(
+    graph: &Graph,
+    bytes: &[u8],
+    rename: F,
+) -> Result<()>
+where
+    F: Fn(&str) -> String,
+{
+    load_safetensors_core(graph, bytes, &rename, false)?;
+    Ok(())
+}
+
+/// Like [`load_safetensors_into_graph_with_rename`] but tolerates
+/// checkpoint keys that the graph does not ask for — useful when
+/// loading a base model out of a checkpoint that also ships task heads
+/// (e.g. `BertForPreTraining` on the Hub carries MLM + NSP heads that
+/// a bare `BertModel` has no slot for). Missing keys and shape
+/// mismatches are still hard errors.
+///
+/// Returns the list of checkpoint keys that were present but not used,
+/// sorted alphabetically, so callers can surface them to the user.
+pub fn load_safetensors_into_graph_with_rename_allow_unused<F>(
+    graph: &Graph,
+    bytes: &[u8],
+    rename: F,
+) -> Result<Vec<String>>
+where
+    F: Fn(&str) -> String,
+{
+    load_safetensors_core(graph, bytes, &rename, true)
+}
+
+fn load_safetensors_core(
+    graph: &Graph,
+    bytes: &[u8],
+    rename: &dyn Fn(&str) -> String,
+    allow_unused: bool,
+) -> Result<Vec<String>> {
     let st = SafeTensors::deserialize(bytes)
         .map_err(|e| TensorError::new(&format!("safetensors parse error: {e}")))?;
 
-    // Build `name → [i64] shape` for the validator.
+    // Index: canonical (renamed) key → original checkpoint key. The rename
+    // must be injective across the checkpoint's key set, otherwise two
+    // checkpoint tensors would collapse onto the same canonical slot —
+    // surface that as a validation-shaped error so the caller knows.
+    let mut canonical_to_original: HashMap<String, String> = HashMap::new();
     let mut actual_shapes: HashMap<String, Vec<i64>> = HashMap::new();
     for name in st.names() {
+        let canonical = rename(name);
+        if let Some(prev) = canonical_to_original.insert(canonical.clone(), name.to_string()) {
+            return Err(TensorError::new(&format!(
+                "safetensors key rename collision: both {prev:?} and {name:?} \
+                 map to canonical key {canonical:?}",
+            )));
+        }
         let view = st.tensor(name)
             .map_err(|e| TensorError::new(&format!("safetensors tensor lookup {name}: {e}")))?;
         actual_shapes.insert(
-            name.to_string(),
+            canonical,
             view.shape().iter().map(|&s| s as i64).collect(),
         );
     }
@@ -233,7 +309,13 @@ pub fn load_safetensors_into_graph(graph: &Graph, bytes: &[u8]) -> Result<()> {
     // Validate before touching any graph storage. If this fails, the graph
     // is left untouched so the caller can recover / report.
     let expected = expected_from_graph(graph);
-    validate_keys(&expected, &actual_shapes).into_result()?;
+    let validation = validate_keys(&expected, &actual_shapes);
+    let unused = validation.unused.clone();
+    if allow_unused {
+        validation.into_result_allow_unused()?;
+    } else {
+        validation.into_result()?;
+    }
 
     // Replace each parameter's tensor with the loaded one. `set_data`
     // preserves the Variable's `requires_grad` flag and its place in the
@@ -242,8 +324,14 @@ pub fn load_safetensors_into_graph(graph: &Graph, bytes: &[u8]) -> Result<()> {
     // check on parameters.
     for (flodl_key, param) in graph.named_parameters() {
         let hf_key = hf_key_from_flodl_key(&flodl_key);
-        let view = st.tensor(&hf_key)
-            .map_err(|e| TensorError::new(&format!("safetensors tensor {hf_key}: {e}")))?;
+        let original = canonical_to_original.get(&hf_key).ok_or_else(|| {
+            TensorError::new(&format!(
+                "canonical key {hf_key:?} missing from checkpoint after rename \
+                 (validation should have caught this)",
+            ))
+        })?;
+        let view = st.tensor(original)
+            .map_err(|e| TensorError::new(&format!("safetensors tensor {original}: {e}")))?;
         let device = param.variable.data().device();
         let src = tensor_view_to_f32_tensor(&view, device)?;
         param.variable.set_data(src);
@@ -253,13 +341,35 @@ pub fn load_safetensors_into_graph(graph: &Graph, bytes: &[u8]) -> Result<()> {
     // model with BatchNorm-style running stats will).
     for (flodl_key, buffer) in graph.named_buffers() {
         let hf_key = hf_key_from_flodl_key(&flodl_key);
-        let view = st.tensor(&hf_key)
-            .map_err(|e| TensorError::new(&format!("safetensors tensor {hf_key}: {e}")))?;
+        let original = canonical_to_original.get(&hf_key).ok_or_else(|| {
+            TensorError::new(&format!(
+                "canonical buffer key {hf_key:?} missing after rename",
+            ))
+        })?;
+        let view = st.tensor(original)
+            .map_err(|e| TensorError::new(&format!("safetensors tensor {original}: {e}")))?;
         let src = tensor_view_to_f32_tensor(&view, buffer.device())?;
         buffer.set(src);
     }
 
-    Ok(())
+    Ok(unused)
+}
+
+/// Rewrite legacy TensorFlow-era BERT LayerNorm key suffixes to the
+/// modern HF form: `LayerNorm.gamma` → `LayerNorm.weight`,
+/// `LayerNorm.beta` → `LayerNorm.bias`.
+///
+/// `bert-base-*` and other pre-2020 checkpoints on the Hub still ship
+/// with `gamma`/`beta`. HF Python's `BertModel.from_pretrained` applies
+/// the same remap at load time.
+pub fn bert_legacy_key_rename(checkpoint_key: &str) -> String {
+    if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.gamma") {
+        format!("{prefix}LayerNorm.weight")
+    } else if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.beta") {
+        format!("{prefix}LayerNorm.bias")
+    } else {
+        checkpoint_key.to_string()
+    }
 }
 
 /// Read a safetensors file from disk and load it into `graph`.
@@ -272,6 +382,23 @@ pub fn load_safetensors_file_into_graph(graph: &Graph, path: &Path) -> Result<()
         TensorError::new(&format!("safetensors read {}: {e}", path.display()))
     })?;
     load_safetensors_into_graph(graph, &bytes)
+}
+
+/// Read a safetensors file from disk and load it into `graph`, applying
+/// `rename` to every checkpoint key first. See
+/// [`load_safetensors_into_graph_with_rename`].
+pub fn load_safetensors_file_into_graph_with_rename<F>(
+    graph: &Graph,
+    path: &Path,
+    rename: F,
+) -> Result<()>
+where
+    F: Fn(&str) -> String,
+{
+    let bytes = std::fs::read(path).map_err(|e| {
+        TensorError::new(&format!("safetensors read {}: {e}", path.display()))
+    })?;
+    load_safetensors_into_graph_with_rename(graph, &bytes, rename)
 }
 
 /// Materialise a safetensors `TensorView` as a CPU f32 `Tensor`, then
@@ -828,6 +955,70 @@ mod tests {
         assert!(err.contains("unsupported safetensors dtype"),
             "error must call out dtype: {err}");
         assert!(err.contains("I32"), "error must name the offending dtype: {err}");
+    }
+
+    /// Legacy BERT checkpoint key rewriting: only `LayerNorm.gamma`
+    /// and `LayerNorm.beta` suffixes are remapped; every other key
+    /// passes through untouched. `bert-base-uncased` from the Hub ships
+    /// with the legacy suffixes on every LayerNorm parameter, so this
+    /// is the one knob that separates "loads" from "doesn't".
+    #[test]
+    fn bert_legacy_key_rename_rewrites_layernorm_suffixes() {
+        assert_eq!(
+            bert_legacy_key_rename("bert.embeddings.LayerNorm.gamma"),
+            "bert.embeddings.LayerNorm.weight",
+        );
+        assert_eq!(
+            bert_legacy_key_rename("bert.embeddings.LayerNorm.beta"),
+            "bert.embeddings.LayerNorm.bias",
+        );
+        assert_eq!(
+            bert_legacy_key_rename("bert.encoder.layer.3.attention.output.LayerNorm.gamma"),
+            "bert.encoder.layer.3.attention.output.LayerNorm.weight",
+        );
+        // Non-LayerNorm keys pass through.
+        assert_eq!(
+            bert_legacy_key_rename("bert.encoder.layer.0.attention.self.query.weight"),
+            "bert.encoder.layer.0.attention.self.query.weight",
+        );
+        // Partial matches (wrong suffix) are NOT remapped.
+        assert_eq!(
+            bert_legacy_key_rename("something.gamma"),
+            "something.gamma",
+        );
+    }
+
+    /// If a checkpoint has BOTH `foo.LayerNorm.gamma` and
+    /// `foo.LayerNorm.weight`, renaming collapses them onto the same
+    /// canonical slot. The loader must surface this as a loud error
+    /// rather than silently picking one — otherwise the user gets a
+    /// non-deterministic load depending on HashMap iteration order.
+    #[test]
+    fn load_safetensors_rename_collision_errors_loudly() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(2, 2, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+
+        // Same numeric data, different legacy-vs-canonical key suffix.
+        let w = f32_le_bytes(&[0.0, 1.0, 2.0, 3.0]);
+        let b = f32_le_bytes(&[0.1, 0.2]);
+        let bytes = serialize_entries(&[
+            ("m.weight",       Dtype::F32, vec![2, 2], w.clone()),
+            ("m.LayerNorm.gamma", Dtype::F32, vec![2], b.clone()),
+            ("m.LayerNorm.weight", Dtype::F32, vec![2], b),
+        ]);
+
+        let err = load_safetensors_into_graph_with_rename(
+            &graph, &bytes, bert_legacy_key_rename,
+        ).unwrap_err().to_string();
+        assert!(err.contains("rename collision"),
+            "error must identify the collision: {err}");
+        assert!(err.contains("LayerNorm.weight"),
+            "error must name the canonical key involved: {err}");
     }
 
     /// f16 helper unit check: +Inf, -Inf, NaN, smallest subnormal all

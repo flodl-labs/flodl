@@ -21,7 +21,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
-use flodl::{scaled_dot_product_attention, DType, Device, FlowBuilder, Graph, Result, Tensor, Variable};
+use flodl::{scaled_dot_product_attention, DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, Variable};
 
 use crate::path::{prefix_params, HfPath};
 
@@ -81,6 +81,54 @@ impl BertConfig {
             hidden_dropout_prob: 0.1,
             attention_probs_dropout_prob: 0.1,
         }
+    }
+
+    /// Parse a HuggingFace-style `config.json` string into a [`BertConfig`].
+    ///
+    /// Reads the fields that affect model shape
+    /// (`vocab_size`, `hidden_size`, `num_hidden_layers`, `num_attention_heads`,
+    /// `intermediate_size`, `max_position_embeddings`, `type_vocab_size`,
+    /// `pad_token_id`, `layer_norm_eps`, `hidden_dropout_prob`,
+    /// `attention_probs_dropout_prob`). Unknown fields are ignored, so adding
+    /// new HF metadata (architecture lists, model type, torch dtype, …)
+    /// doesn't break existing checkpoints.
+    ///
+    /// Required integer fields return a clear error if missing; dropout and
+    /// layer-norm-eps fall back to the BERT defaults.
+    ///
+    /// `hidden_act` is not checked: BERT's default (`gelu`) is hardcoded in
+    /// [`BertIntermediate`]. A config shipping a non-GELU activation will
+    /// silently be run with GELU — acceptable for now since every
+    /// BERT-family checkpoint on the Hub uses GELU.
+    pub fn from_json_str(s: &str) -> Result<Self> {
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
+        let get_i64 = |key: &str| -> Result<i64> {
+            v.get(key)
+                .and_then(|x| x.as_i64())
+                .ok_or_else(|| TensorError::new(&format!(
+                    "config.json missing required integer field: {key}",
+                )))
+        };
+        let get_f64_or = |key: &str, default: f64| -> f64 {
+            v.get(key).and_then(|x| x.as_f64()).unwrap_or(default)
+        };
+        // pad_token_id is allowed to be absent or explicitly `null`.
+        let pad_token_id = v.get("pad_token_id").and_then(|x| x.as_i64());
+
+        Ok(BertConfig {
+            vocab_size:              get_i64("vocab_size")?,
+            hidden_size:             get_i64("hidden_size")?,
+            num_hidden_layers:       get_i64("num_hidden_layers")?,
+            num_attention_heads:     get_i64("num_attention_heads")?,
+            intermediate_size:       get_i64("intermediate_size")?,
+            max_position_embeddings: get_i64("max_position_embeddings")?,
+            type_vocab_size:         get_i64("type_vocab_size")?,
+            pad_token_id,
+            layer_norm_eps:               get_f64_or("layer_norm_eps", 1e-12),
+            hidden_dropout_prob:          get_f64_or("hidden_dropout_prob", 0.1),
+            attention_probs_dropout_prob: get_f64_or("attention_probs_dropout_prob", 0.1),
+        })
     }
 }
 
@@ -711,6 +759,111 @@ mod tests {
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
         }
+    }
+
+    /// Standard `bert-base-uncased` config.json — round-trip through
+    /// `from_json_str` must produce a config that matches the hardcoded
+    /// `bert_base_uncased()` preset. Exercises every required field plus
+    /// a few optional ones and unknown-field tolerance.
+    #[test]
+    fn bert_config_from_json_str_matches_base_preset() {
+        let json = r#"{
+            "architectures": ["BertForMaskedLM"],
+            "attention_probs_dropout_prob": 0.1,
+            "gradient_checkpointing": false,
+            "hidden_act": "gelu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 768,
+            "initializer_range": 0.02,
+            "intermediate_size": 3072,
+            "layer_norm_eps": 1e-12,
+            "max_position_embeddings": 512,
+            "model_type": "bert",
+            "num_attention_heads": 12,
+            "num_hidden_layers": 12,
+            "pad_token_id": 0,
+            "position_embedding_type": "absolute",
+            "transformers_version": "4.6.0.dev0",
+            "type_vocab_size": 2,
+            "use_cache": true,
+            "vocab_size": 30522
+        }"#;
+        let got = BertConfig::from_json_str(json).unwrap();
+        let want = BertConfig::bert_base_uncased();
+        assert_eq!(got.vocab_size,              want.vocab_size);
+        assert_eq!(got.hidden_size,             want.hidden_size);
+        assert_eq!(got.num_hidden_layers,       want.num_hidden_layers);
+        assert_eq!(got.num_attention_heads,     want.num_attention_heads);
+        assert_eq!(got.intermediate_size,       want.intermediate_size);
+        assert_eq!(got.max_position_embeddings, want.max_position_embeddings);
+        assert_eq!(got.type_vocab_size,         want.type_vocab_size);
+        assert_eq!(got.pad_token_id,            want.pad_token_id);
+        assert!((got.layer_norm_eps               - want.layer_norm_eps).abs() < 1e-18);
+        assert!((got.hidden_dropout_prob          - want.hidden_dropout_prob).abs() < 1e-9);
+        assert!((got.attention_probs_dropout_prob - want.attention_probs_dropout_prob).abs() < 1e-9);
+    }
+
+    /// Missing a required integer field must surface a clear error that
+    /// names the offending key — the whole point of the validator is to
+    /// be loud about drift.
+    #[test]
+    fn bert_config_from_json_str_rejects_missing_field() {
+        // No `hidden_size`.
+        let json = r#"{
+            "vocab_size": 30522,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "intermediate_size": 3072,
+            "max_position_embeddings": 512,
+            "type_vocab_size": 2
+        }"#;
+        let err = BertConfig::from_json_str(json).unwrap_err().to_string();
+        assert!(err.contains("hidden_size"),
+            "error must name the missing field: {err}");
+        assert!(err.contains("missing required integer field"),
+            "error must explain the failure mode: {err}");
+    }
+
+    /// Explicit `"pad_token_id": null` and absent `pad_token_id` must both
+    /// produce `None` — these are the two ways HF configs spell "no
+    /// dedicated pad token" (e.g. GPT-2-style).
+    #[test]
+    fn bert_config_from_json_str_pad_token_id_nullable() {
+        let required_fields = r#"
+            "vocab_size": 30522,
+            "hidden_size": 768,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "intermediate_size": 3072,
+            "max_position_embeddings": 512,
+            "type_vocab_size": 2
+        "#;
+        let explicit_null = format!(r#"{{ {required_fields}, "pad_token_id": null }}"#);
+        let absent        = format!(r#"{{ {required_fields} }}"#);
+        let a = BertConfig::from_json_str(&explicit_null).unwrap();
+        let b = BertConfig::from_json_str(&absent).unwrap();
+        assert_eq!(a.pad_token_id, None);
+        assert_eq!(b.pad_token_id, None);
+    }
+
+    /// Optional dropout + layer-norm-eps fields fall back to BERT defaults
+    /// when absent. Keeps configs for bare-metal / test-only checkpoints
+    /// parseable without boilerplate.
+    #[test]
+    fn bert_config_from_json_str_uses_defaults_for_missing_optional_fields() {
+        let json = r#"{
+            "vocab_size": 30522,
+            "hidden_size": 768,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "intermediate_size": 3072,
+            "max_position_embeddings": 512,
+            "type_vocab_size": 2
+        }"#;
+        let c = BertConfig::from_json_str(json).unwrap();
+        assert!((c.layer_norm_eps               - 1e-12).abs() < 1e-18);
+        assert!((c.hidden_dropout_prob          - 0.1).abs() < 1e-9);
+        assert!((c.attention_probs_dropout_prob - 0.1).abs() < 1e-9);
     }
 
     /// Smoke test: construct a tiny BERT on CPU, run forward_multi with

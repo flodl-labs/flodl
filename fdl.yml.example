@@ -17,6 +17,10 @@ commands:
     description: Run tests in release mode
     run: cargo test --release -- --nocapture
     docker: dev
+  test-live:
+    description: Run live tests (network / external resources; `#[ignore]` + name ending in `_live`)
+    run: cargo test live -- --nocapture --ignored
+    docker: dev
   check:
     description: Type check without building
     run: cargo check
