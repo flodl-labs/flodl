@@ -1,28 +1,28 @@
 //! BERT encoder, compatible with HuggingFace `bert-base-uncased` checkpoints.
 //!
-//! # Phase status
+//! Structure: [`BertEmbeddings`] (token + position + token-type embeddings
+//! with LayerNorm and Dropout), a stack of [`BertLayer`] instances (each one
+//! a self-attention block followed by a two-layer GELU feed-forward, both
+//! wrapped with residual + LayerNorm), and [`BertPooler`] on the `[CLS]`
+//! position. [`BertModel::build`] assembles all of this into a flat
+//! [`Graph`].
 //!
-//! - **Phase 1a**: `BertConfig` + `BertEmbeddings` + `BertPooler` +
-//!   minimal `BertModel::build` returning `embeddings → pooler`.
-//!   Parameter-naming plumbing validated.
-//! - **Phase 1b (this file, today)**: `BertSelfAttention` +
-//!   `BertSelfOutput` + `BertAttention` + `BertIntermediate` +
-//!   `BertOutput` + `BertLayer`, with one layer inserted between
-//!   embeddings and pooler. Attention math is naive
-//!   Q·Kᵀ / √d → softmax → ·V — same kernel count as PyTorch HF default.
-//!   No `attention_mask` support yet (Phase 2 task).
-//! - **Phase 1c**: stack to 12 layers (BERT-base).
+//! Self-attention is naive Q·Kᵀ / √d → softmax → ·V with separate Q/K/V
+//! projections (matching HF's default `attn_implementation`). A fused SDPA
+//! path is a future optimisation; kernel count today already matches the
+//! PyTorch HF reference.
 //!
-//! Everything below is written so `Graph::named_parameters()` produces
-//! keys that, after [`hf_key_from_flodl_key`](crate::path::hf_key_from_flodl_key),
-//! match the safetensors checkpoint keys exactly.
+//! Parameter names are chosen so `Graph::named_parameters()` output, once
+//! passed through [`hf_key_from_flodl_key`](crate::path::hf_key_from_flodl_key),
+//! matches safetensors checkpoint keys exactly. No remapping needed at load
+//! time.
 
 use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{Device, FlowBuilder, Graph, Result, Variable};
 
-use crate::path::prefix_params;
+use crate::path::{prefix_params, HfPath};
 
 /// BERT hyperparameters. Matches the fields of a HuggingFace
 /// `BertConfig` JSON file that affect model shape.
@@ -196,9 +196,10 @@ impl Module for BertPooler {
 
 /// Naive scaled-dot-product self-attention with separate Q/K/V projections.
 ///
-/// Kernel count matches PyTorch HF default (no fused SDPA). Parameter layout
-/// matches HF BERT's `attention.self.{query,key,value}` exactly. `padding`
-/// masks are a Phase 2 concern; for Phase 1b the forward is unmasked.
+/// Kernel count matches PyTorch HF default (no fused SDPA). Parameter
+/// layout matches HF BERT's `attention.self.{query,key,value}` exactly.
+/// The forward is unmasked; attention masks will be threaded in alongside
+/// real checkpoint loading.
 pub struct BertSelfAttention {
     query: Linear,
     key: Linear,
@@ -452,7 +453,7 @@ impl Module for BertLayer {
     }
 }
 
-// ── BertModel (Phase 1b: one encoder layer) ──────────────────────────────
+// ── BertModel ────────────────────────────────────────────────────────────
 
 /// Assembled BERT graph.
 ///
@@ -463,8 +464,8 @@ impl Module for BertLayer {
 /// 2. `position_ids` (i64, shape `[batch, seq_len]`)
 /// 3. `token_type_ids` (i64, shape `[batch, seq_len]`)
 ///
-/// At Phase 1a the assembled graph is embeddings → pooler with no
-/// transformer stack; Phase 1b/1c wire in the 12 encoder layers.
+/// Graph layout: `bert.embeddings` → `bert.encoder.layer.{0..N-1}` →
+/// `bert.pooler`, where `N = config.num_hidden_layers`.
 pub struct BertModel;
 
 impl BertModel {
@@ -475,15 +476,22 @@ impl BertModel {
 
     /// Build a BERT graph on `device`.
     pub fn on_device(config: &BertConfig, device: Device) -> Result<Graph> {
-        FlowBuilder::new()
+        let mut fb = FlowBuilder::new()
             .input(&["position_ids", "token_type_ids"])
             .through(BertEmbeddings::on_device(config, device)?)
             .tag("bert.embeddings")
-            .using(&["position_ids", "token_type_ids"])
-            // Phase 1b: one layer. Phase 1c stacks 12.
-            .through(BertLayer::on_device(config, device)?)
-            .tag("bert.encoder.layer.0")
-            .through(BertPooler::on_device(config, device)?)
+            .using(&["position_ids", "token_type_ids"]);
+
+        // Encoder stack. One BertLayer per layer, tagged with its HF path.
+        let layer_root = HfPath::new("bert").sub("encoder").sub("layer");
+        for i in 0..config.num_hidden_layers {
+            let tag = layer_root.sub(i).to_string();
+            fb = fb
+                .through(BertLayer::on_device(config, device)?)
+                .tag(&tag);
+        }
+
+        fb.through(BertPooler::on_device(config, device)?)
             .tag("bert.pooler")
             .build()
     }
@@ -494,43 +502,61 @@ mod tests {
     use super::*;
     use crate::safetensors_io::expected_from_graph;
 
-    /// The assembled BERT graph exposes parameter keys in HuggingFace
-    /// dotted form. The expected set grows phase by phase as encoder
-    /// layers land; the current assertion covers embeddings + pooler.
+    /// The 16 parameter keys every encoder layer exposes, template-formatted
+    /// for a given layer index.
+    fn expected_layer_keys(i: i64) -> Vec<String> {
+        let suffixes = [
+            "attention.output.LayerNorm.bias",
+            "attention.output.LayerNorm.weight",
+            "attention.output.dense.bias",
+            "attention.output.dense.weight",
+            "attention.self.key.bias",
+            "attention.self.key.weight",
+            "attention.self.query.bias",
+            "attention.self.query.weight",
+            "attention.self.value.bias",
+            "attention.self.value.weight",
+            "intermediate.dense.bias",
+            "intermediate.dense.weight",
+            "output.LayerNorm.bias",
+            "output.LayerNorm.weight",
+            "output.dense.bias",
+            "output.dense.weight",
+        ];
+        suffixes.iter().map(|s| format!("bert.encoder.layer.{i}.{s}")).collect()
+    }
+
+    /// The full BERT-base key set (199 keys: 5 embeddings + 16×12 layers +
+    /// 2 pooler) matches HuggingFace safetensors dotted form exactly. The
+    /// expected list is built from the layer template so adding or removing
+    /// layers only changes the config, not the test.
     #[test]
     fn bert_parameter_keys_match_hf_dotted_form() {
         let config = BertConfig::bert_base_uncased();
         let graph = BertModel::build(&config).unwrap();
         let expected = expected_from_graph(&graph);
 
-        let mut keys: Vec<&str> = expected.iter().map(|p| p.key.as_str()).collect();
+        let mut keys: Vec<String> = expected.iter().map(|p| p.key.clone()).collect();
         keys.sort();
 
-        let want = [
-            "bert.embeddings.LayerNorm.bias",
-            "bert.embeddings.LayerNorm.weight",
-            "bert.embeddings.position_embeddings.weight",
-            "bert.embeddings.token_type_embeddings.weight",
-            "bert.embeddings.word_embeddings.weight",
-            "bert.encoder.layer.0.attention.output.LayerNorm.bias",
-            "bert.encoder.layer.0.attention.output.LayerNorm.weight",
-            "bert.encoder.layer.0.attention.output.dense.bias",
-            "bert.encoder.layer.0.attention.output.dense.weight",
-            "bert.encoder.layer.0.attention.self.key.bias",
-            "bert.encoder.layer.0.attention.self.key.weight",
-            "bert.encoder.layer.0.attention.self.query.bias",
-            "bert.encoder.layer.0.attention.self.query.weight",
-            "bert.encoder.layer.0.attention.self.value.bias",
-            "bert.encoder.layer.0.attention.self.value.weight",
-            "bert.encoder.layer.0.intermediate.dense.bias",
-            "bert.encoder.layer.0.intermediate.dense.weight",
-            "bert.encoder.layer.0.output.LayerNorm.bias",
-            "bert.encoder.layer.0.output.LayerNorm.weight",
-            "bert.encoder.layer.0.output.dense.bias",
-            "bert.encoder.layer.0.output.dense.weight",
-            "bert.pooler.dense.bias",
-            "bert.pooler.dense.weight",
+        let mut want: Vec<String> = vec![
+            "bert.embeddings.LayerNorm.bias".into(),
+            "bert.embeddings.LayerNorm.weight".into(),
+            "bert.embeddings.position_embeddings.weight".into(),
+            "bert.embeddings.token_type_embeddings.weight".into(),
+            "bert.embeddings.word_embeddings.weight".into(),
         ];
+        for i in 0..config.num_hidden_layers {
+            want.extend(expected_layer_keys(i));
+        }
+        want.extend([
+            "bert.pooler.dense.bias".into(),
+            "bert.pooler.dense.weight".into(),
+        ]);
+        want.sort();
+
+        // Sanity: BERT-base has exactly 199 parameter tensors.
+        assert_eq!(want.len(), 199, "expected-key list size drift");
         assert_eq!(keys, want, "BERT parameter keys must match HF exactly");
     }
 
@@ -553,22 +579,58 @@ mod tests {
         assert_eq!(by_key["bert.embeddings.LayerNorm.weight"],             &[768]);
         assert_eq!(by_key["bert.embeddings.LayerNorm.bias"],               &[768]);
 
-        // Encoder layer 0: Q/K/V and attention output are square at hidden
-        // size; intermediate expands to 4× hidden; output down-projects.
-        assert_eq!(by_key["bert.encoder.layer.0.attention.self.query.weight"],      &[768, 768]);
-        assert_eq!(by_key["bert.encoder.layer.0.attention.self.key.weight"],        &[768, 768]);
-        assert_eq!(by_key["bert.encoder.layer.0.attention.self.value.weight"],      &[768, 768]);
-        assert_eq!(by_key["bert.encoder.layer.0.attention.self.query.bias"],        &[768]);
-        assert_eq!(by_key["bert.encoder.layer.0.attention.output.dense.weight"],    &[768, 768]);
-        assert_eq!(by_key["bert.encoder.layer.0.attention.output.LayerNorm.weight"],&[768]);
-        assert_eq!(by_key["bert.encoder.layer.0.intermediate.dense.weight"],        &[3072, 768]);
-        assert_eq!(by_key["bert.encoder.layer.0.intermediate.dense.bias"],          &[3072]);
-        assert_eq!(by_key["bert.encoder.layer.0.output.dense.weight"],              &[768, 3072]);
-        assert_eq!(by_key["bert.encoder.layer.0.output.dense.bias"],                &[768]);
-        assert_eq!(by_key["bert.encoder.layer.0.output.LayerNorm.weight"],          &[768]);
+        // Every encoder layer has the same shape profile. Sweep all
+        // layers so any mis-wiring on a specific index surfaces here
+        // rather than being masked by only checking layer 0.
+        for i in 0..config.num_hidden_layers {
+            let p = format!("bert.encoder.layer.{i}");
+            assert_eq!(by_key[&*format!("{p}.attention.self.query.weight")],        &[768, 768]);
+            assert_eq!(by_key[&*format!("{p}.attention.self.query.bias")],          &[768]);
+            assert_eq!(by_key[&*format!("{p}.attention.self.key.weight")],          &[768, 768]);
+            assert_eq!(by_key[&*format!("{p}.attention.self.value.weight")],        &[768, 768]);
+            assert_eq!(by_key[&*format!("{p}.attention.output.dense.weight")],      &[768, 768]);
+            assert_eq!(by_key[&*format!("{p}.attention.output.LayerNorm.weight")],  &[768]);
+            assert_eq!(by_key[&*format!("{p}.intermediate.dense.weight")],          &[3072, 768]);
+            assert_eq!(by_key[&*format!("{p}.intermediate.dense.bias")],            &[3072]);
+            assert_eq!(by_key[&*format!("{p}.output.dense.weight")],                &[768, 3072]);
+            assert_eq!(by_key[&*format!("{p}.output.dense.bias")],                  &[768]);
+            assert_eq!(by_key[&*format!("{p}.output.LayerNorm.weight")],            &[768]);
+        }
 
         assert_eq!(by_key["bert.pooler.dense.weight"], &[768, 768]);
         assert_eq!(by_key["bert.pooler.dense.bias"],   &[768]);
+    }
+
+    /// Encoder stack honours `config.num_hidden_layers`. Pins the loop so
+    /// a future regression that (e.g.) wires in one hardcoded layer is
+    /// caught immediately.
+    #[test]
+    fn bert_layer_count_scales_with_config() {
+        for n in [1_i64, 3, 6] {
+            let config = BertConfig {
+                num_hidden_layers: n,
+                ..BertConfig::bert_base_uncased()
+            };
+            let graph = BertModel::build(&config).unwrap();
+            let expected = expected_from_graph(&graph);
+            let total = expected.len();
+            // 5 embedding keys + 16 per layer + 2 pooler keys.
+            let want_total = 5 + 16 * n as usize + 2;
+            assert_eq!(
+                total, want_total,
+                "num_hidden_layers={n}: got {total} keys, expected {want_total}",
+            );
+
+            // The highest-indexed layer actually exists — catches "stopped
+            // one short" / "started at 1" bugs in the loop.
+            let last_layer_key = format!(
+                "bert.encoder.layer.{}.attention.self.query.weight", n - 1,
+            );
+            assert!(
+                expected.iter().any(|p| p.key == last_layer_key),
+                "last layer key {last_layer_key:?} missing from graph keys",
+            );
+        }
     }
 
     /// Smoke test: construct a tiny BERT on CPU, run forward_multi with
