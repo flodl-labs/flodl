@@ -3,6 +3,7 @@ description: flodl - Rust deep learning framework
 commands:
   # --- Sub-command (child fdl.yml) ---
   ddp-bench:                    # convention: ./ddp-bench/fdl.yml
+  flodl-hf:                     # convention: ./flodl-hf/fdl.yml
 
   # --- CPU targets ---
   build:

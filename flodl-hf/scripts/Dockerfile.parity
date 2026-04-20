@@ -1,0 +1,17 @@
+# HF parity-fixture generator.
+#
+# Built lazily by docker compose on first `fdl parity-bert` (or any other
+# flodl-hf command routed through the `hf-parity` service). Keeps Python and
+# the torch toolchain out of the main flodl dev image.
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.8.0 \
+ && pip install --no-cache-dir \
+        "transformers~=4.46" \
+        "safetensors~=0.4" \
+        "huggingface-hub~=0.26"
+
+WORKDIR /workspace/flodl-hf

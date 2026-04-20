@@ -80,6 +80,18 @@ services:
       - CARGO_TARGET_DIR=/opt/target
       - DOCS_RS=1
 
+  hf-parity:
+    build:
+      context: flodl-hf/scripts
+      dockerfile: Dockerfile.parity
+    image: flodl-hf-parity
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - .:/workspace
+    working_dir: /workspace/flodl-hf
+    environment:
+      - HF_HOME=/workspace/.hf-cache
+
   jekyll:
     image: jekyll/jekyll:4
     volumes:

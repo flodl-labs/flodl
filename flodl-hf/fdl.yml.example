@@ -1,0 +1,7 @@
+description: flodl-hf — HuggingFace integration (safetensors, hub, parity fixtures)
+
+commands:
+  parity-bert:
+    description: Regenerate tests/fixtures/bert_base_uncased_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_bert.py
+    docker: hf-parity
