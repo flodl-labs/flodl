@@ -30,6 +30,7 @@
 //! assert_eq!(attn_self.leaf("query"), "bert.encoder.layer.0.attention.self.query");
 //! ```
 
+use flodl::nn::Parameter;
 use flodl::{Result, TensorError};
 
 /// A dotted path rooted at some prefix, used as the tag string passed to
@@ -102,6 +103,36 @@ impl std::fmt::Display for HfPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.path.fmt(f)
     }
+}
+
+/// Prepend `"{prefix}."` to every parameter's `name` field.
+///
+/// Composite modules whose internal parameter names must line up with
+/// HuggingFace dotted keys use this to build the dotted-path prefix for
+/// their sub-modules. For example, a `BertAttention` with a self-attention
+/// child module returns parameters named `"query.weight"`, `"key.weight"`;
+/// after `prefix_params("self", ...)` they become `"self.query.weight"`,
+/// `"self.key.weight"`. Combined with the `FlowBuilder::tag(...)` string
+/// (`"bert.encoder.layer.0.attention"`), the final safetensors key lands
+/// at `"bert.encoder.layer.0.attention.self.query.weight"`.
+///
+/// ```
+/// use flodl_hf::path::prefix_params;
+/// use flodl::{Linear, Module};
+///
+/// let linear = Linear::new(4, 2).unwrap();
+/// let prefixed = prefix_params("dense", linear.parameters());
+/// assert_eq!(prefixed[0].name, "dense.weight");
+/// assert_eq!(prefixed[1].name, "dense.bias");
+/// ```
+pub fn prefix_params(prefix: &str, params: Vec<Parameter>) -> Vec<Parameter> {
+    params
+        .into_iter()
+        .map(|p| Parameter {
+            variable: p.variable,
+            name: format!("{prefix}.{}", p.name),
+        })
+        .collect()
 }
 
 /// Convert a flodl qualified parameter name to the HF safetensors key.

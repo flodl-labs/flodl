@@ -1290,14 +1290,33 @@ fn test_epoch_fn_called_per_epoch() {
 
     let world = ddp.world_size();
     let _state = ddp.join().unwrap();
-    // epoch_fn fires once per epoch per worker
-    assert_eq!(counter.load(Ordering::Relaxed), num_epochs * world);
+
+    // Instrumented assertions: on flake, dump the full observed state so
+    // the next failure is diagnosable instead of just reporting "assertion
+    // failed". Seen an intermittent miss under full-suite CUDA contention
+    // in 2026-04-20; suspect a coordinator plan-dispatch race in
+    // orchestrator.rs:518-537 where the "plan.epoch != worker.current_epoch"
+    // guard could skip a transition if plans arrive out of order.
+    let got_counter = counter.load(Ordering::Relaxed);
+    let expected_counter = num_epochs * world;
+
     let mut seen = epochs_seen.lock().unwrap().clone();
     seen.sort();
-    // Each worker sees [0, 1, 2]; with N workers we get N copies
-    let mut expected: Vec<usize> = (0..num_epochs).cycle().take(num_epochs * world).collect();
-    expected.sort();
-    assert_eq!(seen, expected);
+    let mut expected_epochs: Vec<usize> = (0..num_epochs).cycle().take(num_epochs * world).collect();
+    expected_epochs.sort();
+
+    assert_eq!(
+        got_counter, expected_counter,
+        "epoch_fn fire count mismatch — got {got_counter}, expected {expected_counter}. \
+         world_size={world}, num_epochs={num_epochs}, epochs_seen={seen:?}. \
+         Likely a coordinator plan-dispatch race (orchestrator.rs:518-537).",
+    );
+    assert_eq!(
+        seen, expected_epochs,
+        "epoch_fn epoch-index set mismatch — got {seen:?}, expected {expected_epochs:?}. \
+         world_size={world}, num_epochs={num_epochs}, counter={got_counter}. \
+         Likely a coordinator plan-dispatch race (orchestrator.rs:518-537).",
+    );
 }
 
 #[test]
