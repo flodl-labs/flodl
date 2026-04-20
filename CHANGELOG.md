@@ -16,7 +16,6 @@ Scaffolded under `flodl-hf/` with feature-gated modules so downstream users can 
   - *Full* (default): `safetensors` + `hf-hub` + `tokenizers`. `flodl-hf = "0.5.1"` loads `"bert-base-uncased"` out of the box.
   - *Vision-only*: `hub` feature only. For ViT, CLIP vision towers, or any image model that doesn't need tokenisation. Drops regex + unicode surface.
   - *Offline / minimal*: no default features. `safetensors`-only. For air-gapped environments, embedded training, or local-disk pipelines — no network, no async runtime, no TLS stack.
-- **Stubs for the planned modules**: `safetensors_io`, `hub` (feature-gated), `tokenizer` (feature-gated), `models` (BERT first, LLaMA next).
 - **`cuda` feature** on `flodl-hf` re-exports `flodl/cuda`.
 - **HTTP backend**: `ureq` + `rustls-tls` on `hf-hub = "0.4"`. Sync, no tokio, no openssl (dev Docker image has no `libssl-dev`, so rustls is now the convention for any HTTP dep).
 - **ROADMAP**: HF fine-tuning moved to `In progress` with `[started]` marker; `flodl-manager CLI evolution` line added to Possibilities (gaps flagged while scaffolding: `fdl build` argv forwarding, `fdl add <crate>` command).
@@ -27,6 +26,58 @@ Scaffolded under `flodl-hf/` with feature-gated modules so downstream users can 
 - **`flodl-hf::path::hf_key_from_flodl_key`** — converts flodl's `"{tag}/{leaf}"` qualified names (from `Graph::named_parameters()`) to HuggingFace-dotted keys by swapping only the final `/` for `.`. Centralises the flodl ↔ HF boundary in one place.
 - **`flodl-hf::safetensors_io::LoadValidation`** — three-bucket key-set diff (`missing`, `unused`, `shape_mismatches`) with stable sorted output. `into_result()` emits a loud `TensorError` listing up to 20 entries per bucket with a `"... and N more"` truncation tail, surfacing every disagreement in a single error instead of failing on the first mismatch. Catches the entire `"queri"` vs `"query"` typo class: the bad tag appears as `missing`, the real checkpoint key as `unused`, pointing straight at the fix.
 - **`flodl-hf::safetensors_io::expected_from_graph`** — walks a `Graph`'s named parameters + buffers and returns the HF-key + shape list needed by `validate_keys`.
+
+#### flodl-hf: BERT architecture
+
+Full HuggingFace BERT stack under `flodl-hf/src/models/bert.rs`: `BertConfig` (with a `bert_base_uncased()` preset), `BertEmbeddings`, `BertSelfAttention` (fused `scaled_dot_product_attention` with in-kernel dropout), `BertSelfOutput`, `BertAttention`, `BertIntermediate`, `BertOutput`, `BertLayer`, `BertPooler`, `BertModel`.
+
+- **`BertModel::build` / `BertModel::on_device`** — returns a flodl `Graph` with `embeddings → N encoder layers → pooler`. The graph takes **4 inputs**: `input_ids`, `position_ids`, `token_type_ids`, and a pre-computed additive `attention_mask` shared across all encoder layers via `.using()`.
+- **Only `BertLayer` implements `Module`**; inner composites carry ad-hoc `forward` signatures matching their real semantics (residual inputs). Not pretending residuals are single-input. Parameter aggregation is explicit via `HfPath::prefix_params`.
+- **`build_extended_attention_mask(mask)`** helper: raw `[B, S]` 0/1 → additive `[B, 1, 1, S]` f32 (`0.0` attend, `-1e4` mask, fp16-safe). Callers run this once before `forward_multi`, mirroring HF Python's explicit `get_extended_attention_mask` idiom.
+- **HF-compatible parameter naming**: tags encode HF dotted paths directly; `Graph::named_parameters() + hf_key_from_flodl_key` yields `"bert.encoder.layer.0.attention.self.query.weight"` on the first run. BERT-base has **199 parameters** total — pinned by a test.
+
+#### flodl-hf: safetensors weight loader
+
+`flodl-hf/src/safetensors_io.rs` — `load_safetensors_into_graph(graph, bytes)` plus rename-aware and allow-unused variants (`*_with_rename`, `*_with_rename_allow_unused`, `*_file_*` path-based).
+
+- **Strict-load semantics**: `validate_keys` runs first; any disagreement bails before mutating any parameter. Either the graph is fully loaded or fully untouched. Makes safe retry / fall-back possible.
+- **`Variable::set_data` over `copy_`**: libtorch rejects in-place ops on leaf Variables that require grad. `set_data` swaps storage while preserving `requires_grad` — the documented "optimizer replacement" path. `Buffer::set` is the buffer equivalent.
+- **Host-side dtype conversion** supports F32 / F64 / BF16 / F16 → f32, including a custom `f16_bits_to_f32` (normals, subnormals, Inf, NaN) so the loader doesn't drag in the `half` crate.
+- **Integer dtypes rejected loudly** (`I8`/`I16`/`I32`/`I64`/`U*`/`BOOL`/`F8*`). Silent casts hide upstream bugs.
+- **`bert_legacy_key_rename`** handles pre-2020 BERT checkpoints' legacy `LayerNorm.gamma` / `LayerNorm.beta` → `weight` / `bias`. The rename-aware loader checks injectivity and raises a loud error on collision.
+
+#### flodl-hf: HuggingFace Hub integration
+
+- **`BertModel::from_pretrained(repo_id)` / `::from_pretrained_on_device(repo_id, dev)`** — one-liner weight + config pull via `hf_hub::api::sync::Api`. Parses `config.json`, builds the matching `Graph`, loads safetensors weights via the allow-unused rename-aware loader. The 7 `cls.*` task-head keys in `bert-base-uncased` (it's a `BertForPreTraining` checkpoint) are logged and discarded (up to 20 with a truncation tail).
+- **`HfTokenizer::from_pretrained(repo_id)`** — downloads `tokenizer.json` via the same `hf_hub` cache. Feature-gated on both `hub` and `tokenizer`.
+- **`fdl test-live`** — root-level command that runs `cargo test live -- --nocapture --ignored`. Canonical runner for `_live`-suffixed `#[ignore]`'d tests that need network / external resources. See `feedback_live_test_naming.md`.
+
+#### flodl-hf: `HfTokenizer` (model-agnostic wrapper)
+
+`flodl-hf/src/tokenizer.rs` — thin façade over `tokenizers::Tokenizer`.
+
+- **`from_file(path)` + `from_pretrained(repo_id)`** (the latter gated on the `hub` feature).
+- **`encode(&[&str])` / `encode_on_device(&[&str], Device)`** return an `EncodedBatch` carrying `input_ids` / `attention_mask` / `token_type_ids` / `position_ids` as `i64 [B, S]` Variables.
+- **Sensible padding defaults** installed on load when `tokenizer.json` hasn't configured padding itself: `BatchLongest`, direction `Right`, `pad_id = token_to_id("[PAD]").unwrap_or(0)`. **No default truncation** — oversized texts error loudly at the model rather than silently truncate.
+- **Model-agnostic**: one wrapper serves BERT, GPT2, LLaMA, etc. The loaded `tokenizer.json` carries the model-specific pre-tokenizer and post-processor. For BERT, the raw 0/1 `attention_mask` still needs `build_extended_attention_mask` before `forward_multi`.
+
+#### flodl-hf: PyTorch forward-parity infrastructure
+
+`flodl-hf/` is now a self-contained sub-project with its own child `fdl.yml`. The root `fdl.yml` picks it up via the convention `flodl-hf:` entry (same shape as `ddp-bench:`).
+
+- **`fdl flodl-hf parity-bert`** regenerates the committed parity fixture:
+  - `flodl-hf/scripts/Dockerfile.parity` (`python:3.12-slim` + torch 2.8.0 CPU wheel + `transformers ~4.46` + `safetensors ~0.4` + `huggingface-hub ~0.26`).
+  - `flodl-hf/scripts/parity_bert.py` — loads `bert-base-uncased`, forces `torch.nn.attention.SDPBackend.MATH` for determinism, writes inputs + outputs + provenance metadata (`source_model` / `source_sha` / `torch_version` / `sdpa_backend`) to `flodl-hf/tests/fixtures/bert_base_uncased_parity.safetensors` (~16 KB).
+- **`flodl-hf/tests/bert_parity.rs`** → `bert_parity_vs_pytorch_live`. Asserts `max_abs_diff ≤ 1e-5` on `pooler_output` vs the HF Python reference. Observed on the reference host: **9.835e-7** (well under the 1e-5 tolerance, 10x headroom).
+- **`flodl-hf/tests/tokenizer_parity.rs`** → `bert_tokenizer_matches_parity_fixture_live`. Asserts `HfTokenizer` reproduces the exact pinned `input_ids` + `attention_mask` + `token_type_ids` from the parity fixture — `"hello world"` → `[101, 7592, 2088, 102]`. Closes the `text → tokens → BertModel → HF reference` loop end-to-end.
+- **`docker-compose.yml` gains the `hf-parity` service** (mounts workspace, `HF_HOME=/workspace/.hf-cache` for persistent weight / tokenizer cache; gitignored).
+- Both parity gates run via `fdl test-live`.
+
+#### flodl-hf: runnable examples
+
+- **`flodl-hf/examples/`** with a child `fdl.yml`, surfaced as `fdl flodl-hf example <name>`. Cleanly separates user-facing demos from dev tooling (`parity-bert`).
+- **`flodl-hf/examples/bert_embed.rs`** — closed-loop example: `HfTokenizer::from_pretrained` → `BertModel::from_pretrained` → `forward_multi` → per-sentence pooled embeddings. Prints `dim=768 L2=… head=[…]` for each input text in a batch.
+- **Cargo `[[example]]` stanzas** carry `required-features = ["hub", "tokenizer"]` so `--no-default-features` builds skip the example cleanly. Adding an example is three yml lines + one Cargo stanza.
 
 #### flodl: `LayerNorm` with custom epsilon
 - **`LayerNorm::with_eps`** and **`LayerNorm::on_device_with_eps`** — constructors accepting a custom epsilon, required for HuggingFace BERT (`eps = 1e-12`) and any architecture deviating from the PyTorch `1e-5` default.
@@ -40,9 +91,24 @@ Scaffolded under `flodl-hf/` with feature-gated modules so downstream users can 
 - For LLaMA-style checkpoints where `pad_token_id == eos_token_id`, pass `padding_idx = None` — otherwise the EOS row freezes, silently breaking fine-tuning.
 - `Embedding::forward` now handles indices of any shape, returning `[*indices.shape, embedding_dim]` without manual reshape.
 
+#### flodl: `scaled_dot_product_attention` FFI
+
+Full FFI chain adding fused attention to flodl. Used internally by `BertSelfAttention`; available to any flodl model that wants fused softmax(QKᵀ/√d)V + optional masking + optional dropout.
+
+- **`flodl_scaled_dot_product_attention`** shim in `flodl-sys/{shim.h, ops_nn.cpp, src/lib.rs}`.
+- **`Tensor::scaled_dot_product_attention(q, k, v, attn_mask: Option<&Tensor>, dropout_p, is_causal, scale: Option<f64>)`** in `flodl/src/tensor/nn_ops.rs`.
+- **`autograd::scaled_dot_product_attention(...)`** (re-exported as `flodl::scaled_dot_product_attention`) — backward via native libtorch autograd, same `Variable::wrap` pattern as `embedding`.
+- Sentinel conventions: `attn_mask = None` for no mask; `scale = None` (or any `Some(x)` with `x <= 0.0`) selects the default `1/sqrt(E)`.
+- Parity test `test_sdpa_parity_vs_naive` anchors the fused kernel against a hand-rolled `softmax(QKᵀ/√d)V` implementation; `test_sdpa_backward` covers the autograd path.
+- libtorch 2.10.0; SDPA shipped in 2.0, so safe under any supported variant.
+
 ### Changed
 
 - **`Embedding::forward` input dtype**: the preferred input is now `i64`. The legacy f32-indices path is kept as a fallback but emits a one-shot stderr deprecation warning (`"[flodl] deprecated: Embedding::forward received non-i64 indices; this fallback will be removed in a future release. Pass i64 tensors via Tensor::from_i64."`) the first time it fires per process. Internal tests that previously used `from_f32` indices have been migrated to `Tensor::from_i64`.
+
+### Fixed
+
+- **DDP test flake under full-suite CUDA contention**: `distributed::ddp_run::tests::test_epoch_fn_called_per_epoch` and `::test_epoch_fn_set_lr` now explicitly use `ApplyPolicy::Sync`. Both assumed `count == num_epochs * world_size`, which only holds in Sync mode: under the default `Cadence`, progressive dispatch lets a fast rank drain an epoch's pool past a slow rank's share, so the slow rank legitimately receives fewer `StartEpoch` events. Designed behaviour for progressive streaming; the test assumption was wrong.
 
 ### Removed
 
