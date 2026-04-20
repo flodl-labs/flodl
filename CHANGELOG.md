@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### flodl-hf: new sibling crate for HuggingFace integration
+Scaffolded under `flodl-hf/` with feature-gated modules so downstream users can take only what they need. Transformer blocks build on flodl's `nn` module; the crate depends on `flodl` for `Tensor`, `Module`, and named-parameter machinery.
+
+- **Three install profiles**:
+  - *Full* (default): `safetensors` + `hf-hub` + `tokenizers`. `flodl-hf = "0.5.1"` loads `"bert-base-uncased"` out of the box.
+  - *Vision-only*: `hub` feature only. For ViT, CLIP vision towers, or any image model that doesn't need tokenisation. Drops regex + unicode surface.
+  - *Offline / minimal*: no default features. `safetensors`-only. For air-gapped environments, embedded training, or local-disk pipelines — no network, no async runtime, no TLS stack.
+- **Stubs for the planned modules**: `safetensors_io`, `hub` (feature-gated), `tokenizer` (feature-gated), `models` (BERT first, LLaMA next).
+- **`cuda` feature** on `flodl-hf` re-exports `flodl/cuda`.
+- **HTTP backend**: `ureq` + `rustls-tls` on `hf-hub = "0.4"`. Sync, no tokio, no openssl (dev Docker image has no `libssl-dev`, so rustls is now the convention for any HTTP dep).
+- **ROADMAP**: HF fine-tuning moved to `In progress` with `[started]` marker; `flodl-manager CLI evolution` line added to Possibilities (gaps flagged while scaffolding: `fdl build` argv forwarding, `fdl add <crate>` command).
+
+#### flodl-hf: HuggingFace-naming foundations
+
+- **`flodl-hf::path::HfPath`** — immutable dotted-path builder that assembles HuggingFace-style keys segment by segment. Authors write short identifiers (`root.sub("encoder").sub("layer").sub(i).sub("attention").sub("self").leaf("query")`) instead of `format!` boilerplate. `sub` accepts anything `ToString`, so integer layer indices compose directly. `new`/`sub`/`leaf` panic on invalid segments (programmer error); `try_new`/`try_sub`/`try_leaf` return `Result` for user-supplied input (LoRA adapter names, custom head names from config, HF `get_submodule` paths). Validation rejects empty segments and embedded `.` / `/`.
+- **`flodl-hf::path::hf_key_from_flodl_key`** — converts flodl's `"{tag}/{leaf}"` qualified names (from `Graph::named_parameters()`) to HuggingFace-dotted keys by swapping only the final `/` for `.`. Centralises the flodl ↔ HF boundary in one place.
+- **`flodl-hf::safetensors_io::LoadValidation`** — three-bucket key-set diff (`missing`, `unused`, `shape_mismatches`) with stable sorted output. `into_result()` emits a loud `TensorError` listing up to 20 entries per bucket with a `"... and N more"` truncation tail, surfacing every disagreement in a single error instead of failing on the first mismatch. Catches the entire `"queri"` vs `"query"` typo class: the bad tag appears as `missing`, the real checkpoint key as `unused`, pointing straight at the fix.
+- **`flodl-hf::safetensors_io::expected_from_graph`** — walks a `Graph`'s named parameters + buffers and returns the HF-key + shape list needed by `validate_keys`.
+
+#### flodl: `LayerNorm` with custom epsilon
+- **`LayerNorm::with_eps`** and **`LayerNorm::on_device_with_eps`** — constructors accepting a custom epsilon, required for HuggingFace BERT (`eps = 1e-12`) and any architecture deviating from the PyTorch `1e-5` default.
+- **`LayerNorm::DEFAULT_EPS`** associated constant.
+- Hand-computed golden-value test anchors the eps-reaches-the-kernel claim (not just "doesn't panic").
+
+#### flodl: Native `torch.embedding` FFI with `padding_idx`
+- **FFI chain**: `flodl_embedding` shim in `flodl-sys/{shim.h, ops_training.cpp, src/lib.rs}` → `Tensor::embedding(weight, indices, padding_idx)` → `autograd::embedding(weight, indices, padding_idx)`. Delegates to libtorch's `at::embedding` directly, replacing the previous `index_select + reshape` manual path in `Embedding::forward`.
+- **`Embedding::with_padding_idx`** and **`Embedding::on_device_with_padding_idx`** — constructors accepting `Option<i64>`. The gradient of the `padding_idx` row is masked to zero during backward by the native kernel, so the PAD embedding doesn't drift during fine-tuning. Range-checked at construction.
+- **`Embedding::NO_PADDING = -1`** associated constant (sentinel matching `at::embedding`'s convention).
+- For LLaMA-style checkpoints where `pad_token_id == eos_token_id`, pass `padding_idx = None` — otherwise the EOS row freezes, silently breaking fine-tuning.
+- `Embedding::forward` now handles indices of any shape, returning `[*indices.shape, embedding_dim]` without manual reshape.
+
+### Changed
+
+- **`Embedding::forward` input dtype**: the preferred input is now `i64`. The legacy f32-indices path is kept as a fallback but emits a one-shot stderr deprecation warning (`"[flodl] deprecated: Embedding::forward received non-i64 indices; this fallback will be removed in a future release. Pass i64 tensors via Tensor::from_i64."`) the first time it fires per process. Internal tests that previously used `from_f32` indices have been migrated to `Tensor::from_i64`.
+
+### Removed
+
+- **`Embedding` struct fields `num_embeddings` and `embedding_dim`** — both were stored but never read after the move to `at::embedding`. Fields were private; no user-visible impact.
+
 ## [0.5.1] - 2026-04-19
 
 ### Added

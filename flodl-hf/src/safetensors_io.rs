@@ -332,6 +332,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_everywhere_is_ok() {
+        let v = validate_keys(&[], &HashMap::new());
+        assert!(v.is_ok());
+        assert!(v.missing.is_empty());
+        assert!(v.unused.is_empty());
+        assert!(v.shape_mismatches.is_empty());
+        assert!(v.into_result().is_ok());
+    }
+
+    #[test]
+    fn into_result_truncates_long_missing_list() {
+        // 25 missing keys — "... and N more" tail should appear for any
+        // bucket longer than the 20-entry cap.
+        let expected: Vec<ExpectedParam> = (0..25)
+            .map(|i| ExpectedParam { key: format!("key.{i:02}"), shape: vec![1] })
+            .collect();
+        let v = validate_keys(&expected, &HashMap::new());
+        assert_eq!(v.missing.len(), 25);
+        let err = v.into_result().unwrap_err().to_string();
+        assert!(err.contains("25 missing key"), "header must show full count: {err}");
+        assert!(err.contains("... and 5 more"),
+            "truncation tail must show remaining count: {err}");
+        // First 20 keys listed; 21st onwards must not appear verbatim.
+        assert!(err.contains("key.00"));
+        assert!(err.contains("key.19"));
+        assert!(!err.contains("key.20"));
+    }
+
+    #[test]
     fn expected_from_graph_converts_slash_to_dot() {
         use flodl::{FlowBuilder, Linear, Module};
         let fb = FlowBuilder::new()

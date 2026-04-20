@@ -866,15 +866,20 @@ mod tests {
 
     #[test]
     fn test_embedding() {
-        let emb = Embedding::on_device(5, 3, crate::tensor::test_device()).unwrap();
+        let dev = crate::tensor::test_device();
+        let emb = Embedding::on_device(5, 3, dev).unwrap();
 
         // Look up indices [0, 2, 4]
-        let indices = Variable::new(from_f32(&[0.0, 2.0, 4.0], &[3]), false);
+        let indices = Variable::new(
+            Tensor::from_i64(&[0, 2, 4], &[3], dev).unwrap(), false,
+        );
         let y = emb.forward(&indices).unwrap();
         assert_eq!(y.shape(), vec![3, 3]); // 3 tokens × 3 dims
 
         // Same index should give same embedding
-        let idx_same = Variable::new(from_f32(&[1.0, 1.0], &[2]), false);
+        let idx_same = Variable::new(
+            Tensor::from_i64(&[1, 1], &[2], dev).unwrap(), false,
+        );
         let y2 = emb.forward(&idx_same).unwrap();
         let data = y2.data().to_f32_vec().unwrap();
         assert_eq!(&data[0..3], &data[3..6]);
@@ -884,8 +889,11 @@ mod tests {
 
     #[test]
     fn test_embedding_backward() {
-        let emb = Embedding::on_device(5, 3, crate::tensor::test_device()).unwrap();
-        let indices = Variable::new(from_f32(&[0.0, 2.0], &[2]), false);
+        let dev = crate::tensor::test_device();
+        let emb = Embedding::on_device(5, 3, dev).unwrap();
+        let indices = Variable::new(
+            Tensor::from_i64(&[0, 2], &[2], dev).unwrap(), false,
+        );
         let y = emb.forward(&indices).unwrap();
         let loss = y.sum().unwrap();
         loss.backward().unwrap();

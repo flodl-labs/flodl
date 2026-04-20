@@ -1,19 +1,28 @@
+use std::sync::OnceLock;
+
 use crate::autograd::{self, Variable};
 use crate::tensor::{Result, Tensor, TensorOptions, DType, Device};
 
 use super::parameter::Parameter;
 use super::Module;
 
-/// Sentinel used internally to mean "no padding_idx".
-/// Matches libtorch `at::embedding` convention.
-const NO_PADDING: i64 = -1;
+/// One-shot flag: first f32-indices call in the process emits a deprecation
+/// warning to stderr. The f32 fallback path in [`Embedding::forward`] will
+/// be removed in a future release.
+static F32_INDEX_DEPRECATION_WARNED: OnceLock<()> = OnceLock::new();
 
 /// Lookup table for token embeddings.
 ///
-/// Weight shape: `[num_embeddings, embedding_dim]`.
-/// Input: integer indices as an i64 or f32 tensor. Output: embedded vectors.
-/// Prefer i64 inputs for vocabularies larger than 16M tokens (f32 loses
-/// precision beyond 2^24).
+/// Weight shape: `[num_embeddings, embedding_dim]`. Input: i64 token indices.
+/// Output: embedded vectors of shape `[*input.shape, embedding_dim]`.
+///
+/// # Input dtype
+///
+/// Indices must be i64. An f32 input is accepted as a deprecated fallback
+/// that converts via `to_f32_vec` + `from_i64`; this path is slow, drops
+/// precision for vocabularies larger than 2^24, and will be removed in a
+/// future release. The first call on that path emits a one-shot warning to
+/// stderr. Use [`Tensor::from_i64`] directly.
 ///
 /// # Padding
 ///
@@ -34,14 +43,14 @@ const NO_PADDING: i64 = -1;
 /// ```
 pub struct Embedding {
     pub weight: Parameter,
-    #[allow(dead_code)]
-    num_embeddings: i64,
-    #[allow(dead_code)]
-    embedding_dim: i64,
     padding_idx: i64,
 }
 
 impl Embedding {
+    /// Sentinel value for `padding_idx` meaning "no padding index set".
+    /// Matches libtorch `at::embedding` convention.
+    pub const NO_PADDING: i64 = -1;
+
     /// Create an embedding table on CPU without a padding index.
     pub fn new(num_embeddings: i64, embedding_dim: i64) -> Result<Self> {
         Self::on_device_with_padding_idx(num_embeddings, embedding_dim, None, Device::CPU)
@@ -88,9 +97,7 @@ impl Embedding {
                 variable: weight,
                 name: "weight".into(),
             },
-            num_embeddings,
-            embedding_dim,
-            padding_idx: padding_idx.unwrap_or(NO_PADDING),
+            padding_idx: padding_idx.unwrap_or(Self::NO_PADDING),
         })
     }
 }
@@ -104,7 +111,16 @@ impl Module for Embedding {
         let index_tensor = if input.data().dtype() == DType::Int64 {
             input.data()
         } else {
-            // Legacy convenience: convert f32 → i64.
+            // Deprecated: f32 indices accepted as a legacy fallback, will be
+            // removed in a future release. Emit a one-shot stderr warning the
+            // first time this path is taken in the process.
+            F32_INDEX_DEPRECATION_WARNED.get_or_init(|| {
+                eprintln!(
+                    "[flodl] deprecated: Embedding::forward received non-i64 \
+                     indices; this fallback will be removed in a future \
+                     release. Pass i64 tensors via Tensor::from_i64."
+                );
+            });
             let input_shape = input.shape();
             let flat_data = input.data().to_f32_vec()?;
             let indices: Vec<i64> = flat_data.iter().map(|&v| v as i64).collect();
@@ -466,6 +482,43 @@ mod tests {
             let row_sum: f32 = gv[row * 4..(row + 1) * 4].iter().map(|v| v.abs()).sum();
             assert!(row_sum > 0.0, "row {row} should have nonzero grad when padding disabled");
         }
+    }
+
+    /// Default constructor (no explicit padding_idx) leaves row 0 trainable:
+    /// when index 0 appears in the forward input, row 0 still gets a nonzero
+    /// gradient. Anchors the "padding must be opt-in" contract so a future
+    /// regression flipping the default is caught immediately.
+    #[test]
+    fn embedding_default_has_no_padding() {
+        let dev = test_device();
+        let emb = Embedding::on_device(4, 3, dev).unwrap();
+
+        let input = Variable::new(
+            Tensor::from_i64(&[0, 1], &[2], dev).unwrap(),
+            false,
+        );
+        emb.forward(&input).unwrap().sum().unwrap().backward().unwrap();
+        let grad = emb.weight.variable.grad().unwrap();
+        let gv = grad.to_f32_vec().unwrap();
+        let row0_sum: f32 = gv[0..3].iter().map(|v| v.abs()).sum();
+        assert!(row0_sum > 0.0,
+            "default constructor must NOT mask row 0 gradient, got {row0_sum}");
+    }
+
+    /// Deprecated f32-index fallback must keep working until it is removed.
+    /// This test pins the runtime behavior so the fallback doesn't silently
+    /// break between now and its scheduled removal. Emits a one-shot stderr
+    /// warning (captured by the test harness).
+    #[test]
+    fn embedding_f32_indices_deprecated_fallback_works() {
+        let dev = test_device();
+        let emb = Embedding::on_device(5, 3, dev).unwrap();
+        let input = Variable::new(
+            Tensor::from_f32(&[0.0, 2.0, 4.0], &[3], dev).unwrap(),
+            false,
+        );
+        let out = emb.forward(&input).unwrap();
+        assert_eq!(out.shape(), vec![3, 3]);
     }
 
     /// Out-of-range padding_idx is rejected at construction.

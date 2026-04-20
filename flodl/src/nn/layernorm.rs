@@ -14,17 +14,17 @@ pub struct LayerNorm {
     eps: f64,
 }
 
-/// Default epsilon, matching PyTorch `nn.LayerNorm`.
-const DEFAULT_EPS: f64 = 1e-5;
-
 impl LayerNorm {
+    /// Default epsilon, matching PyTorch `nn.LayerNorm`.
+    pub const DEFAULT_EPS: f64 = 1e-5;
+
     /// Create a LayerNorm normalizing over the last `size` elements on CPU.
     ///
     /// Uses the PyTorch default `eps = 1e-5`. For HuggingFace BERT-style
     /// checkpoints (which use `eps = 1e-12`), construct with
     /// [`LayerNorm::with_eps`] instead.
     pub fn new(size: i64) -> Result<Self> {
-        Self::on_device_with_eps(size, DEFAULT_EPS, Device::CPU)
+        Self::on_device_with_eps(size, Self::DEFAULT_EPS, Device::CPU)
     }
 
     /// Create a LayerNorm on CPU with a custom epsilon.
@@ -37,7 +37,7 @@ impl LayerNorm {
 
     /// Create a LayerNorm on a specific device with the default epsilon.
     pub fn on_device(size: i64, device: Device) -> Result<Self> {
-        Self::on_device_with_eps(size, DEFAULT_EPS, device)
+        Self::on_device_with_eps(size, Self::DEFAULT_EPS, device)
     }
 
     /// Create a LayerNorm on a specific device with a custom epsilon.
@@ -156,6 +156,32 @@ mod tests {
         // Smoke: constructor wires through and forward runs without panic.
         let y = ln.forward(&x).unwrap();
         assert_eq!(y.shape(), vec![2, 8]);
+    }
+
+    /// Hand-computed golden values: for input [1, 2, 3, 4] with weight=1,
+    /// bias=0, LayerNorm computes centered/sqrt(variance + eps).
+    /// mean=2.5, variance=1.25, centered=[-1.5, -0.5, 0.5, 1.5].
+    /// At eps=1e-12, std ≈ sqrt(1.25) ≈ 1.1180339887, giving the values below.
+    /// This anchors BOTH the implementation correctness AND that the eps
+    /// parameter actually flows through to the libtorch kernel.
+    #[test]
+    fn test_layernorm_bert_eps_golden_values() {
+        let ln = LayerNorm::on_device_with_eps(4, 1e-12, test_device()).unwrap();
+        let x = Variable::new(
+            Tensor::from_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4], test_device()).unwrap(),
+            false,
+        );
+        let y = ln.forward(&x).unwrap().data().to_f32_vec().unwrap();
+        let expected = [
+            -1.341_640_8_f32,
+            -0.447_213_6_f32,
+             0.447_213_6_f32,
+             1.341_640_8_f32,
+        ];
+        for (i, (got, exp)) in y.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < 1e-5,
+                "bert-eps layernorm dim {i}: got {got}, expected {exp}");
+        }
     }
 
     #[test]
