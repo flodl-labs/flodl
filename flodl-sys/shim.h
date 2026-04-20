@@ -749,6 +749,15 @@ char* flodl_dropout(FlodlTensor input, double p, int training,
 char* flodl_feature_dropout(FlodlTensor input, double p, int training,
                             FlodlTensor* result);
 
+// --- Embedding lookup ---
+// Plain embedding: indexes rows of `weight` by `indices`. `padding_idx = -1`
+// disables padding; any other valid index zeros out that row's gradient
+// during backward (matches PyTorch `nn.functional.embedding`).
+char* flodl_embedding(FlodlTensor weight, FlodlTensor indices,
+                      int64_t padding_idx,
+                      int scale_grad_by_freq, int sparse,
+                      FlodlTensor* result);
+
 // --- Embedding bag ---
 // Fused embedding lookup + reduction (sum / mean / max).
 // mode: 0=sum, 1=mean, 2=max.

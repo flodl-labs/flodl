@@ -1169,6 +1169,15 @@ unsafe extern "C" {
     pub fn flodl_to_channels_last(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_is_channels_last(t: FlodlTensor) -> i32;
 
+    // --- Embedding lookup ---
+
+    pub fn flodl_embedding(
+        weight: FlodlTensor, indices: FlodlTensor,
+        padding_idx: i64,
+        scale_grad_by_freq: i32, sparse: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Embedding bag ---
 
     pub fn flodl_embedding_bag(

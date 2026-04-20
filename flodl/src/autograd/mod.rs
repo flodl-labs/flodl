@@ -28,7 +28,7 @@ pub use ops::{
     max_pool2d, avg_pool2d, max_pool1d, avg_pool1d,
     adaptive_avg_pool2d, adaptive_max_pool2d,
     pixel_shuffle, pixel_unshuffle, bilinear,
-    grid_sample, embedding_bag,
+    grid_sample, embedding, embedding_bag,
 };
 
 #[cfg(test)]

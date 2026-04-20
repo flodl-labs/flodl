@@ -926,6 +926,23 @@ pub fn grid_sample(
     Ok(Variable::wrap(result))
 }
 
+/// Plain embedding lookup with autograd support.
+///
+/// `weight`: learnable embedding table (Variable).
+/// `indices`: i64 index tensor of any shape.
+/// `padding_idx`: row masked to zero gradient during backward, or `-1` to
+/// disable padding entirely.
+///
+/// Output shape: `[*indices.shape, embedding_dim]`.
+pub fn embedding(
+    weight: &Variable,
+    indices: &Tensor,
+    padding_idx: i64,
+) -> Result<Variable> {
+    let result = Tensor::embedding(&weight.data(), indices, padding_idx)?;
+    Ok(Variable::wrap(result))
+}
+
 /// Fused embedding lookup + reduction with autograd support.
 ///
 /// `weight`: learnable embedding table (Variable).

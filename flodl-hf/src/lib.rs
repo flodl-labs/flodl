@@ -13,10 +13,12 @@
 //! - [`hub`] — download models from the HuggingFace Hub with local caching.
 //! - [`tokenizer`] — wrappers over the HuggingFace `tokenizers` crate.
 //! - [`models`] — pre-built architectures (BERT first, LLaMA next).
+//! - [`path`] — dotted-path builder for HF-compatible module naming.
 
 #[cfg(feature = "hub")]
 pub mod hub;
 pub mod models;
+pub mod path;
 pub mod safetensors_io;
 #[cfg(feature = "tokenizer")]
 pub mod tokenizer;

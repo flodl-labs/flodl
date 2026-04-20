@@ -568,6 +568,30 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Plain embedding lookup using libtorch's native `at::embedding`.
+    ///
+    /// `weight`: `[num_embeddings, embedding_dim]` embedding table.
+    /// `indices`: i64 tensor of any shape containing token indices.
+    /// `padding_idx`: row whose gradient is masked to zero during backward,
+    /// or `-1` to disable padding entirely.
+    ///
+    /// Output shape: `[*indices.shape, embedding_dim]`.
+    pub fn embedding(
+        weight: &Tensor, indices: &Tensor, padding_idx: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_embedding(
+                weight.handle, indices.handle,
+                padding_idx,
+                /*scale_grad_by_freq=*/0, /*sparse=*/0,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Fused embedding lookup + reduction (sum / mean / max).
     ///
     /// `weight`: `[num_embeddings, embedding_dim]` embedding table.

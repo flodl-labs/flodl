@@ -4,12 +4,26 @@ use crate::tensor::{Result, Tensor, TensorOptions, DType, Device};
 use super::parameter::Parameter;
 use super::Module;
 
+/// Sentinel used internally to mean "no padding_idx".
+/// Matches libtorch `at::embedding` convention.
+const NO_PADDING: i64 = -1;
+
 /// Lookup table for token embeddings.
 ///
 /// Weight shape: `[num_embeddings, embedding_dim]`.
 /// Input: integer indices as an i64 or f32 tensor. Output: embedded vectors.
 /// Prefer i64 inputs for vocabularies larger than 16M tokens (f32 loses
 /// precision beyond 2^24).
+///
+/// # Padding
+///
+/// Use [`Embedding::with_padding_idx`] to designate a row whose gradient is
+/// masked to zero during backward (so the PAD-token embedding does not drift
+/// during fine-tuning). The forward pass still returns that row normally;
+/// downstream code is expected to mask PAD positions via attention masks.
+///
+/// Notes for LLaMA-style checkpoints: when `pad_token_id == eos_token_id`,
+/// pass `padding_idx = None` — otherwise the EOS row would be frozen.
 ///
 /// ```ignore
 /// let emb = Embedding::new(1000, 64)?;
@@ -22,17 +36,45 @@ pub struct Embedding {
     pub weight: Parameter,
     #[allow(dead_code)]
     num_embeddings: i64,
+    #[allow(dead_code)]
     embedding_dim: i64,
+    padding_idx: i64,
 }
 
 impl Embedding {
-    /// Create an embedding table on CPU.
+    /// Create an embedding table on CPU without a padding index.
     pub fn new(num_embeddings: i64, embedding_dim: i64) -> Result<Self> {
-        Self::on_device(num_embeddings, embedding_dim, Device::CPU)
+        Self::on_device_with_padding_idx(num_embeddings, embedding_dim, None, Device::CPU)
     }
 
-    /// Create an embedding table on a specific device.
+    /// Create an embedding table on a specific device without a padding index.
     pub fn on_device(num_embeddings: i64, embedding_dim: i64, device: Device) -> Result<Self> {
+        Self::on_device_with_padding_idx(num_embeddings, embedding_dim, None, device)
+    }
+
+    /// Create an embedding table on CPU with an optional `padding_idx`.
+    ///
+    /// When `padding_idx` is `Some(i)`, the gradient of row `i` is masked to
+    /// zero during backward — matching PyTorch `nn.Embedding(..., padding_idx=i)`.
+    pub fn with_padding_idx(
+        num_embeddings: i64, embedding_dim: i64, padding_idx: Option<i64>,
+    ) -> Result<Self> {
+        Self::on_device_with_padding_idx(num_embeddings, embedding_dim, padding_idx, Device::CPU)
+    }
+
+    /// Create an embedding table on a specific device with an optional
+    /// `padding_idx`.
+    pub fn on_device_with_padding_idx(
+        num_embeddings: i64, embedding_dim: i64, padding_idx: Option<i64>, device: Device,
+    ) -> Result<Self> {
+        if let Some(p) = padding_idx {
+            if p < 0 || p >= num_embeddings {
+                return Err(crate::tensor::TensorError::new(&format!(
+                    "padding_idx {p} out of range [0, {num_embeddings})"
+                )));
+            }
+        }
+
         let weight = Variable::new(
             Tensor::randn(
                 &[num_embeddings, embedding_dim],
@@ -48,6 +90,7 @@ impl Embedding {
             },
             num_embeddings,
             embedding_dim,
+            padding_idx: padding_idx.unwrap_or(NO_PADDING),
         })
     }
 }
@@ -56,27 +99,19 @@ impl Module for Embedding {
     fn name(&self) -> &str { "embedding" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        // Input shape: [*] (any shape of indices)
-        // Output shape: [*, embedding_dim]
-        let input_shape = input.shape();
-        let numel = input.numel();
-
-        // Build i64 index tensor: use native i64 when available, fall back to f32 conversion
+        // at::embedding accepts any-shape i64 indices and returns
+        // [*indices.shape, embedding_dim] directly — no manual reshape.
         let index_tensor = if input.data().dtype() == DType::Int64 {
-            input.data().reshape(&[numel])?
+            input.data()
         } else {
+            // Legacy convenience: convert f32 → i64.
+            let input_shape = input.shape();
             let flat_data = input.data().to_f32_vec()?;
             let indices: Vec<i64> = flat_data.iter().map(|&v| v as i64).collect();
-            Tensor::from_i64(&indices, &[numel], input.device())?
+            Tensor::from_i64(&indices, &input_shape, input.device())?
         };
 
-        // index_select along dim 0
-        let selected = self.weight.variable.index_select(0, &index_tensor)?;
-
-        // Reshape to [*input_shape, embedding_dim]
-        let mut output_shape = input_shape;
-        output_shape.push(self.embedding_dim);
-        selected.reshape(&output_shape)
+        autograd::embedding(&self.weight.variable, &index_tensor, self.padding_idx)
     }
 
     fn parameters(&self) -> Vec<Parameter> {
@@ -343,6 +378,104 @@ mod tests {
             assert!((vals[d] - expected).abs() < 1e-5,
                 "max dim {d}: got {}, expected {}", vals[d], expected);
         }
+    }
+
+    /// Plain Embedding: forward shape and gradient flow (no padding_idx).
+    #[test]
+    fn embedding_forward_and_gradient() {
+        let dev = test_device();
+        let emb = Embedding::on_device(10, 4, dev).unwrap();
+
+        let input = Variable::new(
+            Tensor::from_i64(&[0, 3, 7, 2], &[2, 2], dev).unwrap(),
+            false,
+        );
+        let out = emb.forward(&input).unwrap();
+        assert_eq!(out.shape(), vec![2, 2, 4]);
+
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        let grad = emb.weight.variable.grad().expect("weight grad missing");
+        assert_eq!(grad.shape(), vec![10, 4]);
+
+        // Indices {0, 2, 3, 7} used → their rows should be nonzero;
+        // other rows should be zero.
+        let gv = grad.to_f32_vec().unwrap();
+        let used: std::collections::HashSet<usize> = [0, 2, 3, 7].into_iter().collect();
+        for row in 0..10 {
+            let row_sum: f32 = gv[row * 4..(row + 1) * 4].iter().sum();
+            if used.contains(&row) {
+                assert!(row_sum.abs() > 0.0, "row {row} should have nonzero grad");
+            } else {
+                assert_eq!(row_sum, 0.0, "unused row {row} should have zero grad");
+            }
+        }
+    }
+
+    /// padding_idx masks the corresponding row's gradient to zero during
+    /// backward, even when the pad index IS used in the forward input.
+    /// This is the gradient-correctness guarantee that matters for fine-tuning.
+    #[test]
+    fn embedding_padding_idx_masks_gradient() {
+        let dev = test_device();
+        // padding_idx = 0 — PAD row should never be updated.
+        let emb = Embedding::on_device_with_padding_idx(5, 3, Some(0), dev).unwrap();
+
+        // Use index 0 (PAD) in the forward input — its row still appears in
+        // the forward output, but its gradient row must be zero.
+        let input = Variable::new(
+            Tensor::from_i64(&[0, 0, 1, 2], &[4], dev).unwrap(),
+            false,
+        );
+        let out = emb.forward(&input).unwrap();
+        assert_eq!(out.shape(), vec![4, 3]);
+
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        let grad = emb.weight.variable.grad().unwrap();
+        let gv = grad.to_f32_vec().unwrap();
+
+        // Row 0 (PAD) must be entirely zero.
+        let row0_sum: f32 = gv[0..3].iter().map(|v| v.abs()).sum();
+        assert_eq!(row0_sum, 0.0, "padding_idx row should have zero gradient");
+        // Rows 1 and 2 were used — nonzero gradient expected.
+        let row1_sum: f32 = gv[3..6].iter().map(|v| v.abs()).sum();
+        let row2_sum: f32 = gv[6..9].iter().map(|v| v.abs()).sum();
+        assert!(row1_sum > 0.0, "row 1 grad should be nonzero");
+        assert!(row2_sum > 0.0, "row 2 grad should be nonzero");
+    }
+
+    /// padding_idx = None matches no-padding-idx constructor behaviour.
+    #[test]
+    fn embedding_with_padding_idx_none_equivalent() {
+        let dev = test_device();
+        let emb = Embedding::on_device_with_padding_idx(8, 4, None, dev).unwrap();
+        let input = Variable::new(
+            Tensor::from_i64(&[0, 1, 2, 3], &[4], dev).unwrap(),
+            false,
+        );
+        let out = emb.forward(&input).unwrap();
+        assert_eq!(out.shape(), vec![4, 4]);
+        let loss = out.sum().unwrap();
+        loss.backward().unwrap();
+        // All four used rows (incl. row 0) should have nonzero grad because
+        // padding is disabled.
+        let grad = emb.weight.variable.grad().unwrap();
+        let gv = grad.to_f32_vec().unwrap();
+        for row in 0..4 {
+            let row_sum: f32 = gv[row * 4..(row + 1) * 4].iter().map(|v| v.abs()).sum();
+            assert!(row_sum > 0.0, "row {row} should have nonzero grad when padding disabled");
+        }
+    }
+
+    /// Out-of-range padding_idx is rejected at construction.
+    #[test]
+    fn embedding_padding_idx_out_of_range_errors() {
+        let dev = test_device();
+        let r = Embedding::on_device_with_padding_idx(5, 3, Some(5), dev);
+        assert!(r.is_err(), "padding_idx == num_embeddings must error");
+        let r = Embedding::on_device_with_padding_idx(5, 3, Some(-1), dev);
+        assert!(r.is_err(), "negative padding_idx must error");
     }
 
     /// EmbeddingBag exposes a single parameter.
