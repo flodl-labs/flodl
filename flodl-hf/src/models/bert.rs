@@ -7,10 +7,10 @@
 //! position. [`BertModel::build`] assembles all of this into a flat
 //! [`Graph`].
 //!
-//! Self-attention is naive Q·Kᵀ / √d → softmax → ·V with separate Q/K/V
-//! projections (matching HF's default `attn_implementation`). A fused SDPA
-//! path is a future optimisation; kernel count today already matches the
-//! PyTorch HF reference.
+//! Self-attention uses separate Q/K/V projections and libtorch's fused
+//! [`scaled_dot_product_attention`] kernel. Padding is handled via an
+//! additive attention mask threaded into every encoder layer as a named
+//! graph input (see [`build_extended_attention_mask`]).
 //!
 //! Parameter names are chosen so `Graph::named_parameters()` output, once
 //! passed through [`hf_key_from_flodl_key`](crate::path::hf_key_from_flodl_key),
@@ -21,9 +21,26 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
-use flodl::{scaled_dot_product_attention, Device, FlowBuilder, Graph, Result, Variable};
+use flodl::{scaled_dot_product_attention, DType, Device, FlowBuilder, Graph, Result, Tensor, Variable};
 
 use crate::path::{prefix_params, HfPath};
+
+/// Convert a `[batch, seq_len]` attention mask (0 = mask, 1 = attend,
+/// any numeric dtype) into a `[batch, 1, 1, seq_len]` additive f32 mask
+/// suitable as the fourth input to the BERT graph.
+///
+/// Masked positions receive `-1e4`, attended positions `0.0`. The additive
+/// mask is broadcast into the QKᵀ pre-softmax scores inside
+/// `scaled_dot_product_attention`. `-1e4` (rather than `-inf`) matches
+/// HuggingFace's `get_extended_attention_mask` convention and stays
+/// numerically safe under fp16.
+pub fn build_extended_attention_mask(mask: &Tensor) -> Result<Tensor> {
+    let shape = mask.shape();
+    assert_eq!(shape.len(), 2, "expected [batch, seq_len], got {shape:?}");
+    let mask_f = mask.to_dtype(DType::Float32)?;
+    let additive = mask_f.mul_scalar(-1.0)?.add_scalar(1.0)?.mul_scalar(-1e4)?;
+    additive.reshape(&[shape[0], 1, 1, shape[1]])
+}
 
 /// BERT hyperparameters. Matches the fields of a HuggingFace
 /// `BertConfig` JSON file that affect model shape.
@@ -204,8 +221,9 @@ impl Module for BertPooler {
 /// / math by libtorch at runtime.
 ///
 /// Parameter layout matches HF BERT's `attention.self.{query,key,value}`
-/// exactly. The forward is unmasked; `attn_mask` will be threaded in
-/// alongside real checkpoint loading when the pooler and tokenizer land.
+/// exactly. The forward takes an optional additive attention mask
+/// (shape `[batch, 1, 1, seq_len]`, see [`build_extended_attention_mask`])
+/// which the graph plumbs in as a named input on every encoder layer.
 pub struct BertSelfAttention {
     query: Linear,
     key: Linear,
@@ -238,7 +256,7 @@ impl BertSelfAttention {
         })
     }
 
-    fn forward(&self, input: &Variable) -> Result<Variable> {
+    fn forward(&self, input: &Variable, attention_mask: Option<&Variable>) -> Result<Variable> {
         let shape = input.shape();
         let batch = shape[0];
         let seq = shape[1];
@@ -254,9 +272,10 @@ impl BertSelfAttention {
             .transpose(1, 2)?;
 
         let dropout_p = if self.training.get() { self.attn_dropout_prob } else { 0.0 };
+        let mask_data = attention_mask.map(|m| m.data());
         let context = scaled_dot_product_attention(
             &q, &k, &v,
-            /*attn_mask=*/None,
+            mask_data.as_ref(),
             dropout_p,
             /*is_causal=*/false,
             /*scale=*/None,
@@ -337,8 +356,8 @@ impl BertAttention {
         })
     }
 
-    fn forward(&self, input: &Variable) -> Result<Variable> {
-        let self_out = self.self_attn.forward(input)?;
+    fn forward(&self, input: &Variable, attention_mask: Option<&Variable>) -> Result<Variable> {
+        let self_out = self.self_attn.forward(input, attention_mask)?;
         self.output.forward(&self_out, input)
     }
 
@@ -439,15 +458,26 @@ impl BertLayer {
             output:       BertOutput::on_device(config, device)?,
         })
     }
+
+    fn forward_impl(
+        &self,
+        input: &Variable,
+        attention_mask: Option<&Variable>,
+    ) -> Result<Variable> {
+        let attn_out = self.attention.forward(input, attention_mask)?;
+        let intermediate_out = self.intermediate.forward(&attn_out)?;
+        self.output.forward(&intermediate_out, &attn_out)
+    }
 }
 
 impl Module for BertLayer {
     fn name(&self) -> &str { "bert_layer" }
 
+    /// Single-input forward with no attention mask. The graph drives the
+    /// masked path via `forward_named`; bare calls (tests, diagnostics)
+    /// run unmasked and attend to every position.
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        let attn_out = self.attention.forward(input)?;
-        let intermediate_out = self.intermediate.forward(&attn_out)?;
-        self.output.forward(&intermediate_out, &attn_out)
+        self.forward_impl(input, None)
     }
 
     fn parameters(&self) -> Vec<Parameter> {
@@ -458,9 +488,21 @@ impl Module for BertLayer {
         out
     }
 
+    fn as_named_input(&self) -> Option<&dyn NamedInputModule> { Some(self) }
+
     fn set_training(&self, training: bool) {
         self.attention.set_training(training);
         self.output.set_training(training);
+    }
+}
+
+impl NamedInputModule for BertLayer {
+    fn forward_named(
+        &self,
+        input: &Variable,
+        refs: &HashMap<String, Variable>,
+    ) -> Result<Variable> {
+        self.forward_impl(input, refs.get("attention_mask"))
     }
 }
 
@@ -468,15 +510,20 @@ impl Module for BertLayer {
 
 /// Assembled BERT graph.
 ///
-/// The returned [`Graph`] accepts three inputs via `forward_multi`, in
+/// The returned [`Graph`] accepts four inputs via `forward_multi`, in
 /// declaration order:
 ///
 /// 1. `input_ids` (i64, shape `[batch, seq_len]`)
 /// 2. `position_ids` (i64, shape `[batch, seq_len]`)
 /// 3. `token_type_ids` (i64, shape `[batch, seq_len]`)
+/// 4. `attention_mask` (f32, shape `[batch, 1, 1, seq_len]`, additive —
+///    build with [`build_extended_attention_mask`] from a plain
+///    `[batch, seq_len]` 0/1 mask)
 ///
 /// Graph layout: `bert.embeddings` → `bert.encoder.layer.{0..N-1}` →
-/// `bert.pooler`, where `N = config.num_hidden_layers`.
+/// `bert.pooler`, where `N = config.num_hidden_layers`. Every encoder
+/// layer pulls `attention_mask` via `.using()` so the same mask tensor
+/// is shared across layers without re-materialising.
 pub struct BertModel;
 
 impl BertModel {
@@ -488,18 +535,20 @@ impl BertModel {
     /// Build a BERT graph on `device`.
     pub fn on_device(config: &BertConfig, device: Device) -> Result<Graph> {
         let mut fb = FlowBuilder::new()
-            .input(&["position_ids", "token_type_ids"])
+            .input(&["position_ids", "token_type_ids", "attention_mask"])
             .through(BertEmbeddings::on_device(config, device)?)
             .tag("bert.embeddings")
             .using(&["position_ids", "token_type_ids"]);
 
         // Encoder stack. One BertLayer per layer, tagged with its HF path.
+        // Every layer pulls the same `attention_mask` input.
         let layer_root = HfPath::new("bert").sub("encoder").sub("layer");
         for i in 0..config.num_hidden_layers {
             let tag = layer_root.sub(i).to_string();
             fb = fb
                 .through(BertLayer::on_device(config, device)?)
-                .tag(&tag);
+                .tag(&tag)
+                .using(&["attention_mask"]);
         }
 
         fb.through(BertPooler::on_device(config, device)?)
@@ -512,6 +561,7 @@ impl BertModel {
 mod tests {
     use super::*;
     use crate::safetensors_io::expected_from_graph;
+    use flodl::TensorOptions;
 
     /// The 16 parameter keys every encoder layer exposes, template-formatted
     /// for a given layer index.
@@ -644,15 +694,11 @@ mod tests {
         }
     }
 
-    /// Smoke test: construct a tiny BERT on CPU, run forward_multi with
-    /// made-up ids, and verify the output shape. Catches obvious wiring
-    /// breakage (residual mismatch, missing named input, transpose axis
-    /// bug) without requiring real tokenized inputs.
-    #[test]
-    fn bert_forward_shape_smoke() {
-        use flodl::Tensor;
-
-        let config = BertConfig {
+    /// Small BERT preset the mask tests reuse. One layer, tiny hidden, no
+    /// dropout — enough wiring to exercise embeddings + encoder + pooler
+    /// without the cost of `bert-base`.
+    fn tiny_bert_config() -> BertConfig {
+        BertConfig {
             vocab_size: 32,
             hidden_size: 16,
             num_hidden_layers: 1,
@@ -664,7 +710,16 @@ mod tests {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
-        };
+        }
+    }
+
+    /// Smoke test: construct a tiny BERT on CPU, run forward_multi with
+    /// made-up ids + an all-attend mask, and verify the output shape.
+    /// Catches obvious wiring breakage (residual mismatch, missing named
+    /// input, transpose axis bug) without requiring real tokenized inputs.
+    #[test]
+    fn bert_forward_shape_smoke() {
+        let config = tiny_bert_config();
         let dev = Device::CPU;
         let graph = BertModel::on_device(&config, dev).unwrap();
         graph.eval();
@@ -683,11 +738,120 @@ mod tests {
             Tensor::from_i64(&[0, 0, 0, 0, 1, 1, 1, 1], &[batch, seq], dev).unwrap(),
             false,
         );
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions { dtype: DType::Float32, device: dev }).unwrap();
+        let attention_mask = Variable::new(
+            build_extended_attention_mask(&mask_flat).unwrap(),
+            false,
+        );
 
         let out = graph
-            .forward_multi(&[word_ids, position_ids, token_type_ids])
+            .forward_multi(&[word_ids, position_ids, token_type_ids, attention_mask])
             .unwrap();
         // Pooler reduces [batch, seq, hidden] → [batch, hidden]
         assert_eq!(out.shape(), vec![batch, config.hidden_size]);
+    }
+
+    /// `build_extended_attention_mask` turns a `[B, S]` 0/1 mask into a
+    /// `[B, 1, 1, S]` additive f32 mask: attend positions → `0.0`, mask
+    /// positions → `-1e4`. Pins the HF convention so Phase-2 checkpoint
+    /// parity doesn't drift when we compare against PyTorch.
+    #[test]
+    fn extended_attention_mask_shape_and_values() {
+        let dev = Device::CPU;
+        // [2, 3] with batch-0 fully attending and batch-1 masking the
+        // trailing position (e.g. padding after [CLS] tok tok).
+        let raw = Tensor::from_f32(&[1.0, 1.0, 1.0, 1.0, 1.0, 0.0], &[2, 3], dev).unwrap();
+        let additive = build_extended_attention_mask(&raw).unwrap();
+        assert_eq!(additive.shape(), vec![2, 1, 1, 3]);
+
+        let values: Vec<f32> = additive.reshape(&[6]).unwrap().to_f32_vec().unwrap();
+        assert_eq!(values[0], 0.0);
+        assert_eq!(values[1], 0.0);
+        assert_eq!(values[2], 0.0);
+        assert_eq!(values[3], 0.0);
+        assert_eq!(values[4], 0.0);
+        assert!((values[5] - -1e4).abs() < 1e-3, "masked position should be ~-1e4, got {}", values[5]);
+    }
+
+    /// Mask threading sanity: for the internal `forward_impl` path, a
+    /// zero-additive mask (all positions attend) must produce bitwise-
+    /// identical output to the no-mask path. If the plumbing were wrong
+    /// (e.g. shape broadcast mismatch, stale ref lookup), the two would
+    /// diverge even though the mask is semantically a no-op.
+    #[test]
+    fn bert_layer_zero_additive_mask_matches_unmasked() {
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let layer = BertLayer::on_device(&config, dev).unwrap();
+        layer.set_training(false);
+
+        let batch = 1;
+        let seq = 3;
+        let hidden = config.hidden_size;
+        let x_data: Vec<f32> = (0..(batch * seq * hidden) as usize)
+            .map(|i| (i as f32) * 0.01)
+            .collect();
+        let x = Variable::new(
+            Tensor::from_f32(&x_data, &[batch, seq, hidden], dev).unwrap(),
+            false,
+        );
+
+        // `[B, 1, 1, S]` zeros → semantic no-op for SDPA.
+        let zero_mask = Variable::new(
+            Tensor::zeros(&[batch, 1, 1, seq], TensorOptions { dtype: DType::Float32, device: dev }).unwrap(),
+            false,
+        );
+
+        let unmasked = layer.forward_impl(&x, None).unwrap();
+        let with_zero = layer.forward_impl(&x, Some(&zero_mask)).unwrap();
+
+        let a: Vec<f32> = unmasked.data().to_f32_vec().unwrap();
+        let b: Vec<f32> = with_zero.data().to_f32_vec().unwrap();
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "diverged at {i}: unmasked={x}, zero-masked={y}",
+            );
+        }
+    }
+
+    /// Masking a position must change the encoder output at the remaining
+    /// positions (because SDPA no longer mixes information from the masked
+    /// key). A trivially-true check (some difference anywhere) is enough —
+    /// if the mask were silently dropped, outputs would match bitwise.
+    #[test]
+    fn bert_layer_padding_mask_changes_output() {
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let layer = BertLayer::on_device(&config, dev).unwrap();
+        layer.set_training(false);
+
+        let batch = 1;
+        let seq = 4;
+        let hidden = config.hidden_size;
+        let x_data: Vec<f32> = (0..(batch * seq * hidden) as usize)
+            .map(|i| ((i as f32) * 0.017).sin())
+            .collect();
+        let x = Variable::new(
+            Tensor::from_f32(&x_data, &[batch, seq, hidden], dev).unwrap(),
+            false,
+        );
+
+        // Attend to positions 0..2, mask position 3.
+        let raw = Tensor::from_f32(&[1.0, 1.0, 1.0, 0.0], &[batch, seq], dev).unwrap();
+        let additive = build_extended_attention_mask(&raw).unwrap();
+        let mask = Variable::new(additive, false);
+
+        let unmasked = layer.forward_impl(&x, None).unwrap();
+        let masked = layer.forward_impl(&x, Some(&mask)).unwrap();
+
+        let a: Vec<f32> = unmasked.data().to_f32_vec().unwrap();
+        let b: Vec<f32> = masked.data().to_f32_vec().unwrap();
+        let max_diff = a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1e-4,
+            "masking a position must change attention output; max_diff={max_diff}",
+        );
     }
 }
