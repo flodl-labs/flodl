@@ -2,15 +2,15 @@
 //!
 //! # Phase status
 //!
-//! - **Phase 1a (this file, today)**: `BertConfig` + `BertEmbeddings` +
-//!   `BertPooler` + a minimal `BertModel::on_device` returning a flat
-//!   `Graph` with embeddings → pooler. Encoder layers are not yet wired
-//!   in; the model shape is a scaffold to validate that the HuggingFace
-//!   parameter-naming plumbing holds before the attention math is
-//!   written.
-//! - **Phase 1b**: `BertSelfAttention` + `BertSelfOutput` +
-//!   `BertAttention` + `BertIntermediate` + `BertOutput` + `BertLayer`,
-//!   with one layer inserted between embeddings and pooler.
+//! - **Phase 1a**: `BertConfig` + `BertEmbeddings` + `BertPooler` +
+//!   minimal `BertModel::build` returning `embeddings → pooler`.
+//!   Parameter-naming plumbing validated.
+//! - **Phase 1b (this file, today)**: `BertSelfAttention` +
+//!   `BertSelfOutput` + `BertAttention` + `BertIntermediate` +
+//!   `BertOutput` + `BertLayer`, with one layer inserted between
+//!   embeddings and pooler. Attention math is naive
+//!   Q·Kᵀ / √d → softmax → ·V — same kernel count as PyTorch HF default.
+//!   No `attention_mask` support yet (Phase 2 task).
 //! - **Phase 1c**: stack to 12 layers (BERT-base).
 //!
 //! Everything below is written so `Graph::named_parameters()` produces
@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
+use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{Device, FlowBuilder, Graph, Result, Variable};
 
 use crate::path::prefix_params;
@@ -192,7 +192,267 @@ impl Module for BertPooler {
     }
 }
 
-// ── BertModel (Phase 1a skeleton) ────────────────────────────────────────
+// ── BertSelfAttention ────────────────────────────────────────────────────
+
+/// Naive scaled-dot-product self-attention with separate Q/K/V projections.
+///
+/// Kernel count matches PyTorch HF default (no fused SDPA). Parameter layout
+/// matches HF BERT's `attention.self.{query,key,value}` exactly. `padding`
+/// masks are a Phase 2 concern; for Phase 1b the forward is unmasked.
+pub struct BertSelfAttention {
+    query: Linear,
+    key: Linear,
+    value: Linear,
+    /// Dropout applied to the attention probability matrix after softmax,
+    /// per HF. No learnable parameters.
+    probs_dropout: Dropout,
+    num_heads: i64,
+    head_dim: i64,
+    scale: f64,
+}
+
+impl BertSelfAttention {
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        assert!(
+            config.hidden_size % config.num_attention_heads == 0,
+            "hidden_size ({}) must be divisible by num_attention_heads ({})",
+            config.hidden_size, config.num_attention_heads,
+        );
+        let head_dim = config.hidden_size / config.num_attention_heads;
+        Ok(BertSelfAttention {
+            query: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            key:   Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            value: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            probs_dropout: Dropout::new(config.attention_probs_dropout_prob),
+            num_heads: config.num_attention_heads,
+            head_dim,
+            scale: 1.0 / (head_dim as f64).sqrt(),
+        })
+    }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        let shape = input.shape();
+        let batch = shape[0];
+        let seq = shape[1];
+
+        let q = self.query.forward(input)?
+            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
+            .transpose(1, 2)?;
+        let k = self.key.forward(input)?
+            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
+            .transpose(1, 2)?;
+        let v = self.value.forward(input)?
+            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
+            .transpose(1, 2)?;
+
+        let k_t = k.transpose(2, 3)?;
+        let scores = q.matmul(&k_t)?.mul_scalar(self.scale)?;
+        let probs = self.probs_dropout.forward(&scores.softmax(-1)?)?;
+        let context = probs.matmul(&v)?
+            .transpose(1, 2)?
+            .reshape(&[batch, seq, self.num_heads * self.head_dim])?;
+        Ok(context)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut out = Vec::new();
+        out.extend(prefix_params("query", self.query.parameters()));
+        out.extend(prefix_params("key",   self.key.parameters()));
+        out.extend(prefix_params("value", self.value.parameters()));
+        out
+    }
+
+    fn set_training(&self, training: bool) {
+        self.probs_dropout.set_training(training);
+    }
+}
+
+// ── BertSelfOutput ───────────────────────────────────────────────────────
+
+/// Post-attention projection + dropout + residual + LayerNorm.
+/// HF parameter layout: `dense.{weight,bias}`, `LayerNorm.{weight,bias}`.
+pub struct BertSelfOutput {
+    dense: Linear,
+    layer_norm: LayerNorm,
+    dropout: Dropout,
+}
+
+impl BertSelfOutput {
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        Ok(BertSelfOutput {
+            dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            layer_norm: LayerNorm::on_device_with_eps(
+                config.hidden_size, config.layer_norm_eps, device,
+            )?,
+            dropout: Dropout::new(config.hidden_dropout_prob),
+        })
+    }
+
+    /// `hidden_states` passes through dense + dropout, is added to the
+    /// pre-attention `residual`, and then LayerNormed.
+    fn forward(&self, hidden_states: &Variable, residual: &Variable) -> Result<Variable> {
+        let d = self.dense.forward(hidden_states)?;
+        let dr = self.dropout.forward(&d)?;
+        self.layer_norm.forward(&dr.add(residual)?)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut out = Vec::new();
+        out.extend(prefix_params("dense", self.dense.parameters()));
+        out.extend(prefix_params("LayerNorm", self.layer_norm.parameters()));
+        out
+    }
+
+    fn set_training(&self, training: bool) {
+        self.dropout.set_training(training);
+    }
+}
+
+// ── BertAttention ────────────────────────────────────────────────────────
+
+/// Self-attention block: QKV + output projection with residual and LN.
+/// HF parameter layout: `self.*`, `output.*`.
+pub struct BertAttention {
+    self_attn: BertSelfAttention,
+    output: BertSelfOutput,
+}
+
+impl BertAttention {
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        Ok(BertAttention {
+            self_attn: BertSelfAttention::on_device(config, device)?,
+            output:    BertSelfOutput::on_device(config, device)?,
+        })
+    }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        let self_out = self.self_attn.forward(input)?;
+        self.output.forward(&self_out, input)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut out = Vec::new();
+        out.extend(prefix_params("self",   self.self_attn.parameters()));
+        out.extend(prefix_params("output", self.output.parameters()));
+        out
+    }
+
+    fn set_training(&self, training: bool) {
+        self.self_attn.set_training(training);
+        self.output.set_training(training);
+    }
+}
+
+// ── BertIntermediate ─────────────────────────────────────────────────────
+
+/// Feed-forward up-projection + GELU. `hidden → intermediate`.
+pub struct BertIntermediate {
+    dense: Linear,
+    activation: GELU,
+}
+
+impl BertIntermediate {
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        Ok(BertIntermediate {
+            dense: Linear::on_device(config.hidden_size, config.intermediate_size, device)?,
+            activation: GELU::new(),
+        })
+    }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        self.activation.forward(&self.dense.forward(input)?)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        prefix_params("dense", self.dense.parameters())
+    }
+}
+
+// ── BertOutput ───────────────────────────────────────────────────────────
+
+/// Feed-forward down-projection + dropout + residual + LayerNorm.
+/// `intermediate → hidden`.
+pub struct BertOutput {
+    dense: Linear,
+    layer_norm: LayerNorm,
+    dropout: Dropout,
+}
+
+impl BertOutput {
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        Ok(BertOutput {
+            dense: Linear::on_device(config.intermediate_size, config.hidden_size, device)?,
+            layer_norm: LayerNorm::on_device_with_eps(
+                config.hidden_size, config.layer_norm_eps, device,
+            )?,
+            dropout: Dropout::new(config.hidden_dropout_prob),
+        })
+    }
+
+    /// `hidden_states` (intermediate-sized) passes through dense + dropout,
+    /// is added to the pre-FFN `residual`, and then LayerNormed.
+    fn forward(&self, hidden_states: &Variable, residual: &Variable) -> Result<Variable> {
+        let d = self.dense.forward(hidden_states)?;
+        let dr = self.dropout.forward(&d)?;
+        self.layer_norm.forward(&dr.add(residual)?)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut out = Vec::new();
+        out.extend(prefix_params("dense", self.dense.parameters()));
+        out.extend(prefix_params("LayerNorm", self.layer_norm.parameters()));
+        out
+    }
+
+    fn set_training(&self, training: bool) {
+        self.dropout.set_training(training);
+    }
+}
+
+// ── BertLayer ────────────────────────────────────────────────────────────
+
+/// One transformer encoder layer: attention → intermediate → output.
+/// HF parameter layout: `attention.*`, `intermediate.*`, `output.*`.
+pub struct BertLayer {
+    attention: BertAttention,
+    intermediate: BertIntermediate,
+    output: BertOutput,
+}
+
+impl BertLayer {
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        Ok(BertLayer {
+            attention:    BertAttention::on_device(config, device)?,
+            intermediate: BertIntermediate::on_device(config, device)?,
+            output:       BertOutput::on_device(config, device)?,
+        })
+    }
+}
+
+impl Module for BertLayer {
+    fn name(&self) -> &str { "bert_layer" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        let attn_out = self.attention.forward(input)?;
+        let intermediate_out = self.intermediate.forward(&attn_out)?;
+        self.output.forward(&intermediate_out, &attn_out)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut out = Vec::new();
+        out.extend(prefix_params("attention",    self.attention.parameters()));
+        out.extend(prefix_params("intermediate", self.intermediate.parameters()));
+        out.extend(prefix_params("output",       self.output.parameters()));
+        out
+    }
+
+    fn set_training(&self, training: bool) {
+        self.attention.set_training(training);
+        self.output.set_training(training);
+    }
+}
+
+// ── BertModel (Phase 1b: one encoder layer) ──────────────────────────────
 
 /// Assembled BERT graph.
 ///
@@ -220,7 +480,9 @@ impl BertModel {
             .through(BertEmbeddings::on_device(config, device)?)
             .tag("bert.embeddings")
             .using(&["position_ids", "token_type_ids"])
-            // Phase 1b/1c: 12× BertLayer go here.
+            // Phase 1b: one layer. Phase 1c stacks 12.
+            .through(BertLayer::on_device(config, device)?)
+            .tag("bert.encoder.layer.0")
             .through(BertPooler::on_device(config, device)?)
             .tag("bert.pooler")
             .build()
@@ -250,6 +512,22 @@ mod tests {
             "bert.embeddings.position_embeddings.weight",
             "bert.embeddings.token_type_embeddings.weight",
             "bert.embeddings.word_embeddings.weight",
+            "bert.encoder.layer.0.attention.output.LayerNorm.bias",
+            "bert.encoder.layer.0.attention.output.LayerNorm.weight",
+            "bert.encoder.layer.0.attention.output.dense.bias",
+            "bert.encoder.layer.0.attention.output.dense.weight",
+            "bert.encoder.layer.0.attention.self.key.bias",
+            "bert.encoder.layer.0.attention.self.key.weight",
+            "bert.encoder.layer.0.attention.self.query.bias",
+            "bert.encoder.layer.0.attention.self.query.weight",
+            "bert.encoder.layer.0.attention.self.value.bias",
+            "bert.encoder.layer.0.attention.self.value.weight",
+            "bert.encoder.layer.0.intermediate.dense.bias",
+            "bert.encoder.layer.0.intermediate.dense.weight",
+            "bert.encoder.layer.0.output.LayerNorm.bias",
+            "bert.encoder.layer.0.output.LayerNorm.weight",
+            "bert.encoder.layer.0.output.dense.bias",
+            "bert.encoder.layer.0.output.dense.weight",
             "bert.pooler.dense.bias",
             "bert.pooler.dense.weight",
         ];
@@ -274,7 +552,69 @@ mod tests {
         assert_eq!(by_key["bert.embeddings.token_type_embeddings.weight"], &[2, 768]);
         assert_eq!(by_key["bert.embeddings.LayerNorm.weight"],             &[768]);
         assert_eq!(by_key["bert.embeddings.LayerNorm.bias"],               &[768]);
-        assert_eq!(by_key["bert.pooler.dense.weight"],                     &[768, 768]);
-        assert_eq!(by_key["bert.pooler.dense.bias"],                       &[768]);
+
+        // Encoder layer 0: Q/K/V and attention output are square at hidden
+        // size; intermediate expands to 4× hidden; output down-projects.
+        assert_eq!(by_key["bert.encoder.layer.0.attention.self.query.weight"],      &[768, 768]);
+        assert_eq!(by_key["bert.encoder.layer.0.attention.self.key.weight"],        &[768, 768]);
+        assert_eq!(by_key["bert.encoder.layer.0.attention.self.value.weight"],      &[768, 768]);
+        assert_eq!(by_key["bert.encoder.layer.0.attention.self.query.bias"],        &[768]);
+        assert_eq!(by_key["bert.encoder.layer.0.attention.output.dense.weight"],    &[768, 768]);
+        assert_eq!(by_key["bert.encoder.layer.0.attention.output.LayerNorm.weight"],&[768]);
+        assert_eq!(by_key["bert.encoder.layer.0.intermediate.dense.weight"],        &[3072, 768]);
+        assert_eq!(by_key["bert.encoder.layer.0.intermediate.dense.bias"],          &[3072]);
+        assert_eq!(by_key["bert.encoder.layer.0.output.dense.weight"],              &[768, 3072]);
+        assert_eq!(by_key["bert.encoder.layer.0.output.dense.bias"],                &[768]);
+        assert_eq!(by_key["bert.encoder.layer.0.output.LayerNorm.weight"],          &[768]);
+
+        assert_eq!(by_key["bert.pooler.dense.weight"], &[768, 768]);
+        assert_eq!(by_key["bert.pooler.dense.bias"],   &[768]);
+    }
+
+    /// Smoke test: construct a tiny BERT on CPU, run forward_multi with
+    /// made-up ids, and verify the output shape. Catches obvious wiring
+    /// breakage (residual mismatch, missing named input, transpose axis
+    /// bug) without requiring real tokenized inputs.
+    #[test]
+    fn bert_forward_shape_smoke() {
+        use flodl::Tensor;
+
+        let config = BertConfig {
+            vocab_size: 32,
+            hidden_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            intermediate_size: 32,
+            max_position_embeddings: 8,
+            type_vocab_size: 2,
+            pad_token_id: Some(0),
+            layer_norm_eps: 1e-12,
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+        };
+        let dev = Device::CPU;
+        let graph = BertModel::on_device(&config, dev).unwrap();
+        graph.eval();
+
+        let batch = 2;
+        let seq = 4;
+        let word_ids = Variable::new(
+            Tensor::from_i64(&[1, 2, 3, 4, 5, 6, 7, 0], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let position_ids = Variable::new(
+            Tensor::from_i64(&[0, 1, 2, 3, 0, 1, 2, 3], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let token_type_ids = Variable::new(
+            Tensor::from_i64(&[0, 0, 0, 0, 1, 1, 1, 1], &[batch, seq], dev).unwrap(),
+            false,
+        );
+
+        let out = graph
+            .forward_multi(&[word_ids, position_ids, token_type_ids])
+            .unwrap();
+        // Pooler reduces [batch, seq, hidden] → [batch, hidden]
+        assert_eq!(out.shape(), vec![batch, config.hidden_size]);
     }
 }
