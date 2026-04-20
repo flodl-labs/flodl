@@ -18,6 +18,8 @@ use crate::models::bert::{BertConfig, BertModel};
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
 };
+#[cfg(feature = "tokenizer")]
+use crate::tokenizer::HfTokenizer;
 
 impl BertModel {
     /// Download a pretrained BERT checkpoint from the HuggingFace Hub and
@@ -89,6 +91,24 @@ impl BertModel {
         }
 
         Ok(graph)
+    }
+}
+
+#[cfg(feature = "tokenizer")]
+impl HfTokenizer {
+    /// Download `tokenizer.json` from a HuggingFace Hub repo and wrap it.
+    ///
+    /// Uses the same `hf_hub` cache as [`BertModel::from_pretrained`], so
+    /// a model already pulled from a given repo won't re-download the
+    /// tokenizer either (and vice versa).
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        let api = Api::new()
+            .map_err(|e| TensorError::new(&format!("hf-hub init: {e}")))?;
+        let repo = api.model(repo_id.to_string());
+        let path = repo.get("tokenizer.json").map_err(|e| {
+            TensorError::new(&format!("hf-hub fetch {repo_id}/tokenizer.json: {e}"))
+        })?;
+        Self::from_file(&path)
     }
 }
 
