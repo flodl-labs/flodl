@@ -21,5 +21,25 @@ commands:
     run: cargo run --release --example bert_qa
     docker: dev
 
+  roberta-embed:
+    description: Load roberta-base and embed a batch of text (closed-loop text → pooled output)
+    run: cargo run --release --example roberta_embed
+    docker: dev
+
+  roberta-classify:
+    description: Sequence classification — download a RoBERTa sentiment checkpoint and predict labels
+    run: cargo run --release --example roberta_classify
+    docker: dev
+
+  roberta-ner:
+    description: Named-entity recognition — download a RoBERTa NER checkpoint and tag tokens
+    run: cargo run --release --example roberta_ner
+    docker: dev
+
+  roberta-qa:
+    description: Extractive question answering — download a RoBERTa SQuAD checkpoint and extract answer spans
+    run: cargo run --release --example roberta_qa
+    docker: dev
+
   # Adding an example is three lines plus an entry in flodl-hf/Cargo.toml
   # (`[[example]] name = "..." required-features = [...]`).

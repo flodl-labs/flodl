@@ -51,12 +51,23 @@ pub struct HfTokenizer {
 ///
 /// `position_ids` is `0..seq` broadcast across the batch — matches the
 /// defaults `BertEmbeddings` expects and is pinned in the parity fixture.
+/// RoBERTa-family models compute position ids internally from `input_ids`
+/// using `pad_token_id`, so this field is ignored there.
+///
+/// `sequence_ids` is the per-token segment tag from the HF tokenizer:
+/// `0` = first sequence (e.g. question in a QA pair), `1` = second
+/// sequence (e.g. context), `-1` = special token or padding (the
+/// tokenizer returned `None`). This is the canonical signal used by HF
+/// QA pipelines to locate the context span — it's model-agnostic,
+/// whereas `token_type_ids` is a *model input* whose semantics vary
+/// (BERT sets segment B to 1; RoBERTa keeps everything at 0).
 #[derive(Debug)]
 pub struct EncodedBatch {
     pub input_ids: Variable,
     pub attention_mask: Variable,
     pub token_type_ids: Variable,
     pub position_ids: Variable,
+    pub sequence_ids: Variable,
 }
 
 impl HfTokenizer {
@@ -116,6 +127,7 @@ impl HfTokenizer {
         let mut input_ids = Vec::<i64>::with_capacity(cap);
         let mut attention_mask = Vec::<i64>::with_capacity(cap);
         let mut token_type_ids = Vec::<i64>::with_capacity(cap);
+        let mut sequence_ids = Vec::<i64>::with_capacity(cap);
 
         for enc in &encodings {
             // BatchLongest padding guarantees all encodings share seq length.
@@ -123,6 +135,11 @@ impl HfTokenizer {
             input_ids.extend(enc.get_ids().iter().map(|&x| x as i64));
             attention_mask.extend(enc.get_attention_mask().iter().map(|&x| x as i64));
             token_type_ids.extend(enc.get_type_ids().iter().map(|&x| x as i64));
+            sequence_ids.extend(
+                enc.get_sequence_ids()
+                    .iter()
+                    .map(|opt| opt.map(|v| v as i64).unwrap_or(-1)),
+            );
         }
 
         let mut position_ids = Vec::<i64>::with_capacity(cap);
@@ -142,6 +159,7 @@ impl HfTokenizer {
                 false,
             ),
             position_ids: Variable::new(Tensor::from_i64(&position_ids, &shape, device)?, false),
+            sequence_ids: Variable::new(Tensor::from_i64(&sequence_ids, &shape, device)?, false),
         })
     }
 
@@ -179,12 +197,18 @@ impl HfTokenizer {
         let mut input_ids = Vec::<i64>::with_capacity(cap);
         let mut attention_mask = Vec::<i64>::with_capacity(cap);
         let mut token_type_ids = Vec::<i64>::with_capacity(cap);
+        let mut sequence_ids = Vec::<i64>::with_capacity(cap);
 
         for enc in &encodings {
             debug_assert_eq!(enc.get_ids().len() as i64, seq);
             input_ids.extend(enc.get_ids().iter().map(|&x| x as i64));
             attention_mask.extend(enc.get_attention_mask().iter().map(|&x| x as i64));
             token_type_ids.extend(enc.get_type_ids().iter().map(|&x| x as i64));
+            sequence_ids.extend(
+                enc.get_sequence_ids()
+                    .iter()
+                    .map(|opt| opt.map(|v| v as i64).unwrap_or(-1)),
+            );
         }
         let mut position_ids = Vec::<i64>::with_capacity(cap);
         for _ in 0..batch {
@@ -203,6 +227,7 @@ impl HfTokenizer {
                 false,
             ),
             position_ids: Variable::new(Tensor::from_i64(&position_ids, &shape, device)?, false),
+            sequence_ids: Variable::new(Tensor::from_i64(&sequence_ids, &shape, device)?, false),
         })
     }
 }

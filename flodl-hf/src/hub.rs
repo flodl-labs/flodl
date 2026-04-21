@@ -20,6 +20,10 @@ use crate::models::bert::{
     BertConfig, BertForQuestionAnswering, BertForSequenceClassification,
     BertForTokenClassification, BertModel,
 };
+use crate::models::roberta::{
+    RobertaConfig, RobertaForQuestionAnswering, RobertaForSequenceClassification,
+    RobertaForTokenClassification, RobertaModel,
+};
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
 };
@@ -52,7 +56,7 @@ impl BertModel {
     /// partial is returned — the graph is either fully loaded or the
     /// call errors out.
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
-        let (config, weights) = fetch_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
         let graph = BertModel::on_device(&config, device)?;
         // HF base checkpoints (e.g. `bert-base-uncased`) ship as
         // `BertForPreTraining`, which carries MLM + NSP heads that a
@@ -128,9 +132,10 @@ fn fetch_safetensors(api: &Api, repo_id: &str) -> Result<PathBuf> {
 }
 
 /// Pull `config.json` + `model.safetensors` from a Hub repo and return
-/// `(config, weights_bytes)`. Shared between base + task-head
-/// `from_pretrained` paths.
-fn fetch_config_and_weights(repo_id: &str) -> Result<(BertConfig, Vec<u8>)> {
+/// `(config_string, weights_bytes)`. Config parsing is left to the
+/// caller so the same fetch path serves every model family
+/// (`BertConfig::from_json_str`, `RobertaConfig::from_json_str`, …).
+fn fetch_config_str_and_weights(repo_id: &str) -> Result<(String, Vec<u8>)> {
     // `ApiBuilder::from_env()` reads `HF_HOME` for the cache location.
     // `Api::new()` hardcodes `~/.cache/huggingface/hub/` and silently
     // ignores `HF_HOME`, so every run would redownload into the dev
@@ -146,12 +151,27 @@ fn fetch_config_and_weights(repo_id: &str) -> Result<(BertConfig, Vec<u8>)> {
     let config_str = std::fs::read_to_string(&config_path).map_err(|e| {
         TensorError::new(&format!("read {}: {e}", config_path.display()))
     })?;
-    let config = BertConfig::from_json_str(&config_str)?;
 
     let weights_path = fetch_safetensors(&api, repo_id)?;
     let weights = std::fs::read(&weights_path).map_err(|e| {
         TensorError::new(&format!("read {}: {e}", weights_path.display()))
     })?;
+    Ok((config_str, weights))
+}
+
+/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
+/// [`BertConfig`]. Keeps the BERT `from_pretrained` call sites tidy.
+fn fetch_bert_config_and_weights(repo_id: &str) -> Result<(BertConfig, Vec<u8>)> {
+    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
+    let config = BertConfig::from_json_str(&config_str)?;
+    Ok((config, weights))
+}
+
+/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
+/// [`RobertaConfig`].
+fn fetch_roberta_config_and_weights(repo_id: &str) -> Result<(RobertaConfig, Vec<u8>)> {
+    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
+    let config = RobertaConfig::from_json_str(&config_str)?;
     Ok((config, weights))
 }
 
@@ -230,7 +250,7 @@ impl BertForSequenceClassification {
 
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -253,7 +273,7 @@ impl BertForTokenClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -276,7 +296,119 @@ impl BertForQuestionAnswering {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+// ── RoBERTa from_pretrained ──────────────────────────────────────────────
+//
+// Each RoBERTa head mirrors its BERT counterpart above. The only
+// family-specific bits are the config type (`RobertaConfig`) and the
+// graph the weights load into. The tokenizer, safetensors loader, and
+// HF legacy key rewrite are model-agnostic — `bert_legacy_key_rename`
+// only rewrites `LayerNorm.gamma`/`LayerNorm.beta` suffixes, which is a
+// no-op on modern RoBERTa checkpoints and harmless if it isn't.
+
+impl RobertaModel {
+    /// Download a pretrained RoBERTa checkpoint from the HuggingFace
+    /// Hub and return a fully-initialised [`Graph`] on CPU.
+    ///
+    /// Returns a pooler-free backbone (graph emits
+    /// `last_hidden_state` of shape `[B, S, hidden]`). RoBERTa
+    /// pretraining drops BERT's NSP objective, so most checkpoints
+    /// (including `roberta-base`) don't carry pooler weights; HF
+    /// Python silently random-initialises them on load, which
+    /// produces non-reproducible `pooler_output`. flodl-hf takes the
+    /// opposite default: no pooler, strict weight load. Reach for
+    /// [`RobertaModel::on_device`] if a specific checkpoint is known
+    /// to ship its own pooler.
+    ///
+    /// `repo_id` is the HF-style identifier, e.g. `"roberta-base"` or
+    /// `"FacebookAI/roberta-large"`. HF base checkpoints ship as
+    /// `RobertaForMaskedLM` with an `lm_head` that a bare
+    /// `RobertaModel` has no slot for; `load_weights_with_logging`
+    /// tolerates those and names them on stderr.
+    pub fn from_pretrained(repo_id: &str) -> Result<Graph> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
+        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let graph = RobertaModel::on_device_without_pooler(&config, device)?;
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        Ok(graph)
+    }
+}
+
+impl RobertaForSequenceClassification {
+    /// Download a fine-tuned `RobertaForSequenceClassification`
+    /// checkpoint from the Hub and return a ready-to-use predictor on
+    /// CPU.
+    ///
+    /// Popular checkpoints:
+    /// `cardiffnlp/twitter-roberta-base-sentiment-latest` (3-label
+    /// sentiment), `roberta-large-mnli` (3-label NLI),
+    /// `SamLowe/roberta-base-go_emotions` (28 emotions).
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl RobertaForTokenClassification {
+    /// Download a fine-tuned `RobertaForTokenClassification`
+    /// checkpoint (NER, POS tagging, …) from the Hub. Popular
+    /// checkpoints: `Jean-Baptiste/roberta-large-ner-english`,
+    /// `obi/deid_roberta_i2b2`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl RobertaForQuestionAnswering {
+    /// Download a fine-tuned `RobertaForQuestionAnswering` checkpoint
+    /// (SQuAD, etc.) from the Hub. Popular checkpoints:
+    /// `deepset/roberta-base-squad2`, `csarron/roberta-base-squad-v1`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         #[cfg(feature = "tokenizer")]

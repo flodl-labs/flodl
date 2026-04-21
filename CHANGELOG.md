@@ -94,6 +94,24 @@ Three fine-tuned heads on top of `BertModel`, each with a Laravel-flavoured `pre
   - Matching `_live` integration tests (`bert_seqcls_parity_vs_pytorch_live`, `bert_tokencls_parity_vs_pytorch_live`, `bert_qa_parity_vs_pytorch_live`) assert `max_abs_diff ≤ 1e-5` on logits against the HF reference. Run via `fdl test-live`.
 - **Runnable examples**: `fdl flodl-hf example bert-classify` / `bert-ner` / `bert-qa`. Each demo loads a real fine-tune, runs a small pinned batch, prints the top labels / entities / extracted spans.
 
+#### flodl-hf: RoBERTa architecture + task heads
+
+`flodl-hf/src/models/roberta.rs` — full RoBERTa stack (`RobertaConfig`, `RobertaEmbeddings`, encoder layer, pooler, three task heads). Same attention + FFN shape as BERT, four load-bearing deltas that make RoBERTa-family checkpoints load cleanly without per-model tokenizer or input plumbing.
+
+- **`RobertaModel::from_pretrained(repo_id)`** — one-liner weight + config pull mirroring the BERT path. **Returns a pooler-free backbone by default** (`last_hidden_state` of shape `[B, S, hidden]`) since `roberta-base` and most fine-tunes don't ship pooler weights — RoBERTa pretraining drops BERT's NSP objective. HF Python silently random-initialises the pooler on load, which makes `pooler_output` non-reproducible; flodl-hf takes the opposite default and keeps the weight load strict. `RobertaModel::on_device` is still available for checkpoints that do carry their own pooler.
+- **Position ids computed internally** from `input_ids` using HF's padding-offset convention (`padding_idx + cumsum(mask) * mask`; real tokens start at `padding_idx + 1`). The graph takes **3 named inputs** (`input_ids`, `token_type_ids`, `attention_mask`) — no `position_ids` in the signature, matching HF Python's `RobertaModel.forward`. Callers don't need to know the quirk exists.
+- **`RobertaForSequenceClassification`** — uses the HF-native two-layer head on the `<s>` hidden state: `Dropout → dense → tanh → Dropout → out_proj`. Parameter keys `classifier.dense.{weight,bias}` + `classifier.out_proj.{weight,bias}` — not a single `classifier.{weight,bias}` like BERT. Works with `cardiffnlp/twitter-roberta-base-sentiment-latest`, `roberta-large-mnli`, `SamLowe/roberta-base-go_emotions`.
+- **`RobertaForTokenClassification`** — same `Dropout → Linear` shape as BERT's token-classification head; loads `Jean-Baptiste/roberta-large-ner-english`, `obi/deid_roberta_i2b2`, etc. `predict(&[&str]) → Vec<Vec<TokenPrediction>>`.
+- **`RobertaForQuestionAnswering`** — `qa_outputs.{weight,bias}` head. `answer(question, context)` / `answer_batch(&[(q, c)])` return `Answer { text, start, end, score }`. Span search is restricted to `sequence_id == 1` (see below), since RoBERTa's `token_type_ids` are uniformly zero and can't distinguish question from context. Works with `deepset/roberta-base-squad2`.
+- **`RobertaConfig::from_json_str`** parses all shape + task-head fields. Defaults track HF's `RobertaConfig`: `layer_norm_eps = 1e-5` (not BERT's `1e-12`), `type_vocab_size = 1`, `pad_token_id = 1`, `max_position_embeddings = 514` (holds `padding_idx` row + 512 real positions).
+- **Parity infrastructure per head**: `fdl flodl-hf parity-roberta` / `parity-roberta-seqcls` / `parity-roberta-tokencls` / `parity-roberta-qa` regenerate fixtures under `flodl-hf/tests/fixtures/roberta_*.safetensors` against `roberta-base`, `cardiffnlp/twitter-roberta-base-sentiment-latest`, `Jean-Baptiste/roberta-large-ner-english`, and `deepset/roberta-base-squad2`. Matching `_live` integration tests assert `max_abs_diff ≤ 1e-5` on pooled output / logits against the HF reference. Run via `fdl test-live`.
+- **Runnable examples**: `fdl flodl-hf example roberta-embed` / `roberta-classify` / `roberta-ner` / `roberta-qa`.
+
+#### flodl-hf: `EncodedBatch.sequence_ids` + model-agnostic QA span filter
+
+- **`EncodedBatch` gains `sequence_ids: Variable`** — per-token segment tag from the HF tokenizer (`0` = first sequence, `1` = second sequence, `-1` = special / padding). This is the canonical HF signal for "which part of a pair encoding does this token belong to"; it's model-agnostic, where `token_type_ids` is a model input whose semantics vary (BERT sets segment B to 1; RoBERTa keeps everything at zero).
+- **`BertForQuestionAnswering::extract` switched** from `token_type_ids == 1` to `sequence_ids == 1` for context-region filtering. Behaviour is bit-identical on BERT (the tokenizer sets both equal), but the same code now works across the full BERT family.
+
 #### flodl: `LayerNorm` with custom epsilon
 - **`LayerNorm::with_eps`** and **`LayerNorm::on_device_with_eps`** — constructors accepting a custom epsilon, required for HuggingFace BERT (`eps = 1e-12`) and any architecture deviating from the PyTorch `1e-5` default.
 - **`LayerNorm::DEFAULT_EPS`** associated constant.

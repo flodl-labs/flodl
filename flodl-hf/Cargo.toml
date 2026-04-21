@@ -45,6 +45,22 @@ required-features = ["hub", "tokenizer"]
 name = "bert_qa"
 required-features = ["hub", "tokenizer"]
 
+[[example]]
+name = "roberta_embed"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
+name = "roberta_classify"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
+name = "roberta_ner"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
+name = "roberta_qa"
+required-features = ["hub", "tokenizer"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustc-args = ["--cfg", "docsrs"]

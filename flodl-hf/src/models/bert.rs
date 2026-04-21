@@ -1096,8 +1096,15 @@ impl BertForQuestionAnswering {
     }
 
     /// Run the graph on a pre-tokenised `(question, context)` batch and
-    /// extract best spans. The tokenizer's `token_type_ids` mark the
+    /// extract best spans. The tokenizer's `sequence_ids` mark the
     /// context region (== 1); scoring is restricted to that region.
+    ///
+    /// Uses `sequence_ids` (the tokenizer-level segment tag: `0` =
+    /// question, `1` = context, `-1` = special/pad) rather than
+    /// `token_type_ids` so the same code works across BERT-family
+    /// models with different token-type conventions (RoBERTa, for
+    /// instance, keeps all `token_type_ids` at zero). `-1` already
+    /// excludes padding, so no separate attention-mask check is needed.
     #[cfg(feature = "tokenizer")]
     pub fn extract(
         &self,
@@ -1132,24 +1139,21 @@ impl BertForQuestionAnswering {
         let ends = logits.narrow(-1, 1, 1)?.softmax(1)?;
         let starts_flat = starts.data().to_f32_vec()?;
         let ends_flat = ends.data().to_f32_vec()?;
-        let token_type_ids: Vec<i64> = enc.token_type_ids.data().to_i64_vec()?;
-        let attention_mask: Vec<i64> = enc.attention_mask.data().to_i64_vec()?;
+        let sequence_ids: Vec<i64> = enc.sequence_ids.data().to_i64_vec()?;
         let input_ids: Vec<i64> = enc.input_ids.data().to_i64_vec()?;
 
         let mut answers = Vec::with_capacity(batch);
         for b in 0..batch {
             let offset = b * seq;
-            // Valid span positions: context tokens (token_type_id == 1)
-            // AND not padding (attention_mask == 1).
+            // Valid span positions: context tokens (sequence_id == 1).
+            // `-1` (specials / padding) is automatically excluded.
             let valid: Vec<usize> = (0..seq)
-                .filter(|&s| {
-                    token_type_ids[offset + s] == 1 && attention_mask[offset + s] != 0
-                })
+                .filter(|&s| sequence_ids[offset + s] == 1)
                 .collect();
             if valid.is_empty() {
                 // Pair had no context region; fall back to full sequence.
                 return Err(TensorError::new(
-                    "QA extract: no context tokens (token_type_id == 1) found; \
+                    "QA extract: no context tokens (sequence_id == 1) found; \
                      tokenizer did not produce a pair encoding",
                 ));
             }

@@ -28,6 +28,29 @@ commands:
     run: python scripts/parity_bert_qa.py
     docker: hf-parity
 
+  parity-roberta:
+    description: Regenerate tests/fixtures/roberta_base_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_roberta.py
+    docker: hf-parity
+
+  parity-roberta-seqcls:
+    description: Regenerate tests/fixtures/roberta_seqcls_parity.safetensors (RobertaForSequenceClassification)
+    # The cardiffnlp sentiment checkpoint ships only `pytorch_model.bin`;
+    # convert to safetensors first so from_pretrained picks it up for the
+    # matching _live test.
+    run: python scripts/convert_bin_to_safetensors.py cardiffnlp/twitter-roberta-base-sentiment-latest && python scripts/parity_roberta_seqcls.py
+    docker: hf-parity
+
+  parity-roberta-tokencls:
+    description: Regenerate tests/fixtures/roberta_tokencls_parity.safetensors (RobertaForTokenClassification)
+    run: python scripts/parity_roberta_tokencls.py
+    docker: hf-parity
+
+  parity-roberta-qa:
+    description: Regenerate tests/fixtures/roberta_qa_parity.safetensors (RobertaForQuestionAnswering)
+    run: python scripts/parity_roberta_qa.py
+    docker: hf-parity
+
   example:
     description: Runnable examples (see `fdl flodl-hf example` for the list)
     path: ./examples/
