@@ -20,6 +20,10 @@ use crate::models::bert::{
     BertConfig, BertForQuestionAnswering, BertForSequenceClassification,
     BertForTokenClassification, BertModel,
 };
+use crate::models::distilbert::{
+    DistilBertConfig, DistilBertForQuestionAnswering, DistilBertForSequenceClassification,
+    DistilBertForTokenClassification, DistilBertModel,
+};
 use crate::models::roberta::{
     RobertaConfig, RobertaForQuestionAnswering, RobertaForSequenceClassification,
     RobertaForTokenClassification, RobertaModel,
@@ -172,6 +176,14 @@ fn fetch_bert_config_and_weights(repo_id: &str) -> Result<(BertConfig, Vec<u8>)>
 fn fetch_roberta_config_and_weights(repo_id: &str) -> Result<(RobertaConfig, Vec<u8>)> {
     let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
     let config = RobertaConfig::from_json_str(&config_str)?;
+    Ok((config, weights))
+}
+
+/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
+/// [`DistilBertConfig`].
+fn fetch_distilbert_config_and_weights(repo_id: &str) -> Result<(DistilBertConfig, Vec<u8>)> {
+    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
+    let config = DistilBertConfig::from_json_str(&config_str)?;
     Ok((config, weights))
 }
 
@@ -409,6 +421,110 @@ impl RobertaForQuestionAnswering {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+// ── DistilBERT from_pretrained ───────────────────────────────────────────
+//
+// Each DistilBERT head mirrors its BERT / RoBERTa counterparts above.
+// Family-specific bits: the config type (`DistilBertConfig`) and the
+// fact that the backbone graph never ships a pooler — `DistilBertModel`
+// is pooler-free by construction, matching every public DistilBERT
+// checkpoint.
+
+impl DistilBertModel {
+    /// Download a pretrained DistilBERT checkpoint from the HuggingFace
+    /// Hub and return a fully-initialised pooler-free [`Graph`] on CPU.
+    ///
+    /// `repo_id` examples: `"distilbert/distilbert-base-uncased"`,
+    /// `"distilbert/distilbert-base-cased"`. HF base checkpoints ship
+    /// as `DistilBertForMaskedLM` with an extra MLM head
+    /// (`vocab_transform.*`, `vocab_layer_norm.*`, `vocab_projector.*`)
+    /// that a bare `DistilBertModel` has no slot for;
+    /// `load_weights_with_logging` tolerates those and names them on
+    /// stderr.
+    pub fn from_pretrained(repo_id: &str) -> Result<Graph> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
+        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let graph = DistilBertModel::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        Ok(graph)
+    }
+}
+
+impl DistilBertForSequenceClassification {
+    /// Download a fine-tuned `DistilBertForSequenceClassification`
+    /// checkpoint from the Hub and return a ready-to-use predictor on
+    /// CPU.
+    ///
+    /// Popular checkpoints:
+    /// `lxyuan/distilbert-base-multilingual-cased-sentiments-student`
+    /// (3-label multilingual sentiment),
+    /// `distilbert-base-uncased-finetuned-sst-2-english` (2-label
+    /// sentiment — older, lacks `tokenizer.json`).
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl DistilBertForTokenClassification {
+    /// Download a fine-tuned `DistilBertForTokenClassification`
+    /// checkpoint (NER, POS tagging, …) from the Hub. Popular
+    /// checkpoint: `dslim/distilbert-NER` (PER/ORG/LOC/MISC, 9 labels
+    /// including `O`).
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl DistilBertForQuestionAnswering {
+    /// Download a fine-tuned `DistilBertForQuestionAnswering`
+    /// checkpoint (SQuAD, etc.) from the Hub. Canonical:
+    /// `distilbert/distilbert-base-cased-distilled-squad`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         #[cfg(feature = "tokenizer")]

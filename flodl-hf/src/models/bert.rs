@@ -1,28 +1,33 @@
 //! BERT encoder, compatible with HuggingFace `bert-base-uncased` checkpoints.
 //!
 //! Structure: [`BertEmbeddings`] (token + position + token-type embeddings
-//! with LayerNorm and Dropout), a stack of [`BertLayer`] instances (each one
-//! a self-attention block followed by a two-layer GELU feed-forward, both
-//! wrapped with residual + LayerNorm), and [`BertPooler`] on the `[CLS]`
-//! position. [`BertModel::build`] assembles all of this into a flat
-//! [`Graph`].
+//! with LayerNorm and Dropout), a stack of
+//! [`TransformerLayer`](crate::models::transformer_layer::TransformerLayer)
+//! instances (self-attention + two-layer GELU feed-forward, both wrapped
+//! with residual + LayerNorm), and [`BertPooler`] on the `[CLS]` position.
+//! [`BertModel::build`] assembles all of this into a flat [`Graph`].
 //!
-//! Self-attention uses separate Q/K/V projections and libtorch's fused
-//! [`scaled_dot_product_attention`] kernel. Padding is handled via an
-//! additive attention mask threaded into every encoder layer as a named
-//! graph input (see [`build_extended_attention_mask`]).
+//! The encoder layer itself is shared with the RoBERTa and DistilBERT
+//! ports via
+//! [`LayerNaming::BERT`](crate::models::transformer_layer::LayerNaming::BERT)
+//! — the Q/K/V projections, output projection, two LayerNorms, and
+//! feed-forward block are identical, only the HF weight-key suffixes
+//! differ.
+//!
+//! Padding is handled via an additive attention mask threaded into every
+//! encoder layer as a named graph input (see [`build_extended_attention_mask`]).
 //!
 //! Parameter names are chosen so `Graph::named_parameters()` output, once
 //! passed through [`hf_key_from_flodl_key`](crate::path::hf_key_from_flodl_key),
 //! matches safetensors checkpoint keys exactly. No remapping needed at load
 //! time.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 
-use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
-use flodl::{scaled_dot_product_attention, DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, Variable};
+use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
+use flodl::{DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, Variable};
 
+use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
 use crate::path::{prefix_params, HfPath};
 
 /// Convert a `[batch, seq_len]` attention mask (0 = mask, 1 = attend,
@@ -316,303 +321,20 @@ impl Module for BertPooler {
     }
 }
 
-// ── BertSelfAttention ────────────────────────────────────────────────────
-
-/// Self-attention with separate Q/K/V projections and fused scaled-dot-
-/// product attention.
-///
-/// Uses [`flodl::scaled_dot_product_attention`] (libtorch's
-/// `at::scaled_dot_product_attention`) for the Q·Kᵀ/√d → softmax → ·V
-/// chain — one kernel in most cases, dispatched to flash / mem-efficient
-/// / math by libtorch at runtime.
-///
-/// Parameter layout matches HF BERT's `attention.self.{query,key,value}`
-/// exactly. The forward takes an optional additive attention mask
-/// (shape `[batch, 1, 1, seq_len]`, see [`build_extended_attention_mask`])
-/// which the graph plumbs in as a named input on every encoder layer.
-pub struct BertSelfAttention {
-    query: Linear,
-    key: Linear,
-    value: Linear,
-    /// Dropout probability for attention probabilities. Threaded into SDPA
-    /// via the fused kernel's `dropout_p` parameter; zero at eval time.
-    /// No learnable parameters here; cell carries the training flag.
-    attn_dropout_prob: f64,
-    training: Cell<bool>,
-    num_heads: i64,
-    head_dim: i64,
-}
-
-impl BertSelfAttention {
-    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
-        assert!(
-            config.hidden_size % config.num_attention_heads == 0,
-            "hidden_size ({}) must be divisible by num_attention_heads ({})",
-            config.hidden_size, config.num_attention_heads,
-        );
-        let head_dim = config.hidden_size / config.num_attention_heads;
-        Ok(BertSelfAttention {
-            query: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            key:   Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            value: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            attn_dropout_prob: config.attention_probs_dropout_prob,
-            training: Cell::new(true),
-            num_heads: config.num_attention_heads,
-            head_dim,
-        })
-    }
-
-    fn forward(&self, input: &Variable, attention_mask: Option<&Variable>) -> Result<Variable> {
-        let shape = input.shape();
-        let batch = shape[0];
-        let seq = shape[1];
-
-        let q = self.query.forward(input)?
-            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
-            .transpose(1, 2)?;
-        let k = self.key.forward(input)?
-            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
-            .transpose(1, 2)?;
-        let v = self.value.forward(input)?
-            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
-            .transpose(1, 2)?;
-
-        let dropout_p = if self.training.get() { self.attn_dropout_prob } else { 0.0 };
-        let mask_data = attention_mask.map(|m| m.data());
-        let context = scaled_dot_product_attention(
-            &q, &k, &v,
-            mask_data.as_ref(),
-            dropout_p,
-            /*is_causal=*/false,
-            /*scale=*/None,
-        )?;
-
-        context.transpose(1, 2)?
-            .reshape(&[batch, seq, self.num_heads * self.head_dim])
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("query", self.query.parameters()));
-        out.extend(prefix_params("key",   self.key.parameters()));
-        out.extend(prefix_params("value", self.value.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.training.set(training);
-    }
-}
-
-// ── BertSelfOutput ───────────────────────────────────────────────────────
-
-/// Post-attention projection + dropout + residual + LayerNorm.
-/// HF parameter layout: `dense.{weight,bias}`, `LayerNorm.{weight,bias}`.
-pub struct BertSelfOutput {
-    dense: Linear,
-    layer_norm: LayerNorm,
-    dropout: Dropout,
-}
-
-impl BertSelfOutput {
-    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
-        Ok(BertSelfOutput {
-            dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            layer_norm: LayerNorm::on_device_with_eps(
-                config.hidden_size, config.layer_norm_eps, device,
-            )?,
-            dropout: Dropout::new(config.hidden_dropout_prob),
-        })
-    }
-
-    /// `hidden_states` passes through dense + dropout, is added to the
-    /// pre-attention `residual`, and then LayerNormed.
-    fn forward(&self, hidden_states: &Variable, residual: &Variable) -> Result<Variable> {
-        let d = self.dense.forward(hidden_states)?;
-        let dr = self.dropout.forward(&d)?;
-        self.layer_norm.forward(&dr.add(residual)?)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("dense", self.dense.parameters()));
-        out.extend(prefix_params("LayerNorm", self.layer_norm.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.dropout.set_training(training);
-    }
-}
-
-// ── BertAttention ────────────────────────────────────────────────────────
-
-/// Self-attention block: QKV + output projection with residual and LN.
-/// HF parameter layout: `self.*`, `output.*`.
-pub struct BertAttention {
-    self_attn: BertSelfAttention,
-    output: BertSelfOutput,
-}
-
-impl BertAttention {
-    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
-        Ok(BertAttention {
-            self_attn: BertSelfAttention::on_device(config, device)?,
-            output:    BertSelfOutput::on_device(config, device)?,
-        })
-    }
-
-    fn forward(&self, input: &Variable, attention_mask: Option<&Variable>) -> Result<Variable> {
-        let self_out = self.self_attn.forward(input, attention_mask)?;
-        self.output.forward(&self_out, input)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("self",   self.self_attn.parameters()));
-        out.extend(prefix_params("output", self.output.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.self_attn.set_training(training);
-        self.output.set_training(training);
-    }
-}
-
-// ── BertIntermediate ─────────────────────────────────────────────────────
-
-/// Feed-forward up-projection + GELU. `hidden → intermediate`.
-pub struct BertIntermediate {
-    dense: Linear,
-    activation: GELU,
-}
-
-impl BertIntermediate {
-    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
-        Ok(BertIntermediate {
-            dense: Linear::on_device(config.hidden_size, config.intermediate_size, device)?,
-            activation: GELU::new(),
-        })
-    }
-
-    fn forward(&self, input: &Variable) -> Result<Variable> {
-        self.activation.forward(&self.dense.forward(input)?)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        prefix_params("dense", self.dense.parameters())
-    }
-}
-
-// ── BertOutput ───────────────────────────────────────────────────────────
-
-/// Feed-forward down-projection + dropout + residual + LayerNorm.
-/// `intermediate → hidden`.
-pub struct BertOutput {
-    dense: Linear,
-    layer_norm: LayerNorm,
-    dropout: Dropout,
-}
-
-impl BertOutput {
-    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
-        Ok(BertOutput {
-            dense: Linear::on_device(config.intermediate_size, config.hidden_size, device)?,
-            layer_norm: LayerNorm::on_device_with_eps(
-                config.hidden_size, config.layer_norm_eps, device,
-            )?,
-            dropout: Dropout::new(config.hidden_dropout_prob),
-        })
-    }
-
-    /// `hidden_states` (intermediate-sized) passes through dense + dropout,
-    /// is added to the pre-FFN `residual`, and then LayerNormed.
-    fn forward(&self, hidden_states: &Variable, residual: &Variable) -> Result<Variable> {
-        let d = self.dense.forward(hidden_states)?;
-        let dr = self.dropout.forward(&d)?;
-        self.layer_norm.forward(&dr.add(residual)?)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("dense", self.dense.parameters()));
-        out.extend(prefix_params("LayerNorm", self.layer_norm.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.dropout.set_training(training);
-    }
-}
-
-// ── BertLayer ────────────────────────────────────────────────────────────
-
-/// One transformer encoder layer: attention → intermediate → output.
-/// HF parameter layout: `attention.*`, `intermediate.*`, `output.*`.
-pub struct BertLayer {
-    attention: BertAttention,
-    intermediate: BertIntermediate,
-    output: BertOutput,
-}
-
-impl BertLayer {
-    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
-        Ok(BertLayer {
-            attention:    BertAttention::on_device(config, device)?,
-            intermediate: BertIntermediate::on_device(config, device)?,
-            output:       BertOutput::on_device(config, device)?,
-        })
-    }
-
-    fn forward_impl(
-        &self,
-        input: &Variable,
-        attention_mask: Option<&Variable>,
-    ) -> Result<Variable> {
-        let attn_out = self.attention.forward(input, attention_mask)?;
-        let intermediate_out = self.intermediate.forward(&attn_out)?;
-        self.output.forward(&intermediate_out, &attn_out)
-    }
-}
-
-impl Module for BertLayer {
-    fn name(&self) -> &str { "bert_layer" }
-
-    /// Single-input forward with no attention mask. The graph drives the
-    /// masked path via `forward_named`; bare calls (tests, diagnostics)
-    /// run unmasked and attend to every position.
-    fn forward(&self, input: &Variable) -> Result<Variable> {
-        self.forward_impl(input, None)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("attention",    self.attention.parameters()));
-        out.extend(prefix_params("intermediate", self.intermediate.parameters()));
-        out.extend(prefix_params("output",       self.output.parameters()));
-        out
-    }
-
-    fn as_named_input(&self) -> Option<&dyn NamedInputModule> { Some(self) }
-
-    fn set_training(&self, training: bool) {
-        self.attention.set_training(training);
-        self.output.set_training(training);
-    }
-}
-
-impl NamedInputModule for BertLayer {
-    fn forward_named(
-        &self,
-        input: &Variable,
-        refs: &HashMap<String, Variable>,
-    ) -> Result<Variable> {
-        self.forward_impl(input, refs.get("attention_mask"))
-    }
-}
-
 // ── BertModel ────────────────────────────────────────────────────────────
+
+/// Translate a [`BertConfig`] into the subset [`TransformerLayer`]
+/// consumes. Localizes the field-name mapping in one place.
+fn bert_layer_config(config: &BertConfig) -> TransformerLayerConfig {
+    TransformerLayerConfig {
+        hidden_size:                  config.hidden_size,
+        num_attention_heads:          config.num_attention_heads,
+        intermediate_size:            config.intermediate_size,
+        hidden_dropout_prob:          config.hidden_dropout_prob,
+        attention_probs_dropout_prob: config.attention_probs_dropout_prob,
+        layer_norm_eps:               config.layer_norm_eps,
+    }
+}
 
 /// Assemble the BERT backbone onto a fresh [`FlowBuilder`], up to and
 /// optionally including the pooler.
@@ -642,10 +364,11 @@ fn bert_backbone_flow(
         .using(&["position_ids", "token_type_ids"]);
 
     let layer_root = HfPath::new("bert").sub("encoder").sub("layer");
+    let layer_cfg = bert_layer_config(config);
     for i in 0..config.num_hidden_layers {
         let tag = layer_root.sub(i).to_string();
         fb = fb
-            .through(BertLayer::on_device(config, device)?)
+            .through(TransformerLayer::on_device(&layer_cfg, LayerNaming::BERT, device)?)
             .tag(&tag)
             .using(&["attention_mask"]);
     }
@@ -1579,89 +1302,6 @@ mod tests {
         assert_eq!(values[4], 0.0);
         assert!((values[5] - -1e4).abs() < 1e-3, "masked position should be ~-1e4, got {}", values[5]);
     }
-
-    /// Mask threading sanity: for the internal `forward_impl` path, a
-    /// zero-additive mask (all positions attend) must produce bitwise-
-    /// identical output to the no-mask path. If the plumbing were wrong
-    /// (e.g. shape broadcast mismatch, stale ref lookup), the two would
-    /// diverge even though the mask is semantically a no-op.
-    #[test]
-    fn bert_layer_zero_additive_mask_matches_unmasked() {
-        let config = tiny_bert_config();
-        let dev = Device::CPU;
-        let layer = BertLayer::on_device(&config, dev).unwrap();
-        layer.set_training(false);
-
-        let batch = 1;
-        let seq = 3;
-        let hidden = config.hidden_size;
-        let x_data: Vec<f32> = (0..(batch * seq * hidden) as usize)
-            .map(|i| (i as f32) * 0.01)
-            .collect();
-        let x = Variable::new(
-            Tensor::from_f32(&x_data, &[batch, seq, hidden], dev).unwrap(),
-            false,
-        );
-
-        // `[B, 1, 1, S]` zeros → semantic no-op for SDPA.
-        let zero_mask = Variable::new(
-            Tensor::zeros(&[batch, 1, 1, seq], TensorOptions { dtype: DType::Float32, device: dev }).unwrap(),
-            false,
-        );
-
-        let unmasked = layer.forward_impl(&x, None).unwrap();
-        let with_zero = layer.forward_impl(&x, Some(&zero_mask)).unwrap();
-
-        let a: Vec<f32> = unmasked.data().to_f32_vec().unwrap();
-        let b: Vec<f32> = with_zero.data().to_f32_vec().unwrap();
-        assert_eq!(a.len(), b.len());
-        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert!(
-                (x - y).abs() < 1e-6,
-                "diverged at {i}: unmasked={x}, zero-masked={y}",
-            );
-        }
-    }
-
-    /// Masking a position must change the encoder output at the remaining
-    /// positions (because SDPA no longer mixes information from the masked
-    /// key). A trivially-true check (some difference anywhere) is enough —
-    /// if the mask were silently dropped, outputs would match bitwise.
-    #[test]
-    fn bert_layer_padding_mask_changes_output() {
-        let config = tiny_bert_config();
-        let dev = Device::CPU;
-        let layer = BertLayer::on_device(&config, dev).unwrap();
-        layer.set_training(false);
-
-        let batch = 1;
-        let seq = 4;
-        let hidden = config.hidden_size;
-        let x_data: Vec<f32> = (0..(batch * seq * hidden) as usize)
-            .map(|i| ((i as f32) * 0.017).sin())
-            .collect();
-        let x = Variable::new(
-            Tensor::from_f32(&x_data, &[batch, seq, hidden], dev).unwrap(),
-            false,
-        );
-
-        // Attend to positions 0..2, mask position 3.
-        let raw = Tensor::from_f32(&[1.0, 1.0, 1.0, 0.0], &[batch, seq], dev).unwrap();
-        let additive = build_extended_attention_mask(&raw).unwrap();
-        let mask = Variable::new(additive, false);
-
-        let unmasked = layer.forward_impl(&x, None).unwrap();
-        let masked = layer.forward_impl(&x, Some(&mask)).unwrap();
-
-        let a: Vec<f32> = unmasked.data().to_f32_vec().unwrap();
-        let b: Vec<f32> = masked.data().to_f32_vec().unwrap();
-        let max_diff = a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max);
-        assert!(
-            max_diff > 1e-4,
-            "masking a position must change attention output; max_diff={max_diff}",
-        );
-    }
-
     // ── Task head tests ──────────────────────────────────────────────────
 
     /// `BertModel::on_device_without_pooler` drops the last two parameter

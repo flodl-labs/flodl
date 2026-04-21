@@ -20,22 +20,24 @@
 //!    `classifier.dense.*` + `classifier.out_proj.*`), not the
 //!    BERT-style `pooler → Dropout → Linear`.
 //!
-//! Token classification and question answering heads are structurally
-//! identical to their BERT counterparts; they live here rather than
-//! sharing code with [`crate::models::bert`] so RoBERTa-specific
-//! divergence stays local. A shared abstraction can come later once
-//! more BERT-family models land.
+//! The encoder layer itself is shared with the BERT and DistilBERT
+//! ports via
+//! [`LayerNaming::BERT`](crate::models::transformer_layer::LayerNaming::BERT)
+//! — BERT and RoBERTa use the same `attention.self.{query,key,value}`
+//! / `attention.output.dense` / `intermediate.dense` / `output.dense`
+//! layout, so one [`TransformerLayer`](crate::models::transformer_layer::TransformerLayer)
+//! serves both families. Task heads remain here because RoBERTa's
+//! sequence-classification head diverges from BERT's.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 
-use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
+use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{
-    scaled_dot_product_attention, DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError,
-    Variable,
+    DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, Variable,
 };
 
 use crate::models::bert::build_extended_attention_mask;
+use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
 use crate::path::{prefix_params, HfPath};
 
 /// RoBERTa hyperparameters. Matches the fields of a HuggingFace
@@ -332,272 +334,21 @@ impl Module for RobertaPooler {
     }
 }
 
-// ── RobertaSelfAttention ─────────────────────────────────────────────────
-
-pub struct RobertaSelfAttention {
-    query: Linear,
-    key: Linear,
-    value: Linear,
-    attn_dropout_prob: f64,
-    training: Cell<bool>,
-    num_heads: i64,
-    head_dim: i64,
-}
-
-impl RobertaSelfAttention {
-    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
-        assert!(
-            config.hidden_size % config.num_attention_heads == 0,
-            "hidden_size ({}) must be divisible by num_attention_heads ({})",
-            config.hidden_size, config.num_attention_heads,
-        );
-        let head_dim = config.hidden_size / config.num_attention_heads;
-        Ok(RobertaSelfAttention {
-            query: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            key:   Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            value: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            attn_dropout_prob: config.attention_probs_dropout_prob,
-            training: Cell::new(true),
-            num_heads: config.num_attention_heads,
-            head_dim,
-        })
-    }
-
-    fn forward(&self, input: &Variable, attention_mask: Option<&Variable>) -> Result<Variable> {
-        let shape = input.shape();
-        let batch = shape[0];
-        let seq = shape[1];
-
-        let q = self.query.forward(input)?
-            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
-            .transpose(1, 2)?;
-        let k = self.key.forward(input)?
-            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
-            .transpose(1, 2)?;
-        let v = self.value.forward(input)?
-            .reshape(&[batch, seq, self.num_heads, self.head_dim])?
-            .transpose(1, 2)?;
-
-        let dropout_p = if self.training.get() { self.attn_dropout_prob } else { 0.0 };
-        let mask_data = attention_mask.map(|m| m.data());
-        let context = scaled_dot_product_attention(
-            &q, &k, &v,
-            mask_data.as_ref(),
-            dropout_p,
-            /*is_causal=*/false,
-            /*scale=*/None,
-        )?;
-
-        context.transpose(1, 2)?
-            .reshape(&[batch, seq, self.num_heads * self.head_dim])
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("query", self.query.parameters()));
-        out.extend(prefix_params("key",   self.key.parameters()));
-        out.extend(prefix_params("value", self.value.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.training.set(training);
-    }
-}
-
-// ── RobertaSelfOutput ────────────────────────────────────────────────────
-
-pub struct RobertaSelfOutput {
-    dense: Linear,
-    layer_norm: LayerNorm,
-    dropout: Dropout,
-}
-
-impl RobertaSelfOutput {
-    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
-        Ok(RobertaSelfOutput {
-            dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            layer_norm: LayerNorm::on_device_with_eps(
-                config.hidden_size, config.layer_norm_eps, device,
-            )?,
-            dropout: Dropout::new(config.hidden_dropout_prob),
-        })
-    }
-
-    fn forward(&self, hidden_states: &Variable, residual: &Variable) -> Result<Variable> {
-        let d = self.dense.forward(hidden_states)?;
-        let dr = self.dropout.forward(&d)?;
-        self.layer_norm.forward(&dr.add(residual)?)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("dense", self.dense.parameters()));
-        out.extend(prefix_params("LayerNorm", self.layer_norm.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.dropout.set_training(training);
-    }
-}
-
-// ── RobertaAttention ─────────────────────────────────────────────────────
-
-pub struct RobertaAttention {
-    self_attn: RobertaSelfAttention,
-    output: RobertaSelfOutput,
-}
-
-impl RobertaAttention {
-    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
-        Ok(RobertaAttention {
-            self_attn: RobertaSelfAttention::on_device(config, device)?,
-            output:    RobertaSelfOutput::on_device(config, device)?,
-        })
-    }
-
-    fn forward(&self, input: &Variable, attention_mask: Option<&Variable>) -> Result<Variable> {
-        let self_out = self.self_attn.forward(input, attention_mask)?;
-        self.output.forward(&self_out, input)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("self",   self.self_attn.parameters()));
-        out.extend(prefix_params("output", self.output.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.self_attn.set_training(training);
-        self.output.set_training(training);
-    }
-}
-
-// ── RobertaIntermediate ──────────────────────────────────────────────────
-
-pub struct RobertaIntermediate {
-    dense: Linear,
-    activation: GELU,
-}
-
-impl RobertaIntermediate {
-    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
-        Ok(RobertaIntermediate {
-            dense: Linear::on_device(config.hidden_size, config.intermediate_size, device)?,
-            activation: GELU::new(),
-        })
-    }
-
-    fn forward(&self, input: &Variable) -> Result<Variable> {
-        self.activation.forward(&self.dense.forward(input)?)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        prefix_params("dense", self.dense.parameters())
-    }
-}
-
-// ── RobertaOutput ────────────────────────────────────────────────────────
-
-pub struct RobertaOutput {
-    dense: Linear,
-    layer_norm: LayerNorm,
-    dropout: Dropout,
-}
-
-impl RobertaOutput {
-    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
-        Ok(RobertaOutput {
-            dense: Linear::on_device(config.intermediate_size, config.hidden_size, device)?,
-            layer_norm: LayerNorm::on_device_with_eps(
-                config.hidden_size, config.layer_norm_eps, device,
-            )?,
-            dropout: Dropout::new(config.hidden_dropout_prob),
-        })
-    }
-
-    fn forward(&self, hidden_states: &Variable, residual: &Variable) -> Result<Variable> {
-        let d = self.dense.forward(hidden_states)?;
-        let dr = self.dropout.forward(&d)?;
-        self.layer_norm.forward(&dr.add(residual)?)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("dense", self.dense.parameters()));
-        out.extend(prefix_params("LayerNorm", self.layer_norm.parameters()));
-        out
-    }
-
-    fn set_training(&self, training: bool) {
-        self.dropout.set_training(training);
-    }
-}
-
-// ── RobertaLayer ─────────────────────────────────────────────────────────
-
-pub struct RobertaLayer {
-    attention: RobertaAttention,
-    intermediate: RobertaIntermediate,
-    output: RobertaOutput,
-}
-
-impl RobertaLayer {
-    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
-        Ok(RobertaLayer {
-            attention:    RobertaAttention::on_device(config, device)?,
-            intermediate: RobertaIntermediate::on_device(config, device)?,
-            output:       RobertaOutput::on_device(config, device)?,
-        })
-    }
-
-    fn forward_impl(
-        &self,
-        input: &Variable,
-        attention_mask: Option<&Variable>,
-    ) -> Result<Variable> {
-        let attn_out = self.attention.forward(input, attention_mask)?;
-        let intermediate_out = self.intermediate.forward(&attn_out)?;
-        self.output.forward(&intermediate_out, &attn_out)
-    }
-}
-
-impl Module for RobertaLayer {
-    fn name(&self) -> &str { "roberta_layer" }
-
-    fn forward(&self, input: &Variable) -> Result<Variable> {
-        self.forward_impl(input, None)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut out = Vec::new();
-        out.extend(prefix_params("attention",    self.attention.parameters()));
-        out.extend(prefix_params("intermediate", self.intermediate.parameters()));
-        out.extend(prefix_params("output",       self.output.parameters()));
-        out
-    }
-
-    fn as_named_input(&self) -> Option<&dyn NamedInputModule> { Some(self) }
-
-    fn set_training(&self, training: bool) {
-        self.attention.set_training(training);
-        self.output.set_training(training);
-    }
-}
-
-impl NamedInputModule for RobertaLayer {
-    fn forward_named(
-        &self,
-        input: &Variable,
-        refs: &HashMap<String, Variable>,
-    ) -> Result<Variable> {
-        self.forward_impl(input, refs.get("attention_mask"))
-    }
-}
-
 // ── RobertaModel ─────────────────────────────────────────────────────────
+
+/// Translate a [`RobertaConfig`] into the subset [`TransformerLayer`]
+/// consumes. BERT and RoBERTa share the encoder layer layout exactly;
+/// only the embedding and task-head code differs.
+fn roberta_layer_config(config: &RobertaConfig) -> TransformerLayerConfig {
+    TransformerLayerConfig {
+        hidden_size:                  config.hidden_size,
+        num_attention_heads:          config.num_attention_heads,
+        intermediate_size:            config.intermediate_size,
+        hidden_dropout_prob:          config.hidden_dropout_prob,
+        attention_probs_dropout_prob: config.attention_probs_dropout_prob,
+        layer_norm_eps:               config.layer_norm_eps,
+    }
+}
 
 /// Assemble the RoBERTa backbone onto a fresh [`FlowBuilder`], up to
 /// and optionally including the pooler.
@@ -621,10 +372,11 @@ fn roberta_backbone_flow(
         .using(&["token_type_ids"]);
 
     let layer_root = HfPath::new("roberta").sub("encoder").sub("layer");
+    let layer_cfg = roberta_layer_config(config);
     for i in 0..config.num_hidden_layers {
         let tag = layer_root.sub(i).to_string();
         fb = fb
-            .through(RobertaLayer::on_device(config, device)?)
+            .through(TransformerLayer::on_device(&layer_cfg, LayerNaming::BERT, device)?)
             .tag(&tag)
             .using(&["attention_mask"]);
     }

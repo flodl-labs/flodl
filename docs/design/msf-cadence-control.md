@@ -556,6 +556,42 @@ problem by comparing endpoints of consecutive cycles.
 
 ---
 
+## Related work
+
+The closest venue-scale predecessor on the heterogeneous-DDP empirical
+axis is **HetSeq** (Ding, Botzer, Weninger, AAAI 2021). HetSeq addresses
+the same motivation — university clusters with mixed consumer GPUs that
+stock DDP cannot use — by introducing a weighted loss-averaging shim on
+top of unmodified step-synchronous PyTorch DDP: each GPU gets a batch
+sized to its capacity, per-GPU losses are aggregated by the master with
+weights proportional to batch size or token count, and the averaged
+loss is broadcast back before an every-step gradient AllReduce.
+
+Their reported configurations reach 5.94x speedup on BERT at 8
+heterogeneous nodes (7.19 d to 1.21 d), but expansion decays to 0.60 on
+the Transformer translation task at 8 nodes with Transformer BLEU
+regressing from 25.09 to 18.74 and BERT training loss doubling from
+0.026 to 0.055. The authors flag the scaling shortfall explicitly:
+*"speedup scales at about one-half the linear rate, which can certainly
+be improved with further development,"* and note *"future plans include
+adapting ongoing research in distributed optimization to further improve
+training performance on heterogeneous infrastructure."*
+
+MSF cadence control is orthogonal to their mechanism. HetSeq's shim
+operates at the loss-aggregation stage and leaves the synchronization
+cadence untouched (every-step AllReduce). The MSF framing treats the
+residual shortfall as a cadence problem: once replicas are modeled as
+impulsively coupled dynamical systems, the transversal Lyapunov proxy
+gives a principled signal to decouple fast replicas from slow ones
+rather than paying the step-synchronous tax on every iteration.
+HetSeq's weighted averaging composes as an ingredient underneath a
+cadence-controlled AllReduce, not as a competitor. Note the asymmetry
+of validation scale: HetSeq reports at 32 GPUs across 8 real cluster
+nodes; the present work's empirical anchor is a 2-GPU heterogeneous
+desktop (RTX 5060 Ti + GTX 1060). Closing that scale gap on cloud
+infrastructure is a direct prerequisite for a full comparison against
+the HetSeq configurations.
+
 ## References
 
 - Pecora and Carroll, 1998. "Master Stability Functions for Synchronized
@@ -569,6 +605,11 @@ problem by comparing endpoints of consecutive cycles.
   Better Generalization." https://arxiv.org/abs/1803.05407. SWA
   foundation; centroid-in-wider-basin connects naturally to sync-manifold
   geometry.
+- Ding, Botzer, Weninger, 2021. "HetSeq: Distributed GPU Training on
+  Heterogeneous Infrastructure." AAAI 2021, pp. 15432-15438.
+  https://ojs.aaai.org/index.php/AAAI/article/view/17813. Direct
+  predecessor on the heterogeneous-DDP empirical axis; weighted-loss
+  shim over step-synchronous PyTorch DDP.
 - [research-questions.md](research-questions.md): empirical observations
   on divergence behavior, strange-attractor interpretation, and the
   phase-transition pattern at LR drops.
