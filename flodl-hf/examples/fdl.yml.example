@@ -41,5 +41,25 @@ commands:
     run: cargo run --release --example roberta_qa
     docker: dev
 
+  distilbert-embed:
+    description: Load distilbert-base-uncased and embed a batch of text (closed-loop text → CLS hidden state)
+    run: cargo run --release --example distilbert_embed
+    docker: dev
+
+  distilbert-classify:
+    description: Sequence classification — download a DistilBERT sentiment checkpoint and predict labels
+    run: cargo run --release --example distilbert_classify
+    docker: dev
+
+  distilbert-ner:
+    description: Named-entity recognition — download a DistilBERT NER checkpoint and tag tokens
+    run: cargo run --release --example distilbert_ner
+    docker: dev
+
+  distilbert-qa:
+    description: Extractive question answering — download a DistilBERT SQuAD checkpoint and extract answer spans
+    run: cargo run --release --example distilbert_qa
+    docker: dev
+
   # Adding an example is three lines plus an entry in flodl-hf/Cargo.toml
   # (`[[example]] name = "..." required-features = [...]`).

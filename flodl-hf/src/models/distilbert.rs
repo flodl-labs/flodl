@@ -729,6 +729,20 @@ impl DistilBertForTokenClassification {
         }
         Ok(out)
     }
+
+    /// One-shot texts → per-token predictions. Encodes with the attached
+    /// tokenizer and delegates to [`tag`](Self::tag).
+    #[cfg(feature = "tokenizer")]
+    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<TokenPrediction>>> {
+        let tok = self.tokenizer.as_ref().ok_or_else(|| {
+            TensorError::new(
+                "DistilBertForTokenClassification::predict requires a \
+                 tokenizer; use from_pretrained or .with_tokenizer(...) first",
+            )
+        })?;
+        let enc = tok.encode(texts)?;
+        self.tag(&enc)
+    }
 }
 
 // ── DistilBertForQuestionAnswering ───────────────────────────────────────

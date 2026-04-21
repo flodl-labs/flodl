@@ -51,6 +51,26 @@ commands:
     run: python scripts/parity_roberta_qa.py
     docker: hf-parity
 
+  parity-distilbert:
+    description: Regenerate tests/fixtures/distilbert_base_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_distilbert.py
+    docker: hf-parity
+
+  parity-distilbert-seqcls:
+    description: Regenerate tests/fixtures/distilbert_seqcls_parity.safetensors (DistilBertForSequenceClassification)
+    run: python scripts/parity_distilbert_seqcls.py
+    docker: hf-parity
+
+  parity-distilbert-tokencls:
+    description: Regenerate tests/fixtures/distilbert_tokencls_parity.safetensors (DistilBertForTokenClassification)
+    run: python scripts/parity_distilbert_tokencls.py
+    docker: hf-parity
+
+  parity-distilbert-qa:
+    description: Regenerate tests/fixtures/distilbert_qa_parity.safetensors (DistilBertForQuestionAnswering)
+    run: python scripts/parity_distilbert_qa.py
+    docker: hf-parity
+
   example:
     description: Runnable examples (see `fdl flodl-hf example` for the list)
     path: ./examples/

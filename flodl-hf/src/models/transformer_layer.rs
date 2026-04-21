@@ -296,7 +296,7 @@ mod tests {
         ).unwrap();
         let names: Vec<String> = layer.parameters().into_iter().map(|p| p.name).collect();
         // Spot-check a few — full layout is pinned via the
-        // bert_parity.rs integration test after step 3.
+        // bert_parity.rs integration test.
         assert!(names.iter().any(|n| n == "attention.self.query.weight"),      "got: {names:?}");
         assert!(names.iter().any(|n| n == "attention.self.query.bias"),        "got: {names:?}");
         assert!(names.iter().any(|n| n == "attention.output.dense.weight"),    "got: {names:?}");
