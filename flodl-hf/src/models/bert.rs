@@ -118,77 +118,29 @@ impl BertConfig {
     /// layer-norm-eps fall back to the BERT defaults.
     ///
     /// `hidden_act` is not checked: BERT's default (`gelu`) is hardcoded in
-    /// [`BertIntermediate`]. A config shipping a non-GELU activation will
+    /// the feed-forward block. A config shipping a non-GELU activation will
     /// silently be run with GELU — acceptable for now since every
     /// BERT-family checkpoint on the Hub uses GELU.
     pub fn from_json_str(s: &str) -> Result<Self> {
+        use crate::config_json::{
+            optional_f64, optional_i64_or_none, parse_id2label, parse_num_labels, required_i64,
+        };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
-        let get_i64 = |key: &str| -> Result<i64> {
-            v.get(key)
-                .and_then(|x| x.as_i64())
-                .ok_or_else(|| TensorError::new(&format!(
-                    "config.json missing required integer field: {key}",
-                )))
-        };
-        let get_f64_or = |key: &str, default: f64| -> f64 {
-            v.get(key).and_then(|x| x.as_f64()).unwrap_or(default)
-        };
-        // pad_token_id is allowed to be absent or explicitly `null`.
-        let pad_token_id = v.get("pad_token_id").and_then(|x| x.as_i64());
-
-        // id2label: HF stores {"0": "LABEL_0", "1": "LABEL_1", ...}. Sort by
-        // integer key so callers get a Vec<String> indexable by class id.
-        let id2label = match v.get("id2label").and_then(|x| x.as_object()) {
-            Some(obj) => {
-                let mut pairs: Vec<(i64, String)> = Vec::with_capacity(obj.len());
-                for (k, val) in obj {
-                    let id: i64 = k.parse().map_err(|_| {
-                        TensorError::new(&format!(
-                            "config.json: id2label key {k:?} is not an integer",
-                        ))
-                    })?;
-                    let label = val.as_str().ok_or_else(|| {
-                        TensorError::new(&format!(
-                            "config.json: id2label[{k}] is not a string",
-                        ))
-                    })?;
-                    pairs.push((id, label.to_string()));
-                }
-                pairs.sort_by_key(|(id, _)| *id);
-                // Require contiguous 0..N ids. A gap means the fine-tuner
-                // did something unusual and falling back to "LABEL_k" would
-                // silently misalign names with logits.
-                for (idx, (id, _)) in pairs.iter().enumerate() {
-                    if *id != idx as i64 {
-                        return Err(TensorError::new(&format!(
-                            "config.json: id2label must have contiguous ids 0..N, \
-                             but index {idx} has id {id}",
-                        )));
-                    }
-                }
-                Some(pairs.into_iter().map(|(_, s)| s).collect::<Vec<_>>())
-            }
-            None => None,
-        };
-        // num_labels: explicit field wins; otherwise derive from id2label.
-        let num_labels = v
-            .get("num_labels")
-            .and_then(|x| x.as_i64())
-            .or_else(|| id2label.as_ref().map(|v| v.len() as i64));
-
+        let id2label = parse_id2label(&v)?;
+        let num_labels = parse_num_labels(&v, id2label.as_deref());
         Ok(BertConfig {
-            vocab_size:              get_i64("vocab_size")?,
-            hidden_size:             get_i64("hidden_size")?,
-            num_hidden_layers:       get_i64("num_hidden_layers")?,
-            num_attention_heads:     get_i64("num_attention_heads")?,
-            intermediate_size:       get_i64("intermediate_size")?,
-            max_position_embeddings: get_i64("max_position_embeddings")?,
-            type_vocab_size:         get_i64("type_vocab_size")?,
-            pad_token_id,
-            layer_norm_eps:               get_f64_or("layer_norm_eps", 1e-12),
-            hidden_dropout_prob:          get_f64_or("hidden_dropout_prob", 0.1),
-            attention_probs_dropout_prob: get_f64_or("attention_probs_dropout_prob", 0.1),
+            vocab_size:              required_i64(&v, "vocab_size")?,
+            hidden_size:             required_i64(&v, "hidden_size")?,
+            num_hidden_layers:       required_i64(&v, "num_hidden_layers")?,
+            num_attention_heads:     required_i64(&v, "num_attention_heads")?,
+            intermediate_size:       required_i64(&v, "intermediate_size")?,
+            max_position_embeddings: required_i64(&v, "max_position_embeddings")?,
+            type_vocab_size:         required_i64(&v, "type_vocab_size")?,
+            pad_token_id:            optional_i64_or_none(&v, "pad_token_id"),
+            layer_norm_eps:               optional_f64(&v, "layer_norm_eps", 1e-12),
+            hidden_dropout_prob:          optional_f64(&v, "hidden_dropout_prob", 0.1),
+            attention_probs_dropout_prob: optional_f64(&v, "attention_probs_dropout_prob", 0.1),
             num_labels,
             id2label,
         })
@@ -421,21 +373,8 @@ impl BertModel {
 
 // ── Task heads ───────────────────────────────────────────────────────────
 
-/// Default label names when a checkpoint ships without `id2label`.
-/// Mirrors HF Python's `LABEL_0`, `LABEL_1`, ...
-fn default_labels(n: i64) -> Vec<String> {
-    (0..n).map(|i| format!("LABEL_{i}")).collect()
-}
-
-/// Clamp `num_labels` to a positive value or surface a loud error.
-fn check_num_labels(n: i64) -> Result<i64> {
-    if n <= 0 {
-        return Err(TensorError::new(&format!(
-            "num_labels must be > 0, got {n}",
-        )));
-    }
-    Ok(n)
-}
+use crate::task_heads::{check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels};
+pub use crate::task_heads::{Answer, TokenPrediction};
 
 /// BERT with a sequence-classification head on top of the pooled
 /// `[CLS]` output: `pooler_output → Dropout → Linear(hidden, num_labels)`.
@@ -554,50 +493,6 @@ impl BertForSequenceClassification {
             mask,
         ])
     }
-}
-
-/// Apply softmax to a `[batch, num_labels]` logits tensor and return a
-/// sorted `(label, score)` list per batch entry.
-fn logits_to_sorted_labels(
-    logits: &Variable,
-    id2label: &[String],
-) -> Result<Vec<Vec<(String, f32)>>> {
-    let probs = logits.softmax(-1)?;
-    let shape = probs.shape();
-    assert_eq!(shape.len(), 2, "expected [batch, num_labels], got {shape:?}");
-    let batch = shape[0] as usize;
-    let n = shape[1] as usize;
-    assert_eq!(
-        n,
-        id2label.len(),
-        "classifier output width {n} != id2label count {}",
-        id2label.len(),
-    );
-    let flat = probs.data().to_f32_vec()?;
-    let mut out = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let mut row: Vec<(String, f32)> = (0..n)
-            .map(|k| (id2label[k].clone(), flat[b * n + k]))
-            .collect();
-        row.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        out.push(row);
-    }
-    Ok(out)
-}
-
-/// One labelled token inside a [`BertForTokenClassification`] prediction.
-#[cfg(feature = "tokenizer")]
-#[derive(Debug, Clone)]
-pub struct TokenPrediction {
-    /// The subword string the tokenizer produced for this position.
-    pub token: String,
-    /// The highest-scoring label for this token.
-    pub label: String,
-    /// Softmax probability of `label`.
-    pub score: f32,
-    /// 1 for real tokens, 0 for padding (`attention_mask == 0`). Lets
-    /// callers drop padding without re-tokenising.
-    pub attends: bool,
 }
 
 /// BERT with a per-token classification head: `last_hidden_state →
@@ -740,23 +635,6 @@ impl BertForTokenClassification {
     }
 }
 
-/// Extracted answer span from a [`BertForQuestionAnswering`] prediction.
-#[cfg(feature = "tokenizer")]
-#[derive(Debug, Clone)]
-pub struct Answer {
-    /// Decoded answer text. Built from the token ids between `start`
-    /// and `end` (inclusive) via the attached tokenizer's `decode`.
-    pub text: String,
-    /// Index (inclusive) of the first answer token in the input sequence.
-    pub start: usize,
-    /// Index (inclusive) of the last answer token in the input sequence.
-    pub end: usize,
-    /// Sum of the start and end logit probabilities — higher is more
-    /// confident. Not a normalised probability; callers comparing across
-    /// models should treat this as a relative score.
-    pub score: f32,
-}
-
 /// BERT with an extractive question-answering head: `last_hidden_state →
 /// Linear(hidden, 2)` splitting into `start_logits` and `end_logits`.
 ///
@@ -848,62 +726,7 @@ impl BertForQuestionAnswering {
             enc.token_type_ids.clone(),
             mask,
         ])?;
-        // logits: [B, S, 2] — dim 2 is (start, end).
-        let shape = logits.shape();
-        assert_eq!(shape.len(), 3, "expected [B, S, 2], got {shape:?}");
-        let batch = shape[0] as usize;
-        let seq = shape[1] as usize;
-        assert_eq!(shape[2], 2, "QA head must be 2-wide, got {}", shape[2]);
-
-        // Softmax start and end independently along the sequence axis;
-        // matches HF's "argmax over valid positions, then multiply".
-        // Splitting `[B, S, 2]` along the last dim is two narrows.
-        let starts = logits.narrow(-1, 0, 1)?.softmax(1)?;
-        let ends = logits.narrow(-1, 1, 1)?.softmax(1)?;
-        let starts_flat = starts.data().to_f32_vec()?;
-        let ends_flat = ends.data().to_f32_vec()?;
-        let sequence_ids: Vec<i64> = enc.sequence_ids.data().to_i64_vec()?;
-        let input_ids: Vec<i64> = enc.input_ids.data().to_i64_vec()?;
-
-        let mut answers = Vec::with_capacity(batch);
-        for b in 0..batch {
-            let offset = b * seq;
-            // Valid span positions: context tokens (sequence_id == 1).
-            // `-1` (specials / padding) is automatically excluded.
-            let valid: Vec<usize> = (0..seq)
-                .filter(|&s| sequence_ids[offset + s] == 1)
-                .collect();
-            if valid.is_empty() {
-                // Pair had no context region; fall back to full sequence.
-                return Err(TensorError::new(
-                    "QA extract: no context tokens (sequence_id == 1) found; \
-                     tokenizer did not produce a pair encoding",
-                ));
-            }
-            // Best (start, end) with start <= end, restricted to valid.
-            let mut best = (valid[0], valid[0], f32::NEG_INFINITY);
-            for &i in &valid {
-                let sp = starts_flat[offset + i];
-                for &j in valid.iter().filter(|&&j| j >= i) {
-                    let ep = ends_flat[offset + j];
-                    let score = sp + ep;
-                    if score > best.2 {
-                        best = (i, j, score);
-                    }
-                }
-            }
-            let (start, end, score) = best;
-            let span_ids: Vec<u32> = input_ids[offset + start..=offset + end]
-                .iter()
-                .map(|&x| x as u32)
-                .collect();
-            let text = tok
-                .inner()
-                .decode(&span_ids, /*skip_special_tokens=*/ true)
-                .map_err(|e| TensorError::new(&format!("qa decode: {e}")))?;
-            answers.push(Answer { text, start, end, score });
-        }
-        Ok(answers)
+        extract_best_span(&logits, enc, tok)
     }
 }
 
