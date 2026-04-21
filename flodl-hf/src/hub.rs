@@ -10,11 +10,16 @@
 //! ([`BertModel::from_pretrained`]) so user code reads the same as HF
 //! Python's `BertModel.from_pretrained(...)`.
 
-use hf_hub::api::sync::Api;
+use std::path::PathBuf;
+
+use hf_hub::api::sync::{Api, ApiBuilder};
 
 use flodl::{Device, Graph, Result, TensorError};
 
-use crate::models::bert::{BertConfig, BertModel};
+use crate::models::bert::{
+    BertConfig, BertForQuestionAnswering, BertForSequenceClassification,
+    BertForTokenClassification, BertModel,
+};
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
 };
@@ -47,50 +52,239 @@ impl BertModel {
     /// partial is returned — the graph is either fully loaded or the
     /// call errors out.
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
-        let api = Api::new()
-            .map_err(|e| TensorError::new(&format!("hf-hub init: {e}")))?;
-        let repo = api.model(repo_id.to_string());
-
-        let config_path = repo.get("config.json").map_err(|e| {
-            TensorError::new(&format!("hf-hub fetch {repo_id}/config.json: {e}"))
-        })?;
-        let config_str = std::fs::read_to_string(&config_path).map_err(|e| {
-            TensorError::new(&format!("read {}: {e}", config_path.display()))
-        })?;
-        let config = BertConfig::from_json_str(&config_str)?;
-
+        let (config, weights) = fetch_config_and_weights(repo_id)?;
         let graph = BertModel::on_device(&config, device)?;
-
-        let weights_path = repo.get("model.safetensors").map_err(|e| {
-            TensorError::new(&format!(
-                "hf-hub fetch {repo_id}/model.safetensors: {e}",
-            ))
-        })?;
-        let weights_bytes = std::fs::read(&weights_path).map_err(|e| {
-            TensorError::new(&format!("read {}: {e}", weights_path.display()))
-        })?;
-        // HF base models (e.g. `bert-base-uncased`) live inside checkpoints
-        // that also carry pretraining / task heads. Accept those as
-        // "unused" here and log them so the user can tell what was
-        // discarded vs silently dropped.
-        let unused = load_safetensors_into_graph_with_rename_allow_unused(
-            &graph, &weights_bytes, bert_legacy_key_rename,
-        )?;
-        if !unused.is_empty() {
-            eprintln!(
-                "from_pretrained({repo_id}): ignored {} checkpoint key(s) not used by BertModel \
-                 (task heads etc.):",
-                unused.len(),
-            );
-            for k in unused.iter().take(20) {
-                eprintln!("  - {k}");
-            }
-            if unused.len() > 20 {
-                eprintln!("  ... and {} more", unused.len() - 20);
-            }
-        }
-
+        // HF base checkpoints (e.g. `bert-base-uncased`) ship as
+        // `BertForPreTraining`, which carries MLM + NSP heads that a
+        // bare `BertModel` has no slot for. `load_weights_with_logging`
+        // tolerates those and names them on stderr.
+        load_weights_with_logging(repo_id, &graph, &weights)?;
         Ok(graph)
+    }
+}
+
+/// Environment variable `fetch_safetensors` honours when looking for a
+/// locally-converted `model.safetensors` before hitting the Hub.
+/// Matches the `HF_HOME` the Docker services are configured with
+/// (`/workspace/.hf-cache` via docker-compose.yml).
+const HF_HOME_ENV: &str = "HF_HOME";
+
+/// Default cache root when `HF_HOME` is not set. Mirrors HF Python's
+/// `~/.cache/huggingface/` convention.
+fn default_hf_home() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".cache").join("huggingface")
+    } else {
+        PathBuf::from("/tmp/huggingface")
+    }
+}
+
+/// Locally-converted safetensors path for `repo_id`, if one exists.
+///
+/// flodl-hf writes converted weights to
+/// `<HF_HOME>/flodl-converted/<repo_id>/model.safetensors` via
+/// `fdl flodl-hf convert <repo_id>`. Checking this path first lets
+/// `from_pretrained` transparently use the converted copy without
+/// touching the network.
+fn flodl_converted_path(repo_id: &str) -> PathBuf {
+    let hf_home = std::env::var_os(HF_HOME_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(default_hf_home);
+    hf_home
+        .join("flodl-converted")
+        .join(repo_id)
+        .join("model.safetensors")
+}
+
+/// Resolve `model.safetensors` for `repo_id`, preferring a locally-
+/// converted copy over the Hub.
+///
+/// Order:
+/// 1. `<HF_HOME>/flodl-converted/<repo_id>/model.safetensors` — produced
+///    by `fdl flodl-hf convert <repo_id>` for `.bin`-only repos.
+/// 2. `api.model(repo_id).get("model.safetensors")` — the normal Hub
+///    fetch, goes through hf-hub's own on-disk cache.
+///
+/// On failure at step 2, the returned error explicitly points the user
+/// at `fdl flodl-hf convert <repo_id>` for the common `.bin`-only case.
+fn fetch_safetensors(api: &Api, repo_id: &str) -> Result<PathBuf> {
+    let converted = flodl_converted_path(repo_id);
+    if converted.exists() {
+        eprintln!(
+            "from_pretrained({repo_id}): using flodl-converted safetensors at {}",
+            converted.display(),
+        );
+        return Ok(converted);
+    }
+    api.model(repo_id.to_string())
+        .get("model.safetensors")
+        .map_err(|e| {
+            TensorError::new(&format!(
+                "hf-hub fetch {repo_id}/model.safetensors: {e}\n\
+                 If this repo ships only `pytorch_model.bin`, convert it first:\n  \
+                 fdl flodl-hf convert {repo_id}",
+            ))
+        })
+}
+
+/// Pull `config.json` + `model.safetensors` from a Hub repo and return
+/// `(config, weights_bytes)`. Shared between base + task-head
+/// `from_pretrained` paths.
+fn fetch_config_and_weights(repo_id: &str) -> Result<(BertConfig, Vec<u8>)> {
+    // `ApiBuilder::from_env()` reads `HF_HOME` for the cache location.
+    // `Api::new()` hardcodes `~/.cache/huggingface/hub/` and silently
+    // ignores `HF_HOME`, so every run would redownload into the dev
+    // container's ephemeral `$HOME`.
+    let api = ApiBuilder::from_env()
+        .build()
+        .map_err(|e| TensorError::new(&format!("hf-hub init: {e}")))?;
+    let repo = api.model(repo_id.to_string());
+
+    let config_path = repo.get("config.json").map_err(|e| {
+        TensorError::new(&format!("hf-hub fetch {repo_id}/config.json: {e}"))
+    })?;
+    let config_str = std::fs::read_to_string(&config_path).map_err(|e| {
+        TensorError::new(&format!("read {}: {e}", config_path.display()))
+    })?;
+    let config = BertConfig::from_json_str(&config_str)?;
+
+    let weights_path = fetch_safetensors(&api, repo_id)?;
+    let weights = std::fs::read(&weights_path).map_err(|e| {
+        TensorError::new(&format!("read {}: {e}", weights_path.display()))
+    })?;
+    Ok((config, weights))
+}
+
+/// Best-effort tokenizer download for task-head `from_pretrained` paths.
+///
+/// `HfTokenizer::from_pretrained` requires the repo to ship a fast-
+/// tokenizer `tokenizer.json`. Legacy checkpoints (pre-~2022, many
+/// older fine-tunes, hand-uploaded models) only carry the slow-tokenizer
+/// triple `tokenizer_config.json` + `vocab.txt` + `special_tokens_map.json`;
+/// HF Python rebuilds a fast tokenizer from those on the fly, but the
+/// Rust `tokenizers` crate does not. Failing `from_pretrained` over a
+/// missing `tokenizer.json` breaks the HF-API parity that AutoModel (no
+/// required tokenizer) ships. We log and continue — `predict()` /
+/// `answer()` will then error with a clear "attach a tokenizer" message
+/// at call time.
+#[cfg(feature = "tokenizer")]
+fn try_load_tokenizer(repo_id: &str) -> Option<HfTokenizer> {
+    match HfTokenizer::from_pretrained(repo_id) {
+        Ok(tok) => Some(tok),
+        Err(e) => {
+            // Common case: legacy repos ship only the slow-tokenizer
+            // triple (vocab.txt + tokenizer_config.json + special_tokens_map.json),
+            // no `tokenizer.json`. Surface one actionable line without
+            // echoing the URL or the verbose HfTokenizer error.
+            let terse = if e.to_string().contains("404") {
+                "no tokenizer.json on Hub".to_string()
+            } else {
+                e.to_string()
+            };
+            eprintln!(
+                "from_pretrained({repo_id}): tokenizer not attached ({terse}) \
+                 — predict()/answer() need .with_tokenizer()",
+            );
+            None
+        }
+    }
+}
+
+/// Load safetensors into a graph, logging any discarded checkpoint keys
+/// to stderr. Shared by every `from_pretrained` path.
+fn load_weights_with_logging(
+    repo_id: &str,
+    graph: &Graph,
+    bytes: &[u8],
+) -> Result<()> {
+    let unused = load_safetensors_into_graph_with_rename_allow_unused(
+        graph, bytes, bert_legacy_key_rename,
+    )?;
+    if !unused.is_empty() {
+        eprintln!(
+            "from_pretrained({repo_id}): ignored {} checkpoint key(s) not used by the model:",
+            unused.len(),
+        );
+        for k in unused.iter().take(20) {
+            eprintln!("  - {k}");
+        }
+        if unused.len() > 20 {
+            eprintln!("  ... and {} more", unused.len() - 20);
+        }
+    }
+    Ok(())
+}
+
+impl BertForSequenceClassification {
+    /// Download a fine-tuned `BertForSequenceClassification` checkpoint
+    /// from the Hub and return a ready-to-use predictor on CPU.
+    ///
+    /// The config must carry `num_labels` (or `id2label`) so the head's
+    /// output width is known. Popular checkpoints: `nateraw/bert-base-uncased-emotion`
+    /// (6 emotions, `.bin`-only — needs `fdl flodl-hf convert` first),
+    /// `nlptown/bert-base-multilingual-uncased-sentiment` (5-star rating,
+    /// safetensors on main), `unitary/toxic-bert` (6-label toxicity).
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl BertForTokenClassification {
+    /// Download a fine-tuned `BertForTokenClassification` checkpoint
+    /// (NER, POS tagging, …) from the Hub. Popular checkpoints:
+    /// `dslim/bert-base-NER`,
+    /// `dbmdz/bert-large-cased-finetuned-conll03-english`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl BertForQuestionAnswering {
+    /// Download a fine-tuned `BertForQuestionAnswering` checkpoint
+    /// (SQuAD, etc.) from the Hub. Popular checkpoints:
+    /// `csarron/bert-base-uncased-squad-v1`,
+    /// `bert-large-uncased-whole-word-masking-finetuned-squad`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
     }
 }
 
@@ -102,7 +296,8 @@ impl HfTokenizer {
     /// a model already pulled from a given repo won't re-download the
     /// tokenizer either (and vice versa).
     pub fn from_pretrained(repo_id: &str) -> Result<Self> {
-        let api = Api::new()
+        let api = ApiBuilder::from_env()
+            .build()
             .map_err(|e| TensorError::new(&format!("hf-hub init: {e}")))?;
         let repo = api.model(repo_id.to_string());
         let path = repo.get("tokenizer.json").map_err(|e| {

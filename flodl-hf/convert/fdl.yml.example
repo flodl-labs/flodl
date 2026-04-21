@@ -1,0 +1,10 @@
+description: Convert a HuggingFace repo's pytorch_model.bin to model.safetensors for flodl-hf
+
+# Argv passes through to the Python script (entry: commands forward argv;
+# run: commands do not — see feedback_cli_docs_three_contexts).
+#
+# Writes /workspace/.hf-cache/flodl-converted/<repo_id>/model.safetensors, which
+# flodl-hf/src/hub.rs::fetch_safetensors checks before falling back to the Hub.
+
+docker: hf-parity
+entry: python /workspace/flodl-hf/scripts/convert_bin_to_safetensors.py

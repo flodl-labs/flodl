@@ -1,9 +1,31 @@
 description: flodl-hf — HuggingFace integration (safetensors, hub, parity fixtures)
 
 commands:
+  convert:
+    description: Convert a Hub repo's pytorch_model.bin to model.safetensors for flodl-hf
+    path: ./convert/
+
   parity-bert:
     description: Regenerate tests/fixtures/bert_base_uncased_parity.safetensors against HuggingFace reference
     run: python scripts/parity_bert.py
+    docker: hf-parity
+
+  parity-bert-seqcls:
+    description: Regenerate tests/fixtures/bert_seqcls_parity.safetensors (BertForSequenceClassification)
+    # The emotion checkpoint is .bin-only; convert to safetensors into the
+    # flodl-converted cache first so from_pretrained picks it up for the
+    # matching _live test.
+    run: python scripts/convert_bin_to_safetensors.py nateraw/bert-base-uncased-emotion && python scripts/parity_bert_seqcls.py
+    docker: hf-parity
+
+  parity-bert-tokencls:
+    description: Regenerate tests/fixtures/bert_tokencls_parity.safetensors (BertForTokenClassification)
+    run: python scripts/parity_bert_tokencls.py
+    docker: hf-parity
+
+  parity-bert-qa:
+    description: Regenerate tests/fixtures/bert_qa_parity.safetensors (BertForQuestionAnswering)
+    run: python scripts/parity_bert_qa.py
     docker: hf-parity
 
   example:

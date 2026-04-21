@@ -21,6 +21,8 @@ from huggingface_hub import model_info
 from safetensors.torch import save_file
 from transformers import BertModel
 
+from _hf_cache_utils import ensure_refs_main
+
 MODEL_ID = "bert-base-uncased"
 # `None` resolves to the current main-branch SHA at download time and is
 # recorded in the safetensors metadata. Pin to a specific SHA here if a
@@ -40,6 +42,7 @@ def main() -> None:
     print(f"using {MODEL_ID} @ {sha}")
 
     model = BertModel.from_pretrained(MODEL_ID, revision=sha).eval()
+    ensure_refs_main(MODEL_ID, sha)
 
     input_ids = torch.tensor([[101, 7592, 2088, 102]], dtype=torch.int64)
     position_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)

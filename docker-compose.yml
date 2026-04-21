@@ -16,6 +16,10 @@ services:
     tty: true
     environment:
       - FLODL_VERBOSITY
+      # Share the hf-hub cache with the hf-parity service so `fdl test-live`
+      # reuses fixtures downloaded by `fdl flodl-hf parity-bert*`. Repo-local,
+      # gitignored, survives container rebuild.
+      - HF_HOME=/workspace/.hf-cache
 
   cuda:
     build:

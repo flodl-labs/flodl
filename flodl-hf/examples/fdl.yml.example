@@ -6,5 +6,20 @@ commands:
     run: cargo run --release --example bert_embed
     docker: dev
 
+  bert-classify:
+    description: Sequence classification — download a fine-tuned sentiment/emotion checkpoint and predict labels
+    run: cargo run --release --example bert_classify
+    docker: dev
+
+  bert-ner:
+    description: Named-entity recognition — download a NER checkpoint and tag tokens
+    run: cargo run --release --example bert_ner
+    docker: dev
+
+  bert-qa:
+    description: Extractive question answering — download a SQuAD checkpoint and extract answer spans
+    run: cargo run --release --example bert_qa
+    docker: dev
+
   # Adding an example is three lines plus an entry in flodl-hf/Cargo.toml
   # (`[[example]] name = "..." required-features = [...]`).

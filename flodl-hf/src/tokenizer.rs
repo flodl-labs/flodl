@@ -32,7 +32,7 @@
 
 use std::path::Path;
 
-use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer};
+use tokenizers::{EncodeInput, PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer};
 
 use flodl::{Device, Result, Tensor, TensorError, Variable};
 
@@ -103,7 +103,7 @@ impl HfTokenizer {
         if texts.is_empty() {
             return Err(TensorError::new("tokenize: empty batch"));
         }
-        let inputs: Vec<&str> = texts.to_vec();
+        let inputs: Vec<EncodeInput> = texts.iter().map(|s| (*s).into()).collect();
         let encodings = self
             .inner
             .encode_batch(inputs, true)
@@ -125,6 +125,67 @@ impl HfTokenizer {
             token_type_ids.extend(enc.get_type_ids().iter().map(|&x| x as i64));
         }
 
+        let mut position_ids = Vec::<i64>::with_capacity(cap);
+        for _ in 0..batch {
+            position_ids.extend(0i64..seq);
+        }
+
+        let shape = [batch, seq];
+        Ok(EncodedBatch {
+            input_ids: Variable::new(Tensor::from_i64(&input_ids, &shape, device)?, false),
+            attention_mask: Variable::new(
+                Tensor::from_i64(&attention_mask, &shape, device)?,
+                false,
+            ),
+            token_type_ids: Variable::new(
+                Tensor::from_i64(&token_type_ids, &shape, device)?,
+                false,
+            ),
+            position_ids: Variable::new(Tensor::from_i64(&position_ids, &shape, device)?, false),
+        })
+    }
+
+    /// Encode a batch of `(text_a, text_b)` pairs on CPU.
+    ///
+    /// The resulting `token_type_ids` mark segment B (e.g. the QA
+    /// context, or the second sentence in an NLI pair) with `1`, as HF
+    /// tokenizers do. Question-answering and pair-classification
+    /// pipelines consume this directly.
+    pub fn encode_pairs(&self, pairs: &[(&str, &str)]) -> Result<EncodedBatch> {
+        self.encode_pairs_on_device(pairs, Device::CPU)
+    }
+
+    /// Device-aware variant of [`encode_pairs`](Self::encode_pairs).
+    pub fn encode_pairs_on_device(
+        &self,
+        pairs: &[(&str, &str)],
+        device: Device,
+    ) -> Result<EncodedBatch> {
+        if pairs.is_empty() {
+            return Err(TensorError::new("tokenize pairs: empty batch"));
+        }
+        let inputs: Vec<EncodeInput> = pairs
+            .iter()
+            .map(|(a, b)| EncodeInput::Dual((*a).into(), (*b).into()))
+            .collect();
+        let encodings = self
+            .inner
+            .encode_batch(inputs, true)
+            .map_err(|e| TensorError::new(&format!("tokenize pairs: {e}")))?;
+
+        let batch = encodings.len() as i64;
+        let seq = encodings[0].get_ids().len() as i64;
+        let cap = (batch * seq) as usize;
+        let mut input_ids = Vec::<i64>::with_capacity(cap);
+        let mut attention_mask = Vec::<i64>::with_capacity(cap);
+        let mut token_type_ids = Vec::<i64>::with_capacity(cap);
+
+        for enc in &encodings {
+            debug_assert_eq!(enc.get_ids().len() as i64, seq);
+            input_ids.extend(enc.get_ids().iter().map(|&x| x as i64));
+            attention_mask.extend(enc.get_attention_mask().iter().map(|&x| x as i64));
+            token_type_ids.extend(enc.get_type_ids().iter().map(|&x| x as i64));
+        }
         let mut position_ids = Vec::<i64>::with_capacity(cap);
         for _ in 0..batch {
             position_ids.extend(0i64..seq);

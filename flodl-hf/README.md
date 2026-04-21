@@ -5,8 +5,14 @@ hub downloads, tokenizers, and pre-built transformer architectures.
 
 ## Status
 
-Scaffold. Implementation in progress, starting with BERT as the integration
-shakedown. Follow-up: LLaMA (needs RoPE + GQA + SwiGLU).
+BERT family in progress. End-to-end parity with HuggingFace Python on
+`bert-base-uncased` (`9.8e-7` max-abs-diff on pooled output). Task heads
+(`BertForSequenceClassification`, `BertForTokenClassification`,
+`BertForQuestionAnswering`) ship with runnable examples and `_live`
+parity tests against real fine-tuned checkpoints on the Hub.
+
+Next: RoBERTa, DistilBERT, ELECTRA, then `AutoModel` routing. Follow-up
+arc: LLaMA family (needs RoPE + GQA + SwiGLU).
 
 ## Install
 
@@ -57,12 +63,60 @@ This crate is a sibling to `flodl` and depends on it for `Tensor`, `Module`,
 and the named-parameter machinery. Transformer blocks are built on top of
 flodl's `nn` module (LayerNorm, MultiheadAttention, Embedding, etc.).
 
+## Quick examples
+
+```rust
+// Emotion classification (6 emotions)
+use flodl_hf::models::bert::BertForSequenceClassification;
+
+let clf = BertForSequenceClassification::from_pretrained(
+    "nateraw/bert-base-uncased-emotion",
+)?;
+let top = clf.predict(&["I love this framework"])?;
+println!("{} ({:.3})", top[0][0].0, top[0][0].1); // "joy (0.983)"
+```
+
+Note: some older Hub uploads ship only `pytorch_model.bin`. Run
+`fdl flodl-hf convert <repo_id>` once to produce a safetensors copy
+in the local cache, then `from_pretrained` picks it up automatically.
+
+```rust
+// Named-entity recognition
+use flodl_hf::models::bert::BertForTokenClassification;
+
+let ner = BertForTokenClassification::from_pretrained("dslim/bert-base-NER")?;
+for t in &ner.predict(&["Fabrice lives in Paris"])?[0] {
+    if t.attends && t.label != "O" {
+        println!("{} → {} ({:.3})", t.token, t.label, t.score);
+    }
+}
+```
+
+```rust
+// Extractive QA
+use flodl_hf::models::bert::BertForQuestionAnswering;
+
+let qa = BertForQuestionAnswering::from_pretrained(
+    "csarron/bert-base-uncased-squad-v1",
+)?;
+let a = qa.answer(
+    "Where does Fabrice live?",
+    "Fabrice lives in Paris and writes Rust deep learning code.",
+)?;
+println!("{:?}", a.text); // "paris"
+```
+
+Runnable: `fdl flodl-hf example bert-embed` / `bert-classify` / `bert-ner` / `bert-qa`.
+
 ## Roadmap
 
-- [ ] Safetensors read/write for named tensor dicts
-- [ ] `hf-hub` download + local cache wrappers
-- [ ] `tokenizers` crate integration
-- [ ] BERT (base-uncased parity with `transformers` library)
+- [x] Safetensors read/write for named tensor dicts
+- [x] `hf-hub` download + local cache wrappers
+- [x] `tokenizers` crate integration
+- [x] BERT (base-uncased parity with `transformers` library)
+- [x] BERT task heads: sequence / token classification + question answering
+- [ ] RoBERTa, DistilBERT, ELECTRA — the BERT-family completion arc
+- [ ] `AutoModel` / `AutoConfig` dispatch
 - [ ] LLaMA (RoPE, GQA, SwiGLU, then the architecture)
 - [ ] LoRA adapters
 - [ ] ViT

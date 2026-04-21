@@ -33,6 +33,18 @@ tokenizers = { version = "0.20", optional = true }
 name = "bert_embed"
 required-features = ["hub", "tokenizer"]
 
+[[example]]
+name = "bert_classify"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
+name = "bert_ner"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
+name = "bert_qa"
+required-features = ["hub", "tokenizer"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustc-args = ["--cfg", "docsrs"]
