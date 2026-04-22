@@ -7,14 +7,14 @@
 //! is managed under `~/.flodl/` (override with `$FLODL_HOME`).
 
 use flodl_cli::{
-    api_ref, builtins, cli_error, completions, config, context, diagnose, dispatch, init,
+    add, api_ref, builtins, cli_error, completions, config, context, diagnose, dispatch, init,
     libtorch, overlay, parse_or_schema_from, run, schema, schema_cache, setup, skill, style, util,
 };
 
 use builtins::{
-    ApiRefArgs, DiagnoseArgs, InitArgs, InstallArgs, LibtorchActivateArgs, LibtorchBuildArgs,
-    LibtorchDownloadArgs, LibtorchListArgs, LibtorchRemoveArgs, SchemaClearArgs, SchemaListArgs,
-    SchemaRefreshArgs, SetupArgs, SkillInstallArgs,
+    AddArgs, ApiRefArgs, DiagnoseArgs, InitArgs, InstallArgs, LibtorchActivateArgs,
+    LibtorchBuildArgs, LibtorchDownloadArgs, LibtorchListArgs, LibtorchRemoveArgs, SchemaClearArgs,
+    SchemaListArgs, SchemaRefreshArgs, SetupArgs, SkillInstallArgs,
 };
 use dispatch::{walk_commands, WalkOutcome};
 
@@ -126,7 +126,17 @@ fn main() -> ExitCode {
         }
         "init" => {
             let cli: InitArgs = parse_sub("fdl init", &args[1..]);
-            match init::run(cli.name.as_deref(), cli.docker, cli.native) {
+            match init::run(cli.name.as_deref(), cli.docker, cli.native, cli.with_hf) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    cli_error!("{e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "add" => {
+            let cli: AddArgs = parse_sub("fdl add", &args[1..]);
+            match add::run(cli.target.as_deref()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     cli_error!("{e}");
@@ -1405,6 +1415,7 @@ fn print_usage() {
     println!("    libtorch           Manage libtorch installations");
     println!("    init <name>        Scaffold a new floDl project");
     println!("        --docker       Generate Docker-based scaffold (libtorch baked in)");
+    println!("    add <target>       Add a flodl ecosystem crate (currently: flodl-hf)");
     println!("    diagnose           System and GPU diagnostics");
     println!("        --json         Output as JSON");
     println!("    install             Install or update fdl globally (~/.local/bin)");

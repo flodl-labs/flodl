@@ -3,6 +3,7 @@ description: flodl - Rust deep learning framework
 commands:
   # --- Sub-command (child fdl.yml) ---
   ddp-bench:                    # convention: ./ddp-bench/fdl.yml
+  flodl-hf:                     # convention: ./flodl-hf/fdl.yml
 
   # --- CPU targets ---
   build:
@@ -16,6 +17,10 @@ commands:
   test-release:
     description: Run tests in release mode
     run: cargo test --release -- --nocapture
+    docker: dev
+  test-live:
+    description: Run live tests (network / external resources; `#[ignore]` + name ending in `_live`)
+    run: cargo test live -- --nocapture --ignored
     docker: dev
   check:
     description: Type check without building

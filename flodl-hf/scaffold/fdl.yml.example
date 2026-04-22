@@ -1,0 +1,37 @@
+description: flodl-hf playground — try HuggingFace models from the Hub
+
+commands:
+  classify:
+    description: Classify text via AutoModel; pass a repo_id as the first arg to override default
+    run: cargo run --release
+    docker: dev
+
+  bert:
+    description: Load bert-base-uncased through AutoModel (expects num_labels in config — point at a fine-tuned checkpoint)
+    run: cargo run --release -- bert-base-uncased
+    docker: dev
+
+  distilbert-sentiment:
+    description: DistilBERT multilingual sentiment (3 classes, ships safetensors + tokenizer)
+    run: cargo run --release -- lxyuan/distilbert-base-multilingual-cased-sentiments-student
+    docker: dev
+
+  build:
+    description: Build (debug)
+    run: cargo build
+    docker: dev
+
+  build-release:
+    description: Build release
+    run: cargo build --release
+    docker: dev
+
+  check:
+    description: Type check
+    run: cargo check
+    docker: dev
+
+  shell:
+    description: Interactive shell in dev container
+    run: bash
+    docker: dev

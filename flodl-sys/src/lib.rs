@@ -520,6 +520,15 @@ unsafe extern "C" {
         result: *mut FlodlTensor,
     ) -> *mut i8;
 
+    // --- Scaled dot-product attention ---
+
+    pub fn flodl_scaled_dot_product_attention(
+        query: FlodlTensor, key: FlodlTensor, value: FlodlTensor,
+        attn_mask: FlodlTensor,
+        dropout_p: f64, is_causal: i32, scale: f64,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
+
     // --- Device ---
 
     pub fn flodl_to_device(
@@ -1168,6 +1177,15 @@ unsafe extern "C" {
 
     pub fn flodl_to_channels_last(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_is_channels_last(t: FlodlTensor) -> i32;
+
+    // --- Embedding lookup ---
+
+    pub fn flodl_embedding(
+        weight: FlodlTensor, indices: FlodlTensor,
+        padding_idx: i64,
+        scale_grad_by_freq: i32, sparse: i32,
+        result: *mut FlodlTensor,
+    ) -> *mut i8;
 
     // --- Embedding bag ---
 

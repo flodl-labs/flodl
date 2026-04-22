@@ -1067,6 +1067,27 @@ extern "C" char* flodl_feature_dropout(FlodlTensor input, double p, int training
     }
 }
 
+// --- Embedding lookup ---
+// padding_idx = -1 disables padding. When set to a valid index, the row at
+// that index contributes zero gradient during backward (native libtorch
+// behavior via at::embedding).
+
+extern "C" char* flodl_embedding(FlodlTensor weight, FlodlTensor indices,
+                                  int64_t padding_idx,
+                                  int scale_grad_by_freq, int sparse,
+                                  FlodlTensor* result) {
+    try {
+        *result = wrap(at::embedding(
+            unwrap(weight), unwrap(indices),
+            /*padding_idx=*/padding_idx,
+            /*scale_grad_by_freq=*/scale_grad_by_freq != 0,
+            /*sparse=*/sparse != 0));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 // --- Embedding bag ---
 
 extern "C" char* flodl_embedding_bag(FlodlTensor weight, FlodlTensor indices,

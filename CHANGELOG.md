@@ -7,6 +7,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-22
+
+### Added
+
+#### flodl-hf: new sibling crate for HuggingFace integration
+Scaffolded under `flodl-hf/` with feature-gated modules so downstream users can take only what they need. Transformer blocks build on flodl's `nn` module; the crate depends on `flodl` for `Tensor`, `Module`, and named-parameter machinery.
+
+- **Three install profiles**:
+  - *Full* (default): `safetensors` + `hf-hub` + `tokenizers`. `flodl-hf = "0.5.2"` loads `"bert-base-uncased"` out of the box.
+  - *Vision-only*: `hub` feature only. For ViT, CLIP vision towers, or any image model that doesn't need tokenisation. Drops regex + unicode surface.
+  - *Offline / minimal*: no default features. `safetensors`-only. For air-gapped environments, embedded training, or local-disk pipelines — no network, no async runtime, no TLS stack.
+- **`cuda` feature** on `flodl-hf` re-exports `flodl/cuda`.
+- **HTTP backend**: `ureq` + `rustls-tls` on `hf-hub = "0.4"`. Sync, no tokio, no openssl (dev Docker image has no `libssl-dev`, so rustls is now the convention for any HTTP dep).
+- **ROADMAP**: HF fine-tuning moved to `In progress` with `[started]` marker; `flodl-manager CLI evolution` line added to Possibilities (gaps flagged while scaffolding: `fdl build` argv forwarding, `fdl add <crate>` command).
+
+#### flodl-hf: HuggingFace-naming foundations
+
+- **`flodl-hf::path::HfPath`** — immutable dotted-path builder that assembles HuggingFace-style keys segment by segment. Authors write short identifiers (`root.sub("encoder").sub("layer").sub(i).sub("attention").sub("self").leaf("query")`) instead of `format!` boilerplate. `sub` accepts anything `ToString`, so integer layer indices compose directly. `new`/`sub`/`leaf` panic on invalid segments (programmer error); `try_new`/`try_sub`/`try_leaf` return `Result` for user-supplied input (LoRA adapter names, custom head names from config, HF `get_submodule` paths). Validation rejects empty segments and embedded `.` / `/`.
+- **`flodl-hf::path::hf_key_from_flodl_key`** — converts flodl's `"{tag}/{leaf}"` qualified names (from `Graph::named_parameters()`) to HuggingFace-dotted keys by swapping only the final `/` for `.`. Centralises the flodl ↔ HF boundary in one place.
+- **`flodl-hf::safetensors_io::LoadValidation`** — three-bucket key-set diff (`missing`, `unused`, `shape_mismatches`) with stable sorted output. `into_result()` emits a loud `TensorError` listing up to 20 entries per bucket with a `"... and N more"` truncation tail, surfacing every disagreement in a single error instead of failing on the first mismatch. Catches the entire `"queri"` vs `"query"` typo class: the bad tag appears as `missing`, the real checkpoint key as `unused`, pointing straight at the fix.
+- **`flodl-hf::safetensors_io::expected_from_graph`** — walks a `Graph`'s named parameters + buffers and returns the HF-key + shape list needed by `validate_keys`.
+
+#### flodl-hf: BERT architecture
+
+Full HuggingFace BERT stack under `flodl-hf/src/models/bert.rs`: `BertConfig` (with a `bert_base_uncased()` preset), `BertEmbeddings`, `BertSelfAttention` (fused `scaled_dot_product_attention` with in-kernel dropout), `BertSelfOutput`, `BertAttention`, `BertIntermediate`, `BertOutput`, `BertLayer`, `BertPooler`, `BertModel`.
+
+- **`BertModel::build` / `BertModel::on_device`** — returns a flodl `Graph` with `embeddings → N encoder layers → pooler`. The graph takes **4 inputs**: `input_ids`, `position_ids`, `token_type_ids`, and a pre-computed additive `attention_mask` shared across all encoder layers via `.using()`.
+- **Only `BertLayer` implements `Module`**; inner composites carry ad-hoc `forward` signatures matching their real semantics (residual inputs). Not pretending residuals are single-input. Parameter aggregation is explicit via `HfPath::prefix_params`.
+- **`build_extended_attention_mask(mask)`** helper: raw `[B, S]` 0/1 → additive `[B, 1, 1, S]` f32 (`0.0` attend, `-1e4` mask, fp16-safe). Callers run this once before `forward_multi`, mirroring HF Python's explicit `get_extended_attention_mask` idiom.
+- **HF-compatible parameter naming**: tags encode HF dotted paths directly; `Graph::named_parameters() + hf_key_from_flodl_key` yields `"bert.encoder.layer.0.attention.self.query.weight"` on the first run. BERT-base has **199 parameters** total — pinned by a test.
+
+#### flodl-hf: safetensors weight loader
+
+`flodl-hf/src/safetensors_io.rs` — `load_safetensors_into_graph(graph, bytes)` plus rename-aware and allow-unused variants (`*_with_rename`, `*_with_rename_allow_unused`, `*_file_*` path-based).
+
+- **Strict-load semantics**: `validate_keys` runs first; any disagreement bails before mutating any parameter. Either the graph is fully loaded or fully untouched. Makes safe retry / fall-back possible.
+- **`Variable::set_data` over `copy_`**: libtorch rejects in-place ops on leaf Variables that require grad. `set_data` swaps storage while preserving `requires_grad` — the documented "optimizer replacement" path. `Buffer::set` is the buffer equivalent.
+- **Host-side dtype conversion** supports F32 / F64 / BF16 / F16 → f32, including a custom `f16_bits_to_f32` (normals, subnormals, Inf, NaN) so the loader doesn't drag in the `half` crate.
+- **Integer dtypes rejected loudly** (`I8`/`I16`/`I32`/`I64`/`U*`/`BOOL`/`F8*`). Silent casts hide upstream bugs.
+- **`bert_legacy_key_rename`** handles pre-2020 BERT checkpoints' legacy `LayerNorm.gamma` / `LayerNorm.beta` → `weight` / `bias`. The rename-aware loader checks injectivity and raises a loud error on collision.
+
+#### flodl-hf: HuggingFace Hub integration
+
+- **`BertModel::from_pretrained(repo_id)` / `::from_pretrained_on_device(repo_id, dev)`** — one-liner weight + config pull via `hf_hub::api::sync::Api`. Parses `config.json`, builds the matching `Graph`, loads safetensors weights via the allow-unused rename-aware loader. The 7 `cls.*` task-head keys in `bert-base-uncased` (it's a `BertForPreTraining` checkpoint) are logged and discarded (up to 20 with a truncation tail).
+- **`HfTokenizer::from_pretrained(repo_id)`** — downloads `tokenizer.json` via the same `hf_hub` cache. Feature-gated on both `hub` and `tokenizer`.
+- **`fdl test-live`** — root-level command that runs `cargo test live -- --nocapture --ignored`. Canonical runner for `_live`-suffixed `#[ignore]`'d tests that need network / external resources. See `feedback_live_test_naming.md`.
+
+#### flodl-hf: `HfTokenizer` (model-agnostic wrapper)
+
+`flodl-hf/src/tokenizer.rs` — thin façade over `tokenizers::Tokenizer`.
+
+- **`from_file(path)` + `from_pretrained(repo_id)`** (the latter gated on the `hub` feature).
+- **`encode(&[&str])` / `encode_on_device(&[&str], Device)`** return an `EncodedBatch` carrying `input_ids` / `attention_mask` / `token_type_ids` / `position_ids` as `i64 [B, S]` Variables.
+- **Sensible padding defaults** installed on load when `tokenizer.json` hasn't configured padding itself: `BatchLongest`, direction `Right`, `pad_id = token_to_id("[PAD]").unwrap_or(0)`. **No default truncation** — oversized texts error loudly at the model rather than silently truncate.
+- **Model-agnostic**: one wrapper serves BERT, GPT2, LLaMA, etc. The loaded `tokenizer.json` carries the model-specific pre-tokenizer and post-processor. For BERT, the raw 0/1 `attention_mask` still needs `build_extended_attention_mask` before `forward_multi`.
+
+#### flodl-hf: PyTorch forward-parity infrastructure
+
+`flodl-hf/` is now a self-contained sub-project with its own child `fdl.yml`. The root `fdl.yml` picks it up via the convention `flodl-hf:` entry (same shape as `ddp-bench:`).
+
+- **`fdl flodl-hf parity-bert`** regenerates the committed parity fixture:
+  - `flodl-hf/scripts/Dockerfile.parity` (`python:3.12-slim` + torch 2.8.0 CPU wheel + `transformers ~4.46` + `safetensors ~0.4` + `huggingface-hub ~0.26`).
+  - `flodl-hf/scripts/parity_bert.py` — loads `bert-base-uncased`, forces `torch.nn.attention.SDPBackend.MATH` for determinism, writes inputs + outputs + provenance metadata (`source_model` / `source_sha` / `torch_version` / `sdpa_backend`) to `flodl-hf/tests/fixtures/bert_base_uncased_parity.safetensors` (~16 KB).
+- **`flodl-hf/tests/bert_parity.rs`** → `bert_parity_vs_pytorch_live`. Asserts `max_abs_diff ≤ 1e-5` on `pooler_output` vs the HF Python reference. Observed on the reference host: **9.835e-7** (well under the 1e-5 tolerance, 10x headroom).
+- **`flodl-hf/tests/tokenizer_parity.rs`** → `bert_tokenizer_matches_parity_fixture_live`. Asserts `HfTokenizer` reproduces the exact pinned `input_ids` + `attention_mask` + `token_type_ids` from the parity fixture — `"hello world"` → `[101, 7592, 2088, 102]`. Closes the `text → tokens → BertModel → HF reference` loop end-to-end.
+- **`docker-compose.yml` gains the `hf-parity` service** (mounts workspace, `HF_HOME=/workspace/.hf-cache` for persistent weight / tokenizer cache; gitignored).
+- Both parity gates run via `fdl test-live`.
+
+#### flodl-hf: runnable examples
+
+- **`flodl-hf/examples/`** with a child `fdl.yml`, surfaced as `fdl flodl-hf example <name>`. Cleanly separates user-facing demos from dev tooling (`parity-bert`).
+- **`flodl-hf/examples/bert_embed.rs`** — closed-loop example: `HfTokenizer::from_pretrained` → `BertModel::from_pretrained` → `forward_multi` → per-sentence pooled embeddings. Prints `dim=768 L2=… head=[…]` for each input text in a batch.
+- **Cargo `[[example]]` stanzas** carry `required-features = ["hub", "tokenizer"]` so `--no-default-features` builds skip the example cleanly. Adding an example is three yml lines + one Cargo stanza.
+
+#### flodl-hf: BERT task heads
+
+Three fine-tuned heads on top of `BertModel`, each with a Laravel-flavoured `predict()` / `answer()` API and live parity tests against real Hub checkpoints. All three load with one line (`from_pretrained(repo_id)`), pulling weights, config, and tokenizer in one go. No per-head tokenizer setup, no separate `AutoTokenizer` call.
+
+- **`BertForSequenceClassification`** — `pooler_output → Dropout → Linear(hidden, num_labels)`. Parameter keys `classifier.{weight,bias}`. `predict(&[&str])` returns `Vec<Vec<(String, f32)>>` sorted descending by probability, with label names from the checkpoint's `id2label` (or `LABEL_k` fallback). Works out of the box with emotion / sentiment / toxicity / NLI fine-tunes such as `nateraw/bert-base-uncased-emotion`, `nlptown/bert-base-multilingual-uncased-sentiment`, `unitary/toxic-bert`.
+- **`BertForTokenClassification`** — `last_hidden_state → Dropout → Linear(hidden, num_labels)`. Parameter keys `classifier.{weight,bias}`. `predict(&[&str])` returns `Vec<Vec<TokenPrediction>>` with `{ token, label, score, attends }` per sub-token; the `attends` flag mirrors the attention mask so padding drops cleanly. Works with `dslim/bert-base-NER`, `dbmdz/bert-large-cased-finetuned-conll03-english`, etc.
+- **`BertForQuestionAnswering`** — `last_hidden_state → Linear(hidden, 2)` splitting into start/end logits. Parameter keys `qa_outputs.{weight,bias}`. `answer(question, context)` / `answer_batch(&[(q, c)])` return `Answer { text, start, end, score }` with the extracted span decoded through the attached tokenizer. Span search is restricted to context tokens (`token_type_id == 1`) so the question region can't be answered-with-itself. Works with `csarron/bert-base-uncased-squad-v1` and other SQuAD fine-tunes.
+- **`BertConfig` extended** with `num_labels: Option<i64>` and `id2label: Option<Vec<String>>`, parsed from `config.json`. Non-contiguous label ids (gap, duplicate) error loudly — silently reindexing would misalign names with logits rows.
+- **`BertModel::on_device_without_pooler`** — mirrors HF Python's `add_pooling_layer=False`. Emits `last_hidden_state` (`[B, S, H]`) instead of pooled output; the shape token-classification and QA heads consume. Backed by a shared private `bert_backbone_flow` helper so `BertModel` and every task head build on one source of truth.
+- **`HfTokenizer::encode_pairs(&[(&str, &str)])`** — paired encoding with `token_type_ids == 1` on the second segment. Required for QA; also useful for NLI and sentence-pair classification.
+- **Parity infrastructure per head**:
+  - `fdl flodl-hf parity-bert-seqcls` / `parity-bert-tokencls` / `parity-bert-qa` regenerate fixtures under `flodl-hf/tests/fixtures/bert_{seqcls,tokencls,qa}_parity.safetensors` against `nateraw/bert-base-uncased-emotion` / `dslim/bert-base-NER` / `csarron/bert-base-uncased-squad-v1` respectively. Each script pins a text input, forces the MATH SDPA backend, records source SHA + torch version in metadata. The SeqCls script chains through `convert_bin_to_safetensors.py` first because the emotion checkpoint is `.bin`-only.
+  - Matching `_live` integration tests (`bert_seqcls_parity_vs_pytorch_live`, `bert_tokencls_parity_vs_pytorch_live`, `bert_qa_parity_vs_pytorch_live`) assert `max_abs_diff ≤ 1e-5` on logits against the HF reference. Run via `fdl test-live`.
+- **Runnable examples**: `fdl flodl-hf example bert-classify` / `bert-ner` / `bert-qa`. Each demo loads a real fine-tune, runs a small pinned batch, prints the top labels / entities / extracted spans.
+
+#### flodl-hf: RoBERTa architecture + task heads
+
+`flodl-hf/src/models/roberta.rs` — full RoBERTa stack (`RobertaConfig`, `RobertaEmbeddings`, encoder layer, pooler, three task heads). Same attention + FFN shape as BERT, four load-bearing deltas that make RoBERTa-family checkpoints load cleanly without per-model tokenizer or input plumbing.
+
+- **`RobertaModel::from_pretrained(repo_id)`** — one-liner weight + config pull mirroring the BERT path. **Returns a pooler-free backbone by default** (`last_hidden_state` of shape `[B, S, hidden]`) since `roberta-base` and most fine-tunes don't ship pooler weights — RoBERTa pretraining drops BERT's NSP objective. HF Python silently random-initialises the pooler on load, which makes `pooler_output` non-reproducible; flodl-hf takes the opposite default and keeps the weight load strict. `RobertaModel::on_device` is still available for checkpoints that do carry their own pooler.
+- **Position ids computed internally** from `input_ids` using HF's padding-offset convention (`padding_idx + cumsum(mask) * mask`; real tokens start at `padding_idx + 1`). The graph takes **3 named inputs** (`input_ids`, `token_type_ids`, `attention_mask`) — no `position_ids` in the signature, matching HF Python's `RobertaModel.forward`. Callers don't need to know the quirk exists.
+- **`RobertaForSequenceClassification`** — uses the HF-native two-layer head on the `<s>` hidden state: `Dropout → dense → tanh → Dropout → out_proj`. Parameter keys `classifier.dense.{weight,bias}` + `classifier.out_proj.{weight,bias}` — not a single `classifier.{weight,bias}` like BERT. Works with `cardiffnlp/twitter-roberta-base-sentiment-latest`, `roberta-large-mnli`, `SamLowe/roberta-base-go_emotions`.
+- **`RobertaForTokenClassification`** — same `Dropout → Linear` shape as BERT's token-classification head; loads `Jean-Baptiste/roberta-large-ner-english`, `obi/deid_roberta_i2b2`, etc. `predict(&[&str]) → Vec<Vec<TokenPrediction>>`.
+- **`RobertaForQuestionAnswering`** — `qa_outputs.{weight,bias}` head. `answer(question, context)` / `answer_batch(&[(q, c)])` return `Answer { text, start, end, score }`. Span search is restricted to `sequence_id == 1` (see below), since RoBERTa's `token_type_ids` are uniformly zero and can't distinguish question from context. Works with `deepset/roberta-base-squad2`.
+- **`RobertaConfig::from_json_str`** parses all shape + task-head fields. Defaults track HF's `RobertaConfig`: `layer_norm_eps = 1e-5` (not BERT's `1e-12`), `type_vocab_size = 1`, `pad_token_id = 1`, `max_position_embeddings = 514` (holds `padding_idx` row + 512 real positions).
+- **Parity infrastructure per head**: `fdl flodl-hf parity-roberta` / `parity-roberta-seqcls` / `parity-roberta-tokencls` / `parity-roberta-qa` regenerate fixtures under `flodl-hf/tests/fixtures/roberta_*.safetensors` against `roberta-base`, `cardiffnlp/twitter-roberta-base-sentiment-latest`, `Jean-Baptiste/roberta-large-ner-english`, and `deepset/roberta-base-squad2`. Matching `_live` integration tests assert `max_abs_diff ≤ 1e-5` on pooled output / logits against the HF reference. Run via `fdl test-live`.
+- **Runnable examples**: `fdl flodl-hf example roberta-embed` / `roberta-classify` / `roberta-ner` / `roberta-qa`.
+
+#### flodl-hf: shared encoder layer + `LayerNaming` abstraction
+
+`flodl-hf/src/models/transformer_layer.rs` introduces a single `TransformerLayer` module reused across BERT, RoBERTa, and DistilBERT. The three families share the same mathematical encoder block (self-attention + residual + LayerNorm, two-layer GELU FFN + residual + LayerNorm); only the HF weight-key suffixes differ. `LayerNaming` carries the per-family mapping as a `const` struct of 8 static strings, swapped at construction time.
+
+- **`LayerNaming::BERT`** covers both BERT and RoBERTa (`attention.self.{query,key,value}`, `attention.output.dense`, `attention.output.LayerNorm`, `intermediate.dense`, `output.dense`, `output.LayerNorm`).
+- **`LayerNaming::DISTILBERT`** maps to DistilBERT's flatter layout (`attention.{q_lin,k_lin,v_lin,out_lin}`, `sa_layer_norm`, `ffn.{lin1,lin2}`, `output_layer_norm`).
+- `bert.rs` and `roberta.rs` collapsed from ~1800 + ~1250 lines to their embeddings + pooler + task heads; six duplicated encoder-layer structs per family (`*SelfAttention`, `*SelfOutput`, `*Attention`, `*Intermediate`, `*Output`, `*Layer`) replaced by one shared implementation. Existing parity tests gate the refactor at `max_abs_diff <= 1e-5` vs HF Python on 8 pinned checkpoints; numbers unchanged by the collapse.
+
+#### flodl-hf: DistilBERT architecture + task heads
+
+`flodl-hf/src/models/distilbert.rs` ships the 6-layer distilled BERT family (`DistilBertConfig`, `DistilBertEmbeddings`, `DistilBertModel`, three task heads). Encoder block shared with BERT / RoBERTa via `LayerNaming::DISTILBERT` (see above). Load-bearing deltas from the BERT port:
+
+- **`DistilBertModel::from_pretrained(repo_id)`** returns a pooler-free `Graph` taking **2 named inputs**: `input_ids` (implicit) + `attention_mask`. No `token_type_ids` (DistilBERT is single-segment; the embedding table doesn't exist) and no `position_ids` (sequential `0..S` computed internally via `Tensor::arange + reshape + expand`). Callers ignore both quirks.
+- **`DistilBertConfig::from_json_str`** reads HF's native field names exactly: `n_layers` / `n_heads` / `dim` / `hidden_dim` rather than BERT's `num_hidden_layers` / `num_attention_heads` / `hidden_size` / `intermediate_size`. HF docs cross-reference friction-free; the encoder instantiation pays a tiny adapter cost. Plus the two DistilBERT-specific dropouts `qa_dropout` (typical `0.1`) and `seq_classif_dropout` (typical `0.2`), and `sinusoidal_pos_embds` (parsed but unused: HF Python overwrites the sinusoidal init with the checkpoint's learned positions, so every public checkpoint ships a trained table).
+- **`DistilBertForSequenceClassification`** uses HF's two-layer head on the first token's hidden state: `select(CLS) -> pre_classifier (dim -> dim) -> ReLU -> Dropout(seq_classif_dropout) -> classifier (dim -> num_labels)`. Parameter keys `pre_classifier.{weight,bias}` + `classifier.{weight,bias}` are siblings at the root level, not nested. Works with `lxyuan/distilbert-base-multilingual-cased-sentiments-student` (3-class sentiment, multilingual).
+- **`DistilBertForTokenClassification`** — `last_hidden_state -> Dropout -> Linear(dim, num_labels)`. Parameter keys `classifier.{weight,bias}`. `predict(&[&str]) -> Vec<Vec<TokenPrediction>>`. Works with `dslim/distilbert-NER` (PER / ORG / LOC / MISC BIO, 9 labels).
+- **`DistilBertForQuestionAnswering`** — `last_hidden_state -> Dropout(qa_dropout) -> Linear(dim, 2)`. Parameter keys `qa_outputs.{weight,bias}`. `answer(question, context)` / `answer_batch(&[(q, c)])` return `Answer { text, start, end, score }`; span search restricted to `sequence_ids == 1` (reuses the model-agnostic filter added with `EncodedBatch.sequence_ids`). Works with `distilbert/distilbert-base-cased-distilled-squad`.
+- **Parity infrastructure per head**: `fdl flodl-hf parity-distilbert` / `parity-distilbert-seqcls` / `parity-distilbert-tokencls` / `parity-distilbert-qa` regenerate fixtures under `flodl-hf/tests/fixtures/distilbert_*.safetensors` against the four pinned checkpoints. Matching `_live` integration tests assert `max_abs_diff <= 1e-5` on logits / hidden state. Observed on the reference host: `distilbert-base-uncased` backbone **1.431e-6**, `lxyuan/*-sentiments-student` SeqCls **2.384e-7** (42x headroom), `dslim/distilbert-NER` TokenCls **3.815e-6**, `distilbert/distilbert-base-cased-distilled-squad` QA **2.623e-6**.
+- **Runnable examples**: `fdl flodl-hf example distilbert-embed` / `distilbert-classify` / `distilbert-ner` / `distilbert-qa`.
+
+#### flodl-hf: AutoModel family dispatch
+
+One-liner Hub loading over the BERT / RoBERTa / DistilBERT families without the caller having to know which family the checkpoint belongs to. Dispatches on `config.json`'s `model_type` field, mirroring HF Python's `AutoModel` / `AutoModelForSequenceClassification` / … entry points.
+
+- **`flodl-hf::models::auto::AutoConfig`** — enum over `BertConfig` / `RobertaConfig` / `DistilBertConfig`, parsed by `AutoConfig::from_json_str`. Dispatches on `model_type` (`bert` / `roberta` / `distilbert`). Unsupported values (`modernbert`, `xlm-roberta`, `electra`, …) surface a loud error naming the offending type and listing the supported set. A new `config_json::required_string` helper backs the dispatch read.
+- **`AutoModel::from_pretrained(repo_id)` / `::from_pretrained_on_device`** — returns a `Graph`. Routes BERT through `BertModel::on_device_without_pooler` so the output is always `last_hidden_state` of shape `[batch, seq_len, hidden]`, consistent across the three families. Diverges intentionally from HF Python's `BertModel.from_pretrained` (which includes the pooler); when BERT's pooler output is specifically needed, use `BertModel::from_pretrained` directly. The returned graph's `forward_multi` input count still varies by family (BERT: 4, RoBERTa: 3, DistilBERT: 2); callers that run the graph directly need to match that, the task-head wrappers below hide it.
+- **`AutoModelForSequenceClassification` / `AutoModelForTokenClassification` / `AutoModelForQuestionAnswering`** — enums over the per-family concrete heads. `from_pretrained(repo_id)` dispatches loading; `predict(&[&str])` / `answer(question, context)` / `answer_batch(&[(q, c)])` run inference with a unified signature. `with_tokenizer` and `graph()` / `labels()` accessors delegate to the inner head. The same code path serves `bert-base-uncased`, `roberta-base`, and `distilbert-base-uncased`.
+- **Runnable example**: `fdl flodl-hf example auto-classify -- <repo_id>`. Default: `cardiffnlp/twitter-roberta-base-sentiment-latest`; pass any BERT / RoBERTa / DistilBERT classification checkpoint as `argv[1]`. Same three-line caller regardless of family.
+- **No new parity fixtures**: AutoModel is a pure dispatch layer over already-tested per-family paths. Unit tests cover `AutoConfig::from_json_str` dispatch for all three families plus unknown-model-type and malformed-input error cases.
+
+#### flodl-manager: `fdl add flodl-hf` scaffold + `fdl init --with-hf`
+
+Closes the "very rustic" discovery gap. Before today, a user with a fresh flodl project couldn't find flodl-hf without reading docs, editing their `Cargo.toml` manually, and guessing the right feature flavors. Now one command drops a working playground.
+
+- **`fdl add flodl-hf` (alias: `fdl add hf`)** — scaffolds a `./flodl-hf/` sub-crate inside the current flodl project. Standalone cargo crate with its own `Cargo.toml` + `src/main.rs` (a one-file `AutoModel` classifier that takes a repo id from argv) + `fdl.yml` with runnable commands (`classify`, `bert`, `distilbert-sentiment`, plus `build` / `check` / `shell`) + `README.md` documenting the three feature flavors (full / vision-only / offline), the `fdl flodl-hf convert` workflow for `.bin`-only repos, and how to wire flodl-hf into a main crate when the user is ready.
+- **Version lockstep**: the scaffold parses the host project's `flodl = "X.Y.Z"` dependency (plain, table, or workspace-inherited form) and pins `flodl-hf` to the matching `=X.Y.Z`. Git-only and path-only flodl deps error with actionable guidance rather than silently picking a version.
+- **Scope contract**: no mutation of the user's root `Cargo.toml` or `fdl.yml`. The playground is a side crate for hands-on discovery; wiring flodl-hf into the user's main code stays their call. The generated README walks through it.
+- **Idempotent**: refuses to overwrite an existing `./flodl-hf/` directory. Users delete explicitly if they want a regenerate.
+- **`fdl init --with-hf`** and **interactive prompt**: `fdl init` now asks "Include flodl-hf (HuggingFace: BERT/RoBERTa/DistilBERT, Hub loader, tokenizer)?" after the Docker/native choice. `--with-hf` bypasses the prompt for scripted invocations; any explicit `--docker` / `--native` / `--with-hf` flag puts init in non-interactive mode, respecting `--with-hf` verbatim.
+- **Templates live in `flodl-hf/scaffold/`** — same crate, always version-synced with the `flodl-hf` source tree, no release gymnastics between template and crate. Baked into the `fdl` binary via `include_str!` at compile time. Works out of the box for users building `fdl` from the flodl workspace; `cargo install flodl-cli` from crates.io standalone is documented as a known gap pending a later crate-packaging pass.
+- **Host-project mode detection**: `fdl add flodl-hf` inspects the parent dir to decide how to wire the scaffolded commands. `docker-compose.yml` present → Docker mode, scaffolded `fdl.yml` keeps `docker: dev` on each cargo command so `fdl classify` dispatches into the `dev` service. `docker-compose.yml` absent → Native mode, `docker:` lines stripped so `fdl classify` runs `cargo run --release` directly on the host. The invariant `fdl.yml` (or `fdl.yml.example`) must be present is enforced loudly: a missing fdl config aborts the scaffold with "expects an initialised flodl project". `.bin`-to-safetensors conversion is documented as a direct Python invocation in the scaffold README (`pip install torch transformers safetensors` + inline script) rather than assuming the rdl-repo-internal `fdl flodl-hf convert` Docker service is available in user projects.
+- **First slice of the broader flodl-manager roadmap line**: deliberately narrow. `fdl add` supports only `flodl-hf` today; per-model feature flavors (`fdl add hf --for bert|vit|offline`), `fdl build` / `clippy` argv forwarding, and `fdl doctor` / `model-info` stay on the roadmap for follow-up arcs.
+
+#### flodl-hf: `EncodedBatch.sequence_ids` + model-agnostic QA span filter
+
+- **`EncodedBatch` gains `sequence_ids: Variable`** — per-token segment tag from the HF tokenizer (`0` = first sequence, `1` = second sequence, `-1` = special / padding). This is the canonical HF signal for "which part of a pair encoding does this token belong to"; it's model-agnostic, where `token_type_ids` is a model input whose semantics vary (BERT sets segment B to 1; RoBERTa keeps everything at zero).
+- **`BertForQuestionAnswering::extract` switched** from `token_type_ids == 1` to `sequence_ids == 1` for context-region filtering. Behaviour is bit-identical on BERT (the tokenizer sets both equal), but the same code now works across the full BERT family.
+
+#### flodl: `LayerNorm` with custom epsilon
+- **`LayerNorm::with_eps`** and **`LayerNorm::on_device_with_eps`** — constructors accepting a custom epsilon, required for HuggingFace BERT (`eps = 1e-12`) and any architecture deviating from the PyTorch `1e-5` default.
+- **`LayerNorm::DEFAULT_EPS`** associated constant.
+- Hand-computed golden-value test anchors the eps-reaches-the-kernel claim (not just "doesn't panic").
+
+#### flodl: Native `torch.embedding` FFI with `padding_idx`
+- **FFI chain**: `flodl_embedding` shim in `flodl-sys/{shim.h, ops_training.cpp, src/lib.rs}` → `Tensor::embedding(weight, indices, padding_idx)` → `autograd::embedding(weight, indices, padding_idx)`. Delegates to libtorch's `at::embedding` directly, replacing the previous `index_select + reshape` manual path in `Embedding::forward`.
+- **`Embedding::with_padding_idx`** and **`Embedding::on_device_with_padding_idx`** — constructors accepting `Option<i64>`. The gradient of the `padding_idx` row is masked to zero during backward by the native kernel, so the PAD embedding doesn't drift during fine-tuning. Range-checked at construction.
+- **`Embedding::NO_PADDING = -1`** associated constant (sentinel matching `at::embedding`'s convention).
+- For LLaMA-style checkpoints where `pad_token_id == eos_token_id`, pass `padding_idx = None` — otherwise the EOS row freezes, silently breaking fine-tuning.
+- `Embedding::forward` now handles indices of any shape, returning `[*indices.shape, embedding_dim]` without manual reshape.
+
+#### flodl: `scaled_dot_product_attention` FFI
+
+Full FFI chain adding fused attention to flodl. Used internally by `BertSelfAttention`; available to any flodl model that wants fused softmax(QKᵀ/√d)V + optional masking + optional dropout.
+
+- **`flodl_scaled_dot_product_attention`** shim in `flodl-sys/{shim.h, ops_nn.cpp, src/lib.rs}`.
+- **`Tensor::scaled_dot_product_attention(q, k, v, attn_mask: Option<&Tensor>, dropout_p, is_causal, scale: Option<f64>)`** in `flodl/src/tensor/nn_ops.rs`.
+- **`autograd::scaled_dot_product_attention(...)`** (re-exported as `flodl::scaled_dot_product_attention`) — backward via native libtorch autograd, same `Variable::wrap` pattern as `embedding`.
+- Sentinel conventions: `attn_mask = None` for no mask; `scale = None` (or any `Some(x)` with `x <= 0.0`) selects the default `1/sqrt(E)`.
+- Parity test `test_sdpa_parity_vs_naive` anchors the fused kernel against a hand-rolled `softmax(QKᵀ/√d)V` implementation; `test_sdpa_backward` covers the autograd path.
+- libtorch 2.10.0; SDPA shipped in 2.0, so safe under any supported variant.
+
+### Changed
+
+- **`Embedding::forward` input dtype**: the preferred input is now `i64`. The legacy f32-indices path is kept as a fallback but emits a one-shot stderr deprecation warning (`"[flodl] deprecated: Embedding::forward received non-i64 indices; this fallback will be removed in a future release. Pass i64 tensors via Tensor::from_i64."`) the first time it fires per process. Internal tests that previously used `from_f32` indices have been migrated to `Tensor::from_i64`.
+
+### Fixed
+
+- **DDP test flake under full-suite CUDA contention**: `distributed::ddp_run::tests::test_epoch_fn_called_per_epoch` and `::test_epoch_fn_set_lr` now explicitly use `ApplyPolicy::Sync`. Both assumed `count == num_epochs * world_size`, which only holds in Sync mode: under the default `Cadence`, progressive dispatch lets a fast rank drain an epoch's pool past a slow rank's share, so the slow rank legitimately receives fewer `StartEpoch` events. Designed behaviour for progressive streaming; the test assumption was wrong.
+
+### Removed
+
+- **`Embedding` struct fields `num_embeddings` and `embedding_dim`** — both were stored but never read after the move to `at::embedding`. Fields were private; no user-visible impact.
+
 ## [0.5.1] - 2026-04-19
 
 ### Added

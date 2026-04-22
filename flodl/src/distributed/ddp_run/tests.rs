@@ -1270,6 +1270,28 @@ fn test_epoch_fn_called_per_epoch() {
     let epochs_c = epochs_seen.clone();
 
     let num_epochs = 3;
+    // ApplyPolicy::Sync is required for this test's assertion shape.
+    // The contract flodl's DDP actually guarantees is batch-based, not
+    // epoch-based: `max_batch_diff` / `max_overshoot` bounds how far
+    // ranks can diverge in batches per sync cycle. Epoch boundaries are
+    // bookkeeping on top of that. At production scale this is invisible
+    // — `max_overshoot` (default ceiling 15) is a tiny fraction of the
+    // pool, so every rank receives every epoch's plan in practice.
+    //
+    // This test uses a tiny dataset (100 samples / batch 4 → 25
+    // batches, planned share ~12 per rank) where the overshoot cap
+    // exceeds the per-rank share. Under progressive mode (Cadence /
+    // Async, see coordinator/mod.rs:405) a fast rank can legally drain
+    // the whole pool, leaving the slow rank with no `StartEpoch` plan
+    // for that epoch — which means fewer than `num_epochs * world`
+    // epoch_fn firings. Expected behaviour at this scale, not a bug.
+    //
+    // Sync is the only policy where `count == num_epochs * world`
+    // holds at any dataset size; that's what this test is anchoring.
+    // For an epoch_fn test under progressive semantics, see a future
+    // test that asserts the weaker invariant (every epoch fires at
+    // least once across the cluster, no rank fires the same epoch
+    // twice).
     let ddp = DdpHandle::builder(
         |dev| Linear::on_device(4, 2, dev),
         |params| crate::nn::SGD::new(params, 0.01, 0.0),
@@ -1279,6 +1301,7 @@ fn test_epoch_fn_called_per_epoch() {
     .batch_size(4)
     .num_epochs(num_epochs)
     .backend(AverageBackend::Cpu)
+    .policy(ApplyPolicy::Sync)
     .epoch_fn(move |epoch, worker| {
         counter_c.fetch_add(1, Ordering::Relaxed);
         epochs_c.lock().unwrap().push(epoch);
@@ -1290,14 +1313,29 @@ fn test_epoch_fn_called_per_epoch() {
 
     let world = ddp.world_size();
     let _state = ddp.join().unwrap();
-    // epoch_fn fires once per epoch per worker
-    assert_eq!(counter.load(Ordering::Relaxed), num_epochs * world);
+
+    // Instrumented assertions: on regression, dump the full observed
+    // state. In Sync mode (pinned above) each rank must see each epoch
+    // exactly once; any drift is a real bug in the Sync dispatcher, not
+    // the progressive streaming path.
+    let got_counter = counter.load(Ordering::Relaxed);
+    let expected_counter = num_epochs * world;
+
     let mut seen = epochs_seen.lock().unwrap().clone();
     seen.sort();
-    // Each worker sees [0, 1, 2]; with N workers we get N copies
-    let mut expected: Vec<usize> = (0..num_epochs).cycle().take(num_epochs * world).collect();
-    expected.sort();
-    assert_eq!(seen, expected);
+    let mut expected_epochs: Vec<usize> = (0..num_epochs).cycle().take(num_epochs * world).collect();
+    expected_epochs.sort();
+
+    assert_eq!(
+        got_counter, expected_counter,
+        "epoch_fn fire count mismatch — got {got_counter}, expected {expected_counter}. \
+         world_size={world}, num_epochs={num_epochs}, epochs_seen={seen:?}.",
+    );
+    assert_eq!(
+        seen, expected_epochs,
+        "epoch_fn epoch-index set mismatch — got {seen:?}, expected {expected_epochs:?}. \
+         world_size={world}, num_epochs={num_epochs}, counter={got_counter}.",
+    );
 }
 
 #[test]
@@ -1307,6 +1345,10 @@ fn test_epoch_fn_set_lr() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count_c = call_count.clone();
 
+    // Sync policy required (see `test_epoch_fn_called_per_epoch` for
+    // the full rationale). In Sync every rank fires `epoch_fn` for
+    // every epoch, so `lr` stays consistent across ranks during each
+    // gradient average — which is what this test actually verifies.
     let ddp = DdpHandle::builder(
         |dev| Linear::on_device(4, 2, dev),
         |params| crate::nn::SGD::new(params, 0.01, 0.0),
@@ -1316,6 +1358,7 @@ fn test_epoch_fn_set_lr() {
     .batch_size(4)
     .num_epochs(3)
     .backend(AverageBackend::Cpu)
+    .policy(ApplyPolicy::Sync)
     .epoch_fn(move |epoch, worker| {
         // Simulate a LR schedule: decrease LR each epoch
         let lr = 0.01 * (1.0 - epoch as f64 * 0.3);

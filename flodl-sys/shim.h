@@ -439,6 +439,16 @@ char* flodl_bilinear(FlodlTensor input1, FlodlTensor input2,
 char* flodl_grid_sample(FlodlTensor input, FlodlTensor grid,
                       int mode, int padding_mode, int align_corners,
                       FlodlTensor* result);
+
+// --- Scaled dot-product attention ---
+// Fused attention via at::scaled_dot_product_attention. Pass `attn_mask`
+// as nullptr for no mask. `scale <= 0.0` selects the default 1/sqrt(d).
+char* flodl_scaled_dot_product_attention(
+    FlodlTensor query, FlodlTensor key, FlodlTensor value,
+    FlodlTensor attn_mask,
+    double dropout_p, int is_causal, double scale,
+    FlodlTensor* result);
+
 // --- Fused ops ---
 
 char* flodl_linear(FlodlTensor input, FlodlTensor weight, FlodlTensor bias,
@@ -748,6 +758,15 @@ char* flodl_dropout(FlodlTensor input, double p, int training,
                     FlodlTensor* result);
 char* flodl_feature_dropout(FlodlTensor input, double p, int training,
                             FlodlTensor* result);
+
+// --- Embedding lookup ---
+// Plain embedding: indexes rows of `weight` by `indices`. `padding_idx = -1`
+// disables padding; any other valid index zeros out that row's gradient
+// during backward (matches PyTorch `nn.functional.embedding`).
+char* flodl_embedding(FlodlTensor weight, FlodlTensor indices,
+                      int64_t padding_idx,
+                      int scale_grad_by_freq, int sparse,
+                      FlodlTensor* result);
 
 // --- Embedding bag ---
 // Fused embedding lookup + reduction (sum / mean / max).

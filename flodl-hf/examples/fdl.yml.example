@@ -1,0 +1,70 @@
+description: flodl-hf runnable examples
+
+commands:
+  bert-embed:
+    description: Load bert-base-uncased and embed a batch of text (closed-loop text → pooled output)
+    run: cargo run --release --example bert_embed
+    docker: dev
+
+  bert-classify:
+    description: Sequence classification — download a fine-tuned sentiment/emotion checkpoint and predict labels
+    run: cargo run --release --example bert_classify
+    docker: dev
+
+  bert-ner:
+    description: Named-entity recognition — download a NER checkpoint and tag tokens
+    run: cargo run --release --example bert_ner
+    docker: dev
+
+  bert-qa:
+    description: Extractive question answering — download a SQuAD checkpoint and extract answer spans
+    run: cargo run --release --example bert_qa
+    docker: dev
+
+  roberta-embed:
+    description: Load roberta-base and embed a batch of text (closed-loop text → pooled output)
+    run: cargo run --release --example roberta_embed
+    docker: dev
+
+  roberta-classify:
+    description: Sequence classification — download a RoBERTa sentiment checkpoint and predict labels
+    run: cargo run --release --example roberta_classify
+    docker: dev
+
+  roberta-ner:
+    description: Named-entity recognition — download a RoBERTa NER checkpoint and tag tokens
+    run: cargo run --release --example roberta_ner
+    docker: dev
+
+  roberta-qa:
+    description: Extractive question answering — download a RoBERTa SQuAD checkpoint and extract answer spans
+    run: cargo run --release --example roberta_qa
+    docker: dev
+
+  distilbert-embed:
+    description: Load distilbert-base-uncased and embed a batch of text (closed-loop text → CLS hidden state)
+    run: cargo run --release --example distilbert_embed
+    docker: dev
+
+  distilbert-classify:
+    description: Sequence classification — download a DistilBERT sentiment checkpoint and predict labels
+    run: cargo run --release --example distilbert_classify
+    docker: dev
+
+  distilbert-ner:
+    description: Named-entity recognition — download a DistilBERT NER checkpoint and tag tokens
+    run: cargo run --release --example distilbert_ner
+    docker: dev
+
+  distilbert-qa:
+    description: Extractive question answering — download a DistilBERT SQuAD checkpoint and extract answer spans
+    run: cargo run --release --example distilbert_qa
+    docker: dev
+
+  auto-classify:
+    description: Family-agnostic sequence classification — AutoModel dispatches BERT/RoBERTa/DistilBERT from config.json
+    run: cargo run --release --example auto_classify
+    docker: dev
+
+  # Adding an example is three lines plus an entry in flodl-hf/Cargo.toml
+  # (`[[example]] name = "..." required-features = [...]`).

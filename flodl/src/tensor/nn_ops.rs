@@ -568,6 +568,67 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
+    /// Fused scaled dot-product attention via libtorch's
+    /// `at::scaled_dot_product_attention`. Picks flash / mem-efficient / math
+    /// implementation at runtime based on inputs, hardware, and dtype.
+    ///
+    /// Shapes:
+    /// - `query`: `[*, Lq, E]`
+    /// - `key`: `[*, Lk, E]`
+    /// - `value`: `[*, Lk, Ev]`
+    /// - `attn_mask`: optional `[*, Lq, Lk]` (broadcastable); additive float
+    ///   or boolean. Bool masks mark positions to skip.
+    /// - Output: `[*, Lq, Ev]`.
+    ///
+    /// `dropout_p`: applied to attention probs (0.0 = disabled).
+    /// `is_causal`: apply a causal triangular mask (ignored if `attn_mask`
+    /// is also given — libtorch rejects both).
+    /// `scale`: `None` uses the default `1/sqrt(E)`.
+    pub fn scaled_dot_product_attention(
+        query: &Tensor, key: &Tensor, value: &Tensor,
+        attn_mask: Option<&Tensor>,
+        dropout_p: f64, is_causal: bool, scale: Option<f64>,
+    ) -> Result<Tensor> {
+        let mask_handle = attn_mask.map_or(ptr::null_mut(), |m| m.handle);
+        // Sentinel: non-positive scale means "use default".
+        let scale_arg = scale.filter(|&s| s > 0.0).unwrap_or(-1.0);
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_scaled_dot_product_attention(
+                query.handle, key.handle, value.handle,
+                mask_handle,
+                dropout_p, if is_causal { 1 } else { 0 }, scale_arg,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Plain embedding lookup using libtorch's native `at::embedding`.
+    ///
+    /// `weight`: `[num_embeddings, embedding_dim]` embedding table.
+    /// `indices`: i64 tensor of any shape containing token indices.
+    /// `padding_idx`: row whose gradient is masked to zero during backward,
+    /// or `-1` to disable padding entirely.
+    ///
+    /// Output shape: `[*indices.shape, embedding_dim]`.
+    pub fn embedding(
+        weight: &Tensor, indices: &Tensor, padding_idx: i64,
+    ) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe {
+            ffi::flodl_embedding(
+                weight.handle, indices.handle,
+                padding_idx,
+                /*scale_grad_by_freq=*/0, /*sparse=*/0,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
     /// Fused embedding lookup + reduction (sum / mean / max).
     ///
     /// `weight`: `[num_embeddings, embedding_dim]` embedding table.

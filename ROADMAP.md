@@ -30,6 +30,14 @@ For the historical record of shipped phases and individual changes, see
   first-arg routing, deep-merge, conflict detection, and
   `fdl config show`. See
   [docs/design/run-config.md](docs/design/run-config.md).
+- **HuggingFace integration** scaffolded as sibling crate `flodl-hf`:
+  BERT, RoBERTa, DistilBERT with three task heads each (sequence /
+  token classification, extractive QA), `AutoModel` dispatch from
+  `config.json`'s `model_type`, `HfTokenizer`, strict-load safetensors
+  with key-set validation, `from_pretrained` Hub integration, PyTorch
+  parity tests at `max_abs_diff <= 1e-5` on nine pinned checkpoints.
+  `fdl add flodl-hf` and `fdl init --with-hf` close the discovery gap
+  with a one-command scaffold.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
@@ -37,10 +45,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
 ## In progress
 
-- *(empty — ready to pull the next item from Possibilities)*
-
-(Length-1 by design. The next item pulls from Possibilities when this
-ships.)
+(empty: choosing the next pull from Possibilities. Length-1 by
+design.)
 
 ---
 
@@ -70,9 +76,19 @@ not a commitment; only moving one to In Progress is.
 - **Model parallelism**: tensor / pipeline parallelism for models that
   exceed single-GPU VRAM.
 - **Higher-order gradients**: differentiate through backward.
-- **HuggingFace fine-tuning**: safetensors loader, `tokenizers` crate
-  integration, LoRA adapters, pre-built architectures (LLaMA, BERT).
-  Fine-tune published models on heterogeneous consumer GPUs with ElChe.
+- **flodl-hf next**: ModernBERT (RoPE, GeGLU, alternating local/global
+  attention), LLaMA (RoPE, GQA, SwiGLU, then the architecture), LoRA
+  adapters, ViT. Then the fine-tuning loop on heterogeneous consumer
+  GPUs with ElChe, the original arc continuation. See
+  [docs/design/cloud-ddp.md](docs/design/cloud-ddp.md) for the
+  downstream ElChe tie-in.
+- **flodl-manager CLI evolution**: extend `fdl add` with flodl-aware
+  feature selection (`fdl add hf --for bert|vit|offline`), argv
+  forwarding on `fdl build` / `fdl clippy` so feature matrices can be
+  exercised without falling back to raw `docker compose run`, and
+  `model-info` / `doctor` commands. Makes `fdl` a true DL package
+  manager on top of cargo. The first slice (`fdl add flodl-hf` +
+  `fdl init --with-hf`) shipped in 0.5.2.
 
 ---
 

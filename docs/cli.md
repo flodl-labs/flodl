@@ -361,6 +361,21 @@ fdl init my-model --docker   # Docker with libtorch baked into the image
 fdl init my-model --native   # no Docker; libtorch and cargo on the host
 ```
 
+Add `--with-hf` to include the
+[flodl-hf](tutorials/14-flodl-hf.md) HuggingFace playground in the
+generated project:
+
+```bash
+fdl init my-model --with-hf            # Docker + flodl-hf side crate
+fdl init my-model --native --with-hf   # Native + flodl-hf side crate
+```
+
+`--with-hf` skips the interactive "Include flodl-hf?" prompt when mode
+flags are present. In fully interactive mode (`fdl init my-model` with
+no flag), a prompt offers the same choice after the Docker / native
+selection. See `fdl add` below for adding flodl-hf to an existing
+project later.
+
 In all three modes the scaffold generates:
 
 - `Cargo.toml` -- flodl dependency and optimized profiles.
@@ -390,6 +405,50 @@ dispatches straight to `cargo build`.
 > `libtorch/.active` by flodl-cli before each dispatch — the logic that
 > used to live in the scaffolded Makefile now lives in one place inside
 > the binary.
+
+### `fdl add`
+
+Add an ecosystem crate as a side playground inside an initialised flodl
+project. Today this means `flodl-hf` (alias `hf`); the command is
+designed to grow as more sibling crates land.
+
+```bash
+fdl add flodl-hf             # scaffold ./flodl-hf/
+fdl add hf                   # short alias, same effect
+```
+
+The scaffold drops a standalone cargo crate under `./flodl-hf/` with
+its own `Cargo.toml`, a one-file `AutoModel` classifier
+(`src/main.rs`), a nested `fdl.yml` with runnable commands (`classify`,
+`bert`, `roberta-sentiment`, `distilbert-sentiment`, plus `build` /
+`check` / `shell`), and a `README` covering the three feature flavors
+(full / vision-only / offline) and the `.bin`-to-safetensors conversion
+workflow.
+
+Key properties:
+
+- **Version lockstep**: the scaffold parses the host project's
+  `flodl = "X.Y.Z"` dependency and pins `flodl-hf` to the matching
+  `=X.Y.Z`. Git-only or path-only flodl deps error with actionable
+  guidance.
+- **Scope contract**: no mutation of the host project's root
+  `Cargo.toml` or `fdl.yml`. The playground is a side crate for
+  discovery; wiring flodl-hf into the main code stays the caller's
+  decision.
+- **Mode detection**: `fdl add flodl-hf` inspects the parent dir to
+  pick Docker or native mode. `docker-compose.yml` present, the
+  scaffolded `fdl.yml` keeps `docker: dev` on each cargo command so
+  commands dispatch into the `dev` service. `docker-compose.yml`
+  absent, the `docker:` lines are stripped.
+- **Idempotent**: refuses to overwrite an existing `./flodl-hf/`
+  directory. Delete explicitly to regenerate.
+- **Requires a flodl project**: either `fdl.yml` or `fdl.yml.example`
+  must be present in the parent. Missing manifest errors with
+  "expects an initialised flodl project".
+
+See the
+[HuggingFace Integration tutorial](tutorials/14-flodl-hf.md) for the
+full usage walkthrough of what the scaffold enables.
 
 ### `fdl diagnose`
 
@@ -990,8 +1049,32 @@ fdl build              # debug build
 fdl clippy             # lint (tests + workspace + ddp-bench)
 fdl test               # all CPU tests
 fdl test-release       # tests in release mode
+fdl test-live          # tests needing network / external resources (see below)
 fdl doc                # rustdoc, strict (-D warnings)
 ```
+
+### Live tests
+
+`fdl test-live` runs integration tests that depend on network access or
+external resources (Hugging Face Hub downloads, cached safetensors
+checkpoints, etc.). The canonical pattern:
+
+- Test name ends in `_live`.
+- Test is annotated `#[ignore = "live: requires network"]` (or similar
+  reason) so `fdl test` skips it by default.
+- `fdl test-live` delegates to
+  `cargo test live -- --nocapture --ignored`, which picks them up.
+
+flodl-hf uses this for its PyTorch parity tests
+(`bert_parity_vs_pytorch_live`, `bert_tokenizer_matches_parity_fixture_live`,
+and the RoBERTa / DistilBERT siblings), each asserting
+`max_abs_diff <= 1e-5` on logits or hidden state against a pinned HF
+Python reference. Weights cache under `.hf-cache/` via
+`HF_HOME=/workspace/.hf-cache` in the Docker service.
+
+Any project (not just flodl itself) can adopt the `_live` suffix +
+`#[ignore]` convention; `fdl test-live` picks up any test matching
+the pattern within its `cargo test` scope.
 
 ### CUDA / GPU testing
 
@@ -1031,6 +1114,43 @@ fdl ddp-bench validate                # full DDP validation matrix
 fdl ddp-bench validate --report out   # validation + write report to out/
 fdl ddp-bench --help                  # list all presets + options
 ```
+
+### HuggingFace (flodl-hf)
+
+`flodl-hf/` is another `path:`-kind sub-command with its own
+`fdl.yml`, enabled through the convention entry `flodl-hf:` in the
+root manifest. Same shape as `ddp-bench/` and `benchmarks/`: the root
+declares the sub-command, the child `fdl.yml` defines its tasks.
+
+```bash
+fdl flodl-hf                          # list sub-commands
+fdl flodl-hf convert <repo_id>        # convert pytorch_model.bin -> model.safetensors
+
+# Runnable examples (thirteen demos across BERT / RoBERTa / DistilBERT)
+fdl flodl-hf example                  # list example names
+fdl flodl-hf example auto-classify    # family-agnostic via AutoModel
+fdl flodl-hf example bert-embed       # + bert-classify / bert-ner / bert-qa
+fdl flodl-hf example roberta-embed    # + roberta-classify / -ner / -qa
+fdl flodl-hf example distilbert-embed # + distilbert-classify / -ner / -qa
+
+# Parity-fixture regeneration (contributors; twelve per-head commands)
+fdl flodl-hf parity-bert              # bert-base-uncased backbone fixture
+fdl flodl-hf parity-bert-seqcls       # per-head fixtures
+fdl flodl-hf parity-bert-tokencls
+fdl flodl-hf parity-bert-qa
+fdl flodl-hf parity-roberta           # + seqcls / tokencls / qa
+fdl flodl-hf parity-distilbert        # + seqcls / tokencls / qa
+```
+
+Parity regen runs in a dedicated `hf-parity` Docker service
+(`python:3.12-slim` + torch CPU wheel + `transformers`) declared in
+`docker-compose.yml`. `HF_HOME=/workspace/.hf-cache` keeps weights and
+tokenizers cached between runs (gitignored).
+
+See the
+[HuggingFace Integration tutorial](tutorials/14-flodl-hf.md) for
+end-user usage of the crate itself (API walkthroughs, install
+profiles, `AutoModel` dispatch).
 
 ### Interactive shells
 

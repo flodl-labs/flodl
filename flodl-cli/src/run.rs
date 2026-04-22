@@ -130,6 +130,129 @@ fn inside_docker() -> bool {
     Path::new("/.dockerenv").exists()
 }
 
+/// Default container path we assume the host project root is mounted
+/// at when `docker-compose.yml` is missing or can't be parsed.
+/// Matches the convention `fdl init` writes into every generated
+/// compose service (`.:/workspace`).
+const DEFAULT_CONTAINER_PROJECT_ROOT: &str = "/workspace";
+
+/// Per-process cache of the container-side project-root path, keyed by
+/// docker-compose service name. Populated lazily on first lookup and
+/// reused for the life of the `fdl` invocation. `docker-compose.yml` is
+/// user-edited and version-controlled, so re-parsing once per
+/// invocation is cheap — the cache only avoids re-parsing *within* a
+/// single invocation.
+static COMPOSE_MOUNT_CACHE: std::sync::OnceLock<
+    std::collections::HashMap<String, String>,
+> = std::sync::OnceLock::new();
+
+/// Resolve the absolute container path where the host project root is
+/// mounted inside `service`.
+///
+/// Reads `docker-compose.yml` at `project_root` once per process and
+/// caches the `service → container_path` mapping. Falls back to
+/// [`DEFAULT_CONTAINER_PROJECT_ROOT`] when the compose file is missing,
+/// unparseable, or doesn't declare a matching bind mount for `.`.
+///
+/// This is what lets `exec_command` generate `cd <container-path>`
+/// prefixes that work regardless of the service's `working_dir:` —
+/// e.g. flodl-hf's `hf-parity` service uses
+/// `working_dir: /workspace/flodl-hf` so Python parity scripts can
+/// `import` sibling helpers, and a naive relative `cd flodl-hf/convert`
+/// would resolve to the non-existent
+/// `/workspace/flodl-hf/flodl-hf/convert`.
+fn container_project_root(project_root: &Path, service: &str) -> String {
+    let cache = COMPOSE_MOUNT_CACHE
+        .get_or_init(|| parse_compose_project_mounts(project_root));
+    cache
+        .get(service)
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_CONTAINER_PROJECT_ROOT.to_string())
+}
+
+/// Parse `<project_root>/docker-compose.yml` and return a map of
+/// `service → container-mount-path` for every service that bind-mounts
+/// the project root (host `.` or `./`).
+///
+/// Handles both short-form (`".:/workspace"`) and long-form
+/// (`{ type: bind, source: ., target: /workspace }`) volume entries.
+/// Read errors, parse errors, and missing sections all yield an empty
+/// map — callers fall back to the convention.
+fn parse_compose_project_mounts(
+    project_root: &Path,
+) -> std::collections::HashMap<String, String> {
+    let compose_path = project_root.join("docker-compose.yml");
+    let text = match std::fs::read_to_string(&compose_path) {
+        Ok(t) => t,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let doc: serde_yaml::Value = match serde_yaml::from_str(&text) {
+        Ok(d) => d,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    let mut out = std::collections::HashMap::new();
+    let services = match doc.get("services").and_then(|v| v.as_mapping()) {
+        Some(s) => s,
+        None => return out,
+    };
+    for (name, svc) in services {
+        let svc_name = match name.as_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let volumes = match svc.get("volumes").and_then(|v| v.as_sequence()) {
+            Some(v) => v,
+            None => continue,
+        };
+        if let Some(container_path) = find_project_mount(volumes) {
+            // Strip a trailing `/` so later `format!("{root}/{workdir}")`
+            // never produces `//` in the middle of a path.
+            let cleaned = container_path.trim_end_matches('/').to_string();
+            let cleaned = if cleaned.is_empty() {
+                "/".to_string()
+            } else {
+                cleaned
+            };
+            out.insert(svc_name.to_string(), cleaned);
+        }
+    }
+    out
+}
+
+/// Inside a service's `volumes:` sequence, find the entry that
+/// bind-mounts the project root (host path `.` or `./`) and return the
+/// container-side target path.
+fn find_project_mount(volumes: &[serde_yaml::Value]) -> Option<String> {
+    for entry in volumes {
+        if let Some(s) = entry.as_str() {
+            // Short form: "host:container[:options]". Docker-compose's
+            // short-form parser only splits on the first two `:` on
+            // POSIX, but fdl-generated hosts are always `.` so naive
+            // split-and-check works fine here.
+            let mut parts = s.splitn(3, ':');
+            let host = parts.next()?;
+            let container = parts.next()?;
+            if host == "." || host == "./" {
+                return Some(container.to_string());
+            }
+        } else if let Some(m) = entry.as_mapping() {
+            // Long form: { type: bind, source: ., target: /workspace }.
+            let source = m
+                .get(serde_yaml::Value::String("source".into()))
+                .and_then(|v| v.as_str());
+            let target = m
+                .get(serde_yaml::Value::String("target".into()))
+                .and_then(|v| v.as_str());
+            if matches!(source, Some(".") | Some("./")) {
+                if let Some(t) = target {
+                    return Some(t.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Resolve libtorch env vars from the project root, matching the Makefile logic:
 ///   LIBTORCH_HOST_PATH = ./libtorch/<active_variant>
 ///   LIBTORCH_CPU_PATH  = ./libtorch/precompiled/cpu
@@ -315,12 +438,20 @@ pub fn exec_command(
             .unwrap_or(cmd_dir)
             .to_string_lossy();
 
-        // Build the inner command: cd <workdir> && <entry> <args>
+        // Build the inner command: cd <container-root>/<workdir> && <entry> <args>
+        //
+        // `<container-root>` is discovered from docker-compose.yml's
+        // bind mount for the project (host `.` → container target) via
+        // [`container_project_root`], so the generated `cd` works
+        // regardless of the service's own `working_dir:`. Falls back
+        // to `/workspace` (the fdl init convention) when the compose
+        // file is missing or silent on this service.
+        let container_root = container_project_root(project_root, service);
         let args_str = shell_join(&args);
         let inner = if workdir.is_empty() || workdir == "." {
             format!("{entry} {args_str}")
         } else {
-            format!("cd {workdir} && {entry} {args_str}")
+            format!("cd {container_root}/{workdir} && {entry} {args_str}")
         };
 
         if preset_name.is_some() {

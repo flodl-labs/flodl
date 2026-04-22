@@ -40,6 +40,7 @@ LINK_REWRITES = [
     (r"\(11-multi-gpu\.md\)", "(/guide/multi-gpu)"),
     (r"\(12-async-ddp\.md\)", "(/guide/async-ddp)"),
     (r"\(13-data-loading\.md\)", "(/guide/data-loading)"),
+    (r"\(14-flodl-hf\.md\)", "(/guide/flodl-hf)"),
     (r"\(\.\./design/graph-tree\.md\)", "(https://github.com/fab2s/floDl/blob/main/docs/design/graph-tree.md)"),
     (r"\(\.\./pytorch_migration\.md\)", "(/guide/migration)"),
     (r"\(\.\./ddp\.md\)", "(/guide/ddp-reference)"),
@@ -56,6 +57,7 @@ LINK_REWRITES = [
     (r"\(tutorials/11-multi-gpu\.md\)", "(/guide/multi-gpu)"),
     (r"\(tutorials/12-async-ddp\.md\)", "(/guide/async-ddp)"),
     (r"\(tutorials/13-data-loading\.md\)", "(/guide/data-loading)"),
+    (r"\(tutorials/14-flodl-hf\.md\)", "(/guide/flodl-hf)"),
     (r"\(cli\.md\)", "(/guide/cli)"),
 ]
 

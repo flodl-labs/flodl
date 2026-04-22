@@ -28,7 +28,7 @@ pub use ops::{
     max_pool2d, avg_pool2d, max_pool1d, avg_pool1d,
     adaptive_avg_pool2d, adaptive_max_pool2d,
     pixel_shuffle, pixel_unshuffle, bilinear,
-    grid_sample, embedding_bag,
+    grid_sample, scaled_dot_product_attention, embedding, embedding_bag,
 };
 
 #[cfg(test)]
@@ -1801,6 +1801,52 @@ mod tests {
         let loss = y.sum().unwrap();
         loss.backward().unwrap();
         assert!(w.grad().is_some());
+    }
+
+    /// SDPA parity: the fused kernel must produce outputs numerically
+    /// equivalent to the naive `Q·Kᵀ / √d → softmax → ·V` sequence on the
+    /// same inputs (dropout=0, no mask, no causal). Small tolerance since
+    /// fused backends can reorder fp32 ops.
+    #[test]
+    fn test_sdpa_parity_vs_naive() {
+        let opts = crate::tensor::test_opts();
+        // 4-D inputs: [batch, heads, seq, head_dim]
+        let q = Variable::new(Tensor::randn(&[2, 4, 6, 8], opts).unwrap(), false);
+        let k = Variable::new(Tensor::randn(&[2, 4, 6, 8], opts).unwrap(), false);
+        let v = Variable::new(Tensor::randn(&[2, 4, 6, 8], opts).unwrap(), false);
+
+        // SDPA path.
+        let fused = scaled_dot_product_attention(&q, &k, &v, None, 0.0, false, None).unwrap();
+
+        // Naive path: same math, different kernel sequence.
+        let head_dim = 8_f64;
+        let scale = 1.0 / head_dim.sqrt();
+        let k_t = k.transpose(2, 3).unwrap();
+        let scores = q.matmul(&k_t).unwrap().mul_scalar(scale).unwrap();
+        let probs = scores.softmax(-1).unwrap();
+        let naive = probs.matmul(&v).unwrap();
+
+        assert_eq!(fused.shape(), naive.shape());
+        let fv = fused.data().to_f32_vec().unwrap();
+        let nv = naive.data().to_f32_vec().unwrap();
+        for (i, (a, b)) in fv.iter().zip(nv.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-4,
+                "sdpa/naive divergence at index {i}: sdpa={a}, naive={b}");
+        }
+    }
+
+    /// SDPA participates in native autograd — Q/K/V gradients flow.
+    #[test]
+    fn test_sdpa_backward() {
+        let opts = crate::tensor::test_opts();
+        let q = Variable::new(Tensor::randn(&[1, 2, 4, 4], opts).unwrap(), true);
+        let k = Variable::new(Tensor::randn(&[1, 2, 4, 4], opts).unwrap(), true);
+        let v = Variable::new(Tensor::randn(&[1, 2, 4, 4], opts).unwrap(), true);
+        let y = scaled_dot_product_attention(&q, &k, &v, None, 0.0, false, None).unwrap();
+        y.sum().unwrap().backward().unwrap();
+        assert!(q.grad().is_some());
+        assert!(k.grad().is_some());
+        assert!(v.grad().is_some());
     }
 
     #[test]
