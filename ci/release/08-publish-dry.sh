@@ -39,7 +39,14 @@ fi
 
 # Dependency order (leaves first). ddp-bench and benchmarks are
 # workspace-internal only, never published.
-CRATES="flodl-sys flodl-cli-macros flodl flodl-cli"
+#
+# Note: on the very first release of a new crate joining the list
+# (e.g. flodl-hf at 0.5.2), its verify-tarball step will fail to
+# resolve its upstream dep from crates.io because the upstream bump
+# isn't published yet. That's expected -- dry-run becomes useful from
+# the second release onwards, once every crate has a prior version to
+# dep against.
+CRATES="flodl-sys flodl-cli-macros flodl flodl-cli flodl-hf"
 
 FAIL=0
 for crate in $CRATES; do

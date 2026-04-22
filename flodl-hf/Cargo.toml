@@ -12,7 +12,11 @@ keywords = ["huggingface", "transformers", "safetensors", "deep-learning", "flod
 categories = ["science", "artificial-intelligence"]
 include = [
     "src/**/*",
+    "examples/*.rs",
+    "tests/*.rs",
+    "tests/fixtures/**/*",
     "README.md",
+    "LICENSE",
     "Cargo.toml",
 ]
 

@@ -25,6 +25,9 @@ docs-rs:
 		cargo +nightly rustdoc --lib -p flodl-cli \
 			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]' && \
 		cargo +nightly rustdoc --lib -p flodl-cli-macros \
+			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]' && \
+		cargo +nightly rustdoc --lib -p flodl-hf \
+			--all-features \
 			--config 'build.rustdocflags=[\"--cfg\", \"docsrs\"]'"
 
 # --- Site (host python + docker compose up/down) ---
