@@ -16,16 +16,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Scaffold templates baked into the binary at compile time. Paths are
-/// relative to `flodl-cli/src/add.rs`, which resolves to
-/// `<workspace>/flodl-hf/scaffold/...` in the rdl workspace. Publishing
-/// `flodl-cli` standalone to crates.io currently depends on these files
-/// being present alongside; documented as a known gap.
-const TEMPLATE_CARGO_TOML: &str = include_str!("../../flodl-hf/scaffold/Cargo.toml");
-const TEMPLATE_MAIN_RS: &str = include_str!("../../flodl-hf/scaffold/src/main.rs");
-const TEMPLATE_FDL_YML: &str = include_str!("../../flodl-hf/scaffold/fdl.yml.example");
-const TEMPLATE_README: &str = include_str!("../../flodl-hf/scaffold/README.md");
-const TEMPLATE_GITIGNORE: &str = include_str!("../../flodl-hf/scaffold/.gitignore");
+/// Scaffold templates baked into the binary at compile time. Live
+/// under `flodl-cli/src/scaffold/` so they travel inside the
+/// `flodl-cli` crate tarball on `cargo publish`.
+// `.in` suffix avoids cargo treating this as a nested package manifest
+// during `cargo package`; it is written out as `Cargo.toml` when the
+// scaffold is generated.
+const TEMPLATE_CARGO_TOML: &str = include_str!("scaffold/Cargo.toml.in");
+const TEMPLATE_MAIN_RS: &str = include_str!("scaffold/src/main.rs");
+const TEMPLATE_FDL_YML: &str = include_str!("scaffold/fdl.yml.example");
+const TEMPLATE_README: &str = include_str!("scaffold/README.md");
+const TEMPLATE_GITIGNORE: &str = include_str!("scaffold/.gitignore");
 
 pub fn run(target: Option<&str>) -> Result<(), String> {
     let target = target.ok_or(
