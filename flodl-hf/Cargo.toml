@@ -77,6 +77,10 @@ required-features = ["hub", "tokenizer"]
 name = "distilbert_qa"
 required-features = ["hub", "tokenizer"]
 
+[[example]]
+name = "auto_classify"
+required-features = ["hub", "tokenizer"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustc-args = ["--cfg", "docsrs"]

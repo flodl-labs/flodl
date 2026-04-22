@@ -16,6 +16,10 @@ use hf_hub::api::sync::{Api, ApiBuilder};
 
 use flodl::{Device, Graph, Result, TensorError};
 
+use crate::models::auto::{
+    AutoConfig, AutoModel, AutoModelForQuestionAnswering, AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
+};
 use crate::models::bert::{
     BertConfig, BertForQuestionAnswering, BertForSequenceClassification,
     BertForTokenClassification, BertModel,
@@ -527,6 +531,179 @@ impl DistilBertForQuestionAnswering {
         let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+// ── AutoModel from_pretrained ────────────────────────────────────────────
+//
+// Model-type dispatch: pull `config.json`, read `model_type`, then route
+// to the matching family. The backbone path ([`AutoModel`]) returns a
+// [`Graph`] whose shape is always `[batch, seq_len, hidden]` — BERT is
+// routed through [`BertModel::on_device_without_pooler`] to keep that
+// invariant uniform across families. The task-head paths return the
+// corresponding [`AutoModelFor*`] enum, dispatching the tokenizer
+// attach + weight load through each concrete family's loader.
+
+/// Fetch a `config.json` string and safetensors blob, then parse the
+/// config through [`AutoConfig::from_json_str`]. Shared by every
+/// `AutoModelFor*::from_pretrained` path so model-type dispatch
+/// happens exactly once per call.
+fn fetch_auto_config_and_weights(repo_id: &str) -> Result<(AutoConfig, Vec<u8>)> {
+    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
+    let config = AutoConfig::from_json_str(&config_str)?;
+    Ok((config, weights))
+}
+
+impl AutoModel {
+    /// Download a pretrained encoder from the HuggingFace Hub, auto-
+    /// detecting the family (BERT / RoBERTa / DistilBERT) from the
+    /// repo's `config.json`.
+    ///
+    /// The returned [`Graph`] emits `last_hidden_state` of shape
+    /// `[batch, seq_len, hidden]` across all three families — BERT is
+    /// routed through [`BertModel::on_device_without_pooler`] so its
+    /// output stays consistent with RoBERTa and DistilBERT. If the
+    /// BERT pooler output is specifically required, call
+    /// [`BertModel::from_pretrained`] directly.
+    ///
+    /// `repo_id` examples:
+    /// - `"bert-base-uncased"` (BERT)
+    /// - `"roberta-base"` (RoBERTa)
+    /// - `"distilbert/distilbert-base-uncased"` (DistilBERT)
+    ///
+    /// The returned graph's `forward_multi` input count differs by
+    /// family (BERT: 4, RoBERTa: 3, DistilBERT: 2); see the
+    /// [`auto`](crate::models::auto) module documentation.
+    pub fn from_pretrained(repo_id: &str) -> Result<Graph> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
+        let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let graph = match config {
+            AutoConfig::Bert(c) => BertModel::on_device_without_pooler(&c, device)?,
+            AutoConfig::Roberta(c) => RobertaModel::on_device_without_pooler(&c, device)?,
+            AutoConfig::DistilBert(c) => DistilBertModel::on_device(&c, device)?,
+        };
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        Ok(graph)
+    }
+}
+
+impl AutoModelForSequenceClassification {
+    /// Download a fine-tuned sequence-classification checkpoint from
+    /// the Hub, auto-detecting the family from `config.json`. The
+    /// config must carry `num_labels` (or `id2label`); otherwise the
+    /// concrete family's `num_labels_from_config` surfaces a loud
+    /// error.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let head = match config {
+            AutoConfig::Bert(c) => {
+                let num_labels = BertForSequenceClassification::num_labels_from_config(&c)?;
+                let h = BertForSequenceClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Bert(h)
+            }
+            AutoConfig::Roberta(c) => {
+                let num_labels = RobertaForSequenceClassification::num_labels_from_config(&c)?;
+                let h = RobertaForSequenceClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Roberta(h)
+            }
+            AutoConfig::DistilBert(c) => {
+                let num_labels = DistilBertForSequenceClassification::num_labels_from_config(&c)?;
+                let h = DistilBertForSequenceClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::DistilBert(h)
+            }
+        };
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl AutoModelForTokenClassification {
+    /// Download a fine-tuned token-classification checkpoint (NER,
+    /// POS, …) from the Hub, auto-detecting the family.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let head = match config {
+            AutoConfig::Bert(c) => {
+                let num_labels = BertForTokenClassification::num_labels_from_config(&c)?;
+                let h = BertForTokenClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Bert(h)
+            }
+            AutoConfig::Roberta(c) => {
+                let num_labels = RobertaForTokenClassification::num_labels_from_config(&c)?;
+                let h = RobertaForTokenClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Roberta(h)
+            }
+            AutoConfig::DistilBert(c) => {
+                let num_labels = DistilBertForTokenClassification::num_labels_from_config(&c)?;
+                let h = DistilBertForTokenClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::DistilBert(h)
+            }
+        };
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl AutoModelForQuestionAnswering {
+    /// Download a fine-tuned extractive-QA checkpoint (SQuAD, …) from
+    /// the Hub, auto-detecting the family. QA heads have a fixed
+    /// 2-wide output (start, end logits) independent of `num_labels`,
+    /// so the config carries no head-size metadata requirement.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let head = match config {
+            AutoConfig::Bert(c) => {
+                let h = BertForQuestionAnswering::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Bert(h)
+            }
+            AutoConfig::Roberta(c) => {
+                let h = RobertaForQuestionAnswering::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Roberta(h)
+            }
+            AutoConfig::DistilBert(c) => {
+                let h = DistilBertForQuestionAnswering::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::DistilBert(h)
+            }
+        };
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),

@@ -61,5 +61,10 @@ commands:
     run: cargo run --release --example distilbert_qa
     docker: dev
 
+  auto-classify:
+    description: Family-agnostic sequence classification — AutoModel dispatches BERT/RoBERTa/DistilBERT from config.json
+    run: cargo run --release --example auto_classify
+    docker: dev
+
   # Adding an example is three lines plus an entry in flodl-hf/Cargo.toml
   # (`[[example]] name = "..." required-features = [...]`).

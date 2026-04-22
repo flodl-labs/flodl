@@ -21,6 +21,17 @@ pub(crate) fn required_i64(v: &Value, key: &str) -> Result<i64> {
     })
 }
 
+/// Read a required string field. Errors if missing, null, or not a
+/// string. Used by [`crate::models::auto::AutoConfig`] to dispatch on
+/// `model_type`.
+pub(crate) fn required_string<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
+    v.get(key).and_then(|x| x.as_str()).ok_or_else(|| {
+        TensorError::new(&format!(
+            "config.json missing required string field: {key}",
+        ))
+    })
+}
+
 /// Read an integer field with a fallback default. Accepts both
 /// explicit integers and absent / null values.
 pub(crate) fn optional_i64(v: &Value, key: &str, default: i64) -> i64 {
@@ -111,6 +122,17 @@ mod tests {
         let v: Value = serde_json::from_str(r#"{"a": 42}"#).unwrap();
         assert_eq!(required_i64(&v, "a").unwrap(), 42);
         assert!(required_i64(&v, "missing").is_err());
+    }
+
+    #[test]
+    fn required_string_reads_or_errors() {
+        let v: Value = serde_json::from_str(r#"{"model_type": "bert", "num": 7}"#).unwrap();
+        assert_eq!(required_string(&v, "model_type").unwrap(), "bert");
+        assert!(required_string(&v, "missing").is_err());
+        assert!(
+            required_string(&v, "num").is_err(),
+            "non-string values must error"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Structure: [`BertEmbeddings`] (token + position + token-type embeddings
 //! with LayerNorm and Dropout), a stack of
-//! [`TransformerLayer`](crate::models::transformer_layer::TransformerLayer)
+//! [`crate::models::transformer_layer::TransformerLayer`]
 //! instances (self-attention + two-layer GELU feed-forward, both wrapped
 //! with residual + LayerNorm), and [`BertPooler`] on the `[CLS]` position.
 //! [`BertModel::build`] assembles all of this into a flat [`Graph`].

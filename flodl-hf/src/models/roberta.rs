@@ -25,7 +25,7 @@
 //! [`LayerNaming::BERT`](crate::models::transformer_layer::LayerNaming::BERT)
 //! — BERT and RoBERTa use the same `attention.self.{query,key,value}`
 //! / `attention.output.dense` / `intermediate.dense` / `output.dense`
-//! layout, so one [`TransformerLayer`](crate::models::transformer_layer::TransformerLayer)
+//! layout, so one [`crate::models::transformer_layer::TransformerLayer`]
 //! serves both families. Task heads remain here because RoBERTa's
 //! sequence-classification head diverges from BERT's.
 
@@ -353,7 +353,7 @@ fn roberta_backbone_flow(
 ///    most RoBERTa checkpoints)
 /// 3. `attention_mask` (f32, shape `[batch, 1, 1, seq_len]`, additive
 ///    — build with
-///    [`build_extended_attention_mask`](crate::models::bert::build_extended_attention_mask)
+///    [`crate::models::bert::build_extended_attention_mask`]
 ///    from a plain `[batch, seq_len]` 0/1 mask)
 ///
 /// Position ids are computed internally from `input_ids`.
