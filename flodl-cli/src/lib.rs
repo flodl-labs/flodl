@@ -76,6 +76,11 @@ pub mod diagnose;
 /// training template, `.gitignore`.
 pub mod init;
 
+/// Ecosystem-crate scaffolding (`fdl add <target>`): drops a
+/// configured sub-project inside a flodl project for hands-on
+/// discovery. Currently supports `flodl-hf`.
+pub mod add;
+
 /// libtorch variant management (download, build, list, activate, remove,
 /// info) used by both `fdl libtorch` and the standalone-manager flow.
 pub mod libtorch;

@@ -65,6 +65,24 @@ pub struct InitArgs {
     /// Generate a native scaffold (no Docker; libtorch provided on the host).
     #[option]
     pub native: bool,
+    /// Also scaffold the flodl-hf HuggingFace playground (skips the prompt).
+    #[option]
+    pub with_hf: bool,
+}
+
+/// Add a flodl ecosystem crate as a side playground inside the current
+/// flodl project.
+///
+/// Currently supports `flodl-hf` (alias: `hf`). Drops a standalone
+/// cargo crate under `./flodl-hf/` with pinned deps, a one-file
+/// AutoModel example, `fdl.yml` with runnable commands, and a README
+/// documenting feature flavors and next steps. Does NOT mutate the
+/// caller's root `Cargo.toml` or `fdl.yml`.
+#[derive(crate::FdlArgs, Debug)]
+pub struct AddArgs {
+    /// Target to scaffold (currently: `flodl-hf` or the alias `hf`).
+    #[arg]
+    pub target: Option<String>,
 }
 
 /// Install or update fdl globally (~/.local/bin/fdl).
@@ -247,6 +265,11 @@ pub fn registry() -> &'static [BuiltinSpec] {
             schema_fn: Some(InitArgs::schema),
         },
         BuiltinSpec {
+            path: &["add"],
+            description: Some("Add a flodl ecosystem crate (currently: flodl-hf)"),
+            schema_fn: Some(AddArgs::schema),
+        },
+        BuiltinSpec {
             path: &["diagnose"],
             description: Some("System and GPU diagnostics"),
             schema_fn: Some(DiagnoseArgs::schema),
@@ -403,9 +426,9 @@ mod tests {
         // here. Keeping the list local (rather than introspecting main.rs)
         // documents the coupling explicitly.
         let dispatched = [
-            "setup", "libtorch", "diagnose", "api-ref", "init", "install",
-            "skill", "schema", "completions", "autocomplete", "config",
-            "version",
+            "setup", "libtorch", "diagnose", "api-ref", "init", "add",
+            "install", "skill", "schema", "completions", "autocomplete",
+            "config", "version",
         ];
         for name in &dispatched {
             assert!(
@@ -423,8 +446,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "setup", "libtorch", "init", "diagnose", "install", "skill",
-                "api-ref", "config", "schema", "completions", "autocomplete",
+                "setup", "libtorch", "init", "add", "diagnose", "install",
+                "skill", "api-ref", "config", "schema", "completions",
+                "autocomplete",
             ]
         );
     }

@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-22
+
 ### Added
 
 #### flodl-hf: new sibling crate for HuggingFace integration
 Scaffolded under `flodl-hf/` with feature-gated modules so downstream users can take only what they need. Transformer blocks build on flodl's `nn` module; the crate depends on `flodl` for `Tensor`, `Module`, and named-parameter machinery.
 
 - **Three install profiles**:
-  - *Full* (default): `safetensors` + `hf-hub` + `tokenizers`. `flodl-hf = "0.5.1"` loads `"bert-base-uncased"` out of the box.
+  - *Full* (default): `safetensors` + `hf-hub` + `tokenizers`. `flodl-hf = "0.5.2"` loads `"bert-base-uncased"` out of the box.
   - *Vision-only*: `hub` feature only. For ViT, CLIP vision towers, or any image model that doesn't need tokenisation. Drops regex + unicode surface.
   - *Offline / minimal*: no default features. `safetensors`-only. For air-gapped environments, embedded training, or local-disk pipelines — no network, no async runtime, no TLS stack.
 - **`cuda` feature** on `flodl-hf` re-exports `flodl/cuda`.
@@ -136,6 +138,19 @@ One-liner Hub loading over the BERT / RoBERTa / DistilBERT families without the 
 - **`AutoModelForSequenceClassification` / `AutoModelForTokenClassification` / `AutoModelForQuestionAnswering`** — enums over the per-family concrete heads. `from_pretrained(repo_id)` dispatches loading; `predict(&[&str])` / `answer(question, context)` / `answer_batch(&[(q, c)])` run inference with a unified signature. `with_tokenizer` and `graph()` / `labels()` accessors delegate to the inner head. The same code path serves `bert-base-uncased`, `roberta-base`, and `distilbert-base-uncased`.
 - **Runnable example**: `fdl flodl-hf example auto-classify -- <repo_id>`. Default: `cardiffnlp/twitter-roberta-base-sentiment-latest`; pass any BERT / RoBERTa / DistilBERT classification checkpoint as `argv[1]`. Same three-line caller regardless of family.
 - **No new parity fixtures**: AutoModel is a pure dispatch layer over already-tested per-family paths. Unit tests cover `AutoConfig::from_json_str` dispatch for all three families plus unknown-model-type and malformed-input error cases.
+
+#### flodl-manager: `fdl add flodl-hf` scaffold + `fdl init --with-hf`
+
+Closes the "very rustic" discovery gap. Before today, a user with a fresh flodl project couldn't find flodl-hf without reading docs, editing their `Cargo.toml` manually, and guessing the right feature flavors. Now one command drops a working playground.
+
+- **`fdl add flodl-hf` (alias: `fdl add hf`)** — scaffolds a `./flodl-hf/` sub-crate inside the current flodl project. Standalone cargo crate with its own `Cargo.toml` + `src/main.rs` (a one-file `AutoModel` classifier that takes a repo id from argv) + `fdl.yml` with runnable commands (`classify`, `bert`, `distilbert-sentiment`, plus `build` / `check` / `shell`) + `README.md` documenting the three feature flavors (full / vision-only / offline), the `fdl flodl-hf convert` workflow for `.bin`-only repos, and how to wire flodl-hf into a main crate when the user is ready.
+- **Version lockstep**: the scaffold parses the host project's `flodl = "X.Y.Z"` dependency (plain, table, or workspace-inherited form) and pins `flodl-hf` to the matching `=X.Y.Z`. Git-only and path-only flodl deps error with actionable guidance rather than silently picking a version.
+- **Scope contract**: no mutation of the user's root `Cargo.toml` or `fdl.yml`. The playground is a side crate for hands-on discovery; wiring flodl-hf into the user's main code stays their call. The generated README walks through it.
+- **Idempotent**: refuses to overwrite an existing `./flodl-hf/` directory. Users delete explicitly if they want a regenerate.
+- **`fdl init --with-hf`** and **interactive prompt**: `fdl init` now asks "Include flodl-hf (HuggingFace: BERT/RoBERTa/DistilBERT, Hub loader, tokenizer)?" after the Docker/native choice. `--with-hf` bypasses the prompt for scripted invocations; any explicit `--docker` / `--native` / `--with-hf` flag puts init in non-interactive mode, respecting `--with-hf` verbatim.
+- **Templates live in `flodl-hf/scaffold/`** — same crate, always version-synced with the `flodl-hf` source tree, no release gymnastics between template and crate. Baked into the `fdl` binary via `include_str!` at compile time. Works out of the box for users building `fdl` from the flodl workspace; `cargo install flodl-cli` from crates.io standalone is documented as a known gap pending a later crate-packaging pass.
+- **Host-project mode detection**: `fdl add flodl-hf` inspects the parent dir to decide how to wire the scaffolded commands. `docker-compose.yml` present → Docker mode, scaffolded `fdl.yml` keeps `docker: dev` on each cargo command so `fdl classify` dispatches into the `dev` service. `docker-compose.yml` absent → Native mode, `docker:` lines stripped so `fdl classify` runs `cargo run --release` directly on the host. The invariant `fdl.yml` (or `fdl.yml.example`) must be present is enforced loudly: a missing fdl config aborts the scaffold with "expects an initialised flodl project". `.bin`-to-safetensors conversion is documented as a direct Python invocation in the scaffold README (`pip install torch transformers safetensors` + inline script) rather than assuming the rdl-repo-internal `fdl flodl-hf convert` Docker service is available in user projects.
+- **First slice of the broader flodl-manager roadmap line**: deliberately narrow. `fdl add` supports only `flodl-hf` today; per-model feature flavors (`fdl add hf --for bert|vit|offline`), `fdl build` / `clippy` argv forwarding, and `fdl doctor` / `model-info` stay on the roadmap for follow-up arcs.
 
 #### flodl-hf: `EncodedBatch.sequence_ids` + model-agnostic QA span filter
 

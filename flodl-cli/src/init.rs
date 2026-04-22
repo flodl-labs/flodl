@@ -18,7 +18,12 @@ enum Mode {
     Native,
 }
 
-pub fn run(name: Option<&str>, docker: bool, native: bool) -> Result<(), String> {
+pub fn run(
+    name: Option<&str>,
+    docker: bool,
+    native: bool,
+    with_hf: bool,
+) -> Result<(), String> {
     let name = name.ok_or("usage: fdl init <project-name>")?;
     validate_name(name)?;
 
@@ -29,12 +34,25 @@ pub fn run(name: Option<&str>, docker: bool, native: bool) -> Result<(), String>
     if docker && native {
         return Err("--docker and --native are mutually exclusive".into());
     }
+    let flag_driven = docker || native || with_hf;
     let mode = if docker {
         Mode::Docker
     } else if native {
         Mode::Native
     } else {
         pick_mode_interactively()
+    };
+    // `--with-hf` bypasses the prompt entirely for scripted init.
+    // Without any flag, ask after mode selection; with *any* flag set
+    // the user signalled non-interactive intent, so respect `--with-hf`
+    // verbatim and skip the prompt.
+    let include_hf = if flag_driven {
+        with_hf
+    } else {
+        prompt::ask_yn(
+            "Include flodl-hf (HuggingFace: BERT/RoBERTa/DistilBERT, Hub loader, tokenizer)?",
+            false,
+        )
     };
 
     let crate_name = name.replace('-', "_");
@@ -64,7 +82,17 @@ pub fn run(name: Option<&str>, docker: bool, native: bool) -> Result<(), String>
     )?;
     write_fdl_bootstrap(name)?;
 
-    print_next_steps(name, mode);
+    if include_hf {
+        let project_dir = Path::new(name);
+        if let Err(e) = crate::add::add_flodl_hf_at(project_dir) {
+            // Scaffolded project is still usable even if the HF sub-crate
+            // failed; surface the error but don't roll back.
+            eprintln!("warning: flodl-hf scaffold failed: {e}");
+            eprintln!("You can retry after `cd {}` with `fdl add flodl-hf`.", name);
+        }
+    }
+
+    print_next_steps(name, mode, include_hf);
     crate::util::install_prompt::offer_global_install();
     Ok(())
 }
@@ -92,7 +120,7 @@ fn pick_mode_interactively() -> Mode {
     }
 }
 
-fn print_next_steps(name: &str, mode: Mode) {
+fn print_next_steps(name: &str, mode: Mode, include_hf: bool) {
     println!();
     println!("Project '{}' created. Next steps:", name);
     println!();
@@ -114,6 +142,10 @@ fn print_next_steps(name: &str, mode: Mode) {
     println!("  ./fdl run     # train the model");
     if mode != Mode::Native {
         println!("  ./fdl shell   # interactive shell");
+    }
+    if include_hf {
+        println!();
+        println!("  cd flodl-hf && fdl classify   # try the HuggingFace playground");
     }
     println!();
     println!("`./fdl --help` lists every command defined in fdl.yml.");
