@@ -187,6 +187,7 @@ Full FFI chain adding fused attention to flodl. Used internally by `BertSelfAtte
 ### Fixed
 
 - **DDP test flake under full-suite CUDA contention**: `distributed::ddp_run::tests::test_epoch_fn_called_per_epoch` and `::test_epoch_fn_set_lr` now explicitly use `ApplyPolicy::Sync`. Both assumed `count == num_epochs * world_size`, which only holds in Sync mode: under the default `Cadence`, progressive dispatch lets a fast rank drain an epoch's pool past a slow rank's share, so the slow rank legitimately receives fewer `StartEpoch` events. Designed behaviour for progressive streaming; the test assumption was wrong.
+- **`fdl cuda-test-all` / `cuda-test-serial` pulled in `_live` tests**: the "remaining ignored" leg ran `cargo test --ignored --skip nccl --skip graph_distribute`, which swept up the new HuggingFace `_live` parity tests along with the intended CUDA Graph / manual_seed / probe tests. `--skip _live` added to both commands in `fdl.yml` and `fdl.yml.example`. Live tests are the sole domain of `fdl test-live`.
 
 ### Removed
 

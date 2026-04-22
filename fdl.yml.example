@@ -54,7 +54,7 @@ commands:
     docker: cuda
   cuda-test-all:
     description: Full CUDA suite (parallel + NCCL isolated + serial)
-    run: cargo test --features cuda -- --nocapture && cargo test --features cuda -- --nocapture --ignored --test-threads=1 nccl && cargo test --features cuda -- --nocapture --ignored --test-threads=1 graph_distribute && cargo test --features cuda -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute
+    run: cargo test --features cuda -- --nocapture && cargo test --features cuda -- --nocapture --ignored --test-threads=1 nccl && cargo test --features cuda -- --nocapture --ignored --test-threads=1 graph_distribute && cargo test --features cuda -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute --skip _live
     docker: cuda
   cuda-test-nccl:
     description: NCCL/DDP tests only (isolated processes)
@@ -62,7 +62,7 @@ commands:
     docker: cuda
   cuda-test-serial:
     description: Serial CUDA tests (Graphs, manual_seed, probes)
-    run: cargo test --features cuda -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute
+    run: cargo test --features cuda -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute --skip _live
     docker: cuda
   cuda-test-graph:
     description: CUDA Graph tests only (exclusive GPU, single-threaded)
