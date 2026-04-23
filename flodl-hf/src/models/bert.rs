@@ -1437,13 +1437,23 @@ mod tests {
 
     /// End-to-end `Trainer::setup_head` on CPU: build a head, wire
     /// optimizer via `setup_head`, run a full forward → loss → backward
-    /// → step cycle, confirm no error and the loss is finite. On CPU
-    /// with no extra GPUs, `setup_head`'s distribute path is a no-op,
-    /// so this tests the single-device branch of the wrapper.
+    /// → step cycle, confirm no error and the loss is finite.
+    ///
+    /// Validates the single-device branch of `setup_head`'s distribute
+    /// call (no replicas created, optimizer + training-mode wired on
+    /// rank 0). When `usable_cuda_devices()` reports 2+ GPUs the
+    /// distribute path instead creates CUDA replicas, and a full
+    /// distributed forward driving every rank is required before
+    /// `step()`; flodl's own DDP test suite covers that end-to-end, so
+    /// here we exit early rather than duplicate that coverage.
     #[test]
     fn setup_head_drives_cpu_training_step() {
-        use flodl::{Adam, Trainer};
+        use flodl::{usable_cuda_devices, Adam, Trainer};
         use crate::task_heads::sequence_classification_loss;
+
+        if usable_cuda_devices().len() >= 2 {
+            return;
+        }
 
         let config = tiny_bert_config();
         let dev = Device::CPU;
