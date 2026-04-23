@@ -28,6 +28,11 @@ commands:
     run: python scripts/parity_bert_qa.py
     docker: hf-parity
 
+  parity-bert-mlm:
+    description: Regenerate tests/fixtures/bert_mlm_parity.safetensors (BertForMaskedLM)
+    run: python scripts/parity_bert_mlm.py
+    docker: hf-parity
+
   parity-roberta:
     description: Regenerate tests/fixtures/roberta_base_parity.safetensors against HuggingFace reference
     run: python scripts/parity_roberta.py
@@ -51,6 +56,11 @@ commands:
     run: python scripts/parity_roberta_qa.py
     docker: hf-parity
 
+  parity-roberta-mlm:
+    description: Regenerate tests/fixtures/roberta_mlm_parity.safetensors (RobertaForMaskedLM)
+    run: python scripts/parity_roberta_mlm.py
+    docker: hf-parity
+
   parity-distilbert:
     description: Regenerate tests/fixtures/distilbert_base_parity.safetensors against HuggingFace reference
     run: python scripts/parity_distilbert.py
@@ -69,6 +79,16 @@ commands:
   parity-distilbert-qa:
     description: Regenerate tests/fixtures/distilbert_qa_parity.safetensors (DistilBertForQuestionAnswering)
     run: python scripts/parity_distilbert_qa.py
+    docker: hf-parity
+
+  parity-distilbert-mlm:
+    description: Regenerate tests/fixtures/distilbert_mlm_parity.safetensors (DistilBertForMaskedLM)
+    run: python scripts/parity_distilbert_mlm.py
+    docker: hf-parity
+
+  parity-deberta-v2:
+    description: Regenerate tests/fixtures/deberta_v2_parity.safetensors against HuggingFace reference (microsoft/deberta-v3-base)
+    run: python scripts/parity_deberta_v2.py
     docker: hf-parity
 
   example:

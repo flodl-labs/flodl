@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
-use flodl::{DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, TensorOptions, Variable};
+use flodl::{DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable};
 
 use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
 use crate::path::{prefix_params, HfPath};
@@ -437,11 +437,31 @@ impl BertModel {
 // ── Task heads ───────────────────────────────────────────────────────────
 
 use crate::task_heads::{
-    check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels,
-    masked_lm_loss, question_answering_loss, sequence_classification_loss,
-    token_classification_loss,
+    check_num_labels, ClassificationHead, EncoderInputs, MaskedLmHead, QaHead, TaggingHead,
 };
 pub use crate::task_heads::{Answer, TokenPrediction};
+
+/// BERT graphs take four `forward_multi` inputs — `input_ids`,
+/// `position_ids`, `token_type_ids`, and an extended attention mask —
+/// in that order. The backbone flow is built with
+/// `.input(&["position_ids", "token_type_ids", "attention_mask"])` so
+/// `input_ids` flows in via `.through(embeddings)` as the first arg.
+#[cfg(feature = "tokenizer")]
+impl EncoderInputs for BertConfig {
+    const FAMILY_NAME: &'static str = "Bert";
+    const MASK_TOKEN: &'static str = "[MASK]";
+
+    fn encoder_inputs(enc: &crate::tokenizer::EncodedBatch) -> Result<Vec<Variable>> {
+        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
+        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
+        Ok(vec![
+            enc.input_ids.clone(),
+            enc.position_ids.clone(),
+            enc.token_type_ids.clone(),
+            mask,
+        ])
+    }
+}
 
 /// BERT with a sequence-classification head on top of the pooled
 /// `[CLS]` output: `pooler_output → Dropout → Linear(hidden, num_labels)`.
@@ -456,15 +476,14 @@ pub use crate::task_heads::{Answer, TokenPrediction};
 /// requires `fdl flodl-hf convert` first for `.bin`-only repos),
 /// `nlptown/bert-base-multilingual-uncased-sentiment` (5-star rating),
 /// `unitary/toxic-bert` (6-label toxicity).
-pub struct BertForSequenceClassification {
-    graph: Graph,
-    config: BertConfig,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+///
+/// Type alias over the generic [`ClassificationHead`]; `predict`,
+/// `classify`, `forward_encoded`, `compute_loss`, `labels`, `graph`,
+/// `config`, and `with_tokenizer` are inherited from there. Only the
+/// BERT-specific `on_device` constructor lives below.
+pub type BertForSequenceClassification = ClassificationHead<BertConfig>;
 
-impl BertForSequenceClassification {
+impl ClassificationHead<BertConfig> {
     /// Build the full graph (backbone + classifier head) on `device`
     /// without loading any weights. `num_labels` determines the head's
     /// output dimension; `id2label` falls back to `["LABEL_0", ...]`.
@@ -479,17 +498,7 @@ impl BertForSequenceClassification {
             .through(Linear::on_device(config.hidden_size, num_labels, device)?)
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     /// Resolve `num_labels` from config if present; error otherwise.
@@ -502,92 +511,6 @@ impl BertForSequenceClassification {
                  (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    /// Borrow the underlying [`Graph`] for direct inspection, inference
-    /// via `forward_multi`, or custom training loops.
-    pub fn graph(&self) -> &Graph { &self.graph }
-
-    /// Borrow the config this head was built from. Use when rebuilding
-    /// replicas on additional devices (e.g. inside the `head_factory`
-    /// closure passed to [`flodl::Trainer::setup_head`]).
-    pub fn config(&self) -> &BertConfig { &self.config }
-
-    /// Label names indexed by class id. `labels()[k]` is the name of
-    /// class `k` — either from the checkpoint's `id2label` or the
-    /// `LABEL_k` fallback.
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    /// Attach a tokenizer so [`predict`](Self::predict) can encode raw
-    /// text. `from_pretrained` does this automatically.
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Classify a pre-tokenised batch. Returns one label distribution per
-    /// input, sorted by descending probability.
-    #[cfg(feature = "tokenizer")]
-    pub fn classify(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<(String, f32)>>> {
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        logits_to_sorted_labels(&logits, &self.id2label)
-    }
-
-    /// One-shot text → label distribution. Encodes with the attached
-    /// tokenizer, runs the graph in eval mode, softmaxes the logits, and
-    /// returns per-input label distributions sorted desc.
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<(String, f32)>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForSequenceClassification::predict requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.classify(&enc)
-    }
-
-    /// Raw forward pass returning `[batch, num_labels]` logits. Does not
-    /// change train / eval mode - the caller is responsible for it.
-    /// After [`flodl::Trainer::setup`] the graph is already in training
-    /// mode; for inference-only calls prefer [`classify`](Self::classify)
-    /// or [`predict`](Self::predict).
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus sequence-classification loss on a labelled
-    /// batch. Convenience for training loops - mirrors HF Python's
-    /// `BertForSequenceClassification(..., labels=labels).loss`.
-    ///
-    /// `labels`: `[batch]` Int64 class indices or `[batch, num_labels]`
-    /// Float soft labels. See [`sequence_classification_loss`] for label
-    /// shape rules.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        sequence_classification_loss(&logits, labels)
     }
 }
 
@@ -602,15 +525,13 @@ impl BertForSequenceClassification {
 /// Matches HF Python's `BertForTokenClassification`. Pre-trained
 /// checkpoints: `dslim/bert-base-NER`,
 /// `dbmdz/bert-large-cased-finetuned-conll03-english`, etc.
-pub struct BertForTokenClassification {
-    graph: Graph,
-    config: BertConfig,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`TaggingHead`]; all per-token
+/// machinery (`tag`, `predict`, `forward_encoded`, `compute_loss`,
+/// `labels`, `graph`, `config`, `with_tokenizer`) is inherited. Only
+/// the BERT-specific `on_device` constructor lives below.
+pub type BertForTokenClassification = TaggingHead<BertConfig>;
 
-impl BertForTokenClassification {
+impl TaggingHead<BertConfig> {
     /// Build the full graph (backbone without pooler + classifier head).
     pub fn on_device(
         config: &BertConfig,
@@ -623,17 +544,7 @@ impl BertForTokenClassification {
             .through(Linear::on_device(config.hidden_size, num_labels, device)?)
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     pub(crate) fn num_labels_from_config(config: &BertConfig) -> Result<i64> {
@@ -643,121 +554,6 @@ impl BertForTokenClassification {
                  (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &BertConfig { &self.config }
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Tag every token in a pre-tokenised batch. Output shape matches
-    /// `enc.input_ids`: `result[b][s]` is the top-1 prediction for batch
-    /// entry `b`, position `s`.
-    ///
-    /// `TokenPrediction::attends` mirrors the input attention mask so
-    /// callers can drop `[PAD]` entries without re-tokenising.
-    #[cfg(feature = "tokenizer")]
-    pub fn tag(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForTokenClassification::tag requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        // logits: [B, S, num_labels]
-        let probs = logits.softmax(-1)?;
-        let shape = probs.shape();
-        assert_eq!(shape.len(), 3, "expected [B, S, num_labels], got {shape:?}");
-        let batch = shape[0] as usize;
-        let seq = shape[1] as usize;
-        let n = shape[2] as usize;
-        let flat = probs.data().to_f32_vec()?;
-        let input_ids: Vec<i64> = enc.input_ids.data().to_i64_vec()?;
-        let attn_ids: Vec<i64> = enc.attention_mask.data().to_i64_vec()?;
-
-        let mut out = Vec::with_capacity(batch);
-        for b in 0..batch {
-            let mut row = Vec::with_capacity(seq);
-            for s in 0..seq {
-                let base = (b * seq + s) * n;
-                let (best_k, &best_p) = flat[base..base + n]
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .expect("n > 0 checked by check_num_labels");
-                let id = input_ids[b * seq + s] as u32;
-                let token = tok
-                    .inner()
-                    .id_to_token(id)
-                    .unwrap_or_else(|| format!("<unk_id={id}>"));
-                row.push(TokenPrediction {
-                    token,
-                    label: self.id2label[best_k].clone(),
-                    score: best_p,
-                    attends: attn_ids[b * seq + s] != 0,
-                });
-            }
-            out.push(row);
-        }
-        Ok(out)
-    }
-
-    /// One-shot text → per-token tags. Encodes with the attached
-    /// tokenizer and calls [`tag`](Self::tag).
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForTokenClassification::predict requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.tag(&enc)
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, num_labels]` logits.
-    /// Does not change train / eval mode - caller's responsibility. After
-    /// [`flodl::Trainer::setup`] the graph is already in training mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus token-classification loss on a labelled batch.
-    /// Mirrors HF Python's `BertForTokenClassification(..., labels=...).loss`.
-    ///
-    /// `labels`: `[batch, seq_len]` Int64 with `-100` at positions to
-    /// ignore (specials, padding, non-first subwords). See
-    /// [`token_classification_loss`].
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        token_classification_loss(&logits, labels)
     }
 }
 
@@ -771,14 +567,13 @@ impl BertForTokenClassification {
 /// Matches HF Python's `BertForQuestionAnswering`. Pre-trained
 /// checkpoints: `csarron/bert-base-uncased-squad-v1`,
 /// `bert-large-uncased-whole-word-masking-finetuned-squad`, etc.
-pub struct BertForQuestionAnswering {
-    graph: Graph,
-    config: BertConfig,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`QaHead`]; span-extraction logic
+/// (`answer`, `answer_batch`, `extract`, `forward_encoded`,
+/// `compute_loss`, `graph`, `config`, `with_tokenizer`) is inherited.
+/// Only the BERT-specific `on_device` constructor lives below.
+pub type BertForQuestionAnswering = QaHead<BertConfig>;
 
-impl BertForQuestionAnswering {
+impl QaHead<BertConfig> {
     /// Build the full graph (backbone without pooler + QA output head).
     pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
         // QA is a fixed-width head: 2 outputs (start, end), independent
@@ -787,103 +582,7 @@ impl BertForQuestionAnswering {
             .through(Linear::on_device(config.hidden_size, 2, device)?)
             .tag("qa_outputs")
             .build()?;
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &BertConfig { &self.config }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Answer one `(question, context)` pair. Returns the highest-scoring
-    /// span over the context tokens.
-    #[cfg(feature = "tokenizer")]
-    pub fn answer(&self, question: &str, context: &str) -> Result<Answer> {
-        let mut out = self.answer_batch(&[(question, context)])?;
-        Ok(out.pop().expect("answer_batch returns one per input"))
-    }
-
-    /// Batched variant of [`answer`](Self::answer).
-    #[cfg(feature = "tokenizer")]
-    pub fn answer_batch(&self, pairs: &[(&str, &str)]) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForQuestionAnswering::answer requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode_pairs(pairs)?;
-        self.extract(&enc)
-    }
-
-    /// Run the graph on a pre-tokenised `(question, context)` batch and
-    /// extract best spans. The tokenizer's `sequence_ids` mark the
-    /// context region (== 1); scoring is restricted to that region.
-    ///
-    /// Uses `sequence_ids` (the tokenizer-level segment tag: `0` =
-    /// question, `1` = context, `-1` = special/pad) rather than
-    /// `token_type_ids` so the same code works across BERT-family
-    /// models with different token-type conventions (RoBERTa, for
-    /// instance, keeps all `token_type_ids` at zero). `-1` already
-    /// excludes padding, so no separate attention-mask check is needed.
-    #[cfg(feature = "tokenizer")]
-    pub fn extract(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForQuestionAnswering::extract requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        extract_best_span(&logits, enc, tok)
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, 2]` logits. Start
-    /// logits are on slice `0` of the last axis, end logits on slice `1`.
-    /// Does not change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus extractive QA loss on a labelled batch. Mirrors
-    /// HF Python's `BertForQuestionAnswering(..., start_positions=...,
-    /// end_positions=...).loss`.
-    ///
-    /// `start_positions`, `end_positions`: `[batch]` Int64 inclusive
-    /// span bounds in `[0, seq_len)`. See [`question_answering_loss`].
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        start_positions: &Variable,
-        end_positions: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        question_answering_loss(&logits, start_positions, end_positions)
+        Ok(Self::from_graph(graph, config))
     }
 }
 
@@ -919,17 +618,16 @@ impl BertForQuestionAnswering {
 /// Pre-trained checkpoints ship with `bert-base-uncased` et al. out of
 /// the box; for inference fill-mask demos, reach for
 /// `bert-base-uncased` or `bert-base-cased`.
-pub struct BertForMaskedLM {
-    graph: Graph,
-    config: BertConfig,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`MaskedLmHead`]; `fill_mask`,
+/// `forward_encoded`, `compute_loss`, `graph`, `config`, and
+/// `with_tokenizer` are inherited. Only the BERT-specific `on_device`
+/// constructor lives below.
+pub type BertForMaskedLM = MaskedLmHead<BertConfig>;
 
-impl BertForMaskedLM {
+impl MaskedLmHead<BertConfig> {
     /// Build the full graph: backbone (without pooler) + transform +
     /// tied decoder. Initializes all weights fresh; use
-    /// [`from_pretrained`](crate::hub::BertForMaskedLM::from_pretrained)
+    /// [`from_pretrained`](crate::models::bert::BertForMaskedLM::from_pretrained)
     /// to load a checkpoint.
     pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
         // Build embeddings first, grab the tied weight before ownership
@@ -970,144 +668,15 @@ impl BertForMaskedLM {
             .tag("cls.predictions.decoder")
             .build()?;
 
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config))
     }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &BertConfig { &self.config }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, vocab_size]` logits
-    /// over the vocabulary. Does not change train / eval mode — wrap in
-    /// `graph.eval()` / `graph.train()` as needed.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus masked-LM loss on a labelled batch. Mirrors HF
-    /// Python's `BertForMaskedLM(..., labels=labels).loss`. See
-    /// [`masked_lm_loss`] for the label convention (`-100` at ignored
-    /// positions, original token id at masked positions).
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        masked_lm_loss(&logits, labels)
-    }
-
-    /// Fill every `[MASK]` token in `text` with its top-`k` predicted
-    /// replacements, sorted by descending softmax probability.
-    ///
-    /// Returns one list of `(token, score)` pairs per mask position, in
-    /// left-to-right order. Inference helper — for training, use
-    /// [`compute_loss`](Self::compute_loss).
-    ///
-    /// Requires a tokenizer (via
-    /// [`from_pretrained`](crate::hub::BertForMaskedLM::from_pretrained)
-    /// or [`with_tokenizer`](Self::with_tokenizer)) to resolve the
-    /// `[MASK]` id and decode predicted ids back to tokens.
-    #[cfg(feature = "tokenizer")]
-    pub fn fill_mask(&self, text: &str, top_k: usize) -> Result<Vec<Vec<(String, f32)>>> {
-        if top_k == 0 {
-            return Err(TensorError::new("fill_mask: top_k must be > 0"));
-        }
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForMaskedLM::fill_mask requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let mask_id = tok.inner().token_to_id("[MASK]").ok_or_else(|| {
-            TensorError::new("fill_mask: tokenizer has no [MASK] token")
-        })? as i64;
-
-        self.graph.eval();
-        let enc = tok.encode(&[text])?;
-        let logits = self.forward_encoded(&enc)?;  // [1, S, V]
-        let probs = logits.data().softmax(-1)?;    // [1, S, V]
-
-        // Find mask positions in input_ids[0].
-        let ids_row = enc.input_ids.data().select(0, 0)?.to_i64_vec()?;
-
-        let mut out = Vec::new();
-        for (pos, id) in ids_row.iter().enumerate() {
-            if *id != mask_id {
-                continue;
-            }
-            // probs[0, pos, :] → [V]
-            let row = probs
-                .select(0, 0)?
-                .select(0, pos as i64)?;
-            let (vals, idxs) = row.topk(top_k as i64, 0, /*largest=*/ true, /*sorted=*/ true)?;
-            let score_vec = vals.to_f32_vec()?;
-            let id_vec = idxs.to_i64_vec()?;
-            let picks: Vec<(String, f32)> = id_vec
-                .iter()
-                .zip(score_vec.iter())
-                .map(|(i, s)| {
-                    let tok_str = tok
-                        .inner()
-                        .id_to_token(*i as u32)
-                        .unwrap_or_else(|| format!("[UNK_{i}]"));
-                    (tok_str, *s)
-                })
-                .collect();
-            out.push(picks);
-        }
-
-        if out.is_empty() {
-            return Err(TensorError::new(
-                "fill_mask: input contains no [MASK] token",
-            ));
-        }
-        Ok(out)
-    }
-}
-
-// ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
-
-impl HasGraph for BertForSequenceClassification {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for BertForTokenClassification {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for BertForQuestionAnswering {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for BertForMaskedLM {
-    fn graph(&self) -> &Graph { &self.graph }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::safetensors_io::expected_from_graph;
-    use flodl::TensorOptions;
+    use flodl::{HasGraph, TensorOptions};
 
     /// The 16 parameter keys every encoder layer exposes, template-formatted
     /// for a given layer index.
@@ -1938,6 +1507,109 @@ mod tests {
         assert!(
             embed_w.variable.grad().is_some(),
             "tied embedding/decoder weight must receive gradient",
+        );
+    }
+
+    /// HF checkpoints save `cls.predictions.decoder.weight` alongside
+    /// `bert.embeddings.word_embeddings.weight` even though the two
+    /// are the same tied tensor. flodl-hf emits only the first
+    /// (dedup by pointer identity in `named_parameters()`), so the
+    /// loader must *tolerate* the redundant decoder key rather than
+    /// error on it.
+    ///
+    /// This is a CPU-only synthetic-safetensors test — no network,
+    /// no real checkpoint needed. The existing
+    /// `bert_mlm_parity.rs` live test exercises the same path
+    /// end-to-end but is `#[ignore]` + `_live` (network-gated), so
+    /// this unit test closes the coverage gap for default runs.
+    ///
+    /// Covers two assertions:
+    /// 1. `load_safetensors_into_graph_with_rename_allow_unused`
+    ///    accepts a blob carrying the redundant key and reports it
+    ///    back in the `unused` list.
+    /// 2. `load_safetensors_into_graph_with_rename` (strict) rejects
+    ///    the same blob — confirming the tolerance is opt-in, not
+    ///    accidental.
+    #[test]
+    fn mlm_loader_tolerates_redundant_tied_decoder_key() {
+        use std::collections::HashMap as StdHashMap;
+
+        use safetensors::{tensor::TensorView, Dtype};
+
+        use crate::safetensors_io::{
+            expected_from_graph, load_safetensors_into_graph_with_rename,
+            load_safetensors_into_graph_with_rename_allow_unused,
+        };
+
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let head = BertForMaskedLM::on_device(&config, dev).unwrap();
+
+        // Drive the checkpoint's key set from the graph itself. Each
+        // expected key gets a zero-filled payload of the right shape;
+        // the loader only validates shapes, not values.
+        let expected = expected_from_graph(head.graph());
+        let mut entries: Vec<(String, Dtype, Vec<usize>, Vec<u8>)> = Vec::new();
+        let mut embed_weight_shape: Vec<usize> = Vec::new();
+        for p in &expected {
+            let shape_usize: Vec<usize> = p.shape.iter().map(|&d| d as usize).collect();
+            let numel: usize = shape_usize.iter().product();
+            let payload = vec![0u8; numel * 4]; // f32 zeros
+            if p.key == "bert.embeddings.word_embeddings.weight" {
+                embed_weight_shape = shape_usize.clone();
+            }
+            entries.push((p.key.clone(), Dtype::F32, shape_usize, payload));
+        }
+        assert!(
+            !embed_weight_shape.is_empty(),
+            "bert.embeddings.word_embeddings.weight must be an expected key",
+        );
+
+        // The load-bearing addition: a redundant `cls.predictions.decoder.weight`
+        // with the same shape as the tied word-embedding weight, as HF
+        // checkpoints typically ship it.
+        let decoder_numel: usize = embed_weight_shape.iter().product();
+        entries.push((
+            "cls.predictions.decoder.weight".to_string(),
+            Dtype::F32,
+            embed_weight_shape,
+            vec![0u8; decoder_numel * 4],
+        ));
+
+        // Serialize into an in-memory safetensors blob.
+        let views: StdHashMap<String, TensorView<'_>> = entries
+            .iter()
+            .map(|(n, d, s, b)| {
+                (n.clone(), TensorView::new(*d, s.clone(), b).unwrap())
+            })
+            .collect();
+        let bytes = safetensors::serialize(&views, &None).unwrap();
+
+        // 1. `allow_unused` variant: accepts the redundant key and
+        //    returns it in the `unused` list.
+        let unused = load_safetensors_into_graph_with_rename_allow_unused(
+            head.graph(),
+            &bytes,
+            |k| k.to_string(),
+        )
+        .expect("allow_unused loader must accept redundant tied decoder key");
+        assert!(
+            unused.iter().any(|k| k == "cls.predictions.decoder.weight"),
+            "redundant decoder key must be reported in `unused`; got: {unused:?}",
+        );
+
+        // 2. Strict variant: same blob must fail, confirming the
+        //    tolerance is opt-in.
+        let strict_err = load_safetensors_into_graph_with_rename(
+            head.graph(),
+            &bytes,
+            |k| k.to_string(),
+        )
+        .expect_err("strict loader must reject the redundant decoder key");
+        let msg = strict_err.to_string();
+        assert!(
+            msg.contains("cls.predictions.decoder.weight"),
+            "strict-loader error must name the offending key; got: {msg}",
         );
     }
 }

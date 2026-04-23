@@ -38,18 +38,35 @@ use std::cell::Cell;
 
 use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, Parameter};
 use flodl::{
-    DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, TensorOptions, Variable,
+    DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable,
 };
 
-use crate::models::bert::build_extended_attention_mask;
 use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
 use crate::path::{prefix_params, HfPath};
 use crate::task_heads::{
-    check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels,
-    masked_lm_loss, question_answering_loss, sequence_classification_loss,
-    token_classification_loss,
+    check_num_labels, ClassificationHead, EncoderInputs, MaskedLmHead, QaHead, TaggingHead,
 };
 pub use crate::task_heads::{Answer, TokenPrediction};
+
+/// DistilBERT graphs take two `forward_multi` inputs — `input_ids` and
+/// an extended attention mask — in that order. DistilBERT drops BERT's
+/// `token_type_ids` and `position_ids` entirely: there's no segment
+/// embedding, and position ids are learned absolute positions looked
+/// up inside the embedding layer from `[0, seq_len)`.
+#[cfg(feature = "tokenizer")]
+impl EncoderInputs for DistilBertConfig {
+    const FAMILY_NAME: &'static str = "DistilBert";
+    const MASK_TOKEN: &'static str = "[MASK]";
+
+    fn encoder_inputs(enc: &crate::tokenizer::EncodedBatch) -> Result<Vec<Variable>> {
+        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
+        let mask = Variable::new(
+            crate::models::bert::build_extended_attention_mask(&mask_f32)?,
+            false,
+        );
+        Ok(vec![enc.input_ids.clone(), mask])
+    }
+}
 
 /// DistilBERT hyperparameters. Matches the fields of a HuggingFace
 /// `DistilBertConfig` JSON file that affect model shape.
@@ -431,15 +448,13 @@ impl Module for ActivationDropoutLinear {
 /// `lxyuan/distilbert-base-multilingual-cased-sentiments-student`
 /// (3-class sentiment),
 /// `distilbert-base-uncased-finetuned-sst-2-english` (2-class).
-pub struct DistilBertForSequenceClassification {
-    graph: Graph,
-    config: DistilBertConfig,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`ClassificationHead`]; `predict`,
+/// `classify`, `forward_encoded`, `compute_loss`, `labels`, `graph`,
+/// `config`, and `with_tokenizer` are inherited. Only the
+/// DistilBERT-specific `on_device` constructor lives below.
+pub type DistilBertForSequenceClassification = ClassificationHead<DistilBertConfig>;
 
-impl DistilBertForSequenceClassification {
+impl ClassificationHead<DistilBertConfig> {
     /// Build the full graph (backbone + 2-layer classification head) on
     /// `device` without loading any weights.
     pub fn on_device(
@@ -460,17 +475,7 @@ impl DistilBertForSequenceClassification {
             })
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     pub(crate) fn num_labels_from_config(config: &DistilBertConfig) -> Result<i64> {
@@ -480,67 +485,6 @@ impl DistilBertForSequenceClassification {
                  `num_labels` (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &DistilBertConfig { &self.config }
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Classify a pre-tokenised batch. Returns one label distribution
-    /// per input, sorted by descending probability.
-    #[cfg(feature = "tokenizer")]
-    pub fn classify(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<(String, f32)>>> {
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        logits_to_sorted_labels(&logits, &self.id2label)
-    }
-
-    /// One-shot text → label distribution. Encodes with the attached
-    /// tokenizer, runs the graph in eval mode, softmaxes, returns
-    /// per-input label distributions sorted desc.
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<(String, f32)>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "DistilBertForSequenceClassification::predict requires a \
-                 tokenizer; use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.classify(&enc)
-    }
-
-    /// Raw forward pass returning `[batch, num_labels]` logits. Does not
-    /// change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[enc.input_ids.clone(), mask])
-    }
-
-    /// Forward pass plus sequence-classification loss. Mirrors HF
-    /// Python's `DistilBertForSequenceClassification(..., labels=...).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        sequence_classification_loss(&logits, labels)
     }
 }
 
@@ -557,15 +501,12 @@ impl DistilBertForSequenceClassification {
 /// Matches HF Python's `DistilBertForTokenClassification`. Pre-trained
 /// checkpoints: `dslim/distilbert-NER` (PER/ORG/LOC/MISC, 4 entity
 /// types × BIO = 9 labels including `O`).
-pub struct DistilBertForTokenClassification {
-    graph: Graph,
-    config: DistilBertConfig,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`TaggingHead`]; all per-token
+/// machinery is inherited. Only the DistilBERT-specific `on_device`
+/// constructor lives below.
+pub type DistilBertForTokenClassification = TaggingHead<DistilBertConfig>;
 
-impl DistilBertForTokenClassification {
+impl TaggingHead<DistilBertConfig> {
     pub fn on_device(
         config: &DistilBertConfig,
         num_labels: i64,
@@ -577,17 +518,7 @@ impl DistilBertForTokenClassification {
             .through(Linear::on_device(config.dim, num_labels, device)?)
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     pub(crate) fn num_labels_from_config(config: &DistilBertConfig) -> Result<i64> {
@@ -597,112 +528,6 @@ impl DistilBertForTokenClassification {
                  `num_labels` (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &DistilBertConfig { &self.config }
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Tag every token in a pre-tokenised batch. Output shape matches
-    /// `enc.input_ids`: `result[b][s]` is the top-1 prediction for batch
-    /// entry `b`, position `s`. `TokenPrediction::attends` mirrors the
-    /// input attention mask so callers can drop `[PAD]` entries without
-    /// re-tokenising.
-    #[cfg(feature = "tokenizer")]
-    pub fn tag(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "DistilBertForTokenClassification::tag requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        let probs = logits.softmax(-1)?;
-        let shape = probs.shape();
-        assert_eq!(shape.len(), 3, "expected [B, S, num_labels], got {shape:?}");
-        let batch = shape[0] as usize;
-        let seq = shape[1] as usize;
-        let n = shape[2] as usize;
-        let flat = probs.data().to_f32_vec()?;
-        let input_ids: Vec<i64> = enc.input_ids.data().to_i64_vec()?;
-        let attn_ids: Vec<i64> = enc.attention_mask.data().to_i64_vec()?;
-
-        let mut out = Vec::with_capacity(batch);
-        for b in 0..batch {
-            let mut row = Vec::with_capacity(seq);
-            for s in 0..seq {
-                let offset = (b * seq + s) * n;
-                let slice = &flat[offset..offset + n];
-                let (argmax, score) = slice
-                    .iter()
-                    .enumerate()
-                    .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, &v)| {
-                        if v > bs { (i, v) } else { (bi, bs) }
-                    });
-                let token_id = input_ids[b * seq + s] as u32;
-                let token = tok
-                    .inner()
-                    .id_to_token(token_id)
-                    .unwrap_or_else(|| format!("<{token_id}>"));
-                let attends = attn_ids[b * seq + s] != 0;
-                row.push(TokenPrediction {
-                    token,
-                    label: self.id2label[argmax].clone(),
-                    score,
-                    attends,
-                });
-            }
-            out.push(row);
-        }
-        Ok(out)
-    }
-
-    /// One-shot texts → per-token predictions. Encodes with the attached
-    /// tokenizer and delegates to [`tag`](Self::tag).
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "DistilBertForTokenClassification::predict requires a \
-                 tokenizer; use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.tag(&enc)
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, num_labels]` logits.
-    /// Does not change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[enc.input_ids.clone(), mask])
-    }
-
-    /// Forward pass plus token-classification loss. Mirrors HF Python's
-    /// `DistilBertForTokenClassification(..., labels=...).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        token_classification_loss(&logits, labels)
     }
 }
 
@@ -718,103 +543,20 @@ impl DistilBertForTokenClassification {
 ///
 /// Matches HF Python's `DistilBertForQuestionAnswering`. Canonical
 /// checkpoint: `distilbert-base-cased-distilled-squad`.
-pub struct DistilBertForQuestionAnswering {
-    graph: Graph,
-    config: DistilBertConfig,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`QaHead`]; span-extraction,
+/// `forward_encoded`, `compute_loss`, and tokenizer plumbing are
+/// inherited. Only the DistilBERT-specific `on_device` constructor
+/// lives below.
+pub type DistilBertForQuestionAnswering = QaHead<DistilBertConfig>;
 
-impl DistilBertForQuestionAnswering {
+impl QaHead<DistilBertConfig> {
     pub fn on_device(config: &DistilBertConfig, device: Device) -> Result<Self> {
         let graph = distilbert_backbone_flow(config, device)?
             .through(Dropout::new(config.qa_dropout))
             .through(Linear::on_device(config.dim, 2, device)?)
             .tag("qa_outputs")
             .build()?;
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &DistilBertConfig { &self.config }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Answer one `(question, context)` pair. Returns the highest-scoring
-    /// span over the context tokens.
-    #[cfg(feature = "tokenizer")]
-    pub fn answer(&self, question: &str, context: &str) -> Result<Answer> {
-        let mut out = self.answer_batch(&[(question, context)])?;
-        Ok(out.pop().expect("answer_batch returns one per input"))
-    }
-
-    /// Batched variant of [`answer`](Self::answer).
-    #[cfg(feature = "tokenizer")]
-    pub fn answer_batch(&self, pairs: &[(&str, &str)]) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "DistilBertForQuestionAnswering::answer requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode_pairs(pairs)?;
-        self.extract(&enc)
-    }
-
-    /// Run the graph on a pre-tokenised `(question, context)` batch and
-    /// extract best spans. `enc.sequence_ids == 1` marks the context
-    /// region — `-1` already excludes padding, so no separate
-    /// attention-mask check is needed. Same algorithm as
-    /// [`BertForQuestionAnswering::extract`](crate::models::bert::BertForQuestionAnswering::extract).
-    #[cfg(feature = "tokenizer")]
-    pub fn extract(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "DistilBertForQuestionAnswering::extract requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        extract_best_span(&logits, enc, tok)
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, 2]` logits.
-    /// Does not change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[enc.input_ids.clone(), mask])
-    }
-
-    /// Forward pass plus extractive QA loss. Mirrors HF Python's
-    /// `DistilBertForQuestionAnswering(..., start_positions=...,
-    /// end_positions=...).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        start_positions: &Variable,
-        end_positions: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        question_answering_loss(&logits, start_positions, end_positions)
+        Ok(Self::from_graph(graph, config))
     }
 }
 
@@ -851,18 +593,17 @@ impl DistilBertForQuestionAnswering {
 ///
 /// Matches HF Python's `DistilBertForMaskedLM`. Canonical checkpoints:
 /// `distilbert-base-uncased`, `distilbert-base-cased`.
-pub struct DistilBertForMaskedLM {
-    graph: Graph,
-    config: DistilBertConfig,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`MaskedLmHead`]; `fill_mask`,
+/// `forward_encoded`, `compute_loss`, and tokenizer plumbing are
+/// inherited. Only the DistilBERT-specific `on_device` constructor
+/// lives below.
+pub type DistilBertForMaskedLM = MaskedLmHead<DistilBertConfig>;
 
-impl DistilBertForMaskedLM {
+impl MaskedLmHead<DistilBertConfig> {
     /// Build the full graph: backbone + vocab_transform + gelu +
     /// vocab_layer_norm + tied vocab_projector on `device`. Initializes
     /// all weights fresh; use
-    /// [`from_pretrained`](crate::hub::DistilBertForMaskedLM::from_pretrained)
+    /// [`from_pretrained`](crate::models::distilbert::DistilBertForMaskedLM::from_pretrained)
     /// to load a checkpoint.
     pub fn on_device(config: &DistilBertConfig, device: Device) -> Result<Self> {
         let embeddings = DistilBertEmbeddings::on_device(config, device)?;
@@ -905,124 +646,16 @@ impl DistilBertForMaskedLM {
             .tag("vocab_projector")
             .build()?;
 
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config))
     }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &DistilBertConfig { &self.config }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, vocab_size]` logits
-    /// over the vocabulary. Does not change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus masked-LM loss. Mirrors HF Python's
-    /// `DistilBertForMaskedLM(..., labels=labels).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        masked_lm_loss(&logits, labels)
-    }
-
-    /// Fill every `[MASK]` token in `text` with its top-`k` predicted
-    /// replacements. DistilBERT inherits BERT's `[MASK]` token.
-    #[cfg(feature = "tokenizer")]
-    pub fn fill_mask(&self, text: &str, top_k: usize) -> Result<Vec<Vec<(String, f32)>>> {
-        if top_k == 0 {
-            return Err(TensorError::new("fill_mask: top_k must be > 0"));
-        }
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "DistilBertForMaskedLM::fill_mask requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let mask_id = tok.inner().token_to_id("[MASK]").ok_or_else(|| {
-            TensorError::new("fill_mask: tokenizer has no [MASK] token")
-        })? as i64;
-
-        self.graph.eval();
-        let enc = tok.encode(&[text])?;
-        let logits = self.forward_encoded(&enc)?;
-        let probs = logits.data().softmax(-1)?;
-
-        let ids_row = enc.input_ids.data().select(0, 0)?.to_i64_vec()?;
-        let mut out = Vec::new();
-        for (pos, id) in ids_row.iter().enumerate() {
-            if *id != mask_id {
-                continue;
-            }
-            let row = probs.select(0, 0)?.select(0, pos as i64)?;
-            let (vals, idxs) = row.topk(top_k as i64, 0, /*largest=*/ true, /*sorted=*/ true)?;
-            let score_vec = vals.to_f32_vec()?;
-            let id_vec = idxs.to_i64_vec()?;
-            let picks: Vec<(String, f32)> = id_vec
-                .iter()
-                .zip(score_vec.iter())
-                .map(|(i, s)| {
-                    let tok_str = tok
-                        .inner()
-                        .id_to_token(*i as u32)
-                        .unwrap_or_else(|| format!("[UNK_{i}]"));
-                    (tok_str, *s)
-                })
-                .collect();
-            out.push(picks);
-        }
-
-        if out.is_empty() {
-            return Err(TensorError::new(
-                "fill_mask: input contains no [MASK] token",
-            ));
-        }
-        Ok(out)
-    }
-}
-
-// ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
-
-impl HasGraph for DistilBertForSequenceClassification {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for DistilBertForTokenClassification {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for DistilBertForQuestionAnswering {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for DistilBertForMaskedLM {
-    fn graph(&self) -> &Graph { &self.graph }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::bert::build_extended_attention_mask;
     use crate::safetensors_io::expected_from_graph;
+    use flodl::HasGraph;
 
     /// 16 parameter keys every encoder layer exposes, template-formatted
     /// for a given layer index.

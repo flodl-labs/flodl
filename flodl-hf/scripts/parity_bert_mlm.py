@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Generate the parity fixture for `BertForTokenClassification`.
+"""Generate the parity fixture for `BertForMaskedLM`.
 
-Runs HuggingFace `BertForTokenClassification` on a pinned sentence and
-writes inputs + per-token reference logits to
-`flodl-hf/tests/fixtures/bert_tokencls_parity.safetensors`.
+Runs HuggingFace `BertForMaskedLM` on a pinned sentence and writes
+inputs + per-position vocabulary logits to
+`flodl-hf/tests/fixtures/bert_mlm_parity.safetensors`.
 
-Fixture model: `dslim/bert-base-NER` (9-class CoNLL-2003 NER).
+Fixture model: `bert-base-uncased` (the canonical MLM checkpoint —
+same weights used by every downstream BERT fine-tune). Weight tying
+between the decoder and the word-embedding table is preserved; HF's
+`tie_weights()` runs after load, so any redundant `cls.predictions.decoder.weight`
+in the checkpoint is overwritten to match the embedding.
 
-Run via `fdl flodl-hf parity-bert-tokencls`.
+Run via `fdl flodl-hf parity-bert-mlm`.
 """
 
 from __future__ import annotations
@@ -17,19 +21,19 @@ from pathlib import Path
 import torch
 from huggingface_hub import model_info
 from safetensors.torch import save_file
-from transformers import AutoTokenizer, BertForTokenClassification
+from transformers import AutoTokenizer, BertForMaskedLM
 
 from _hf_cache_utils import ensure_refs_main
 
-MODEL_ID = "dslim/bert-base-NER"
+MODEL_ID = "bert-base-uncased"
 REVISION: str | None = None
 
 FIXTURE_PATH = (
     Path(__file__).resolve().parents[1]
-    / "tests" / "fixtures" / "bert_tokencls_parity.safetensors"
+    / "tests" / "fixtures" / "bert_mlm_parity.safetensors"
 )
 
-PROMPT = "fab2s lives in Latent"
+PROMPT = "The capital of France is [MASK]."
 
 
 def main() -> None:
@@ -39,7 +43,7 @@ def main() -> None:
     print(f"using {MODEL_ID} @ {sha}")
 
     tok = AutoTokenizer.from_pretrained(MODEL_ID, revision=sha)
-    model = BertForTokenClassification.from_pretrained(MODEL_ID, revision=sha).eval()
+    model = BertForMaskedLM.from_pretrained(MODEL_ID, revision=sha).eval()
     ensure_refs_main(MODEL_ID, sha)
 
     enc = tok(PROMPT, return_tensors="pt")

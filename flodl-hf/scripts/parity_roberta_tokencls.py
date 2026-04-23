@@ -33,7 +33,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "roberta_tokencls_parity.safetensors"
 )
 
-PROMPT = "Fabrice writes Rust code in Paris"
+PROMPT = "fab2s writes Rust code in Latent"
 
 
 def sequence_ids_tensor(enc) -> torch.Tensor:

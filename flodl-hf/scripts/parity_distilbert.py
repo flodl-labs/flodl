@@ -35,7 +35,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "distilbert_base_parity.safetensors"
 )
 
-PROMPT = "Fabrice writes Rust"
+PROMPT = "fab2s writes Rust"
 
 
 def main() -> None:

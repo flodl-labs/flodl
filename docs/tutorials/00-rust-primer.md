@@ -7,6 +7,13 @@ explicit that Python leaves implicit.
 
 > **Time:** ~15 minutes. After this you can follow every floDl tutorial.
 
+> **Don't want to translate by hand?** floDl ships with an AI porting skill
+> that reads your PyTorch script and generates a complete floDl project.
+> Run `/port my_model.py` in Claude Code, or see the
+> [Porting Guide](../porting.md). For a side-by-side API reference, see the
+> [PyTorch Migration Guide](../pytorch_migration.md). You can also run
+> `fdl api-ref` to get the full, up-to-date API surface in your terminal.
+
 ---
 
 ## 1. Variables: `let` and `let mut`

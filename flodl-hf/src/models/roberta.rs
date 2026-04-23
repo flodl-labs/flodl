@@ -33,11 +33,9 @@ use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{
-    DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, TensorOptions,
-    Variable,
+    DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable,
 };
 
-use crate::models::bert::build_extended_attention_mask;
 use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
 use crate::path::{prefix_params, HfPath};
 
@@ -310,7 +308,7 @@ impl Module for RobertaPooler {
 /// Translate a [`RobertaConfig`] into the subset [`TransformerLayer`]
 /// consumes. BERT and RoBERTa share the encoder layer layout exactly;
 /// only the embedding and task-head code differs.
-fn roberta_layer_config(config: &RobertaConfig) -> TransformerLayerConfig {
+pub(crate) fn roberta_layer_config(config: &RobertaConfig) -> TransformerLayerConfig {
     TransformerLayerConfig {
         hidden_size:                  config.hidden_size,
         num_attention_heads:          config.num_attention_heads,
@@ -331,7 +329,11 @@ fn roberta_layer_config(config: &RobertaConfig) -> TransformerLayerConfig {
 ///
 /// Graph shape: `roberta.embeddings` →
 /// `roberta.encoder.layer.{0..N-1}` → (`roberta.pooler`?).
-fn roberta_backbone_flow(
+///
+/// Exposed `pub(crate)` so the sibling XLM-RoBERTa port can reuse the
+/// exact builder — HF's XLM-R state_dict uses the `roberta.*` prefix
+/// and shares this graph shape verbatim.
+pub(crate) fn roberta_backbone_flow(
     config: &RobertaConfig,
     device: Device,
     with_pooler: bool,
@@ -410,11 +412,35 @@ impl RobertaModel {
 // ── Task heads ───────────────────────────────────────────────────────────
 
 use crate::task_heads::{
-    check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels,
-    masked_lm_loss, question_answering_loss, sequence_classification_loss,
-    token_classification_loss,
+    check_num_labels, ClassificationHead, EncoderInputs, MaskedLmHead, QaHead, TaggingHead,
 };
 pub use crate::task_heads::{Answer, TokenPrediction};
+
+/// RoBERTa graphs take three `forward_multi` inputs — `input_ids`,
+/// `token_type_ids`, and an extended attention mask — in that order.
+/// Position ids are computed inside the embedding layer (non-padding
+/// cumulative count + `padding_idx + 1`), so they are not a graph
+/// input. Token-type ids are accepted but typically all-zero — HF
+/// matches this by keeping the type-embedding table and letting
+/// every token index into row 0.
+#[cfg(feature = "tokenizer")]
+impl EncoderInputs for RobertaConfig {
+    const FAMILY_NAME: &'static str = "Roberta";
+    const MASK_TOKEN: &'static str = "<mask>";
+
+    fn encoder_inputs(enc: &crate::tokenizer::EncodedBatch) -> Result<Vec<Variable>> {
+        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
+        let mask = Variable::new(
+            crate::models::bert::build_extended_attention_mask(&mask_f32)?,
+            false,
+        );
+        Ok(vec![
+            enc.input_ids.clone(),
+            enc.token_type_ids.clone(),
+            mask,
+        ])
+    }
+}
 
 // ── RobertaClassificationHead ────────────────────────────────────────────
 
@@ -488,15 +514,13 @@ impl Module for RobertaClassificationHead {
 /// Pre-trained checkpoints:
 /// `cardiffnlp/twitter-roberta-base-sentiment-latest` (3-label),
 /// `roberta-large-mnli`, `SamLowe/roberta-base-go_emotions`.
-pub struct RobertaForSequenceClassification {
-    graph: Graph,
-    config: RobertaConfig,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`ClassificationHead`]; `predict`,
+/// `classify`, `forward_encoded`, `compute_loss`, `labels`, `graph`,
+/// `config`, and `with_tokenizer` are inherited. Only the RoBERTa-
+/// specific `on_device` constructor lives below.
+pub type RobertaForSequenceClassification = ClassificationHead<RobertaConfig>;
 
-impl RobertaForSequenceClassification {
+impl ClassificationHead<RobertaConfig> {
     /// Build the full graph (backbone without pooler + two-layer
     /// classification head) on `device` without loading any weights.
     pub fn on_device(
@@ -509,17 +533,7 @@ impl RobertaForSequenceClassification {
             .through(RobertaClassificationHead::on_device(config, num_labels, device)?)
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     pub(crate) fn num_labels_from_config(config: &RobertaConfig) -> Result<i64> {
@@ -529,69 +543,6 @@ impl RobertaForSequenceClassification {
                  (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &RobertaConfig { &self.config }
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Classify a pre-tokenised batch. Returns one label distribution per
-    /// input, sorted by descending probability.
-    #[cfg(feature = "tokenizer")]
-    pub fn classify(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<(String, f32)>>> {
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        logits_to_sorted_labels(&logits, &self.id2label)
-    }
-
-    /// One-shot text → label distribution.
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<(String, f32)>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "RobertaForSequenceClassification::predict requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.classify(&enc)
-    }
-
-    /// Raw forward pass returning `[batch, num_labels]` logits. Does not
-    /// change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus sequence-classification loss. Mirrors HF
-    /// Python's `RobertaForSequenceClassification(..., labels=...).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        sequence_classification_loss(&logits, labels)
     }
 }
 
@@ -604,15 +555,12 @@ impl RobertaForSequenceClassification {
 /// Matches HF Python's `RobertaForTokenClassification`. Pre-trained
 /// checkpoints: `Jean-Baptiste/roberta-large-ner-english`,
 /// `obi/deid_roberta_i2b2`.
-pub struct RobertaForTokenClassification {
-    graph: Graph,
-    config: RobertaConfig,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`TaggingHead`]; all per-token
+/// machinery is inherited. Only the RoBERTa-specific `on_device`
+/// constructor lives below.
+pub type RobertaForTokenClassification = TaggingHead<RobertaConfig>;
 
-impl RobertaForTokenClassification {
+impl TaggingHead<RobertaConfig> {
     pub fn on_device(
         config: &RobertaConfig,
         num_labels: i64,
@@ -624,17 +572,7 @@ impl RobertaForTokenClassification {
             .through(Linear::on_device(config.hidden_size, num_labels, device)?)
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     pub(crate) fn num_labels_from_config(config: &RobertaConfig) -> Result<i64> {
@@ -644,106 +582,6 @@ impl RobertaForTokenClassification {
                  (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &RobertaConfig { &self.config }
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn tag(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "RobertaForTokenClassification::tag requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        let probs = logits.softmax(-1)?;
-        let shape = probs.shape();
-        assert_eq!(shape.len(), 3, "expected [B, S, num_labels], got {shape:?}");
-        let batch = shape[0] as usize;
-        let seq = shape[1] as usize;
-        let n = shape[2] as usize;
-        let flat = probs.data().to_f32_vec()?;
-        let input_ids: Vec<i64> = enc.input_ids.data().to_i64_vec()?;
-        let attn_ids: Vec<i64> = enc.attention_mask.data().to_i64_vec()?;
-
-        let mut out = Vec::with_capacity(batch);
-        for b in 0..batch {
-            let mut row = Vec::with_capacity(seq);
-            for s in 0..seq {
-                let base = (b * seq + s) * n;
-                let (best_k, &best_p) = flat[base..base + n]
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .expect("n > 0 checked by check_num_labels");
-                let id = input_ids[b * seq + s] as u32;
-                let token = tok
-                    .inner()
-                    .id_to_token(id)
-                    .unwrap_or_else(|| format!("<unk_id={id}>"));
-                row.push(TokenPrediction {
-                    token,
-                    label: self.id2label[best_k].clone(),
-                    score: best_p,
-                    attends: attn_ids[b * seq + s] != 0,
-                });
-            }
-            out.push(row);
-        }
-        Ok(out)
-    }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "RobertaForTokenClassification::predict requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.tag(&enc)
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, num_labels]` logits.
-    /// Does not change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus token-classification loss on a labelled batch.
-    /// Mirrors HF Python's `RobertaForTokenClassification(..., labels=...).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        token_classification_loss(&logits, labels)
     }
 }
 
@@ -760,106 +598,18 @@ impl RobertaForTokenClassification {
 /// Matches HF Python's `RobertaForQuestionAnswering`. Pre-trained
 /// checkpoints: `deepset/roberta-base-squad2`,
 /// `csarron/roberta-base-squad-v1`.
-pub struct RobertaForQuestionAnswering {
-    graph: Graph,
-    config: RobertaConfig,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`QaHead`]; span-extraction and
+/// forward machinery are inherited. Only the RoBERTa-specific
+/// `on_device` constructor lives below.
+pub type RobertaForQuestionAnswering = QaHead<RobertaConfig>;
 
-impl RobertaForQuestionAnswering {
+impl QaHead<RobertaConfig> {
     pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
         let graph = roberta_backbone_flow(config, device, /*with_pooler=*/ false)?
             .through(Linear::on_device(config.hidden_size, 2, device)?)
             .tag("qa_outputs")
             .build()?;
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &RobertaConfig { &self.config }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn answer(&self, question: &str, context: &str) -> Result<Answer> {
-        let mut out = self.answer_batch(&[(question, context)])?;
-        Ok(out.pop().expect("answer_batch returns one per input"))
-    }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn answer_batch(&self, pairs: &[(&str, &str)]) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "RobertaForQuestionAnswering::answer requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode_pairs(pairs)?;
-        self.extract(&enc)
-    }
-
-    /// Run the graph on a pre-tokenised `(question, context)` batch
-    /// and extract best spans. The tokenizer's `sequence_ids` mark the
-    /// context region (`== 1`); scoring is restricted to that region.
-    ///
-    /// RoBERTa's `token_type_ids` are all zero so the BERT-style
-    /// `tt == 1` filter doesn't work; `sequence_ids` is the
-    /// model-agnostic signal HF uses in its QA pipeline.
-    #[cfg(feature = "tokenizer")]
-    pub fn extract(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "RobertaForQuestionAnswering::extract requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let logits = self.forward_encoded(enc)?;
-        extract_best_span(&logits, enc, tok)
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, 2]` logits. Start
-    /// logits are on slice `0` of the last axis, end logits on slice `1`.
-    /// Does not change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus extractive QA loss on a labelled batch. Mirrors
-    /// HF Python's `RobertaForQuestionAnswering(..., start_positions=...,
-    /// end_positions=...).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        start_positions: &Variable,
-        end_positions: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        question_answering_loss(&logits, start_positions, end_positions)
+        Ok(Self::from_graph(graph, config))
     }
 }
 
@@ -938,175 +688,71 @@ impl Module for RobertaLMHeadTransform {
 /// Matches HF Python's `RobertaForMaskedLM`. Canonical checkpoints:
 /// `roberta-base`, `roberta-large`, any `*-mlm` domain-adaptation
 /// fine-tune.
-pub struct RobertaForMaskedLM {
-    graph: Graph,
-    config: RobertaConfig,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
+/// Type alias over the generic [`MaskedLmHead`]; `fill_mask`,
+/// `forward_encoded`, `compute_loss`, and tokenizer plumbing are
+/// inherited. Only the RoBERTa-specific `on_device` constructor lives
+/// below.
+pub type RobertaForMaskedLM = MaskedLmHead<RobertaConfig>;
+
+/// Build the full RoBERTa MLM graph: embeddings (with tied weight
+/// captured) → encoder layers → LM-head transform → tied decoder.
+///
+/// Shared with the sibling XLM-RoBERTa port since HF's XLM-R state_dict
+/// uses identical `roberta.*` keys and the same tied-decoder layout.
+pub(crate) fn roberta_masked_lm_graph(config: &RobertaConfig, device: Device) -> Result<Graph> {
+    // Build embeddings first, grab the tied weight before ownership
+    // moves into `.through(...)`.
+    let embeddings = RobertaEmbeddings::on_device(config, device)?;
+    let tied_weight = embeddings.word_embeddings_weight();
+
+    let mut fb = FlowBuilder::new()
+        .input(&["token_type_ids", "attention_mask"])
+        .through(embeddings)
+        .tag("roberta.embeddings")
+        .using(&["token_type_ids"]);
+
+    let layer_root = HfPath::new("roberta").sub("encoder").sub("layer");
+    let layer_cfg = roberta_layer_config(config);
+    for i in 0..config.num_hidden_layers {
+        let tag = layer_root.sub(i).to_string();
+        fb = fb
+            .through(TransformerLayer::on_device(&layer_cfg, LayerNaming::BERT, device)?)
+            .tag(&tag)
+            .using(&["attention_mask"]);
+    }
+
+    // LM head: transform stack → tied decoder with fresh [V] bias.
+    let decoder_bias = Parameter::new(
+        Tensor::zeros(
+            &[config.vocab_size],
+            TensorOptions { dtype: DType::Float32, device },
+        )?,
+        "bias",
+    );
+    fb.through(RobertaLMHeadTransform::on_device(config, device)?)
+        .tag("lm_head")
+        .through(Linear::from_shared_weight(tied_weight, Some(decoder_bias)))
+        .tag("lm_head.decoder")
+        .build()
 }
 
-impl RobertaForMaskedLM {
+impl MaskedLmHead<RobertaConfig> {
     /// Build the full graph: backbone (no pooler) + LM-head transform +
     /// tied decoder on `device`. Initializes all weights fresh; use
-    /// [`from_pretrained`](crate::hub::RobertaForMaskedLM::from_pretrained)
+    /// [`from_pretrained`](crate::models::roberta::RobertaForMaskedLM::from_pretrained)
     /// to load a checkpoint.
     pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
-        // Build embeddings first, grab the tied weight before ownership
-        // moves into `.through(...)`.
-        let embeddings = RobertaEmbeddings::on_device(config, device)?;
-        let tied_weight = embeddings.word_embeddings_weight();
-
-        let mut fb = FlowBuilder::new()
-            .input(&["token_type_ids", "attention_mask"])
-            .through(embeddings)
-            .tag("roberta.embeddings")
-            .using(&["token_type_ids"]);
-
-        let layer_root = HfPath::new("roberta").sub("encoder").sub("layer");
-        let layer_cfg = roberta_layer_config(config);
-        for i in 0..config.num_hidden_layers {
-            let tag = layer_root.sub(i).to_string();
-            fb = fb
-                .through(TransformerLayer::on_device(&layer_cfg, LayerNaming::BERT, device)?)
-                .tag(&tag)
-                .using(&["attention_mask"]);
-        }
-
-        // LM head: transform stack → tied decoder with fresh [V] bias.
-        let decoder_bias = Parameter::new(
-            Tensor::zeros(
-                &[config.vocab_size],
-                TensorOptions { dtype: DType::Float32, device },
-            )?,
-            "bias",
-        );
-        let graph = fb
-            .through(RobertaLMHeadTransform::on_device(config, device)?)
-            .tag("lm_head")
-            .through(Linear::from_shared_weight(tied_weight, Some(decoder_bias)))
-            .tag("lm_head.decoder")
-            .build()?;
-
-        Ok(Self {
-            graph,
-            config: config.clone(),
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        let graph = roberta_masked_lm_graph(config, device)?;
+        Ok(Self::from_graph(graph, config))
     }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn config(&self) -> &RobertaConfig { &self.config }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Raw forward pass returning `[batch, seq_len, vocab_size]` logits
-    /// over the vocabulary. Does not change train / eval mode.
-    #[cfg(feature = "tokenizer")]
-    pub fn forward_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
-    }
-
-    /// Forward pass plus masked-LM loss. Mirrors HF Python's
-    /// `RobertaForMaskedLM(..., labels=labels).loss`.
-    #[cfg(feature = "tokenizer")]
-    pub fn compute_loss(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-        labels: &Variable,
-    ) -> Result<Variable> {
-        let logits = self.forward_encoded(enc)?;
-        masked_lm_loss(&logits, labels)
-    }
-
-    /// Fill every `<mask>` token in `text` with its top-`k` predicted
-    /// replacements, sorted by descending softmax probability. RoBERTa
-    /// uses `<mask>` (not BERT's `[MASK]`); the tokenizer resolves it.
-    #[cfg(feature = "tokenizer")]
-    pub fn fill_mask(&self, text: &str, top_k: usize) -> Result<Vec<Vec<(String, f32)>>> {
-        if top_k == 0 {
-            return Err(TensorError::new("fill_mask: top_k must be > 0"));
-        }
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "RobertaForMaskedLM::fill_mask requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let mask_id = tok.inner().token_to_id("<mask>").ok_or_else(|| {
-            TensorError::new("fill_mask: tokenizer has no <mask> token")
-        })? as i64;
-
-        self.graph.eval();
-        let enc = tok.encode(&[text])?;
-        let logits = self.forward_encoded(&enc)?;
-        let probs = logits.data().softmax(-1)?;
-
-        let ids_row = enc.input_ids.data().select(0, 0)?.to_i64_vec()?;
-        let mut out = Vec::new();
-        for (pos, id) in ids_row.iter().enumerate() {
-            if *id != mask_id {
-                continue;
-            }
-            let row = probs.select(0, 0)?.select(0, pos as i64)?;
-            let (vals, idxs) = row.topk(top_k as i64, 0, /*largest=*/ true, /*sorted=*/ true)?;
-            let score_vec = vals.to_f32_vec()?;
-            let id_vec = idxs.to_i64_vec()?;
-            let picks: Vec<(String, f32)> = id_vec
-                .iter()
-                .zip(score_vec.iter())
-                .map(|(i, s)| {
-                    let tok_str = tok
-                        .inner()
-                        .id_to_token(*i as u32)
-                        .unwrap_or_else(|| format!("[UNK_{i}]"));
-                    (tok_str, *s)
-                })
-                .collect();
-            out.push(picks);
-        }
-
-        if out.is_empty() {
-            return Err(TensorError::new(
-                "fill_mask: input contains no <mask> token",
-            ));
-        }
-        Ok(out)
-    }
-}
-
-// ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
-
-impl HasGraph for RobertaForSequenceClassification {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for RobertaForTokenClassification {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for RobertaForQuestionAnswering {
-    fn graph(&self) -> &Graph { &self.graph }
-}
-impl HasGraph for RobertaForMaskedLM {
-    fn graph(&self) -> &Graph { &self.graph }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::bert::build_extended_attention_mask;
     use crate::safetensors_io::expected_from_graph;
+    use flodl::HasGraph;
 
     /// The 16 parameter keys every encoder layer exposes.
     fn expected_layer_keys(i: i64) -> Vec<String> {

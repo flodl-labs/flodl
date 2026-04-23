@@ -26,7 +26,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "distilbert_tokencls_parity.safetensors"
 )
 
-PROMPT = "Fabrice writes Rust code in Paris"
+PROMPT = "fab2s writes Rust code in Latent"
 
 
 def main() -> None:

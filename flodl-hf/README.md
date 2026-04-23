@@ -120,7 +120,7 @@ in the local cache, then `from_pretrained` picks it up automatically.
 use flodl_hf::models::bert::BertForTokenClassification;
 
 let ner = BertForTokenClassification::from_pretrained("dslim/bert-base-NER")?;
-for t in &ner.predict(&["Fabrice lives in Paris"])?[0] {
+for t in &ner.predict(&["fab2s lives in Latent"])?[0] {
     if t.attends && t.label != "O" {
         println!("{} → {} ({:.3})", t.token, t.label, t.score);
     }

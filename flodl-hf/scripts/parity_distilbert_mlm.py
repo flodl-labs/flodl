@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Generate the parity fixture for `BertForTokenClassification`.
+"""Generate the parity fixture for `DistilBertForMaskedLM`.
 
-Runs HuggingFace `BertForTokenClassification` on a pinned sentence and
-writes inputs + per-token reference logits to
-`flodl-hf/tests/fixtures/bert_tokencls_parity.safetensors`.
+Runs HuggingFace `DistilBertForMaskedLM` on a pinned sentence and
+writes inputs + per-position vocabulary logits to
+`flodl-hf/tests/fixtures/distilbert_mlm_parity.safetensors`.
 
-Fixture model: `dslim/bert-base-NER` (9-class CoNLL-2003 NER).
+Fixture model: `distilbert-base-uncased` — the canonical DistilBERT
+MLM checkpoint distilled from `bert-base-uncased`. HF's
+`tie_weights()` ties `vocab_projector.weight` to
+`distilbert.embeddings.word_embeddings.weight` after load.
 
-Run via `fdl flodl-hf parity-bert-tokencls`.
+Run via `fdl flodl-hf parity-distilbert-mlm`.
 """
 
 from __future__ import annotations
@@ -17,19 +20,19 @@ from pathlib import Path
 import torch
 from huggingface_hub import model_info
 from safetensors.torch import save_file
-from transformers import AutoTokenizer, BertForTokenClassification
+from transformers import AutoTokenizer, DistilBertForMaskedLM
 
 from _hf_cache_utils import ensure_refs_main
 
-MODEL_ID = "dslim/bert-base-NER"
+MODEL_ID = "distilbert-base-uncased"
 REVISION: str | None = None
 
 FIXTURE_PATH = (
     Path(__file__).resolve().parents[1]
-    / "tests" / "fixtures" / "bert_tokencls_parity.safetensors"
+    / "tests" / "fixtures" / "distilbert_mlm_parity.safetensors"
 )
 
-PROMPT = "fab2s lives in Latent"
+PROMPT = "The capital of France is [MASK]."
 
 
 def main() -> None:
@@ -39,30 +42,20 @@ def main() -> None:
     print(f"using {MODEL_ID} @ {sha}")
 
     tok = AutoTokenizer.from_pretrained(MODEL_ID, revision=sha)
-    model = BertForTokenClassification.from_pretrained(MODEL_ID, revision=sha).eval()
+    model = DistilBertForMaskedLM.from_pretrained(MODEL_ID, revision=sha).eval()
     ensure_refs_main(MODEL_ID, sha)
 
     enc = tok(PROMPT, return_tensors="pt")
     input_ids = enc["input_ids"].to(torch.int64)
     attention_mask = enc["attention_mask"].to(torch.int64)
-    token_type_ids = enc.get("token_type_ids", torch.zeros_like(input_ids)).to(torch.int64)
-    seq = input_ids.shape[1]
-    position_ids = torch.arange(seq, dtype=torch.int64).unsqueeze(0)
 
     with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-        out = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-        )
+        out = model(input_ids=input_ids, attention_mask=attention_mask)
 
     tensors = {
-        "inputs.input_ids":       input_ids,
-        "inputs.position_ids":    position_ids,
-        "inputs.token_type_ids":  token_type_ids,
-        "inputs.attention_mask":  attention_mask,
-        "outputs.logits":         out.logits.contiguous(),
+        "inputs.input_ids":      input_ids,
+        "inputs.attention_mask": attention_mask,
+        "outputs.logits":        out.logits.contiguous(),
     }
     metadata = {
         "source_model": MODEL_ID,

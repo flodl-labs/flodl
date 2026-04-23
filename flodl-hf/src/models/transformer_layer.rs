@@ -93,6 +93,28 @@ impl LayerNaming {
         ffn_down:        "ffn.lin2",
         ffn_layer_norm:  "output_layer_norm",
     };
+
+    /// ALBERT encoder-layer key suffixes. Differs from [`Self::BERT`]
+    /// in two regular ways: the attention sub-module is flat (no
+    /// `attention.self` / `attention.output` split — HF inlines both
+    /// into `attention`), and the feed-forward uses `ffn` / `ffn_output`
+    /// instead of `intermediate.dense` / `output.dense`.
+    ///
+    /// Full state_dict keys for one ALBERT inner layer start with the
+    /// graph tag `albert.encoder.albert_layer_groups.{G}.albert_layers.{L}`
+    /// (almost always `G=0`, `L=0`: every public ALBERT checkpoint
+    /// uses `num_hidden_groups=1` and `inner_group_num=1`, sharing one
+    /// transformer block across all `num_hidden_layers` applications).
+    pub const ALBERT: Self = Self {
+        query:           "attention.query",
+        key:             "attention.key",
+        value:           "attention.value",
+        attn_output:     "attention.dense",
+        attn_layer_norm: "attention.LayerNorm",
+        ffn_up:          "ffn",
+        ffn_down:        "ffn_output",
+        ffn_layer_norm:  "full_layer_layer_norm",
+    };
 }
 
 /// Hyperparameters consumed by [`TransformerLayer::on_device`]. Bundles

@@ -30,8 +30,8 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "roberta_qa_parity.safetensors"
 )
 
-QUESTION = "Where does Fabrice live?"
-CONTEXT = "Fabrice lives in Paris and writes Rust deep learning code."
+QUESTION = "Where does fab2s live?"
+CONTEXT = "fab2s lives in Latent and writes Rust deep learning code."
 
 
 def sequence_ids_tensor(enc) -> torch.Tensor:

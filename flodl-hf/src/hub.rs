@@ -17,8 +17,12 @@ use hf_hub::api::sync::{Api, ApiBuilder};
 use flodl::{Device, Graph, Result, TensorError};
 
 use crate::models::auto::{
-    AutoConfig, AutoModel, AutoModelForQuestionAnswering, AutoModelForSequenceClassification,
-    AutoModelForTokenClassification,
+    AutoConfig, AutoModel, AutoModelForMaskedLM, AutoModelForQuestionAnswering,
+    AutoModelForSequenceClassification, AutoModelForTokenClassification,
+};
+use crate::models::albert::{
+    AlbertConfig, AlbertForMaskedLM, AlbertForQuestionAnswering,
+    AlbertForSequenceClassification, AlbertForTokenClassification, AlbertModel,
 };
 use crate::models::bert::{
     BertConfig, BertForMaskedLM, BertForQuestionAnswering, BertForSequenceClassification,
@@ -31,6 +35,10 @@ use crate::models::distilbert::{
 use crate::models::roberta::{
     RobertaConfig, RobertaForMaskedLM, RobertaForQuestionAnswering,
     RobertaForSequenceClassification, RobertaForTokenClassification, RobertaModel,
+};
+use crate::models::xlm_roberta::{
+    XlmRobertaConfig, XlmRobertaForMaskedLM, XlmRobertaForQuestionAnswering,
+    XlmRobertaForSequenceClassification, XlmRobertaForTokenClassification, XlmRobertaModel,
 };
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
@@ -188,6 +196,22 @@ fn fetch_roberta_config_and_weights(repo_id: &str) -> Result<(RobertaConfig, Vec
 fn fetch_distilbert_config_and_weights(repo_id: &str) -> Result<(DistilBertConfig, Vec<u8>)> {
     let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
     let config = DistilBertConfig::from_json_str(&config_str)?;
+    Ok((config, weights))
+}
+
+/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
+/// [`XlmRobertaConfig`].
+fn fetch_xlm_roberta_config_and_weights(repo_id: &str) -> Result<(XlmRobertaConfig, Vec<u8>)> {
+    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
+    let config = XlmRobertaConfig::from_json_str(&config_str)?;
+    Ok((config, weights))
+}
+
+/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
+/// [`AlbertConfig`].
+fn fetch_albert_config_and_weights(repo_id: &str) -> Result<(AlbertConfig, Vec<u8>)> {
+    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
+    let config = AlbertConfig::from_json_str(&config_str)?;
     Ok((config, weights))
 }
 
@@ -625,6 +649,260 @@ impl DistilBertForMaskedLM {
     }
 }
 
+// ── XLM-RoBERTa from_pretrained ──────────────────────────────────────────
+//
+// Each head mirrors the RoBERTa counterpart — XLM-R's state_dict uses
+// the `roberta.*` prefix verbatim, so the shared safetensors loader
+// path loads cleanly with no key rewriting beyond the standard legacy
+// LayerNorm.gamma/beta rename. The family-specific bits are just the
+// config type (`XlmRobertaConfig`) and the head constructors routing
+// through the XLM-RoBERTa public surface.
+
+impl XlmRobertaModel {
+    /// Download a pretrained XLM-RoBERTa checkpoint from the HuggingFace
+    /// Hub and return a fully-initialised pooler-free [`Graph`] on CPU.
+    ///
+    /// `repo_id` examples: `"xlm-roberta-base"`, `"xlm-roberta-large"`,
+    /// `"FacebookAI/xlm-roberta-base"`. Like RoBERTa, XLM-R pretraining
+    /// drops BERT's NSP objective so the default Hub loader returns the
+    /// backbone *without* a pooler; HF base checkpoints ship as
+    /// `XLMRobertaForMaskedLM` and the `lm_head.*` keys are tolerated
+    /// (logged, ignored) by `load_weights_with_logging`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Graph> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
+        let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
+        let graph = XlmRobertaModel::on_device_without_pooler(&config, device)?;
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        Ok(graph)
+    }
+}
+
+impl XlmRobertaForSequenceClassification {
+    /// Download a fine-tuned `XLMRobertaForSequenceClassification`
+    /// checkpoint from the Hub. Popular checkpoints:
+    /// `cardiffnlp/twitter-xlm-roberta-base-sentiment` (3-label
+    /// multilingual sentiment), `joeddav/xlm-roberta-large-xnli`
+    /// (zero-shot NLI), `papluca/xlm-roberta-base-language-detection`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl XlmRobertaForTokenClassification {
+    /// Download a fine-tuned `XLMRobertaForTokenClassification`
+    /// checkpoint (NER, POS tagging, …) from the Hub. Popular
+    /// checkpoints: `Davlan/xlm-roberta-base-ner-hrl` (multilingual
+    /// NER), `Davlan/xlm-roberta-base-finetuned-conll03-english`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl XlmRobertaForQuestionAnswering {
+    /// Download a fine-tuned `XLMRobertaForQuestionAnswering`
+    /// checkpoint (multilingual SQuAD, …) from the Hub. Popular
+    /// checkpoints: `deepset/xlm-roberta-base-squad2`,
+    /// `deepset/xlm-roberta-large-squad2`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl XlmRobertaForMaskedLM {
+    /// Download an XLM-RoBERTa MLM checkpoint (`xlm-roberta-base`,
+    /// `xlm-roberta-large`, any `*-mlm` domain-adaptation fine-tune)
+    /// from the Hub.
+    ///
+    /// The decoder weight is tied to
+    /// `roberta.embeddings.word_embeddings.weight`; checkpoints that
+    /// redundantly save `lm_head.decoder.weight`, or ship an extra
+    /// `lm_head.bias` tied-to-decoder-bias, load cleanly — the loader
+    /// silently ignores keys absent from the graph's deduplicated
+    /// `named_parameters()`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+// ── ALBERT from_pretrained ───────────────────────────────────────────────
+//
+// Each head mirrors the BERT counterpart on the load side — the
+// family-specific bits (factorised embeddings, cross-layer sharing)
+// are all absorbed by the backbone builder. HF ALBERT checkpoints
+// ship with `pooler_activation` weights that a bare pooler-free
+// backbone has no slot for; `load_weights_with_logging` tolerates
+// and names those on stderr.
+
+impl AlbertModel {
+    /// Download a pretrained ALBERT checkpoint from the HuggingFace
+    /// Hub and return a fully-initialised pooler-free [`Graph`] on
+    /// CPU.
+    ///
+    /// `repo_id` examples: `"albert-base-v2"`, `"albert-large-v2"`,
+    /// `"albert/albert-base-v2"`. HF base checkpoints ship as
+    /// `AlbertForMaskedLM`; the `predictions.*` and
+    /// `pooler_activation` keys a bare `AlbertModel` has no slot
+    /// for are tolerated by `load_weights_with_logging` and named
+    /// on stderr.
+    pub fn from_pretrained(repo_id: &str) -> Result<Graph> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
+        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let graph = AlbertModel::on_device_without_pooler(&config, device)?;
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        Ok(graph)
+    }
+}
+
+impl AlbertForSequenceClassification {
+    /// Download a fine-tuned `AlbertForSequenceClassification`
+    /// checkpoint from the Hub. Popular checkpoints:
+    /// `textattack/albert-base-v2-SST-2` (binary sentiment),
+    /// `textattack/albert-base-v2-MRPC`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl AlbertForTokenClassification {
+    /// Download a fine-tuned `AlbertForTokenClassification` checkpoint
+    /// (NER, POS tagging, …) from the Hub.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let num_labels = Self::num_labels_from_config(&config)?;
+        let head = Self::on_device(&config, num_labels, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl AlbertForQuestionAnswering {
+    /// Download a fine-tuned `AlbertForQuestionAnswering` checkpoint
+    /// (SQuAD, …) from the Hub. Popular checkpoint:
+    /// `twmkn9/albert-base-v2-squad2`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl AlbertForMaskedLM {
+    /// Download an ALBERT MLM checkpoint (`albert-base-v2`,
+    /// `albert-large-v2`, any `*-mlm` domain-adaptation fine-tune)
+    /// from the Hub.
+    ///
+    /// The decoder weight is tied to
+    /// `albert.embeddings.word_embeddings.weight`; HF's historical
+    /// save format also emits `predictions.bias` (tied to
+    /// `decoder.bias`) as a top-level key. Both redundant keys are
+    /// silently ignored by
+    /// `load_safetensors_into_graph_with_rename_allow_unused`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
 // ── AutoModel from_pretrained ────────────────────────────────────────────
 //
 // Model-type dispatch: pull `config.json`, read `model_type`, then route
@@ -676,6 +954,8 @@ impl AutoModel {
             AutoConfig::Bert(c) => BertModel::on_device_without_pooler(&c, device)?,
             AutoConfig::Roberta(c) => RobertaModel::on_device_without_pooler(&c, device)?,
             AutoConfig::DistilBert(c) => DistilBertModel::on_device(&c, device)?,
+            AutoConfig::XlmRoberta(c) => XlmRobertaModel::on_device_without_pooler(&c, device)?,
+            AutoConfig::Albert(c) => AlbertModel::on_device_without_pooler(&c, device)?,
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
         Ok(graph)
@@ -712,6 +992,18 @@ impl AutoModelForSequenceClassification {
                 let h = DistilBertForSequenceClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
                 Self::DistilBert(h)
+            }
+            AutoConfig::XlmRoberta(c) => {
+                let num_labels = XlmRobertaForSequenceClassification::num_labels_from_config(&c)?;
+                let h = XlmRobertaForSequenceClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::XlmRoberta(h)
+            }
+            AutoConfig::Albert(c) => {
+                let num_labels = AlbertForSequenceClassification::num_labels_from_config(&c)?;
+                let h = AlbertForSequenceClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Albert(h)
             }
         };
         #[cfg(feature = "tokenizer")]
@@ -751,6 +1043,18 @@ impl AutoModelForTokenClassification {
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
                 Self::DistilBert(h)
             }
+            AutoConfig::XlmRoberta(c) => {
+                let num_labels = XlmRobertaForTokenClassification::num_labels_from_config(&c)?;
+                let h = XlmRobertaForTokenClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::XlmRoberta(h)
+            }
+            AutoConfig::Albert(c) => {
+                let num_labels = AlbertForTokenClassification::num_labels_from_config(&c)?;
+                let h = AlbertForTokenClassification::on_device(&c, num_labels, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Albert(h)
+            }
         };
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
@@ -787,6 +1091,69 @@ impl AutoModelForQuestionAnswering {
                 let h = DistilBertForQuestionAnswering::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
                 Self::DistilBert(h)
+            }
+            AutoConfig::XlmRoberta(c) => {
+                let h = XlmRobertaForQuestionAnswering::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::XlmRoberta(h)
+            }
+            AutoConfig::Albert(c) => {
+                let h = AlbertForQuestionAnswering::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Albert(h)
+            }
+        };
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl AutoModelForMaskedLM {
+    /// Download a masked-language-modelling checkpoint from the Hub,
+    /// auto-detecting the family. MLM heads have no `num_labels`
+    /// requirement — the decoder is tied to the word-embedding table
+    /// and outputs `vocab_size` logits per position.
+    ///
+    /// Typical use is continued pretraining / domain adaptation on
+    /// base checkpoints (`bert-base-uncased`, `roberta-base`,
+    /// `distilbert-base-uncased`); each family's `from_pretrained`
+    /// tolerates the redundant decoder-weight key some HF save
+    /// formats ship, silently ignoring it during load.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let head = match config {
+            AutoConfig::Bert(c) => {
+                let h = BertForMaskedLM::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Bert(h)
+            }
+            AutoConfig::Roberta(c) => {
+                let h = RobertaForMaskedLM::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Roberta(h)
+            }
+            AutoConfig::DistilBert(c) => {
+                let h = DistilBertForMaskedLM::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::DistilBert(h)
+            }
+            AutoConfig::XlmRoberta(c) => {
+                let h = XlmRobertaForMaskedLM::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::XlmRoberta(h)
+            }
+            AutoConfig::Albert(c) => {
+                let h = AlbertForMaskedLM::on_device(&c, device)?;
+                load_weights_with_logging(repo_id, h.graph(), &weights)?;
+                Self::Albert(h)
             }
         };
         #[cfg(feature = "tokenizer")]

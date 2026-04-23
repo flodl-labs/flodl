@@ -31,7 +31,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "roberta_base_parity.safetensors"
 )
 
-PROMPT = "Fabrice writes Rust"
+PROMPT = "fab2s writes Rust"
 
 
 def sequence_ids_tensor(enc) -> torch.Tensor:

@@ -355,14 +355,35 @@ fn load_safetensors_core(
     Ok(unused)
 }
 
-/// Rewrite legacy TensorFlow-era BERT LayerNorm key suffixes to the
-/// modern HF form: `LayerNorm.gamma` → `LayerNorm.weight`,
-/// `LayerNorm.beta` → `LayerNorm.bias`.
+/// Rewrite legacy HF BERT-family checkpoint keys to the form flodl's
+/// MLM-head graphs expect.
 ///
-/// `bert-base-*` and other pre-2020 checkpoints on the Hub still ship
-/// with `gamma`/`beta`. HF Python's `BertModel.from_pretrained` applies
-/// the same remap at load time.
+/// 1. **LayerNorm gamma/beta** (TensorFlow-era): `LayerNorm.gamma` →
+///    `LayerNorm.weight`, `LayerNorm.beta` → `LayerNorm.bias`.
+///    `bert-base-*` and other pre-2020 checkpoints still ship with
+///    `gamma`/`beta`. HF Python's `BertModel.from_pretrained` applies
+///    the same remap at load time.
+///
+/// 2. **MLM decoder bias tying** (BERT / RoBERTa MLM):
+///    `cls.predictions.bias` → `cls.predictions.decoder.bias`,
+///    `lm_head.bias` → `lm_head.decoder.bias`. HF's `BertForMaskedLM`
+///    and `RobertaForMaskedLM` both tie their decoder's bias to a
+///    top-level `bias` Parameter via `self.decoder.bias = self.bias`.
+///    PyTorch's `state_dict` dedupes tied Parameters on save, so
+///    checkpoints ship only the top-level key. Our graphs store the
+///    bias directly on the decoder `Linear` (one of the entry points
+///    of weight tying via [`flodl::Linear::from_shared_weight`]), so
+///    we rename the checkpoint's key onto the decoder at load time.
 pub fn bert_legacy_key_rename(checkpoint_key: &str) -> String {
+    // MLM decoder-bias tying: exact-match renames. Exact rather than
+    // suffix so we don't accidentally eat `*.cls.predictions.bias`
+    // sub-keys in some future nested head.
+    if checkpoint_key == "cls.predictions.bias" {
+        return "cls.predictions.decoder.bias".to_string();
+    }
+    if checkpoint_key == "lm_head.bias" {
+        return "lm_head.decoder.bias".to_string();
+    }
     if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.gamma") {
         format!("{prefix}LayerNorm.weight")
     } else if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.beta") {
@@ -985,6 +1006,29 @@ mod tests {
         assert_eq!(
             bert_legacy_key_rename("something.gamma"),
             "something.gamma",
+        );
+    }
+
+    /// MLM decoder-bias tying: HF's `BertForMaskedLM` and
+    /// `RobertaForMaskedLM` save a single top-level `bias` Parameter
+    /// that is tied to `decoder.bias`; our graph stores the bias on the
+    /// decoder `Linear` directly. The rename maps the checkpoint key
+    /// onto our graph key so MLM checkpoints load cleanly.
+    #[test]
+    fn bert_legacy_key_rename_retags_mlm_tied_bias() {
+        assert_eq!(
+            bert_legacy_key_rename("cls.predictions.bias"),
+            "cls.predictions.decoder.bias",
+        );
+        assert_eq!(
+            bert_legacy_key_rename("lm_head.bias"),
+            "lm_head.decoder.bias",
+        );
+        // Exact-match, not suffix — a hypothetical nested key
+        // `something.cls.predictions.bias` is untouched.
+        assert_eq!(
+            bert_legacy_key_rename("something.cls.predictions.bias"),
+            "something.cls.predictions.bias",
         );
     }
 

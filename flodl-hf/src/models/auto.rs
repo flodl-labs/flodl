@@ -4,9 +4,10 @@
 //! the payload as the matching family-specific config. [`AutoModel`]
 //! and the [`AutoModelForSequenceClassification`] /
 //! [`AutoModelForTokenClassification`] /
-//! [`AutoModelForQuestionAnswering`] enums provide one-liner Hub
-//! loading over `bert` / `roberta` / `distilbert` without the caller
-//! knowing which family the checkpoint belongs to.
+//! [`AutoModelForQuestionAnswering`] /
+//! [`AutoModelForMaskedLM`] enums provide one-liner Hub loading over
+//! `bert` / `roberta` / `distilbert` without the caller knowing which
+//! family the checkpoint belongs to.
 //!
 //! ## Output-shape convention
 //!
@@ -39,28 +40,38 @@
 //!
 //! ## Supported model types
 //!
-//! | `model_type`  | Family                                                  |
-//! |---------------|---------------------------------------------------------|
-//! | `bert`        | [`crate::models::bert::BertConfig`]                     |
-//! | `roberta`     | [`crate::models::roberta::RobertaConfig`]               |
-//! | `distilbert`  | [`crate::models::distilbert::DistilBertConfig`]         |
+//! | `model_type`    | Family                                                      |
+//! |-----------------|-------------------------------------------------------------|
+//! | `bert`          | [`crate::models::bert::BertConfig`]                         |
+//! | `roberta`       | [`crate::models::roberta::RobertaConfig`]                   |
+//! | `distilbert`    | [`crate::models::distilbert::DistilBertConfig`]             |
+//! | `xlm-roberta`   | [`crate::models::xlm_roberta::XlmRobertaConfig`]            |
+//! | `albert`        | [`crate::models::albert::AlbertConfig`]                     |
 //!
-//! Any other value (e.g. `modernbert`, `xlm-roberta`, `electra`)
-//! surfaces a loud error listing the supported set.
+//! Any other value (e.g. `modernbert`, `deberta-v2`) surfaces a loud
+//! error listing the supported set.
 
 use flodl::{Result, TensorError};
 
+use crate::models::albert::{
+    AlbertConfig, AlbertForMaskedLM, AlbertForQuestionAnswering,
+    AlbertForSequenceClassification, AlbertForTokenClassification,
+};
 use crate::models::bert::{
-    BertConfig, BertForQuestionAnswering, BertForSequenceClassification,
+    BertConfig, BertForMaskedLM, BertForQuestionAnswering, BertForSequenceClassification,
     BertForTokenClassification,
 };
 use crate::models::distilbert::{
-    DistilBertConfig, DistilBertForQuestionAnswering, DistilBertForSequenceClassification,
-    DistilBertForTokenClassification,
+    DistilBertConfig, DistilBertForMaskedLM, DistilBertForQuestionAnswering,
+    DistilBertForSequenceClassification, DistilBertForTokenClassification,
 };
 use crate::models::roberta::{
-    RobertaConfig, RobertaForQuestionAnswering, RobertaForSequenceClassification,
-    RobertaForTokenClassification,
+    RobertaConfig, RobertaForMaskedLM, RobertaForQuestionAnswering,
+    RobertaForSequenceClassification, RobertaForTokenClassification,
+};
+use crate::models::xlm_roberta::{
+    XlmRobertaConfig, XlmRobertaForMaskedLM, XlmRobertaForQuestionAnswering,
+    XlmRobertaForSequenceClassification, XlmRobertaForTokenClassification,
 };
 
 /// Family-tagged parsed `config.json`.
@@ -73,6 +84,8 @@ pub enum AutoConfig {
     Bert(BertConfig),
     Roberta(RobertaConfig),
     DistilBert(DistilBertConfig),
+    XlmRoberta(XlmRobertaConfig),
+    Albert(AlbertConfig),
 }
 
 impl AutoConfig {
@@ -82,8 +95,7 @@ impl AutoConfig {
     /// Errors on:
     /// - invalid JSON,
     /// - missing / non-string `model_type`,
-    /// - unsupported `model_type` (error names the three supported
-    ///   families),
+    /// - unsupported `model_type` (error names the supported set),
     /// - any downstream parse error from the family-specific
     ///   `from_json_str` (missing required field, malformed
     ///   `id2label`, …).
@@ -96,21 +108,27 @@ impl AutoConfig {
             "bert" => Ok(AutoConfig::Bert(BertConfig::from_json_str(s)?)),
             "roberta" => Ok(AutoConfig::Roberta(RobertaConfig::from_json_str(s)?)),
             "distilbert" => Ok(AutoConfig::DistilBert(DistilBertConfig::from_json_str(s)?)),
+            "xlm-roberta" => Ok(AutoConfig::XlmRoberta(XlmRobertaConfig::from_json_str(s)?)),
+            "albert" => Ok(AutoConfig::Albert(AlbertConfig::from_json_str(s)?)),
             other => Err(TensorError::new(&format!(
                 "AutoConfig: unsupported model_type {other:?}. \
-                 Supported families: \"bert\", \"roberta\", \"distilbert\". \
-                 ModernBERT and other architectures are planned for a future release.",
+                 Supported families: \"bert\", \"roberta\", \"distilbert\", \"xlm-roberta\", \
+                 \"albert\". DeBERTa-v2, ModernBERT and other architectures are planned for \
+                 a future release.",
             ))),
         }
     }
 
     /// The underlying `model_type` string as it appeared in
-    /// `config.json` (e.g. `"bert"`, `"roberta"`, `"distilbert"`).
+    /// `config.json` (e.g. `"bert"`, `"roberta"`, `"distilbert"`,
+    /// `"xlm-roberta"`, `"albert"`).
     pub fn model_type(&self) -> &'static str {
         match self {
             AutoConfig::Bert(_) => "bert",
             AutoConfig::Roberta(_) => "roberta",
             AutoConfig::DistilBert(_) => "distilbert",
+            AutoConfig::XlmRoberta(_) => "xlm-roberta",
+            AutoConfig::Albert(_) => "albert",
         }
     }
 }
@@ -136,6 +154,8 @@ pub enum AutoModelForSequenceClassification {
     Bert(BertForSequenceClassification),
     Roberta(RobertaForSequenceClassification),
     DistilBert(DistilBertForSequenceClassification),
+    XlmRoberta(XlmRobertaForSequenceClassification),
+    Albert(AlbertForSequenceClassification),
 }
 
 /// Family-dispatched token-classification head. Canonical use is NER.
@@ -146,6 +166,8 @@ pub enum AutoModelForTokenClassification {
     Bert(BertForTokenClassification),
     Roberta(RobertaForTokenClassification),
     DistilBert(DistilBertForTokenClassification),
+    XlmRoberta(XlmRobertaForTokenClassification),
+    Albert(AlbertForTokenClassification),
 }
 
 /// Family-dispatched extractive question-answering head. Build via
@@ -156,6 +178,8 @@ pub enum AutoModelForQuestionAnswering {
     Bert(BertForQuestionAnswering),
     Roberta(RobertaForQuestionAnswering),
     DistilBert(DistilBertForQuestionAnswering),
+    XlmRoberta(XlmRobertaForQuestionAnswering),
+    Albert(AlbertForQuestionAnswering),
 }
 
 impl AutoModelForSequenceClassification {
@@ -167,6 +191,8 @@ impl AutoModelForSequenceClassification {
             Self::Bert(h) => h.graph(),
             Self::Roberta(h) => h.graph(),
             Self::DistilBert(h) => h.graph(),
+            Self::XlmRoberta(h) => h.graph(),
+            Self::Albert(h) => h.graph(),
         }
     }
 
@@ -176,6 +202,8 @@ impl AutoModelForSequenceClassification {
             Self::Bert(h) => h.labels(),
             Self::Roberta(h) => h.labels(),
             Self::DistilBert(h) => h.labels(),
+            Self::XlmRoberta(h) => h.labels(),
+            Self::Albert(h) => h.labels(),
         }
     }
 
@@ -187,6 +215,8 @@ impl AutoModelForSequenceClassification {
             Self::Bert(h) => Self::Bert(h.with_tokenizer(tok)),
             Self::Roberta(h) => Self::Roberta(h.with_tokenizer(tok)),
             Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
+            Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
+            Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
         }
     }
 
@@ -199,6 +229,8 @@ impl AutoModelForSequenceClassification {
             Self::Bert(h) => h.predict(texts),
             Self::Roberta(h) => h.predict(texts),
             Self::DistilBert(h) => h.predict(texts),
+            Self::XlmRoberta(h) => h.predict(texts),
+            Self::Albert(h) => h.predict(texts),
         }
     }
 }
@@ -209,6 +241,8 @@ impl AutoModelForTokenClassification {
             Self::Bert(h) => h.graph(),
             Self::Roberta(h) => h.graph(),
             Self::DistilBert(h) => h.graph(),
+            Self::XlmRoberta(h) => h.graph(),
+            Self::Albert(h) => h.graph(),
         }
     }
 
@@ -217,6 +251,8 @@ impl AutoModelForTokenClassification {
             Self::Bert(h) => h.labels(),
             Self::Roberta(h) => h.labels(),
             Self::DistilBert(h) => h.labels(),
+            Self::XlmRoberta(h) => h.labels(),
+            Self::Albert(h) => h.labels(),
         }
     }
 
@@ -226,6 +262,8 @@ impl AutoModelForTokenClassification {
             Self::Bert(h) => Self::Bert(h.with_tokenizer(tok)),
             Self::Roberta(h) => Self::Roberta(h.with_tokenizer(tok)),
             Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
+            Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
+            Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
         }
     }
 
@@ -241,6 +279,8 @@ impl AutoModelForTokenClassification {
             Self::Bert(h) => h.predict(texts),
             Self::Roberta(h) => h.predict(texts),
             Self::DistilBert(h) => h.predict(texts),
+            Self::XlmRoberta(h) => h.predict(texts),
+            Self::Albert(h) => h.predict(texts),
         }
     }
 }
@@ -251,6 +291,8 @@ impl AutoModelForQuestionAnswering {
             Self::Bert(h) => h.graph(),
             Self::Roberta(h) => h.graph(),
             Self::DistilBert(h) => h.graph(),
+            Self::XlmRoberta(h) => h.graph(),
+            Self::Albert(h) => h.graph(),
         }
     }
 
@@ -260,6 +302,8 @@ impl AutoModelForQuestionAnswering {
             Self::Bert(h) => Self::Bert(h.with_tokenizer(tok)),
             Self::Roberta(h) => Self::Roberta(h.with_tokenizer(tok)),
             Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
+            Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
+            Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
         }
     }
 
@@ -275,6 +319,8 @@ impl AutoModelForQuestionAnswering {
             Self::Bert(h) => h.answer(question, context),
             Self::Roberta(h) => h.answer(question, context),
             Self::DistilBert(h) => h.answer(question, context),
+            Self::XlmRoberta(h) => h.answer(question, context),
+            Self::Albert(h) => h.answer(question, context),
         }
     }
 
@@ -288,6 +334,72 @@ impl AutoModelForQuestionAnswering {
             Self::Bert(h) => h.answer_batch(pairs),
             Self::Roberta(h) => h.answer_batch(pairs),
             Self::DistilBert(h) => h.answer_batch(pairs),
+            Self::XlmRoberta(h) => h.answer_batch(pairs),
+            Self::Albert(h) => h.answer_batch(pairs),
+        }
+    }
+}
+
+/// Family-dispatched masked-language-modelling head. Build via
+/// [`AutoModelForMaskedLM::from_pretrained`](crate::hub) and call
+/// [`fill_mask`](Self::fill_mask) to predict the top-`k` replacements
+/// at every mask-token position in the input.
+///
+/// The mask-token spelling (`[MASK]` for BERT/DistilBERT, `<mask>` for
+/// RoBERTa) is handled per-variant via the inner head's
+/// [`EncoderInputs::MASK_TOKEN`](crate::task_heads::EncoderInputs::MASK_TOKEN),
+/// so callers write one `fill_mask` call regardless of the underlying
+/// family.
+pub enum AutoModelForMaskedLM {
+    Bert(BertForMaskedLM),
+    Roberta(RobertaForMaskedLM),
+    DistilBert(DistilBertForMaskedLM),
+    XlmRoberta(XlmRobertaForMaskedLM),
+    Albert(AlbertForMaskedLM),
+}
+
+impl AutoModelForMaskedLM {
+    /// Borrow the underlying [`Graph`](flodl::Graph) of the inner
+    /// concrete head.
+    pub fn graph(&self) -> &flodl::Graph {
+        match self {
+            Self::Bert(h) => h.graph(),
+            Self::Roberta(h) => h.graph(),
+            Self::DistilBert(h) => h.graph(),
+            Self::XlmRoberta(h) => h.graph(),
+            Self::Albert(h) => h.graph(),
+        }
+    }
+
+    /// Attach a tokenizer, replacing any previously attached one.
+    #[cfg(feature = "tokenizer")]
+    pub fn with_tokenizer(self, tok: crate::tokenizer::HfTokenizer) -> Self {
+        match self {
+            Self::Bert(h) => Self::Bert(h.with_tokenizer(tok)),
+            Self::Roberta(h) => Self::Roberta(h.with_tokenizer(tok)),
+            Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
+            Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
+            Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
+        }
+    }
+
+    /// Fill every mask-token position in `text` with its top-`k`
+    /// predicted replacements, sorted by descending softmax
+    /// probability. Delegates to the inner concrete head's
+    /// [`fill_mask`](crate::task_heads::MaskedLmHead::fill_mask) —
+    /// the mask-token spelling comes from the head's config.
+    #[cfg(feature = "tokenizer")]
+    pub fn fill_mask(
+        &self,
+        text: &str,
+        top_k: usize,
+    ) -> Result<Vec<Vec<(String, f32)>>> {
+        match self {
+            Self::Bert(h) => h.fill_mask(text, top_k),
+            Self::Roberta(h) => h.fill_mask(text, top_k),
+            Self::DistilBert(h) => h.fill_mask(text, top_k),
+            Self::XlmRoberta(h) => h.fill_mask(text, top_k),
+            Self::Albert(h) => h.fill_mask(text, top_k),
         }
     }
 }
@@ -374,6 +486,34 @@ mod tests {
         }
     }
 
+    /// `xlm-roberta-base`-style config.json dispatches to
+    /// `AutoConfig::XlmRoberta`. Field layout is identical to RoBERTa;
+    /// the multilingual vocabulary (250k) is the only distinguishing
+    /// numeric field.
+    #[test]
+    fn auto_config_dispatches_xlm_roberta() {
+        let json = r#"{
+            "model_type": "xlm-roberta",
+            "vocab_size": 250002,
+            "hidden_size": 768,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "intermediate_size": 3072,
+            "max_position_embeddings": 514,
+            "type_vocab_size": 1,
+            "pad_token_id": 1
+        }"#;
+        let c = AutoConfig::from_json_str(json).unwrap();
+        assert_eq!(c.model_type(), "xlm-roberta");
+        match c {
+            AutoConfig::XlmRoberta(x) => {
+                assert_eq!(x.vocab_size, 250_002);
+                assert_eq!(x.pad_token_id, 1);
+            }
+            other => panic!("expected XlmRoberta, got {:?}", other.model_type()),
+        }
+    }
+
     /// Unsupported `model_type` must surface a loud error that names
     /// the supported set — silently misdispatching a ModernBERT or
     /// ELECTRA config as BERT would produce confusing shape errors
@@ -390,6 +530,36 @@ mod tests {
         assert!(err.contains("bert"), "error lists supported: {err}");
         assert!(err.contains("roberta"), "error lists supported: {err}");
         assert!(err.contains("distilbert"), "error lists supported: {err}");
+        assert!(err.contains("xlm-roberta"), "error lists supported: {err}");
+        assert!(err.contains("albert"), "error lists supported: {err}");
+    }
+
+    /// `albert-base-v2`-style config.json dispatches to
+    /// `AutoConfig::Albert`. Distinguishing fields: `embedding_size`
+    /// (factorised embeddings) and the default
+    /// `num_hidden_groups=1`, `inner_group_num=1` layout.
+    #[test]
+    fn auto_config_dispatches_albert() {
+        let json = r#"{
+            "model_type": "albert",
+            "vocab_size": 30000,
+            "embedding_size": 128,
+            "hidden_size": 768,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "intermediate_size": 3072,
+            "max_position_embeddings": 512
+        }"#;
+        let c = AutoConfig::from_json_str(json).unwrap();
+        assert_eq!(c.model_type(), "albert");
+        match c {
+            AutoConfig::Albert(a) => {
+                assert_eq!(a.vocab_size, 30000);
+                assert_eq!(a.embedding_size, 128);
+                assert_eq!(a.hidden_size, 768);
+            }
+            other => panic!("expected Albert, got {:?}", other.model_type()),
+        }
     }
 
     /// Missing `model_type` must error with a clear message, not
