@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let model_repo = "distilbert-base-uncased-finetuned-sst-2-english";
     // The SST-2 checkpoint only ships the legacy vocab.txt / tokenizer_config
     // triple, not a fast `tokenizer.json`. Grab the tokenizer from the base
-    // repo — the vocabulary is identical since SST-2 fine-tuning does not
+    // repo - the vocabulary is identical since SST-2 fine-tuning does not
     // retrain it.
     let tok_repo = "distilbert-base-uncased";
 

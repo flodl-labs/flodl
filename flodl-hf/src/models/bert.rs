@@ -462,7 +462,8 @@ impl BertForSequenceClassification {
         &self,
         enc: &crate::tokenizer::EncodedBatch,
     ) -> Result<Vec<Vec<(String, f32)>>> {
-        let logits = self.forward_from_encoded(enc)?;
+        self.graph.eval();
+        let logits = self.forward_encoded(enc)?;
         logits_to_sorted_labels(&logits, &self.id2label)
     }
 
@@ -479,15 +480,6 @@ impl BertForSequenceClassification {
         })?;
         let enc = tok.encode(texts)?;
         self.classify(&enc)
-    }
-
-    #[cfg(feature = "tokenizer")]
-    fn forward_from_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        self.graph.eval();
-        self.forward_encoded(enc)
     }
 
     /// Raw forward pass returning `[batch, num_labels]` logits. Does not
@@ -607,14 +599,7 @@ impl BertForTokenClassification {
             )
         })?;
         self.graph.eval();
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        let logits = self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])?;
+        let logits = self.forward_encoded(enc)?;
         // logits: [B, S, num_labels]
         let probs = logits.softmax(-1)?;
         let shape = probs.shape();

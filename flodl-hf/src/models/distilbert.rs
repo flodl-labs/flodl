@@ -482,7 +482,8 @@ impl DistilBertForSequenceClassification {
         &self,
         enc: &crate::tokenizer::EncodedBatch,
     ) -> Result<Vec<Vec<(String, f32)>>> {
-        let logits = self.forward_from_encoded(enc)?;
+        self.graph.eval();
+        let logits = self.forward_encoded(enc)?;
         logits_to_sorted_labels(&logits, &self.id2label)
     }
 
@@ -499,15 +500,6 @@ impl DistilBertForSequenceClassification {
         })?;
         let enc = tok.encode(texts)?;
         self.classify(&enc)
-    }
-
-    #[cfg(feature = "tokenizer")]
-    fn forward_from_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        self.graph.eval();
-        self.forward_encoded(enc)
     }
 
     /// Raw forward pass returning `[batch, num_labels]` logits. Does not
@@ -614,9 +606,7 @@ impl DistilBertForTokenClassification {
             )
         })?;
         self.graph.eval();
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        let logits = self.graph.forward_multi(&[enc.input_ids.clone(), mask])?;
+        let logits = self.forward_encoded(enc)?;
         let probs = logits.softmax(-1)?;
         let shape = probs.shape();
         assert_eq!(shape.len(), 3, "expected [B, S, num_labels], got {shape:?}");
