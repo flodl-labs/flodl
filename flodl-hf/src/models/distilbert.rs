@@ -38,7 +38,7 @@ use std::cell::Cell;
 
 use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, Parameter};
 use flodl::{
-    DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable,
+    DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, TensorOptions, Variable,
 };
 
 use crate::models::bert::build_extended_attention_mask;
@@ -419,6 +419,7 @@ impl Module for ActivationDropoutLinear {
 /// `distilbert-base-uncased-finetuned-sst-2-english` (2-class).
 pub struct DistilBertForSequenceClassification {
     graph: Graph,
+    config: DistilBertConfig,
     id2label: Vec<String>,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
@@ -451,6 +452,7 @@ impl DistilBertForSequenceClassification {
             .unwrap_or_else(|| default_labels(num_labels));
         Ok(Self {
             graph,
+            config: config.clone(),
             id2label,
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
@@ -467,6 +469,7 @@ impl DistilBertForSequenceClassification {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &DistilBertConfig { &self.config }
     pub fn labels(&self) -> &[String] { &self.id2label }
 
     #[cfg(feature = "tokenizer")]
@@ -542,6 +545,7 @@ impl DistilBertForSequenceClassification {
 /// types × BIO = 9 labels including `O`).
 pub struct DistilBertForTokenClassification {
     graph: Graph,
+    config: DistilBertConfig,
     id2label: Vec<String>,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
@@ -565,6 +569,7 @@ impl DistilBertForTokenClassification {
             .unwrap_or_else(|| default_labels(num_labels));
         Ok(Self {
             graph,
+            config: config.clone(),
             id2label,
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
@@ -581,6 +586,7 @@ impl DistilBertForTokenClassification {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &DistilBertConfig { &self.config }
     pub fn labels(&self) -> &[String] { &self.id2label }
 
     #[cfg(feature = "tokenizer")]
@@ -700,6 +706,7 @@ impl DistilBertForTokenClassification {
 /// checkpoint: `distilbert-base-cased-distilled-squad`.
 pub struct DistilBertForQuestionAnswering {
     graph: Graph,
+    config: DistilBertConfig,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
 }
@@ -713,12 +720,14 @@ impl DistilBertForQuestionAnswering {
             .build()?;
         Ok(Self {
             graph,
+            config: config.clone(),
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
         })
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &DistilBertConfig { &self.config }
 
     #[cfg(feature = "tokenizer")]
     pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
@@ -793,6 +802,18 @@ impl DistilBertForQuestionAnswering {
         let logits = self.forward_encoded(enc)?;
         question_answering_loss(&logits, start_positions, end_positions)
     }
+}
+
+// ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
+
+impl HasGraph for DistilBertForSequenceClassification {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for DistilBertForTokenClassification {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for DistilBertForQuestionAnswering {
+    fn graph(&self) -> &Graph { &self.graph }
 }
 
 #[cfg(test)]

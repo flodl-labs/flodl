@@ -19,7 +19,7 @@
 //! cargo run --release --example distilbert_finetune
 //! ```
 
-use flodl::{clip_grad_norm, Adam, Device, Module, Optimizer, Result, Tensor, Variable};
+use flodl::{clip_grad_norm, Adam, Device, Module, Result, Tensor, Trainer, Variable};
 use flodl_hf::models::distilbert::DistilBertForSequenceClassification;
 use flodl_hf::tokenizer::HfTokenizer;
 
@@ -35,6 +35,21 @@ fn main() -> Result<()> {
     // id 0 = NEGATIVE, id 1 = POSITIVE (matches HF convention).
     let head = DistilBertForSequenceClassification::from_pretrained(model_repo)?;
     let tok = HfTokenizer::from_pretrained(tok_repo)?;
+
+    // Wire the optimizer and training mode through `Trainer::setup_head`.
+    // On CPU or a single GPU this is a thin wrapper; on multi-GPU hosts
+    // the same call auto-distributes, so the loop below is identical for
+    // 1 or N devices. The factory closure is only invoked for additional
+    // replica devices.
+    let replica_config = head.config().clone();
+    let num_labels = head.labels().len() as i64;
+    Trainer::setup_head(
+        &head,
+        move |dev| DistilBertForSequenceClassification::on_device(
+            &replica_config, num_labels, dev,
+        ),
+        |p| Adam::new(p, 5e-5),
+    )?;
 
     // Tiny domain-specific dataset. Swap this for a real one by
     // feeding a `DataSet` through `DataLoader::new` - the training
@@ -53,15 +68,10 @@ fn main() -> Result<()> {
     ];
 
     let params = head.graph().parameters();
-    let mut opt = Adam::new(&params, 5e-5);
-    head.graph().train();
-
     println!("fine-tuning {model_repo} on {} examples", train.len());
     println!("{:>4} {:>8}", "step", "loss");
 
     for step in 0..5 {
-        opt.zero_grad();
-
         let texts: Vec<&str> = train.iter().map(|(t, _)| *t).collect();
         let enc = tok.encode(&texts)?;
         let label_ids: Vec<i64> = train.iter().map(|(_, l)| *l).collect();
@@ -78,7 +88,7 @@ fn main() -> Result<()> {
         // Standard fine-tuning clip. Keeps early steps stable even
         // when a noisy mini-batch produces a large gradient.
         clip_grad_norm(&params, 1.0)?;
-        opt.step()?;
+        head.graph().step()?;
     }
 
     // Close the loop: run one last eval forward (no backward) and

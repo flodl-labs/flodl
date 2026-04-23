@@ -33,7 +33,7 @@ use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{
-    DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, Variable,
+    DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, Variable,
 };
 
 use crate::models::bert::build_extended_attention_mask;
@@ -473,6 +473,7 @@ impl Module for RobertaClassificationHead {
 /// `roberta-large-mnli`, `SamLowe/roberta-base-go_emotions`.
 pub struct RobertaForSequenceClassification {
     graph: Graph,
+    config: RobertaConfig,
     id2label: Vec<String>,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
@@ -497,6 +498,7 @@ impl RobertaForSequenceClassification {
             .unwrap_or_else(|| default_labels(num_labels));
         Ok(Self {
             graph,
+            config: config.clone(),
             id2label,
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
@@ -513,6 +515,7 @@ impl RobertaForSequenceClassification {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &RobertaConfig { &self.config }
     pub fn labels(&self) -> &[String] { &self.id2label }
 
     #[cfg(feature = "tokenizer")]
@@ -586,6 +589,7 @@ impl RobertaForSequenceClassification {
 /// `obi/deid_roberta_i2b2`.
 pub struct RobertaForTokenClassification {
     graph: Graph,
+    config: RobertaConfig,
     id2label: Vec<String>,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
@@ -609,6 +613,7 @@ impl RobertaForTokenClassification {
             .unwrap_or_else(|| default_labels(num_labels));
         Ok(Self {
             graph,
+            config: config.clone(),
             id2label,
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
@@ -625,6 +630,7 @@ impl RobertaForTokenClassification {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &RobertaConfig { &self.config }
     pub fn labels(&self) -> &[String] { &self.id2label }
 
     #[cfg(feature = "tokenizer")]
@@ -739,6 +745,7 @@ impl RobertaForTokenClassification {
 /// `csarron/roberta-base-squad-v1`.
 pub struct RobertaForQuestionAnswering {
     graph: Graph,
+    config: RobertaConfig,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
 }
@@ -751,12 +758,14 @@ impl RobertaForQuestionAnswering {
             .build()?;
         Ok(Self {
             graph,
+            config: config.clone(),
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
         })
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &RobertaConfig { &self.config }
 
     #[cfg(feature = "tokenizer")]
     pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
@@ -835,6 +844,18 @@ impl RobertaForQuestionAnswering {
         let logits = self.forward_encoded(enc)?;
         question_answering_loss(&logits, start_positions, end_positions)
     }
+}
+
+// ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
+
+impl HasGraph for RobertaForSequenceClassification {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for RobertaForTokenClassification {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for RobertaForQuestionAnswering {
+    fn graph(&self) -> &Graph { &self.graph }
 }
 
 #[cfg(test)]

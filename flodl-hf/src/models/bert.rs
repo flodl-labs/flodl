@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
-use flodl::{DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, Variable};
+use flodl::{DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, Variable};
 
 use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
 use crate::path::{prefix_params, HfPath};
@@ -394,6 +394,7 @@ pub use crate::task_heads::{Answer, TokenPrediction};
 /// `unitary/toxic-bert` (6-label toxicity).
 pub struct BertForSequenceClassification {
     graph: Graph,
+    config: BertConfig,
     id2label: Vec<String>,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
@@ -420,6 +421,7 @@ impl BertForSequenceClassification {
             .unwrap_or_else(|| default_labels(num_labels));
         Ok(Self {
             graph,
+            config: config.clone(),
             id2label,
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
@@ -441,6 +443,11 @@ impl BertForSequenceClassification {
     /// Borrow the underlying [`Graph`] for direct inspection, inference
     /// via `forward_multi`, or custom training loops.
     pub fn graph(&self) -> &Graph { &self.graph }
+
+    /// Borrow the config this head was built from. Use when rebuilding
+    /// replicas on additional devices (e.g. inside the `head_factory`
+    /// closure passed to [`flodl::Trainer::setup_head`]).
+    pub fn config(&self) -> &BertConfig { &self.config }
 
     /// Label names indexed by class id. `labels()[k]` is the name of
     /// class `k` — either from the checkpoint's `id2label` or the
@@ -533,6 +540,7 @@ impl BertForSequenceClassification {
 /// `dbmdz/bert-large-cased-finetuned-conll03-english`, etc.
 pub struct BertForTokenClassification {
     graph: Graph,
+    config: BertConfig,
     id2label: Vec<String>,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
@@ -557,6 +565,7 @@ impl BertForTokenClassification {
             .unwrap_or_else(|| default_labels(num_labels));
         Ok(Self {
             graph,
+            config: config.clone(),
             id2label,
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
@@ -573,6 +582,7 @@ impl BertForTokenClassification {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &BertConfig { &self.config }
     pub fn labels(&self) -> &[String] { &self.id2label }
 
     #[cfg(feature = "tokenizer")]
@@ -699,6 +709,7 @@ impl BertForTokenClassification {
 /// `bert-large-uncased-whole-word-masking-finetuned-squad`, etc.
 pub struct BertForQuestionAnswering {
     graph: Graph,
+    config: BertConfig,
     #[cfg(feature = "tokenizer")]
     tokenizer: Option<crate::tokenizer::HfTokenizer>,
 }
@@ -714,12 +725,14 @@ impl BertForQuestionAnswering {
             .build()?;
         Ok(Self {
             graph,
+            config: config.clone(),
             #[cfg(feature = "tokenizer")]
             tokenizer: None,
         })
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &BertConfig { &self.config }
 
     #[cfg(feature = "tokenizer")]
     pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
@@ -808,6 +821,18 @@ impl BertForQuestionAnswering {
         let logits = self.forward_encoded(enc)?;
         question_answering_loss(&logits, start_positions, end_positions)
     }
+}
+
+// ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
+
+impl HasGraph for BertForSequenceClassification {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for BertForTokenClassification {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for BertForQuestionAnswering {
+    fn graph(&self) -> &Graph { &self.graph }
 }
 
 #[cfg(test)]
@@ -1393,5 +1418,69 @@ mod tests {
         let dev = Device::CPU;
         assert!(BertForSequenceClassification::on_device(&config, 0, dev).is_err());
         assert!(BertForTokenClassification::on_device(&config, 0, dev).is_err());
+    }
+
+    /// `HasGraph` should return a reference to the same underlying graph
+    /// the head owns (pointer equality). This is the contract
+    /// `Trainer::setup_head` relies on for rank-0 param matching.
+    #[test]
+    fn has_graph_returns_inner_graph_by_reference() {
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let seq   = BertForSequenceClassification::on_device(&config, 3, dev).unwrap();
+        let token = BertForTokenClassification::on_device(&config, 5, dev).unwrap();
+        let qa    = BertForQuestionAnswering::on_device(&config, dev).unwrap();
+        assert!(std::ptr::eq(seq.graph(),   <BertForSequenceClassification as HasGraph>::graph(&seq)));
+        assert!(std::ptr::eq(token.graph(), <BertForTokenClassification as HasGraph>::graph(&token)));
+        assert!(std::ptr::eq(qa.graph(),    <BertForQuestionAnswering as HasGraph>::graph(&qa)));
+    }
+
+    /// End-to-end `Trainer::setup_head` on CPU: build a head, wire
+    /// optimizer via `setup_head`, run a full forward → loss → backward
+    /// → step cycle, confirm no error and the loss is finite. On CPU
+    /// with no extra GPUs, `setup_head`'s distribute path is a no-op,
+    /// so this tests the single-device branch of the wrapper.
+    #[test]
+    fn setup_head_drives_cpu_training_step() {
+        use flodl::{Adam, Trainer};
+        use crate::task_heads::sequence_classification_loss;
+
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let head = BertForSequenceClassification::on_device(&config, 3, dev).unwrap();
+
+        let cfg_for_factory = config.clone();
+        Trainer::setup_head(
+            &head,
+            move |dev| BertForSequenceClassification::on_device(&cfg_for_factory, 3, dev),
+            |p| Adam::new(p, 1e-3),
+        ).unwrap();
+
+        let batch = 2;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[1, 2, 3, 4, 5, 6, 7, 0], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let pos = Variable::new(
+            Tensor::from_i64(&[0, 1, 2, 3, 0, 1, 2, 3], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let tt = Variable::new(Tensor::from_i64(&[0; 8], &[batch, seq], dev).unwrap(), false);
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let logits = head.graph().forward_multi(&[ids, pos, tt, mask]).unwrap();
+        assert_eq!(logits.shape(), vec![batch, 3]);
+
+        let labels = Variable::new(Tensor::from_i64(&[0, 1], &[batch], dev).unwrap(), false);
+        let loss = sequence_classification_loss(&logits, &labels).unwrap();
+        loss.backward().unwrap();
+        head.graph().step().unwrap();
+
+        let loss_val = loss.item().unwrap();
+        assert!(loss_val.is_finite(), "loss must be finite, got {loss_val}");
     }
 }

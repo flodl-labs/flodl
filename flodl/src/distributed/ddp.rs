@@ -869,6 +869,147 @@ impl Trainer {
     {
         DdpHandle::new_builder(model_factory, optim_factory, train_fn)
     }
+
+    /// One-call setup for a task-head wrapper (e.g. `flodl-hf`'s
+    /// `BertForSequenceClassification`). The wrapper must implement
+    /// [`HasGraph`] so `Trainer` can reach the underlying [`Graph`].
+    ///
+    /// Semantics match [`Trainer::setup`] exactly; the only difference is
+    /// that `head_factory` builds a fresh wrapper (not a bare `Graph`) on
+    /// each replica device. Useful when the training-loop code holds onto
+    /// the wrapper's richer surface (`compute_loss`, `predict`, attached
+    /// tokenizer) but still wants transparent 1-or-N-GPU DDP.
+    ///
+    /// ```ignore
+    /// let head = DistilBertForSequenceClassification::from_pretrained(repo)?;
+    /// let config = head.config().clone();
+    /// let num_labels = head.labels().len() as i64;
+    ///
+    /// Trainer::setup_head(
+    ///     &head,
+    ///     move |dev| DistilBertForSequenceClassification::on_device(&config, num_labels, dev),
+    ///     |p| Adam::new(p, 5e-5),
+    /// )?;
+    ///
+    /// for (enc, labels) in &batches {
+    ///     let loss = head.compute_loss(&enc, &labels)?;
+    ///     loss.backward()?;
+    ///     head.graph().step()?;
+    /// }
+    /// ```
+    pub fn setup_head<H, F, G, O>(
+        head: &H,
+        head_factory: F,
+        optimizer: G,
+    ) -> Result<()>
+    where
+        H: HasGraph,
+        F: Fn(Device) -> Result<H> + 'static,
+        H: 'static,
+        G: Fn(&[Parameter]) -> O,
+        O: Optimizer + 'static,
+    {
+        Ddp::print_device_summary();
+        let graph = head.graph();
+        graph.distribute(move |dev| head_factory(dev).map(|h| HeadReplica { head: h }))?;
+        graph.set_optimizer(optimizer);
+        graph.set_training(true);
+
+        if Ddp::is_heterogeneous() {
+            graph.configure_el_che(&DdpConfig::new());
+        }
+
+        Ok(())
+    }
+
+    /// Task-head variant of [`Trainer::setup_with`]. Same behaviour as
+    /// [`Trainer::setup_head`] but takes an explicit [`DdpConfig`].
+    pub fn setup_head_with<H, F, G, O>(
+        head: &H,
+        head_factory: F,
+        optimizer: G,
+        config: DdpConfig,
+    ) -> Result<()>
+    where
+        H: HasGraph,
+        F: Fn(Device) -> Result<H> + 'static,
+        H: 'static,
+        G: Fn(&[Parameter]) -> O,
+        O: Optimizer + 'static,
+    {
+        Ddp::print_device_summary();
+        let graph = head.graph();
+        graph.distribute(move |dev| head_factory(dev).map(|h| HeadReplica { head: h }))?;
+        graph.set_optimizer(optimizer);
+        graph.set_training(true);
+        graph.configure_el_che(&config);
+        if let Some(tl) = config.timeline {
+            if let Some(ref mut state) = *graph.distributed.borrow_mut() {
+                state.timeline = Some(tl);
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HasGraph trait: lets wrapper types plug into Trainer::setup_head
+// ---------------------------------------------------------------------------
+
+/// A wrapper type that exposes an inner [`Graph`].
+///
+/// Implement on any wrapper around a `Graph` that should participate in
+/// [`Trainer::setup_head`] or other graph-aware DDP machinery. The
+/// reference returned must outlive `&self` and point at the same graph
+/// used for the wrapper's forward / loss calls.
+///
+/// [`Graph`] implements this trivially (returns `self`) so bare-graph
+/// callers can pass a `&Graph` wherever `&impl HasGraph` is accepted.
+///
+/// ```ignore
+/// impl HasGraph for BertForSequenceClassification {
+///     fn graph(&self) -> &Graph { &self.graph }
+/// }
+/// ```
+pub trait HasGraph {
+    /// Borrow the inner training graph.
+    fn graph(&self) -> &Graph;
+}
+
+impl HasGraph for Graph {
+    fn graph(&self) -> &Graph { self }
+}
+
+/// Internal Module adapter used by [`Trainer::setup_head`] to feed a
+/// `HasGraph` replica through [`Graph::distribute`].
+///
+/// `distribute` boxes each replica as `Box<dyn Module>`. Task-head
+/// wrappers don't implement `Module` directly (their true forward is
+/// multi-input via [`Graph::forward_multi`], which doesn't fit the
+/// single-Variable `Module::forward` signature). `HeadReplica` delegates
+/// every Module method through to the inner graph and overrides
+/// [`Module::as_graph`] so DDP's multi-input replica paths downcast
+/// cleanly rather than hitting the single-input fallback.
+struct HeadReplica<H: HasGraph + 'static> {
+    head: H,
+}
+
+impl<H: HasGraph + 'static> Module for HeadReplica<H> {
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        // Single-input fallback. Task-head DDP paths reach
+        // forward_multi via `as_graph()` below, so this is only
+        // exercised on single-input replica paths (e.g. the scatter
+        // forward in `forward_distributed_scatter`). For multi-input
+        // heads that path is never triggered because the user calls
+        // the head's own `compute_loss` / `forward_encoded`, which
+        // route through `Graph::forward_multi` directly.
+        self.head.graph().forward(input)
+    }
+    fn parameters(&self) -> Vec<Parameter> { self.head.graph().parameters() }
+    fn buffers(&self) -> Vec<Buffer> { self.head.graph().buffers() }
+    fn name(&self) -> &str { "head_replica" }
+    fn set_training(&self, training: bool) { self.head.graph().set_training(training); }
+    fn as_graph(&self) -> Option<&Graph> { Some(self.head.graph()) }
 }
 
 // ---------------------------------------------------------------------------

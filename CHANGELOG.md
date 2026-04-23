@@ -32,6 +32,16 @@ All nine `*For{SequenceClassification,TokenClassification,QuestionAnswering}` he
 - **`compute_loss(enc, labels)` on every head** combines `forward_encoded` with the matching task-head loss. Mirrors HF Python's `model(..., labels=...).loss` one-call pattern for `/port`-friendly fine-tune loops.
 - **New example**: `fdl flodl-hf example distilbert-finetune` - loads the SST-2 DistilBERT checkpoint, fine-tunes on an inline 10-example polarity dataset for 5 steps, prints the loss curve and a final eval probe. Self-contained (no dataset download at example-runtime), CPU-only, about 30 s after the one-time weight fetch.
 
+#### `Trainer::setup_head` + `HasGraph` trait: transparent DDP for task-head wrappers
+
+`Trainer::setup_head` extends the transparent 1-or-N-GPU story to wrapper types like `flodl-hf`'s `BertForSequenceClassification`. Same call shape as `Trainer::setup` (`head, factory, optimizer`), same training-loop code path, works identically on CPU / single GPU / multi-GPU.
+
+- **`flodl::HasGraph` trait**: one method, `fn graph(&self) -> &Graph`. Any wrapper that owns a flodl `Graph` can opt into graph-aware DDP machinery by implementing it (3 lines). `Graph` itself implements it trivially.
+- **`Trainer::setup_head(head, head_factory, optimizer)`** (and `setup_head_with` for explicit `DdpConfig`): prints device summary, distributes via the head factory for additional GPUs, wires the optimizer, enables training mode. On 1 GPU or CPU the factory is never called; on N GPUs each replica is a fresh head built at its device.
+- Internally routes through a small `HeadReplica<H>` adapter that delegates `Module::parameters/buffers/set_training/as_graph` to the inner graph. Task heads stay free of a direct `impl Module` (their true forward is multi-input via `forward_multi` and doesn't fit the single-Variable `Module::forward` signature).
+- All nine flodl-hf task heads (BERT / RoBERTa / DistilBERT × SeqCls / TokenCls / QA) now implement `HasGraph` and expose a `config()` accessor so callers can build replicas inside the factory closure.
+- The `distilbert-finetune` example is rewritten to use `setup_head`: the loop is byte-identical to the multi-GPU path, so a user can scale to N GPUs without changing any training code.
+
 ### Deprecated
 
 - `Ddp::setup()`, `Ddp::setup_with()`, `Ddp::builder()` — use the matching `Trainer::*` methods instead. Same behavior, clearer intent. Compile-time deprecation warnings guide migration. `Ddp::wrap()` remains on `Ddp` as the explicit multi-GPU control tier. Removal targeted for a future release.
