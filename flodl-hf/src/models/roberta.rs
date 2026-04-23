@@ -33,7 +33,8 @@ use std::collections::HashMap;
 
 use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{
-    DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, Variable,
+    DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, TensorOptions,
+    Variable,
 };
 
 use crate::models::bert::build_extended_attention_mask;
@@ -410,7 +411,8 @@ impl RobertaModel {
 
 use crate::task_heads::{
     check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels,
-    question_answering_loss, sequence_classification_loss, token_classification_loss,
+    masked_lm_loss, question_answering_loss, sequence_classification_loss,
+    token_classification_loss,
 };
 pub use crate::task_heads::{Answer, TokenPrediction};
 
@@ -861,6 +863,231 @@ impl RobertaForQuestionAnswering {
     }
 }
 
+// ── RobertaLMHeadTransform ────────────────────────────────────────────────
+
+/// Dense + GELU + LayerNorm stack that sits between the encoder output
+/// and the MLM decoder in `RobertaLMHead`. Shapes preserved end-to-end
+/// (`[B, S, H] → [B, S, H]`).
+///
+/// Parameter keys (post-`prefix_params` under the `lm_head` tag):
+/// - `lm_head.dense.{weight,bias}`
+/// - `lm_head.layer_norm.{weight,bias}`
+///
+/// Note the lowercase `layer_norm` — unlike BERT's `LayerNorm` inside
+/// `cls.predictions.transform`, HF's `RobertaLMHead` spells it
+/// lowercase. Matches HF Python's `RobertaLMHead`.
+pub struct RobertaLMHeadTransform {
+    dense: Linear,
+    layer_norm: LayerNorm,
+}
+
+impl RobertaLMHeadTransform {
+    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
+        Ok(RobertaLMHeadTransform {
+            dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            layer_norm: LayerNorm::on_device_with_eps(
+                config.hidden_size,
+                config.layer_norm_eps,
+                device,
+            )?,
+        })
+    }
+}
+
+impl Module for RobertaLMHeadTransform {
+    fn name(&self) -> &str { "roberta_lm_head_transform" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        let x = self.dense.forward(input)?;
+        let x = x.gelu()?;
+        self.layer_norm.forward(&x)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut out = prefix_params("dense",      self.dense.parameters());
+        out.extend(   prefix_params("layer_norm", self.layer_norm.parameters()));
+        out
+    }
+}
+
+// ── RobertaForMaskedLM ───────────────────────────────────────────────────
+
+/// RoBERTa with a masked-language-modelling head: `RobertaLMHead` =
+/// `Linear → GELU → LayerNorm → tied-decoder Linear`, where the decoder
+/// weight is tied to `roberta.embeddings.word_embeddings.weight`.
+///
+/// Primary use case: **continued pretraining / domain adaptation** on
+/// private corpora. Callers feed masked `input_ids` and labels shaped
+/// `[batch, seq_len]` where loss-relevant positions carry the original
+/// token id and the rest is `-100`. See [`masked_lm_loss`].
+///
+/// Parameter keys emitted by the graph (post-dedup):
+/// - `lm_head.dense.{weight,bias}`
+/// - `lm_head.layer_norm.{weight,bias}`
+/// - `lm_head.decoder.bias`  (`[vocab_size]`, fresh)
+///
+/// `lm_head.decoder.weight` is **absent** — the decoder borrows
+/// `roberta.embeddings.word_embeddings.weight` via
+/// [`Linear::from_shared_weight`], and `Graph::named_parameters()`
+/// dedupes by pointer identity. HF Python's `RobertaLMHead` additionally
+/// exposes a top-level `lm_head.bias` Parameter tied to
+/// `decoder.bias`; we keep only the decoder's own bias and let the
+/// safetensors loader ignore an extra `lm_head.bias` key when a
+/// checkpoint carries one.
+///
+/// Matches HF Python's `RobertaForMaskedLM`. Canonical checkpoints:
+/// `roberta-base`, `roberta-large`, any `*-mlm` domain-adaptation
+/// fine-tune.
+pub struct RobertaForMaskedLM {
+    graph: Graph,
+    config: RobertaConfig,
+    #[cfg(feature = "tokenizer")]
+    tokenizer: Option<crate::tokenizer::HfTokenizer>,
+}
+
+impl RobertaForMaskedLM {
+    /// Build the full graph: backbone (no pooler) + LM-head transform +
+    /// tied decoder on `device`. Initializes all weights fresh; use
+    /// [`from_pretrained`](crate::hub::RobertaForMaskedLM::from_pretrained)
+    /// to load a checkpoint.
+    pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
+        // Build embeddings first, grab the tied weight before ownership
+        // moves into `.through(...)`.
+        let embeddings = RobertaEmbeddings::on_device(config, device)?;
+        let tied_weight = embeddings.word_embeddings_weight();
+
+        let mut fb = FlowBuilder::new()
+            .input(&["token_type_ids", "attention_mask"])
+            .through(embeddings)
+            .tag("roberta.embeddings")
+            .using(&["token_type_ids"]);
+
+        let layer_root = HfPath::new("roberta").sub("encoder").sub("layer");
+        let layer_cfg = roberta_layer_config(config);
+        for i in 0..config.num_hidden_layers {
+            let tag = layer_root.sub(i).to_string();
+            fb = fb
+                .through(TransformerLayer::on_device(&layer_cfg, LayerNaming::BERT, device)?)
+                .tag(&tag)
+                .using(&["attention_mask"]);
+        }
+
+        // LM head: transform stack → tied decoder with fresh [V] bias.
+        let decoder_bias = Parameter::new(
+            Tensor::zeros(
+                &[config.vocab_size],
+                TensorOptions { dtype: DType::Float32, device },
+            )?,
+            "bias",
+        );
+        let graph = fb
+            .through(RobertaLMHeadTransform::on_device(config, device)?)
+            .tag("lm_head")
+            .through(Linear::from_shared_weight(tied_weight, Some(decoder_bias)))
+            .tag("lm_head.decoder")
+            .build()?;
+
+        Ok(Self {
+            graph,
+            config: config.clone(),
+            #[cfg(feature = "tokenizer")]
+            tokenizer: None,
+        })
+    }
+
+    pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &RobertaConfig { &self.config }
+
+    #[cfg(feature = "tokenizer")]
+    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
+        self.tokenizer = Some(tok);
+        self
+    }
+
+    /// Raw forward pass returning `[batch, seq_len, vocab_size]` logits
+    /// over the vocabulary. Does not change train / eval mode.
+    #[cfg(feature = "tokenizer")]
+    pub fn forward_encoded(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+    ) -> Result<Variable> {
+        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
+        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
+        self.graph.forward_multi(&[
+            enc.input_ids.clone(),
+            enc.token_type_ids.clone(),
+            mask,
+        ])
+    }
+
+    /// Forward pass plus masked-LM loss. Mirrors HF Python's
+    /// `RobertaForMaskedLM(..., labels=labels).loss`.
+    #[cfg(feature = "tokenizer")]
+    pub fn compute_loss(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+        labels: &Variable,
+    ) -> Result<Variable> {
+        let logits = self.forward_encoded(enc)?;
+        masked_lm_loss(&logits, labels)
+    }
+
+    /// Fill every `<mask>` token in `text` with its top-`k` predicted
+    /// replacements, sorted by descending softmax probability. RoBERTa
+    /// uses `<mask>` (not BERT's `[MASK]`); the tokenizer resolves it.
+    #[cfg(feature = "tokenizer")]
+    pub fn fill_mask(&self, text: &str, top_k: usize) -> Result<Vec<Vec<(String, f32)>>> {
+        if top_k == 0 {
+            return Err(TensorError::new("fill_mask: top_k must be > 0"));
+        }
+        let tok = self.tokenizer.as_ref().ok_or_else(|| {
+            TensorError::new(
+                "RobertaForMaskedLM::fill_mask requires a tokenizer; \
+                 use from_pretrained or .with_tokenizer(...) first",
+            )
+        })?;
+        let mask_id = tok.inner().token_to_id("<mask>").ok_or_else(|| {
+            TensorError::new("fill_mask: tokenizer has no <mask> token")
+        })? as i64;
+
+        self.graph.eval();
+        let enc = tok.encode(&[text])?;
+        let logits = self.forward_encoded(&enc)?;
+        let probs = logits.data().softmax(-1)?;
+
+        let ids_row = enc.input_ids.data().select(0, 0)?.to_i64_vec()?;
+        let mut out = Vec::new();
+        for (pos, id) in ids_row.iter().enumerate() {
+            if *id != mask_id {
+                continue;
+            }
+            let row = probs.select(0, 0)?.select(0, pos as i64)?;
+            let (vals, idxs) = row.topk(top_k as i64, 0, /*largest=*/ true, /*sorted=*/ true)?;
+            let score_vec = vals.to_f32_vec()?;
+            let id_vec = idxs.to_i64_vec()?;
+            let picks: Vec<(String, f32)> = id_vec
+                .iter()
+                .zip(score_vec.iter())
+                .map(|(i, s)| {
+                    let tok_str = tok
+                        .inner()
+                        .id_to_token(*i as u32)
+                        .unwrap_or_else(|| format!("[UNK_{i}]"));
+                    (tok_str, *s)
+                })
+                .collect();
+            out.push(picks);
+        }
+
+        if out.is_empty() {
+            return Err(TensorError::new(
+                "fill_mask: input contains no <mask> token",
+            ));
+        }
+        Ok(out)
+    }
+}
+
 // ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
 
 impl HasGraph for RobertaForSequenceClassification {
@@ -870,6 +1097,9 @@ impl HasGraph for RobertaForTokenClassification {
     fn graph(&self) -> &Graph { &self.graph }
 }
 impl HasGraph for RobertaForQuestionAnswering {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for RobertaForMaskedLM {
     fn graph(&self) -> &Graph { &self.graph }
 }
 
@@ -966,5 +1196,160 @@ mod tests {
         //   cumsum*mask = [1, 2, 3, 4, 0, 0]
         //   + pad_idx=1 = [2, 3, 4, 5, 1, 1]
         assert_eq!(flat, vec![2, 3, 4, 5, 1, 1]);
+    }
+
+    // ── RobertaForMaskedLM ──────────────────────────────────────────
+
+    /// `RobertaForMaskedLM` weight-ties its decoder. State_dict must
+    /// carry `roberta.embeddings.word_embeddings.weight` but **not**
+    /// `lm_head.decoder.weight`; the LM-head transform + fresh bias
+    /// show up under `lm_head.{dense,layer_norm,decoder.bias}`.
+    #[test]
+    fn masked_lm_parameter_keys_match_hf_tied_layout() {
+        let config = RobertaConfig::roberta_base();
+        let head = RobertaForMaskedLM::on_device(&config, Device::CPU).unwrap();
+        let expected = expected_from_graph(head.graph());
+        let keys: Vec<&str> = expected.iter().map(|p| p.key.as_str()).collect();
+
+        assert!(
+            keys.contains(&"roberta.embeddings.word_embeddings.weight"),
+            "tied weight must surface under embeddings tag: {keys:?}",
+        );
+        assert!(
+            !keys.contains(&"lm_head.decoder.weight"),
+            "decoder.weight must be absent (tied, dedup kept embeddings entry)",
+        );
+        assert!(
+            !keys.iter().any(|k| k.starts_with("roberta.pooler.")),
+            "MLM must not carry pooler params",
+        );
+
+        let mut head_keys: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|k| k.starts_with("lm_head."))
+            .collect();
+        head_keys.sort();
+        assert_eq!(
+            head_keys,
+            vec![
+                "lm_head.decoder.bias",
+                "lm_head.dense.bias",
+                "lm_head.dense.weight",
+                "lm_head.layer_norm.bias",
+                "lm_head.layer_norm.weight",
+            ],
+        );
+
+        let by_key: std::collections::HashMap<&str, &[i64]> = expected
+            .iter().map(|p| (p.key.as_str(), p.shape.as_slice())).collect();
+        let v = config.vocab_size;
+        let h = config.hidden_size;
+        assert_eq!(by_key["roberta.embeddings.word_embeddings.weight"], &[v, h]);
+        assert_eq!(by_key["lm_head.dense.weight"],       &[h, h]);
+        assert_eq!(by_key["lm_head.dense.bias"],         &[h]);
+        assert_eq!(by_key["lm_head.layer_norm.weight"],  &[h]);
+        assert_eq!(by_key["lm_head.layer_norm.bias"],    &[h]);
+        assert_eq!(by_key["lm_head.decoder.bias"],       &[v]);
+    }
+
+    /// Structural tying check: exactly one `[vocab, hidden]`-shaped
+    /// Parameter in the graph. Uses `roberta_base` so the shape is
+    /// unambiguous against the FFN dimensions.
+    #[test]
+    fn masked_lm_decoder_shares_embedding_rc() {
+        let config = RobertaConfig::roberta_base();
+        let head = RobertaForMaskedLM::on_device(&config, Device::CPU).unwrap();
+
+        let named = head.graph().named_parameters();
+        let embed_w = named
+            .iter()
+            .find(|(k, _)| k == "roberta.embeddings/word_embeddings.weight")
+            .map(|(_, p)| p.clone())
+            .expect("embeddings word_embeddings.weight must be present");
+        assert_eq!(
+            embed_w.variable.shape(),
+            vec![config.vocab_size, config.hidden_size],
+        );
+
+        let vocab_shaped_count = named
+            .iter()
+            .filter(|(_, p)| p.variable.shape() == vec![config.vocab_size, config.hidden_size])
+            .count();
+        assert_eq!(
+            vocab_shaped_count, 1,
+            "exactly one [V, H]-shaped Parameter expected under tying",
+        );
+    }
+
+    /// Smoke: RoBERTa MLM head emits `[batch, seq, vocab_size]` logits.
+    /// Uses the full `roberta_base` config; seq_len and batch kept tiny
+    /// so the forward pass stays cheap.
+    #[test]
+    fn masked_lm_forward_shape_smoke() {
+        let config = RobertaConfig::roberta_base();
+        let dev = Device::CPU;
+        let head = RobertaForMaskedLM::on_device(&config, dev).unwrap();
+        head.graph().eval();
+
+        let batch = 1;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[0, 100, 200, 2], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let tt = Variable::new(Tensor::from_i64(&[0; 4], &[batch, seq], dev).unwrap(), false);
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let out = head.graph().forward_multi(&[ids, tt, mask]).unwrap();
+        assert_eq!(out.shape(), vec![batch, seq, config.vocab_size]);
+    }
+
+    /// `HasGraph` impl points to the MLM head's inner graph by reference.
+    #[test]
+    fn masked_lm_has_graph_returns_inner_graph_by_reference() {
+        let config = RobertaConfig::roberta_base();
+        let head = RobertaForMaskedLM::on_device(&config, Device::CPU).unwrap();
+        assert!(std::ptr::eq(head.graph(), <RobertaForMaskedLM as HasGraph>::graph(&head)));
+    }
+
+    /// Backward through the tied decoder must produce a gradient on
+    /// the shared embedding weight.
+    #[test]
+    fn masked_lm_backward_accumulates_on_tied_weight() {
+        let config = RobertaConfig::roberta_base();
+        let dev = Device::CPU;
+        let head = RobertaForMaskedLM::on_device(&config, dev).unwrap();
+        head.graph().train();
+
+        let batch = 1;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[0, 100, 200, 2], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let tt = Variable::new(Tensor::from_i64(&[0; 4], &[batch, seq], dev).unwrap(), false);
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let logits = head.graph().forward_multi(&[ids, tt, mask]).unwrap();
+        let loss = logits.sum().unwrap();
+        loss.backward().unwrap();
+
+        let named = head.graph().named_parameters();
+        let embed_w = named
+            .iter()
+            .find(|(k, _)| k == "roberta.embeddings/word_embeddings.weight")
+            .map(|(_, p)| p.clone())
+            .expect("tied weight must be present");
+        assert!(
+            embed_w.variable.grad().is_some(),
+            "tied embedding/decoder weight must receive gradient",
+        );
     }
 }

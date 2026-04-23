@@ -25,12 +25,12 @@ use crate::models::bert::{
     BertForTokenClassification, BertModel,
 };
 use crate::models::distilbert::{
-    DistilBertConfig, DistilBertForQuestionAnswering, DistilBertForSequenceClassification,
-    DistilBertForTokenClassification, DistilBertModel,
+    DistilBertConfig, DistilBertForMaskedLM, DistilBertForQuestionAnswering,
+    DistilBertForSequenceClassification, DistilBertForTokenClassification, DistilBertModel,
 };
 use crate::models::roberta::{
-    RobertaConfig, RobertaForQuestionAnswering, RobertaForSequenceClassification,
-    RobertaForTokenClassification, RobertaModel,
+    RobertaConfig, RobertaForMaskedLM, RobertaForQuestionAnswering,
+    RobertaForSequenceClassification, RobertaForTokenClassification, RobertaModel,
 };
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
@@ -465,6 +465,35 @@ impl RobertaForQuestionAnswering {
     }
 }
 
+impl RobertaForMaskedLM {
+    /// Download a RoBERTa MLM checkpoint (`roberta-base`,
+    /// `roberta-large`, any `*-mlm` domain-adaptation fine-tune) from
+    /// the Hub.
+    ///
+    /// The decoder weight is tied to
+    /// `roberta.embeddings.word_embeddings.weight`; checkpoints that
+    /// redundantly save `lm_head.decoder.weight` alongside it, or ship
+    /// an extra `lm_head.bias` tied-to-decoder-bias, load cleanly —
+    /// `load_safetensors_into_graph_with_rename_allow_unused` silently
+    /// ignores keys absent from the graph's deduplicated
+    /// `named_parameters()`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
 // ── DistilBERT from_pretrained ───────────────────────────────────────────
 //
 // Each DistilBERT head mirrors its BERT / RoBERTa counterparts above.
@@ -552,6 +581,33 @@ impl DistilBertForQuestionAnswering {
     /// Download a fine-tuned `DistilBertForQuestionAnswering`
     /// checkpoint (SQuAD, etc.) from the Hub. Canonical:
     /// `distilbert/distilbert-base-cased-distilled-squad`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl DistilBertForMaskedLM {
+    /// Download a DistilBERT MLM checkpoint (`distilbert-base-uncased`,
+    /// `distilbert-base-cased`, any `*-mlm` domain-adaptation fine-tune)
+    /// from the Hub.
+    ///
+    /// The `vocab_projector` weight is tied to
+    /// `distilbert.embeddings.word_embeddings.weight`; checkpoints that
+    /// redundantly save `vocab_projector.weight` load cleanly — the
+    /// loader silently ignores keys absent from the graph's deduplicated
+    /// `named_parameters()`.
     pub fn from_pretrained(repo_id: &str) -> Result<Self> {
         Self::from_pretrained_on_device(repo_id, Device::CPU)
     }

@@ -36,7 +36,7 @@
 
 use std::cell::Cell;
 
-use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, Parameter};
+use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, Parameter};
 use flodl::{
     DType, Device, FlowBuilder, Graph, HasGraph, Result, Tensor, TensorError, TensorOptions, Variable,
 };
@@ -46,7 +46,8 @@ use crate::models::transformer_layer::{LayerNaming, TransformerLayer, Transforme
 use crate::path::{prefix_params, HfPath};
 use crate::task_heads::{
     check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels,
-    question_answering_loss, sequence_classification_loss, token_classification_loss,
+    masked_lm_loss, question_answering_loss, sequence_classification_loss,
+    token_classification_loss,
 };
 pub use crate::task_heads::{Answer, TokenPrediction};
 
@@ -817,6 +818,192 @@ impl DistilBertForQuestionAnswering {
     }
 }
 
+// ── DistilBertForMaskedLM ────────────────────────────────────────────────
+
+/// DistilBERT with a masked-language-modelling head. HF Python's
+/// `DistilBertForMaskedLM` lays out the LM head flat on top of the
+/// backbone — no `cls.` / `lm_head.` subgroup prefix — so the graph
+/// mirrors that with three top-level tags:
+///
+/// - `vocab_transform` — `Linear(dim, dim)`
+/// - `vocab_layer_norm` — `LayerNorm(dim)`
+/// - `vocab_projector` — `Linear(dim, vocab_size)`, weight tied to
+///   `distilbert.embeddings.word_embeddings.weight`
+///
+/// A `GELU` node sits between `vocab_transform` and `vocab_layer_norm`;
+/// it carries no parameters so it leaves no key in the state_dict.
+///
+/// Primary use case: **continued pretraining / domain adaptation** on
+/// private corpora. Callers feed masked `input_ids` and labels shaped
+/// `[batch, seq_len]` where loss-relevant positions carry the original
+/// token id and the rest is `-100`. See [`masked_lm_loss`].
+///
+/// Parameter keys emitted by the graph (post-dedup):
+/// - `vocab_transform.{weight,bias}`
+/// - `vocab_layer_norm.{weight,bias}`
+/// - `vocab_projector.bias`  (`[vocab_size]`, fresh)
+///
+/// `vocab_projector.weight` is **absent** — tied to the embedding
+/// table via [`Linear::from_shared_weight`] and dedup'd by
+/// `Graph::named_parameters()`. HF checkpoints that save the
+/// redundant `vocab_projector.weight` load fine — the safetensors
+/// loader silently ignores unused keys.
+///
+/// Matches HF Python's `DistilBertForMaskedLM`. Canonical checkpoints:
+/// `distilbert-base-uncased`, `distilbert-base-cased`.
+pub struct DistilBertForMaskedLM {
+    graph: Graph,
+    config: DistilBertConfig,
+    #[cfg(feature = "tokenizer")]
+    tokenizer: Option<crate::tokenizer::HfTokenizer>,
+}
+
+impl DistilBertForMaskedLM {
+    /// Build the full graph: backbone + vocab_transform + gelu +
+    /// vocab_layer_norm + tied vocab_projector on `device`. Initializes
+    /// all weights fresh; use
+    /// [`from_pretrained`](crate::hub::DistilBertForMaskedLM::from_pretrained)
+    /// to load a checkpoint.
+    pub fn on_device(config: &DistilBertConfig, device: Device) -> Result<Self> {
+        let embeddings = DistilBertEmbeddings::on_device(config, device)?;
+        let tied_weight = embeddings.word_embeddings_weight();
+
+        let mut fb = FlowBuilder::new()
+            .input(&["attention_mask"])
+            .through(embeddings)
+            .tag("distilbert.embeddings");
+
+        let layer_root = HfPath::new("distilbert").sub("transformer").sub("layer");
+        let layer_cfg = distilbert_layer_config(config);
+        for i in 0..config.n_layers {
+            let tag = layer_root.sub(i).to_string();
+            fb = fb
+                .through(TransformerLayer::on_device(&layer_cfg, LayerNaming::DISTILBERT, device)?)
+                .tag(&tag)
+                .using(&["attention_mask"]);
+        }
+
+        // LM head: dense → gelu → layer_norm → tied projector (fresh bias).
+        let projector_bias = Parameter::new(
+            Tensor::zeros(
+                &[config.vocab_size],
+                TensorOptions { dtype: DType::Float32, device },
+            )?,
+            "bias",
+        );
+        let graph = fb
+            .through(Linear::on_device(config.dim, config.dim, device)?)
+            .tag("vocab_transform")
+            .through(GELU::new())
+            .through(LayerNorm::on_device_with_eps(
+                config.dim,
+                config.layer_norm_eps,
+                device,
+            )?)
+            .tag("vocab_layer_norm")
+            .through(Linear::from_shared_weight(tied_weight, Some(projector_bias)))
+            .tag("vocab_projector")
+            .build()?;
+
+        Ok(Self {
+            graph,
+            config: config.clone(),
+            #[cfg(feature = "tokenizer")]
+            tokenizer: None,
+        })
+    }
+
+    pub fn graph(&self) -> &Graph { &self.graph }
+    pub fn config(&self) -> &DistilBertConfig { &self.config }
+
+    #[cfg(feature = "tokenizer")]
+    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
+        self.tokenizer = Some(tok);
+        self
+    }
+
+    /// Raw forward pass returning `[batch, seq_len, vocab_size]` logits
+    /// over the vocabulary. Does not change train / eval mode.
+    #[cfg(feature = "tokenizer")]
+    pub fn forward_encoded(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+    ) -> Result<Variable> {
+        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
+        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
+        self.graph.forward_multi(&[
+            enc.input_ids.clone(),
+            mask,
+        ])
+    }
+
+    /// Forward pass plus masked-LM loss. Mirrors HF Python's
+    /// `DistilBertForMaskedLM(..., labels=labels).loss`.
+    #[cfg(feature = "tokenizer")]
+    pub fn compute_loss(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+        labels: &Variable,
+    ) -> Result<Variable> {
+        let logits = self.forward_encoded(enc)?;
+        masked_lm_loss(&logits, labels)
+    }
+
+    /// Fill every `[MASK]` token in `text` with its top-`k` predicted
+    /// replacements. DistilBERT inherits BERT's `[MASK]` token.
+    #[cfg(feature = "tokenizer")]
+    pub fn fill_mask(&self, text: &str, top_k: usize) -> Result<Vec<Vec<(String, f32)>>> {
+        if top_k == 0 {
+            return Err(TensorError::new("fill_mask: top_k must be > 0"));
+        }
+        let tok = self.tokenizer.as_ref().ok_or_else(|| {
+            TensorError::new(
+                "DistilBertForMaskedLM::fill_mask requires a tokenizer; \
+                 use from_pretrained or .with_tokenizer(...) first",
+            )
+        })?;
+        let mask_id = tok.inner().token_to_id("[MASK]").ok_or_else(|| {
+            TensorError::new("fill_mask: tokenizer has no [MASK] token")
+        })? as i64;
+
+        self.graph.eval();
+        let enc = tok.encode(&[text])?;
+        let logits = self.forward_encoded(&enc)?;
+        let probs = logits.data().softmax(-1)?;
+
+        let ids_row = enc.input_ids.data().select(0, 0)?.to_i64_vec()?;
+        let mut out = Vec::new();
+        for (pos, id) in ids_row.iter().enumerate() {
+            if *id != mask_id {
+                continue;
+            }
+            let row = probs.select(0, 0)?.select(0, pos as i64)?;
+            let (vals, idxs) = row.topk(top_k as i64, 0, /*largest=*/ true, /*sorted=*/ true)?;
+            let score_vec = vals.to_f32_vec()?;
+            let id_vec = idxs.to_i64_vec()?;
+            let picks: Vec<(String, f32)> = id_vec
+                .iter()
+                .zip(score_vec.iter())
+                .map(|(i, s)| {
+                    let tok_str = tok
+                        .inner()
+                        .id_to_token(*i as u32)
+                        .unwrap_or_else(|| format!("[UNK_{i}]"));
+                    (tok_str, *s)
+                })
+                .collect();
+            out.push(picks);
+        }
+
+        if out.is_empty() {
+            return Err(TensorError::new(
+                "fill_mask: input contains no [MASK] token",
+            ));
+        }
+        Ok(out)
+    }
+}
+
 // ── HasGraph impls for flodl::Trainer::setup_head ─────────────────────────
 
 impl HasGraph for DistilBertForSequenceClassification {
@@ -826,6 +1013,9 @@ impl HasGraph for DistilBertForTokenClassification {
     fn graph(&self) -> &Graph { &self.graph }
 }
 impl HasGraph for DistilBertForQuestionAnswering {
+    fn graph(&self) -> &Graph { &self.graph }
+}
+impl HasGraph for DistilBertForMaskedLM {
     fn graph(&self) -> &Graph { &self.graph }
 }
 
@@ -1106,6 +1296,168 @@ mod tests {
         }"#;
         let err = DistilBertConfig::from_json_str(json).unwrap_err();
         assert!(format!("{err}").contains("n_layers"), "got: {err}");
+    }
+
+    // ── DistilBertForMaskedLM ────────────────────────────────────────
+
+    /// `DistilBertForMaskedLM` ties its projector weight to the
+    /// word-embedding table. State_dict must carry
+    /// `distilbert.embeddings.word_embeddings.weight` but **not**
+    /// `vocab_projector.weight`; the flat LM head contributes three
+    /// tagged nodes.
+    #[test]
+    fn masked_lm_parameter_keys_match_hf_tied_layout() {
+        let config = DistilBertConfig::distilbert_base_uncased();
+        let head = DistilBertForMaskedLM::on_device(&config, Device::CPU).unwrap();
+        let expected = expected_from_graph(head.graph());
+        let keys: Vec<&str> = expected.iter().map(|p| p.key.as_str()).collect();
+
+        assert!(
+            keys.contains(&"distilbert.embeddings.word_embeddings.weight"),
+            "tied weight must surface under embeddings tag: {keys:?}",
+        );
+        assert!(
+            !keys.contains(&"vocab_projector.weight"),
+            "vocab_projector.weight must be absent (tied, dedup kept embeddings entry)",
+        );
+
+        // No pooler in DistilBERT at all.
+        assert!(
+            !keys.iter().any(|k| k.contains("pooler")),
+            "DistilBERT carries no pooler",
+        );
+
+        let mut head_keys: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|k| {
+                k.starts_with("vocab_transform.")
+                    || k.starts_with("vocab_layer_norm.")
+                    || k.starts_with("vocab_projector.")
+            })
+            .collect();
+        head_keys.sort();
+        assert_eq!(
+            head_keys,
+            vec![
+                "vocab_layer_norm.bias",
+                "vocab_layer_norm.weight",
+                "vocab_projector.bias",
+                "vocab_transform.bias",
+                "vocab_transform.weight",
+            ],
+        );
+
+        let by_key: std::collections::HashMap<&str, &[i64]> = expected
+            .iter().map(|p| (p.key.as_str(), p.shape.as_slice())).collect();
+        let v = config.vocab_size;
+        let d = config.dim;
+        assert_eq!(by_key["distilbert.embeddings.word_embeddings.weight"], &[v, d]);
+        assert_eq!(by_key["vocab_transform.weight"],  &[d, d]);
+        assert_eq!(by_key["vocab_transform.bias"],    &[d]);
+        assert_eq!(by_key["vocab_layer_norm.weight"], &[d]);
+        assert_eq!(by_key["vocab_layer_norm.bias"],   &[d]);
+        assert_eq!(by_key["vocab_projector.bias"],    &[v]);
+    }
+
+    /// Structural tying check: exactly one `[vocab, dim]`-shaped
+    /// Parameter in the graph.
+    #[test]
+    fn masked_lm_projector_shares_embedding_rc() {
+        let config = DistilBertConfig::distilbert_base_uncased();
+        let head = DistilBertForMaskedLM::on_device(&config, Device::CPU).unwrap();
+
+        let named = head.graph().named_parameters();
+        let embed_w = named
+            .iter()
+            .find(|(k, _)| k == "distilbert.embeddings/word_embeddings.weight")
+            .map(|(_, p)| p.clone())
+            .expect("embeddings word_embeddings.weight must be present");
+        assert_eq!(
+            embed_w.variable.shape(),
+            vec![config.vocab_size, config.dim],
+        );
+
+        let vocab_shaped_count = named
+            .iter()
+            .filter(|(_, p)| p.variable.shape() == vec![config.vocab_size, config.dim])
+            .count();
+        assert_eq!(
+            vocab_shaped_count, 1,
+            "exactly one [V, dim]-shaped Parameter expected under tying",
+        );
+    }
+
+    /// Smoke: DistilBERT MLM head emits `[batch, seq, vocab_size]`
+    /// logits. Batch and seq kept tiny so the forward pass stays
+    /// cheap on the full distilbert-base config.
+    #[test]
+    fn masked_lm_forward_shape_smoke() {
+        let config = DistilBertConfig::distilbert_base_uncased();
+        let dev = Device::CPU;
+        let head = DistilBertForMaskedLM::on_device(&config, dev).unwrap();
+        head.graph().eval();
+
+        let batch = 1;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[101, 200, 300, 102], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let out = head.graph().forward_multi(&[ids, mask]).unwrap();
+        assert_eq!(out.shape(), vec![batch, seq, config.vocab_size]);
+    }
+
+    /// `HasGraph` impl points to the MLM head's inner graph by reference.
+    #[test]
+    fn masked_lm_has_graph_returns_inner_graph_by_reference() {
+        let config = DistilBertConfig::distilbert_base_uncased();
+        let head = DistilBertForMaskedLM::on_device(&config, Device::CPU).unwrap();
+        assert!(std::ptr::eq(
+            head.graph(),
+            <DistilBertForMaskedLM as HasGraph>::graph(&head),
+        ));
+    }
+
+    /// Backward through the tied projector must produce a gradient on
+    /// the shared embedding weight.
+    #[test]
+    fn masked_lm_backward_accumulates_on_tied_weight() {
+        let config = DistilBertConfig::distilbert_base_uncased();
+        let dev = Device::CPU;
+        let head = DistilBertForMaskedLM::on_device(&config, dev).unwrap();
+        head.graph().train();
+
+        let batch = 1;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[101, 200, 300, 102], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let logits = head.graph().forward_multi(&[ids, mask]).unwrap();
+        let loss = logits.sum().unwrap();
+        loss.backward().unwrap();
+
+        let named = head.graph().named_parameters();
+        let embed_w = named
+            .iter()
+            .find(|(k, _)| k == "distilbert.embeddings/word_embeddings.weight")
+            .map(|(_, p)| p.clone())
+            .expect("tied weight must be present");
+        assert!(
+            embed_w.variable.grad().is_some(),
+            "tied embedding/projector weight must receive gradient",
+        );
     }
 
     #[test]
