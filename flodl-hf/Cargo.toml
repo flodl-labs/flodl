@@ -82,6 +82,10 @@ name = "distilbert_qa"
 required-features = ["hub", "tokenizer"]
 
 [[example]]
+name = "distilbert_finetune"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
 name = "auto_classify"
 required-features = ["hub", "tokenizer"]
 

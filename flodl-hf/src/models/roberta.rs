@@ -393,7 +393,10 @@ impl RobertaModel {
 
 // ── Task heads ───────────────────────────────────────────────────────────
 
-use crate::task_heads::{check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels};
+use crate::task_heads::{
+    check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels,
+    question_answering_loss, sequence_classification_loss, token_classification_loss,
+};
 pub use crate::task_heads::{Answer, TokenPrediction};
 
 // ── RobertaClassificationHead ────────────────────────────────────────────
@@ -548,6 +551,16 @@ impl RobertaForSequenceClassification {
         enc: &crate::tokenizer::EncodedBatch,
     ) -> Result<Variable> {
         self.graph.eval();
+        self.forward_encoded(enc)
+    }
+
+    /// Raw forward pass returning `[batch, num_labels]` logits. Does not
+    /// change train / eval mode.
+    #[cfg(feature = "tokenizer")]
+    pub fn forward_encoded(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+    ) -> Result<Variable> {
         let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
         let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
         self.graph.forward_multi(&[
@@ -555,6 +568,18 @@ impl RobertaForSequenceClassification {
             enc.token_type_ids.clone(),
             mask,
         ])
+    }
+
+    /// Forward pass plus sequence-classification loss. Mirrors HF
+    /// Python's `RobertaForSequenceClassification(..., labels=...).loss`.
+    #[cfg(feature = "tokenizer")]
+    pub fn compute_loss(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+        labels: &Variable,
+    ) -> Result<Variable> {
+        let logits = self.forward_encoded(enc)?;
+        sequence_classification_loss(&logits, labels)
     }
 }
 
@@ -683,6 +708,34 @@ impl RobertaForTokenClassification {
         let enc = tok.encode(texts)?;
         self.tag(&enc)
     }
+
+    /// Raw forward pass returning `[batch, seq_len, num_labels]` logits.
+    /// Does not change train / eval mode.
+    #[cfg(feature = "tokenizer")]
+    pub fn forward_encoded(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+    ) -> Result<Variable> {
+        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
+        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
+        self.graph.forward_multi(&[
+            enc.input_ids.clone(),
+            enc.token_type_ids.clone(),
+            mask,
+        ])
+    }
+
+    /// Forward pass plus token-classification loss on a labelled batch.
+    /// Mirrors HF Python's `RobertaForTokenClassification(..., labels=...).loss`.
+    #[cfg(feature = "tokenizer")]
+    pub fn compute_loss(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+        labels: &Variable,
+    ) -> Result<Variable> {
+        let logits = self.forward_encoded(enc)?;
+        token_classification_loss(&logits, labels)
+    }
 }
 
 // ── RobertaForQuestionAnswering ──────────────────────────────────────────
@@ -762,14 +815,39 @@ impl RobertaForQuestionAnswering {
             )
         })?;
         self.graph.eval();
+        let logits = self.forward_encoded(enc)?;
+        extract_best_span(&logits, enc, tok)
+    }
+
+    /// Raw forward pass returning `[batch, seq_len, 2]` logits. Start
+    /// logits are on slice `0` of the last axis, end logits on slice `1`.
+    /// Does not change train / eval mode.
+    #[cfg(feature = "tokenizer")]
+    pub fn forward_encoded(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+    ) -> Result<Variable> {
         let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
         let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        let logits = self.graph.forward_multi(&[
+        self.graph.forward_multi(&[
             enc.input_ids.clone(),
             enc.token_type_ids.clone(),
             mask,
-        ])?;
-        extract_best_span(&logits, enc, tok)
+        ])
+    }
+
+    /// Forward pass plus extractive QA loss on a labelled batch. Mirrors
+    /// HF Python's `RobertaForQuestionAnswering(..., start_positions=...,
+    /// end_positions=...).loss`.
+    #[cfg(feature = "tokenizer")]
+    pub fn compute_loss(
+        &self,
+        enc: &crate::tokenizer::EncodedBatch,
+        start_positions: &Variable,
+        end_positions: &Variable,
+    ) -> Result<Variable> {
+        let logits = self.forward_encoded(enc)?;
+        question_answering_loss(&logits, start_positions, end_positions)
     }
 }
 

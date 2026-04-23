@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 Motivation: `Ddp::builder()` read as an opt-in for "when you have multiple GPUs," obscuring that the same entry is the sensible default for single-GPU training too. `Trainer::builder()` makes the intent explicit — reach for it by default; drop to `Ddp::wrap()` when you need explicit multi-GPU control (GAN, RL, progressive patterns).
 
+#### flodl-hf: loss wiring on BERT-family task heads
+
+All nine `*For{SequenceClassification,TokenClassification,QuestionAnswering}` heads across BERT, RoBERTa, and DistilBERT can now drive a training loop without any hand-rolled loss plumbing.
+
+- **Free functions in `flodl_hf::task_heads`** (family-agnostic, compose with flodl's existing loss idiom):
+  - `sequence_classification_loss(logits, labels)` - CE over `[batch, num_labels]` logits with `[batch]` indices or `[batch, num_labels]` soft labels.
+  - `token_classification_loss(logits, labels)` - CE over flattened `[batch*seq_len, num_labels]` logits with `-100` ignore on `[batch, seq_len]` labels, matching HF Python's convention for specials / padding / non-first subwords.
+  - `question_answering_loss(logits, start_positions, end_positions)` - averaged CE on the split `[batch, seq_len, 2]` logits.
+- **`forward_encoded(enc) -> Variable` on every head** returns raw logits without touching train / eval mode, leaving the caller (or `Trainer::setup`) in charge of mode.
+- **`compute_loss(enc, labels)` on every head** combines `forward_encoded` with the matching task-head loss. Mirrors HF Python's `model(..., labels=...).loss` one-call pattern for `/port`-friendly fine-tune loops.
+- **New example**: `fdl flodl-hf example distilbert-finetune` - loads the SST-2 DistilBERT checkpoint, fine-tunes on an inline 10-example polarity dataset for 5 steps, prints the loss curve and a final eval probe. Self-contained (no dataset download at example-runtime), CPU-only, about 30 s after the one-time weight fetch.
+
 ### Deprecated
 
 - `Ddp::setup()`, `Ddp::setup_with()`, `Ddp::builder()` — use the matching `Trainer::*` methods instead. Same behavior, clearer intent. Compile-time deprecation warnings guide migration. `Ddp::wrap()` remains on `Ddp` as the explicit multi-GPU control tier. Removal targeted for a future release.

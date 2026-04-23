@@ -61,6 +61,11 @@ commands:
     run: cargo run --release --example distilbert_qa
     docker: dev
 
+  distilbert-finetune:
+    description: Fine-tune a DistilBERT sentiment classifier on an inline dataset, CPU-only, about 30s after one-time weight download
+    run: cargo run --release --example distilbert_finetune
+    docker: dev
+
   auto-classify:
     description: Family-agnostic sequence classification — AutoModel dispatches BERT/RoBERTa/DistilBERT from config.json
     run: cargo run --release --example auto_classify
