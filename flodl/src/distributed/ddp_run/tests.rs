@@ -3412,8 +3412,8 @@ fn test_worker_scheduler_step_advances_with_global_progress() {
 //   1. **Manual**:  `optimizer.set_lr(sched.lr(step))` per batch (the
 //      reference implementation a user would write themselves).
 //   2. **GpuWorker**: train_step() with set_scheduler attached
-//      (the path used by Ddp::builder, both in DDP and single-GPU fallback).
-//   3. **Graph::step()**: the path used by Ddp::setup_with (sync mode).
+//      (the path used by Trainer::builder, both in DDP and single-GPU fallback).
+//   3. **Graph::step()**: the path used by Trainer::setup_with (sync mode).
 //
 // The first time we ran this we had two bugs (graph mode never updated LR;
 // worker scheduler interaction with lr_scale was broken) and this single
@@ -3480,7 +3480,7 @@ fn test_cross_mode_lr_parity_solo_vs_worker_vs_graph() {
         lrs
     };
 
-    // ---------- Path 2: GpuWorker with set_scheduler (Ddp::builder path). ----------
+    // ---------- Path 2: GpuWorker with set_scheduler (Trainer::builder path). ----------
     let worker_lrs: Vec<f64> = {
         let (mut worker, _ch) = make_test_worker();
         worker.set_scheduler(Arc::new(RecordingSched::new(base_lr, &milestones, gamma)));
@@ -3496,7 +3496,7 @@ fn test_cross_mode_lr_parity_solo_vs_worker_vs_graph() {
         lrs
     };
 
-    // ---------- Path 3: Graph::step() with set_scheduler (Ddp::setup_with path). ----------
+    // ---------- Path 3: Graph::step() with set_scheduler (Trainer::setup_with path). ----------
     let graph_lrs: Vec<f64> = {
         let graph = FlowBuilder::from(Linear::on_device(4, 2, dev).unwrap())
             .build()

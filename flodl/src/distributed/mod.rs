@@ -1,9 +1,12 @@
-//! Distributed Data Parallel (DDP) infrastructure for multi-GPU training.
+//! Training entry points and distributed infrastructure.
 //!
-//! Three entry points, one type:
+//! Primary API:
 //!
-//! - [`Ddp::setup()`] -- user owns the training loop (Graph-based, transparent)
-//! - [`Ddp::builder()`] -- framework manages threads, data, epochs, averaging
+//! - [`Trainer::setup()`] -- user owns the training loop (Graph-based, transparent 1 or N GPU)
+//! - [`Trainer::builder()`] -- framework manages threads, data, epochs, averaging
+//!
+//! Explicit multi-GPU control:
+//!
 //! - [`Ddp::wrap()`] -- manual gradient sync for advanced patterns (GAN, RL)
 //!
 //! Supporting infrastructure: NCCL bindings, CUDA events/streams, El Che
@@ -19,7 +22,7 @@ pub mod el_che;
 pub use cuda_event::{CudaEvent, CudaEventFlags};
 pub use cuda_stream::{CudaStream, StreamGuard};
 pub use nccl::{NcclAbortHandle, NcclComms, NcclRankComm, NcclUniqueId, ReduceOp};
-pub use ddp::{Ddp, DdpConfig};
+pub use ddp::{Ddp, DdpConfig, Trainer};
 pub use el_che::ElChe;
 pub use ddp_run::{ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, drain_scalars, GpuWorker};
 // Deprecated aliases

@@ -402,7 +402,7 @@ the **[Observation example](https://github.com/fab2s/floDl/tree/main/flodl/examp
 
 ## Multi-GPU Training
 
-`Ddp::setup()` gives you transparent heterogeneous multi-GPU training with
+`Trainer::setup()` gives you transparent heterogeneous multi-GPU training with
 zero changes to your training loop. floDl detects your GPUs, picks the best
 strategy, and balances work automatically: the slowest GPU anchors the pace
 while faster ones run ahead intelligently.
@@ -411,7 +411,7 @@ while faster ones run ahead intelligently.
 
 ```rust
 // Detect GPUs, replicate model, set optimizer, enable training
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 
 // Training loop is IDENTICAL for 1 or N GPUs
 for batch in model.epoch(0) {
@@ -423,7 +423,7 @@ for batch in model.epoch(0) {
 **DDP Builder** -- thread-per-GPU, works with any `Module`:
 
 ```rust
-let state = Ddp::builder(model_factory, optim_factory, train_fn)
+let state = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(10)
@@ -438,7 +438,7 @@ let state = Ddp::builder(model_factory, optim_factory, train_fn)
 | **Works with** | `Graph` builder | Any `Module` |
 | **GPU model** | Scatter per batch | Thread per GPU (Local SGD) |
 | **Mixed GPUs** | El Che auto-enabled | `ApplyPolicy` x `AverageBackend` |
-| **Setup** | One line (`Ddp::setup`) | Builder pattern |
+| **Setup** | One line (`Trainer::setup`) | Builder pattern |
 | **Dashboard** | Integrated | Stderr logging |
 
 **A/B testing**: swap `AverageBackend::Nccl` for `AverageBackend::Cpu`
@@ -636,8 +636,8 @@ codegen-units = 1
 
 | Component | What it does |
 |-----------|-------------|
-| `Ddp::setup` | One-liner: detect GPUs, distribute, set optimizer, train |
-| `Ddp::builder` | Thread-per-GPU with Local SGD, any Module |
+| `Trainer::setup` | One-liner: detect GPUs, distribute, set optimizer, train |
+| `Trainer::builder` | Thread-per-GPU with Local SGD, any Module |
 | `ApplyPolicy` | Sync / Cadence / Async (when to average) |
 | `AverageBackend` | Nccl / Cpu (how to average, A/B testable) |
 | `ElChe` | Heterogeneous GPU cadence strategy |
@@ -687,7 +687,7 @@ supports. If `nvidia-smi` works, floDl trains on it.
 8. **[Utilities](https://github.com/fab2s/floDl/blob/main/docs/tutorials/08-utilities.md)** — checkpoints, clipping, freezing, initialization, scheduling, verbosity-gated logging
 9. **[Training Monitor](https://github.com/fab2s/floDl/blob/main/docs/tutorials/09-monitor.md)** — ETA, resource tracking, live dashboard
 10. **[Graph Tree](https://github.com/fab2s/floDl/blob/main/docs/tutorials/10-graph-tree.md)** — hierarchical composition, freeze/thaw, subgraph checkpoints
-11. **[Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md)** — Ddp::setup, El Che, auto-balancing, DataLoader integration
+11. **[Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md)** — Trainer::setup, El Che, auto-balancing, DataLoader integration
 12. **[DDP Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md)** — thread-per-GPU, Local SGD, A/B testable backends
 13. **[Data Loading](https://github.com/fab2s/floDl/blob/main/docs/tutorials/13-data-loading.md)** — DataLoader, resident/streaming modes, VRAM-aware prefetch, DDP integration
 

@@ -229,7 +229,7 @@ available CUDA devices and fall back to single-GPU/CPU when fewer than
 
 ### Graph DDP -- one-liner
 
-For Graph models, `Ddp::setup()` replaces the whole distributed-init
+For Graph models, `Trainer::setup()` replaces the whole distributed-init
 ceremony. The training loop is identical for 1 or N GPUs:
 
 ```rust
@@ -239,7 +239,7 @@ let model = FlowBuilder::from(Linear::new(784, 256)?)
     .build()?;
 
 // One call: detect GPUs, replicate, set optimizer, enable training mode
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 
 model.set_data_loader(loader, "image");
 
@@ -259,7 +259,7 @@ for epoch in 0..num_epochs {
 For non-Graph modules or when you want to benchmark sync strategies:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(10)

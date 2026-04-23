@@ -53,7 +53,7 @@ well. What about 5x? 10x?
 
 ## Graph DDP vs builder DDP convergence
 
-**Observation:** ResNet-20 Graph (Ddp::setup) and ResNet-20 manual (Ddp::builder)
+**Observation:** ResNet-20 Graph (Trainer::setup) and ResNet-20 manual (Trainer::builder)
 produce nearly identical convergence on the same architecture, but through very
 different code paths. The Graph path scatters input across replicas inside forward().
 The builder path gives each GPU its own data shard and training loop.

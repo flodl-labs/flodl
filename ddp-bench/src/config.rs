@@ -9,9 +9,9 @@ use flodl::distributed::{ApplyPolicy, AverageBackend};
 pub enum DdpMode {
     /// Single GPU, no DDP.
     Solo(usize),
-    /// Synchronous El Che via `Ddp::setup_with()` (graph-based).
+    /// Synchronous El Che via `Trainer::setup_with()` (graph-based).
     Sync,
-    /// Thread-per-GPU via `Ddp::builder()`.
+    /// Thread-per-GPU via `Trainer::builder()`.
     Builder {
         policy: ApplyPolicy,
         backend: AverageBackend,

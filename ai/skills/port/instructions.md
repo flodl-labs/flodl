@@ -93,10 +93,10 @@ Before writing code, decide:
    training loop through flodl's DDP entry points instead of the manual
    `forward / backward / step` loop. flodl unifies data loading and
    training under DDP:
-   - **Graph model** -> `Ddp::setup(&model, &builder, |p| Adam::new(p, lr))?`.
+   - **Graph model** -> `Trainer::setup(&model, &builder, |p| Adam::new(p, lr))?`.
      Training loop becomes `for batch in model.epoch(e) { ...
      loss.backward()?; model.step()?; }`. Same loop runs on 1 or N GPUs.
-   - **Non-Graph Module** -> `Ddp::builder(model_factory, optim_factory,
+   - **Non-Graph Module** -> `Trainer::builder(model_factory, optim_factory,
      train_fn).dataset(...).batch_size(...).num_epochs(...).run()?`.
      Thread-per-GPU. `.policy(ApplyPolicy::Cadence)` and
      `.backend(AverageBackend::Nccl)` are swappable for A/B testing.

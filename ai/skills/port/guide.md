@@ -331,7 +331,7 @@ flodl has two DDP entry points. Both auto-detect available CUDA devices
 and fall back to single-GPU/CPU when fewer than 2 GPUs are present, so
 the same code runs everywhere.
 
-**Graph models -- `Ddp::setup()` (one-liner, unified data loading + training):**
+**Graph models -- `Trainer::setup()` (one-liner, unified data loading + training):**
 
 ```python
 # PyTorch
@@ -355,7 +355,7 @@ for epoch in range(num_epochs):
 let model = FlowBuilder::from(/* ... */).build()?;
 
 // One call: detect GPUs, replicate, set optimizer, enable training mode
-Ddp::setup(&model, &builder, |p| Adam::new(p, 1e-3))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 1e-3))?;
 model.set_data_loader(loader, "input");
 
 for epoch in 0..num_epochs {
@@ -369,11 +369,11 @@ for epoch in 0..num_epochs {
 }
 ```
 
-**Non-Graph modules -- `Ddp::builder()` (thread-per-GPU, A/B-testable):**
+**Non-Graph modules -- `Trainer::builder()` (thread-per-GPU, A/B-testable):**
 
 ```rust
 // flodl -- DDP Builder
-let ddp = Ddp::builder(
+let ddp = Trainer::builder(
         |dev| MyModel::on_device(dev),
         |params| Adam::new(params, 1e-3),
         |model, batch| {
@@ -397,8 +397,8 @@ let state = ddp.join()?;                // averaged params + buffers on CPU
 
 | PyTorch | flodl |
 |---------|-------|
-| `dist.init_process_group(...)` | handled inside `Ddp::setup` / `Ddp::builder` |
-| `DistributedDataParallel(model, device_ids=[rank])` | `Ddp::setup(&model, &builder, opt_factory)?` (Graph) or `Ddp::builder(...).run()?` (Module) |
+| `dist.init_process_group(...)` | handled inside `Trainer::setup` / `Trainer::builder` |
+| `DistributedDataParallel(model, device_ids=[rank])` | `Trainer::setup(&model, &builder, opt_factory)?` (Graph) or `Trainer::builder(...).run()?` (Module) |
 | `DistributedSampler(dataset)` | Built-in: DataLoader is DDP-aware, partitions automatically |
 | `sampler.set_epoch(epoch)` | Not needed (flodl handles deterministic per-epoch partitioning) |
 | `torchrun --nproc_per_node=N` | Not needed (flodl is single-process, multi-thread) |
@@ -407,8 +407,8 @@ let state = ddp.join()?;                // averaged params + buffers on CPU
 
 **Heterogeneous clusters:** flodl's ElChe cadence auto-detects per-GPU
 speed and lets faster cards run ahead while the slow one anchors
-synchronization. Use `.policy(ApplyPolicy::Cadence)` on `Ddp::builder`,
-or pass a `DdpConfig` with `.speed_hint(rank, ratio)` to `Ddp::setup_with`.
+synchronization. Use `.policy(ApplyPolicy::Cadence)` on `Trainer::builder`,
+or pass a `DdpConfig` with `.speed_hint(rank, ratio)` to `Trainer::setup_with`.
 
 For the full DDP surface (policies, backends, convergence guard, metrics,
 live monitor integration, troubleshooting), see `docs/ddp.md`.

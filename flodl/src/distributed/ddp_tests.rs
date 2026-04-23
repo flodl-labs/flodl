@@ -479,7 +479,7 @@
 
     #[test]
     fn test_ddp_auto_single_gpu() {
-        // On multi-GPU hardware Ddp::setup would initialize NCCL,
+        // On multi-GPU hardware Trainer::setup would initialize NCCL,
         // which poisons CUBLAS for concurrent tests. Skip here;
         // multi-GPU path is validated in test_ddp_auto_multi_gpu.
         if cuda_device_count() >= 2 {
@@ -495,7 +495,7 @@
             .build()
             .unwrap();
 
-        Ddp::setup(
+        Trainer::setup(
             &model,
             |dev| {
                 FlowBuilder::from(Linear::on_device(4, 8, dev)?)
@@ -543,7 +543,7 @@
         .build()
         .unwrap();
 
-        Ddp::setup(
+        Trainer::setup(
             &model,
             |dev| {
                 FlowBuilder::from(Linear::on_device(4, 8, dev)?)
@@ -1072,7 +1072,7 @@
         .build()
         .unwrap();
 
-        Ddp::setup_with(
+        Trainer::setup_with(
             &model,
             |dev| {
                 FlowBuilder::from(Linear::on_device(4, 8, dev)?)
@@ -1156,7 +1156,7 @@
         .build()
         .unwrap();
 
-        Ddp::setup_with(
+        Trainer::setup_with(
             &model,
             |dev| {
                 FlowBuilder::from(Linear::on_device(4, 8, dev)?)

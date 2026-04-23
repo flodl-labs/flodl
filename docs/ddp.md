@@ -11,7 +11,7 @@ backend and ElChe cadence strategy, but differ in how they integrate with
 your model:
 
 **Graph DDP** -- integrates with the Graph builder. One-liner setup via
-`Ddp::setup()`. The training loop is identical for 1 or N GPUs. Best for
+`Trainer::setup()`. The training loop is identical for 1 or N GPUs. Best for
 Graph-based models where you want transparent scaling.
 
 **DDP Builder** -- works with any `Module`. Thread-per-GPU with Local SGD.
@@ -23,8 +23,8 @@ Best for non-Graph modules or when you need maximum configurability.
 
 ```
 Using the Graph builder?
-  YES --> Graph DDP (Ddp::setup)
-  NO  --> DDP Builder (Ddp::builder)
+  YES --> Graph DDP (Trainer::setup)
+  NO  --> DDP Builder (Trainer::builder)
 
 Need A/B testing NCCL vs CPU averaging?
   YES --> DDP Builder
@@ -33,7 +33,7 @@ Need per-GPU thread independence (different epochs, fault tolerance)?
   YES --> DDP Builder
 
 Want the simplest possible setup?
-  YES --> Graph DDP (Ddp::setup)
+  YES --> Graph DDP (Trainer::setup)
 ```
 
 Both approaches auto-detect available CUDA devices and fall back to
@@ -43,7 +43,7 @@ single-GPU/CPU mode when fewer than 2 GPUs are available.
 
 ## Graph DDP
 
-### Ddp::setup()
+### Trainer::setup()
 
 One-liner to auto-detect GPUs, distribute the model, set per-replica
 optimizers, and enable training mode.
@@ -58,7 +58,7 @@ let model = FlowBuilder::from(Linear::new(784, 256)?)
     .build()?;
 
 // Single call: detect GPUs, replicate, set optimizer, training mode
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 
 // Training loop -- identical for 1 or N GPUs
 for epoch in 0..100 {
@@ -79,7 +79,7 @@ Prints hardware diagnostics to stderr:
 - 1 CUDA device: sets optimizer + training mode, no distribution
 - CPU only: same as single device
 
-### Ddp::setup_with()
+### Trainer::setup_with()
 
 Same as `setup()` but accepts a `DdpConfig` for explicit configuration:
 
@@ -90,12 +90,12 @@ let config = DdpConfig::new()
     .max_anchor(Some(200))     // gradient staleness cap
     .max_grad_norm(5.0);       // per-rank gradient clipping
 
-Ddp::setup_with(&model, &builder, |p| Adam::new(p, 0.001), config)?;
+Trainer::setup_with(&model, &builder, |p| Adam::new(p, 0.001), config)?;
 ```
 
 ### Graph::distribute()
 
-Called internally by `Ddp::setup()`. Can also be called directly for
+Called internally by `Trainer::setup()`. Can also be called directly for
 manual setup:
 
 ```rust
@@ -275,13 +275,13 @@ per-device batch counts.
 
 ## DDP Builder
 
-### Ddp::builder()
+### Trainer::builder()
 
 Recommended entry point. Returns a builder that launches training
 non-blocking:
 
 ```rust
-let ddp = Ddp::builder(
+let ddp = Trainer::builder(
     |dev| MyModel::on_device(dev),              // model factory
     |params| Adam::new(params, 0.001),          // optimizer factory
     |model, batch| {                            // train function
@@ -305,12 +305,12 @@ let state = ddp.join()?;                        // blocks until done
 `Rc<RefCell<...>>` types (Variable, Buffer) are not Send, so they must be
 constructed inside each thread. The factories are called once per GPU.
 
-### Ddp::builder() quick-start
+### Trainer::builder() quick-start
 
 All arguments can be passed directly via the builder:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(10)
@@ -555,7 +555,7 @@ training progress from outside the worker threads.
 **Outside** -- consume aggregated epoch metrics:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(100)
@@ -593,7 +593,7 @@ let state = ddp.join()?;
 Wire the DDP handle into a training `Monitor` for the live dashboard:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(100)
@@ -754,7 +754,7 @@ same data, same seed. Change one knob, compare loss curves.
 ```rust
 // Build your base config once
 let base = || {
-    Ddp::builder(model_factory.clone(), optim_factory.clone(), train_fn.clone())
+    Trainer::builder(model_factory.clone(), optim_factory.clone(), train_fn.clone())
         .dataset(dataset.clone())
         .batch_size(32)
         .num_epochs(5)   // just enough to see the trend
@@ -879,7 +879,7 @@ literally two `.policy(...).backend(...)` lines.
 let timeline = Timeline::new(100);   // 100ms poll interval
 timeline.start();
 
-let mut builder = Ddp::builder(
+let mut builder = Trainer::builder(
         build_model,                                   // model factory
         |params: &[Parameter]| SGD::new(params, 0.1, 0.9).weight_decay(1e-4),
         train_step,                                    // train fn
@@ -928,7 +928,7 @@ To produce a clean A/B comparison, capture `base()` as a closure factory:
 
 ```rust
 let base = || {
-    Ddp::builder(build_model, opt_factory.clone(), train_step)
+    Trainer::builder(build_model, opt_factory.clone(), train_step)
         .dataset(dataset.clone())
         .batch_size(64)
         .num_epochs(5)                              // smoke run
@@ -949,14 +949,14 @@ a winner.
 
 ### 3. Graph mode (sync) — same wiring, fewer pieces
 
-`Ddp::setup_with` + `DdpConfig::new().timeline(...)` gives the Graph DDP
+`Trainer::setup_with` + `DdpConfig::new().timeline(...)` gives the Graph DDP
 path the same A/B-testable surface, with the user-owned training loop:
 
 ```rust
 let graph = build_model(Device::CUDA(0))?;
 let graph = graph.as_graph().expect("Graph required");
 
-Ddp::setup_with(
+Trainer::setup_with(
     graph,
     move |dev| build_model(dev),
     move |params: &[Parameter]| SGD::new(params, 0.1, 0.9).weight_decay(1e-4),
@@ -1043,7 +1043,7 @@ training. Understanding its modes helps get the best throughput.
 |------|-------------|------|
 | **Resident** | Entire dataset loaded into GPU VRAM once. Per-epoch reshuffling via GPU-side `index_select`. | Dataset fits in 75% of free VRAM |
 | **Streaming** | Persistent background worker thread with async H2D on dedicated CUDA stream. Prefetch depth auto-adapts to VRAM. | Dataset too large for VRAM |
-| **Distributed** | Per-device backends (each GPU independently selects resident or streaming). No lowest-common-denominator. | `Ddp::setup()` or `Graph::distribute()` |
+| **Distributed** | Per-device backends (each GPU independently selects resident or streaming). No lowest-common-denominator. | `Trainer::setup()` or `Graph::distribute()` |
 
 ### VRAM-aware prefetch
 
@@ -1264,9 +1264,9 @@ fails.
 **Cause**: Heterogeneous GPUs with different VRAM. The smaller GPU cannot
 fit the same batch size.
 
-**Fix**: Use El Che (auto-enabled by `Ddp::setup()` for heterogeneous
+**Fix**: Use El Che (auto-enabled by `Trainer::setup()` for heterogeneous
 hardware). It assigns fewer batches to the slower/smaller GPU. Or use
-`Ddp::builder` with `Cadence` policy, which naturally partitions data
+`Trainer::builder` with `Cadence` policy, which naturally partitions data
 proportionally. The DataLoader's per-device backend selection also helps:
 the large GPU can go resident while the small GPU streams.
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 let dataset: Arc<dyn BatchDataSet> = Arc::new(MyDataset::new());
 
-let ddp = Ddp::builder(
+let ddp = Trainer::builder(
     |dev| MyModel::on_device(dev),              // model factory
     |params| Adam::new(params, 0.001),          // optimizer factory
     |model, batch| {                            // train function
@@ -64,7 +64,7 @@ multi-GPU server with zero code changes.
 All configuration is done through the builder before calling `.run()`:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)                      // required
     .batch_size(32)                        // required
     .num_epochs(10)                        // required
@@ -222,7 +222,7 @@ between averaging events, creating parameter diversity that benefits
 convergence. The divergence monitor auto-tunes the averaging interval.
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset.clone())
     .batch_size(32)
     .num_epochs(5)                          // just enough to see the trend
@@ -329,7 +329,7 @@ DdpRunConfig::new().with_snapshot_timeout(10)  // 10 seconds
 Save checkpoints at regular intervals during training:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(100)
@@ -376,7 +376,7 @@ These are aggregated per rank per epoch and available via
 ```rust
 use flodl::nn::record_scalar;
 
-let ddp = Ddp::builder(
+let ddp = Trainer::builder(
     model_factory,
     optim_factory,
     |model, batch| {
@@ -419,7 +419,7 @@ Wire the DDP handle into a training `Monitor` for the live dashboard
 and HTML archive:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(100)
@@ -504,7 +504,7 @@ training (thermal throttling, competing workloads).
 
 | Method | Description |
 |--------|-------------|
-| `Ddp::builder(model_fn, optim_fn, train_fn)` | Create builder |
+| `Trainer::builder(model_fn, optim_fn, train_fn)` | Create builder |
 | `.join()` | Block until done, return TrainedState |
 | `.world_size()` | Number of GPUs |
 | `.devices()` | Device list |

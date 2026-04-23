@@ -1,7 +1,7 @@
 # Tutorial 11: Multi-GPU Training
 
 Scale your Graph-based model to multiple GPUs with one line of code.
-The training loop stays identical: `Ddp::setup()` handles replication,
+The training loop stays identical: `Trainer::setup()` handles replication,
 gradient sync, and optimizer management transparently.
 
 > **Prerequisites**: [Training](04-training.md) and
@@ -10,7 +10,7 @@ gradient sync, and optimizer management transparently.
 
 > **Time**: ~20 minutes.
 
-## The one-liner: Ddp::setup()
+## The one-liner: Trainer::setup()
 
 ```rust
 use flodl::*;
@@ -23,7 +23,7 @@ let model = FlowBuilder::from(Linear::new(784, 256)?)
     .build()?;
 
 // One call: detect GPUs, replicate, set optimizer, enable training
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 
 // Training loop -- identical for 1 or N GPUs
 for epoch in 0..100 {
@@ -36,7 +36,7 @@ for epoch in 0..100 {
 }
 ```
 
-`Ddp::setup()` prints hardware diagnostics to stderr:
+`Trainer::setup()` prints hardware diagnostics to stderr:
 ```
   ddp: 2 GPUs (heterogeneous) | RTX 5060 Ti (16.0 GB) | GTX 1060 (6.0 GB)
 ```
@@ -60,12 +60,12 @@ loader = DataLoader(dataset, sampler=sampler)
 In floDl:
 ```rust
 // floDl: one line, no process groups, no torchrun
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 ```
 
 ## What happens under the hood
 
-When `Ddp::setup()` detects 2+ CUDA devices:
+When `Trainer::setup()` detects 2+ CUDA devices:
 
 1. **Replicate**: creates a model replica on each GPU via the builder
    closure you provided when constructing the Graph
@@ -129,7 +129,7 @@ Named after Che Guevara's marching principle: "the column marches at the
 slowest one's pace." The slow device anchors the sync cadence, and the
 fast device processes more batches between sync points.
 
-`Ddp::setup()` detects heterogeneous hardware automatically and enables
+`Trainer::setup()` detects heterogeneous hardware automatically and enables
 El Che. No configuration needed for the common case.
 
 ### How it works
@@ -141,7 +141,7 @@ El Che. No configuration needed for the common case.
 
 ### Explicit configuration
 
-For manual control, use `Ddp::setup_with()` with `DdpConfig`:
+For manual control, use `Trainer::setup_with()` with `DdpConfig`:
 
 ```rust
 let config = DdpConfig::new()
@@ -149,7 +149,7 @@ let config = DdpConfig::new()
     .overhead_target(0.10)      // AllReduce < 10% of compute
     .max_anchor(Some(200));     // gradient staleness cap
 
-Ddp::setup_with(&model, &builder, |p| Adam::new(p, 0.001), config)?;
+Trainer::setup_with(&model, &builder, |p| Adam::new(p, 0.001), config)?;
 ```
 
 `speed_hint` is optional and self-corrects after the first timing report.
@@ -254,8 +254,8 @@ ddp.weighted_all_reduce_gradients(&batch_counts)?;
 
 | Method | Description |
 |--------|-------------|
-| `Ddp::setup(&model, &builder, optim_fn)` | One-liner: detect, distribute, set optimizer |
-| `Ddp::setup_with(..., config)` | Same with explicit DdpConfig |
+| `Trainer::setup(&model, &builder, optim_fn)` | One-liner: detect, distribute, set optimizer |
+| `Trainer::setup_with(..., config)` | Same with explicit DdpConfig |
 | `Ddp::wrap(&[&model], &devices)` | Manual coordinator |
 | `Ddp::is_heterogeneous()` | True if GPU models differ |
 | `.sync_params()` | Broadcast params from rank 0 |

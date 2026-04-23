@@ -43,7 +43,7 @@ Every round saved is one AllReduce not performed on the internet.
 ### API
 
 ```rust
-Ddp::builder(...)
+Trainer::builder(...)
     .policy(ApplyPolicy::Cadence)
     .outer_optimizer(|| NesterovMomentum::new(lr = 0.7, mu = 0.9))
     .max_anchor(500)                    // H, widen aggressively

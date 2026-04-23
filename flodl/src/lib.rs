@@ -91,7 +91,7 @@ pub use nn::{
 };
 pub use distributed::{
     CudaEvent, CudaEventFlags, CudaStream, StreamGuard,
-    NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, ElChe,
+    NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, Trainer, ElChe,
     ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, drain_scalars, GpuWorker,
 };
 pub use graph::{

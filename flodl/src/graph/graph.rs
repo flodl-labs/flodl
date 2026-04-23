@@ -116,7 +116,7 @@ pub struct Graph {
     // calling `optimizer.step()`.
     pub(crate) scheduler: RefCell<Option<std::sync::Arc<dyn crate::nn::Scheduler>>>,
     // DDP linear-scaling factor applied multiplicatively to scheduler output.
-    // Defaults to 1.0 (no scaling). Set by `Ddp::setup_with` when the user
+    // Defaults to 1.0 (no scaling). Set by `Trainer::setup_with` when the user
     // enabled `DdpConfig::lr_scale_ratio`.
     pub(crate) lr_scale: Cell<f64>,
     // Dedicated training step counter for the LR scheduler. Incremented once

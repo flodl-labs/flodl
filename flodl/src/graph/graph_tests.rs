@@ -2319,7 +2319,7 @@
     // Graph::set_scheduler -- regression guard
     // -----------------------------------------------------------------------
     //
-    // Original bug (2026-04-13): sync mode (Ddp::setup_with + graph.step())
+    // Original bug (2026-04-13): sync mode (Trainer::setup_with + graph.step())
     // had no scheduler plumbing, so the optimizer LR stayed constant for the
     // entire run regardless of what scheduler the user attached. These tests
     // assert that set_scheduler drives the optimizer LR through step(), that

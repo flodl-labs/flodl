@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### `Trainer`: primary training entry point
+
+`Trainer` is the new default API for training in flodl. It forwards to the same DDP machinery as `Ddp::*` but reads as "just train" rather than "set up DDP" — the one-liner works transparently on 1 or N GPUs.
+
+- **`Trainer::setup(&model, builder, optimizer)`** — one-call setup for Graph-based models, replacing `Ddp::setup()`. Auto-detects hardware, distributes if multi-GPU, sets optimizer, enables training mode. Zero DDP overhead on single GPU / CPU.
+- **`Trainer::setup_with(&model, builder, optimizer, config)`** — same but takes a `DdpConfig` for explicit El Che cadence / speed hints / overhead target. Replaces `Ddp::setup_with()`.
+- **`Trainer::builder(model_factory, optim_factory, train_fn)`** — builder entry for framework-managed training. Replaces `Ddp::builder()`. Works identically on single or multi-GPU.
+- `flodl::Trainer` re-exported from the crate root alongside `Ddp`.
+
+Motivation: `Ddp::builder()` read as an opt-in for "when you have multiple GPUs," obscuring that the same entry is the sensible default for single-GPU training too. `Trainer::builder()` makes the intent explicit — reach for it by default; drop to `Ddp::wrap()` when you need explicit multi-GPU control (GAN, RL, progressive patterns).
+
+### Deprecated
+
+- `Ddp::setup()`, `Ddp::setup_with()`, `Ddp::builder()` — use the matching `Trainer::*` methods instead. Same behavior, clearer intent. Compile-time deprecation warnings guide migration. `Ddp::wrap()` remains on `Ddp` as the explicit multi-GPU control tier. Removal targeted for a future release.
+
 ## [0.5.2] - 2026-04-22
 
 ### Added

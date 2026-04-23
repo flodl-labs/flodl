@@ -45,8 +45,14 @@ See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
 ## In progress
 
-(empty: choosing the next pull from Possibilities. Length-1 by
-design.)
+- **JEPA exploration** `[started]`: two-tower EMA target-encoder
+  infrastructure, latent predictive training, via BYOL as the
+  stepping stone. The infra (EMA updates, stop-gradient composition,
+  latent probes) is reusable for I-JEPA / V-JEPA and any
+  FBRL-native objective that follows.
+
+(Length-1 by design. The next item pulls from Possibilities when this
+ships.)
 
 ---
 
@@ -64,9 +70,6 @@ not a commitment; only moving one to In Progress is.
   small) for the attention family, ViT, UNet for multi-scale skip
   connections, MoE as a routing pressure test, PPO for the RL data
   loop.
-- **JEPA exploration**, with BYOL or MoCo as a stepping stone. The
-  EMA target encoder + two-tower training infra needed for I-JEPA /
-  V-JEPA is also what BYOL needs, so it's a natural progression.
 - **Zero-dispatch training**: full train-step CUDA Graph capture
   (forward + backward + optimizer as one replay) plus double-buffered
   static I/O tensors. Resident and streaming DataLoader modes already

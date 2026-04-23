@@ -10,7 +10,7 @@
 //! ```ignore
 //! use flodl::*;
 //!
-//! let handle = Ddp::builder(model_factory, optim_factory, train_fn)
+//! let handle = Trainer::builder(model_factory, optim_factory, train_fn)
 //!     .dataset(dataset)
 //!     .batch_size(32)
 //!     .num_epochs(10)
@@ -146,11 +146,11 @@ pub type EpochFn<M> = Arc<dyn Fn(usize, &mut GpuWorker<M>) + Send + Sync>;
 // ---------------------------------------------------------------------------
 
 /// Deprecated: renamed to [`DdpHandle`].
-#[deprecated(since = "0.3.0", note = "Renamed to DdpHandle. Use Ddp::builder() to create.")]
+#[deprecated(since = "0.3.0", note = "Renamed to DdpHandle. Use Trainer::builder() to create.")]
 pub type AsyncDdp = DdpHandle;
 
 /// Deprecated: renamed to [`DdpBuilder`].
-#[deprecated(since = "0.3.0", note = "Renamed to DdpBuilder. Use Ddp::builder() to create.")]
+#[deprecated(since = "0.3.0", note = "Renamed to DdpBuilder. Use Trainer::builder() to create.")]
 pub type AsyncDdpBuilder<F, M, G, O, T> = DdpBuilder<F, M, G, O, T>;
 
 /// Deprecated: renamed to [`DdpRunConfig`].
@@ -190,7 +190,7 @@ pub struct TrainedState {
 /// # Example
 ///
 /// ```ignore
-/// let handle = Ddp::builder(...).run()?;
+/// let handle = Trainer::builder(...).run()?;
 /// while let Some(m) = handle.next_metrics() {
 ///     for (name, value) in &m.scalars {
 ///         monitor.record_scalar(name, *value);
