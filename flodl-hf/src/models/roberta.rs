@@ -184,6 +184,21 @@ impl RobertaEmbeddings {
         })
     }
 
+    /// Clone the word-embedding weight `Parameter` for weight tying.
+    ///
+    /// See [`crate::models::bert::BertEmbeddings::word_embeddings_weight`]
+    /// for the full contract. In short: the returned `Parameter` shares
+    /// the underlying `Variable` by `Rc`, gradients accumulate on the
+    /// single leaf, and `Graph::named_parameters()` surfaces the tied
+    /// weight once under the first-visited tag (which for RoBERTa MLM is
+    /// `roberta.embeddings.word_embeddings.weight`).
+    ///
+    /// Call this **before** moving the embeddings into the backbone's
+    /// `FlowBuilder`, since `.through(...)` consumes ownership.
+    pub fn word_embeddings_weight(&self) -> Parameter {
+        self.word_embeddings.weight.clone()
+    }
+
     /// Compute RoBERTa-style position ids from `input_ids`.
     ///
     /// Runs entirely on raw `Tensor`s (no autograd) — position ids are

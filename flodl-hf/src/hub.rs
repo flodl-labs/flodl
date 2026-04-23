@@ -21,7 +21,7 @@ use crate::models::auto::{
     AutoModelForTokenClassification,
 };
 use crate::models::bert::{
-    BertConfig, BertForQuestionAnswering, BertForSequenceClassification,
+    BertConfig, BertForMaskedLM, BertForQuestionAnswering, BertForSequenceClassification,
     BertForTokenClassification, BertModel,
 };
 use crate::models::distilbert::{
@@ -307,6 +307,35 @@ impl BertForQuestionAnswering {
     /// (SQuAD, etc.) from the Hub. Popular checkpoints:
     /// `csarron/bert-base-uncased-squad-v1`,
     /// `bert-large-uncased-whole-word-masking-finetuned-squad`.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        Self::from_pretrained_on_device(repo_id, Device::CPU)
+    }
+
+    pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
+        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
+        let head = Self::on_device(&config, device)?;
+        load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        #[cfg(feature = "tokenizer")]
+        let head = match try_load_tokenizer(repo_id) {
+            Some(tok) => head.with_tokenizer(tok),
+            None => head,
+        };
+        Ok(head)
+    }
+}
+
+impl BertForMaskedLM {
+    /// Download a BERT MLM checkpoint (`bert-base-uncased`,
+    /// `bert-base-cased`, any `*-mlm` fine-tune) from the Hub.
+    ///
+    /// The decoder weight is tied to the word-embedding table, so
+    /// checkpoints that redundantly save `cls.predictions.decoder.weight`
+    /// alongside `bert.embeddings.word_embeddings.weight` (HF's
+    /// historical save format) load cleanly — the decoder key is
+    /// ignored by `load_safetensors_into_graph_with_rename_allow_unused`,
+    /// and the embedding key populates the single tied Parameter.
+    /// Checkpoints that skip the redundant decoder key (modern HF saves)
+    /// also load cleanly.
     pub fn from_pretrained(repo_id: &str) -> Result<Self> {
         Self::from_pretrained_on_device(repo_id, Device::CPU)
     }

@@ -221,6 +221,19 @@ impl DistilBertEmbeddings {
         })
     }
 
+    /// Clone the word-embedding weight `Parameter` for weight tying.
+    ///
+    /// See [`crate::models::bert::BertEmbeddings::word_embeddings_weight`]
+    /// for the full contract. The tied weight surfaces once under
+    /// `distilbert.embeddings.word_embeddings.weight` when the MLM
+    /// decoder shares it via [`flodl::nn::Linear::from_shared_weight`].
+    ///
+    /// Call this **before** moving the embeddings into the backbone's
+    /// `FlowBuilder`, since `.through(...)` consumes ownership.
+    pub fn word_embeddings_weight(&self) -> Parameter {
+        self.word_embeddings.weight.clone()
+    }
+
     /// Build sequential `0..seq_len` position ids matching `input_ids`
     /// shape. Runs on raw tensors (no autograd) — position ids are
     /// integer indices that never participate in backward.

@@ -119,6 +119,39 @@ pub fn token_classification_loss(
     cross_entropy_loss(&flat_logits, &flat_labels)
 }
 
+/// Compute masked-language-modelling loss.
+///
+/// `logits`: `[batch, seq_len, vocab_size]` — the raw output of a
+/// `*ForMaskedLM` head's decoder.
+///
+/// `labels`: `[batch, seq_len]` Int64 token ids. Use `-100` at every
+/// position the loss should **ignore** — unmasked tokens, padding, and
+/// special tokens — and the original (pre-mask) token id at positions
+/// where the model is being asked to predict. Matches HF Python's
+/// `CrossEntropyLoss(ignore_index=-100)` default wiring in
+/// `BertForMaskedLM`, which flodl's [`cross_entropy_loss`] honours
+/// natively.
+///
+/// Flatten-then-CE: identical implementation to
+/// [`token_classification_loss`], but exposed under the HF-canonical
+/// name so callers of continued-pretraining / domain-adaptation paths
+/// find it by the name they know.
+pub fn masked_lm_loss(
+    logits: &Variable,
+    labels: &Variable,
+) -> Result<Variable> {
+    let shape = logits.shape();
+    if shape.len() != 3 {
+        return Err(TensorError::new(&format!(
+            "masked_lm_loss: logits must be [batch, seq_len, vocab_size], got {shape:?}",
+        )));
+    }
+    let vocab_size = shape[2];
+    let flat_logits = logits.reshape(&[-1, vocab_size])?;
+    let flat_labels = labels.reshape(&[-1])?;
+    cross_entropy_loss(&flat_logits, &flat_labels)
+}
+
 /// Compute extractive question-answering loss.
 ///
 /// `logits`: `[batch, seq_len, 2]` - the raw output of a
@@ -378,6 +411,40 @@ mod tests {
         assert!(logits.grad().is_some(), "logits must receive grad");
         let loss_val = loss.data().to_f32_vec().unwrap()[0];
         assert!(loss_val < 0.01, "expected tiny loss at peaked logits, got {loss_val}");
+    }
+
+    #[test]
+    fn masked_lm_loss_flattens_and_ignores_minus_100() {
+        // batch=2, seq=3, vocab=4. Labels: [[2, -100, 0], [-100, 1, 3]].
+        // The -100 positions must not contribute; the other 4 positions
+        // all have their target class peaked, so loss is tiny.
+        let logits_data = [
+            // batch 0
+            0.0, 0.0, 5.0, 0.0,   0.0, 0.0, 0.0, 0.0,   5.0, 0.0, 0.0, 0.0,
+            // batch 1
+            0.0, 0.0, 0.0, 0.0,   0.0, 5.0, 0.0, 0.0,   0.0, 0.0, 0.0, 5.0,
+        ];
+        let logits = Variable::new(
+            Tensor::from_f32(&logits_data, &[2, 3, 4], cpu()).unwrap(),
+            true,
+        );
+        let labels = Variable::new(
+            Tensor::from_i64(&[2, -100, 0, -100, 1, 3], &[2, 3], cpu()).unwrap(),
+            false,
+        );
+        let loss = masked_lm_loss(&logits, &labels).unwrap();
+        loss.backward().unwrap();
+        assert!(logits.grad().is_some(), "logits must receive grad");
+        let loss_val = loss.data().to_f32_vec().unwrap()[0];
+        assert!(loss_val < 0.1, "expected small loss (all targets peaked), got {loss_val}");
+    }
+
+    #[test]
+    fn masked_lm_loss_rejects_wrong_rank() {
+        let logits = logits_2d(&[1.0, 2.0, 3.0, 4.0], 2, 2);
+        let labels = labels_1d(&[0, 1], 2);
+        let err = masked_lm_loss(&logits, &labels).unwrap_err();
+        assert!(err.to_string().contains("[batch, seq_len, vocab_size]"));
     }
 
     #[test]
