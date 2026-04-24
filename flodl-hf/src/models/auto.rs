@@ -47,8 +47,9 @@
 //! | `distilbert`    | [`crate::models::distilbert::DistilBertConfig`]             |
 //! | `xlm-roberta`   | [`crate::models::xlm_roberta::XlmRobertaConfig`]            |
 //! | `albert`        | [`crate::models::albert::AlbertConfig`]                     |
+//! | `deberta-v2`    | [`crate::models::deberta_v2::DebertaV2Config`]              |
 //!
-//! Any other value (e.g. `modernbert`, `deberta-v2`) surfaces a loud
+//! Any other value (e.g. `modernbert`, `electra`) surfaces a loud
 //! error listing the supported set.
 
 use flodl::{Result, TensorError};
@@ -60,6 +61,10 @@ use crate::models::albert::{
 use crate::models::bert::{
     BertConfig, BertForMaskedLM, BertForQuestionAnswering, BertForSequenceClassification,
     BertForTokenClassification,
+};
+use crate::models::deberta_v2::{
+    DebertaV2Config, DebertaV2ForMaskedLM, DebertaV2ForQuestionAnswering,
+    DebertaV2ForSequenceClassification, DebertaV2ForTokenClassification,
 };
 use crate::models::distilbert::{
     DistilBertConfig, DistilBertForMaskedLM, DistilBertForQuestionAnswering,
@@ -86,6 +91,7 @@ pub enum AutoConfig {
     DistilBert(DistilBertConfig),
     XlmRoberta(XlmRobertaConfig),
     Albert(AlbertConfig),
+    DebertaV2(DebertaV2Config),
 }
 
 impl AutoConfig {
@@ -110,18 +116,19 @@ impl AutoConfig {
             "distilbert" => Ok(AutoConfig::DistilBert(DistilBertConfig::from_json_str(s)?)),
             "xlm-roberta" => Ok(AutoConfig::XlmRoberta(XlmRobertaConfig::from_json_str(s)?)),
             "albert" => Ok(AutoConfig::Albert(AlbertConfig::from_json_str(s)?)),
+            "deberta-v2" => Ok(AutoConfig::DebertaV2(DebertaV2Config::from_json_str(s)?)),
             other => Err(TensorError::new(&format!(
                 "AutoConfig: unsupported model_type {other:?}. \
                  Supported families: \"bert\", \"roberta\", \"distilbert\", \"xlm-roberta\", \
-                 \"albert\". DeBERTa-v2, ModernBERT and other architectures are planned for \
-                 a future release.",
+                 \"albert\", \"deberta-v2\". ModernBERT and other architectures are planned \
+                 for a future release.",
             ))),
         }
     }
 
     /// The underlying `model_type` string as it appeared in
     /// `config.json` (e.g. `"bert"`, `"roberta"`, `"distilbert"`,
-    /// `"xlm-roberta"`, `"albert"`).
+    /// `"xlm-roberta"`, `"albert"`, `"deberta-v2"`).
     pub fn model_type(&self) -> &'static str {
         match self {
             AutoConfig::Bert(_) => "bert",
@@ -129,6 +136,7 @@ impl AutoConfig {
             AutoConfig::DistilBert(_) => "distilbert",
             AutoConfig::XlmRoberta(_) => "xlm-roberta",
             AutoConfig::Albert(_) => "albert",
+            AutoConfig::DebertaV2(_) => "deberta-v2",
         }
     }
 }
@@ -156,6 +164,7 @@ pub enum AutoModelForSequenceClassification {
     DistilBert(DistilBertForSequenceClassification),
     XlmRoberta(XlmRobertaForSequenceClassification),
     Albert(AlbertForSequenceClassification),
+    DebertaV2(DebertaV2ForSequenceClassification),
 }
 
 /// Family-dispatched token-classification head. Canonical use is NER.
@@ -168,6 +177,7 @@ pub enum AutoModelForTokenClassification {
     DistilBert(DistilBertForTokenClassification),
     XlmRoberta(XlmRobertaForTokenClassification),
     Albert(AlbertForTokenClassification),
+    DebertaV2(DebertaV2ForTokenClassification),
 }
 
 /// Family-dispatched extractive question-answering head. Build via
@@ -180,6 +190,7 @@ pub enum AutoModelForQuestionAnswering {
     DistilBert(DistilBertForQuestionAnswering),
     XlmRoberta(XlmRobertaForQuestionAnswering),
     Albert(AlbertForQuestionAnswering),
+    DebertaV2(DebertaV2ForQuestionAnswering),
 }
 
 impl AutoModelForSequenceClassification {
@@ -193,6 +204,7 @@ impl AutoModelForSequenceClassification {
             Self::DistilBert(h) => h.graph(),
             Self::XlmRoberta(h) => h.graph(),
             Self::Albert(h) => h.graph(),
+            Self::DebertaV2(h) => h.graph(),
         }
     }
 
@@ -204,6 +216,7 @@ impl AutoModelForSequenceClassification {
             Self::DistilBert(h) => h.labels(),
             Self::XlmRoberta(h) => h.labels(),
             Self::Albert(h) => h.labels(),
+            Self::DebertaV2(h) => h.labels(),
         }
     }
 
@@ -217,6 +230,7 @@ impl AutoModelForSequenceClassification {
             Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
             Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
             Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
+            Self::DebertaV2(h) => Self::DebertaV2(h.with_tokenizer(tok)),
         }
     }
 
@@ -231,6 +245,7 @@ impl AutoModelForSequenceClassification {
             Self::DistilBert(h) => h.predict(texts),
             Self::XlmRoberta(h) => h.predict(texts),
             Self::Albert(h) => h.predict(texts),
+            Self::DebertaV2(h) => h.predict(texts),
         }
     }
 }
@@ -243,6 +258,7 @@ impl AutoModelForTokenClassification {
             Self::DistilBert(h) => h.graph(),
             Self::XlmRoberta(h) => h.graph(),
             Self::Albert(h) => h.graph(),
+            Self::DebertaV2(h) => h.graph(),
         }
     }
 
@@ -253,6 +269,7 @@ impl AutoModelForTokenClassification {
             Self::DistilBert(h) => h.labels(),
             Self::XlmRoberta(h) => h.labels(),
             Self::Albert(h) => h.labels(),
+            Self::DebertaV2(h) => h.labels(),
         }
     }
 
@@ -264,6 +281,7 @@ impl AutoModelForTokenClassification {
             Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
             Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
             Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
+            Self::DebertaV2(h) => Self::DebertaV2(h.with_tokenizer(tok)),
         }
     }
 
@@ -281,6 +299,7 @@ impl AutoModelForTokenClassification {
             Self::DistilBert(h) => h.predict(texts),
             Self::XlmRoberta(h) => h.predict(texts),
             Self::Albert(h) => h.predict(texts),
+            Self::DebertaV2(h) => h.predict(texts),
         }
     }
 }
@@ -293,6 +312,7 @@ impl AutoModelForQuestionAnswering {
             Self::DistilBert(h) => h.graph(),
             Self::XlmRoberta(h) => h.graph(),
             Self::Albert(h) => h.graph(),
+            Self::DebertaV2(h) => h.graph(),
         }
     }
 
@@ -304,6 +324,7 @@ impl AutoModelForQuestionAnswering {
             Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
             Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
             Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
+            Self::DebertaV2(h) => Self::DebertaV2(h.with_tokenizer(tok)),
         }
     }
 
@@ -321,6 +342,7 @@ impl AutoModelForQuestionAnswering {
             Self::DistilBert(h) => h.answer(question, context),
             Self::XlmRoberta(h) => h.answer(question, context),
             Self::Albert(h) => h.answer(question, context),
+            Self::DebertaV2(h) => h.answer(question, context),
         }
     }
 
@@ -336,6 +358,7 @@ impl AutoModelForQuestionAnswering {
             Self::DistilBert(h) => h.answer_batch(pairs),
             Self::XlmRoberta(h) => h.answer_batch(pairs),
             Self::Albert(h) => h.answer_batch(pairs),
+            Self::DebertaV2(h) => h.answer_batch(pairs),
         }
     }
 }
@@ -356,6 +379,7 @@ pub enum AutoModelForMaskedLM {
     DistilBert(DistilBertForMaskedLM),
     XlmRoberta(XlmRobertaForMaskedLM),
     Albert(AlbertForMaskedLM),
+    DebertaV2(DebertaV2ForMaskedLM),
 }
 
 impl AutoModelForMaskedLM {
@@ -368,6 +392,7 @@ impl AutoModelForMaskedLM {
             Self::DistilBert(h) => h.graph(),
             Self::XlmRoberta(h) => h.graph(),
             Self::Albert(h) => h.graph(),
+            Self::DebertaV2(h) => h.graph(),
         }
     }
 
@@ -380,6 +405,7 @@ impl AutoModelForMaskedLM {
             Self::DistilBert(h) => Self::DistilBert(h.with_tokenizer(tok)),
             Self::XlmRoberta(h) => Self::XlmRoberta(h.with_tokenizer(tok)),
             Self::Albert(h) => Self::Albert(h.with_tokenizer(tok)),
+            Self::DebertaV2(h) => Self::DebertaV2(h.with_tokenizer(tok)),
         }
     }
 
@@ -400,6 +426,7 @@ impl AutoModelForMaskedLM {
             Self::DistilBert(h) => h.fill_mask(text, top_k),
             Self::XlmRoberta(h) => h.fill_mask(text, top_k),
             Self::Albert(h) => h.fill_mask(text, top_k),
+            Self::DebertaV2(h) => h.fill_mask(text, top_k),
         }
     }
 }
@@ -532,6 +559,44 @@ mod tests {
         assert!(err.contains("distilbert"), "error lists supported: {err}");
         assert!(err.contains("xlm-roberta"), "error lists supported: {err}");
         assert!(err.contains("albert"), "error lists supported: {err}");
+        assert!(err.contains("deberta-v2"), "error lists supported: {err}");
+    }
+
+    /// `microsoft/deberta-v3-base`-style config.json dispatches to
+    /// `AutoConfig::DebertaV2`. Distinguishing fields:
+    /// `relative_attention=true`, `pos_att_type="p2c|c2p"`,
+    /// `share_att_key=true`, `type_vocab_size=0`.
+    #[test]
+    fn auto_config_dispatches_deberta_v2() {
+        let json = r#"{
+            "model_type": "deberta-v2",
+            "vocab_size": 128100,
+            "hidden_size": 768,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 12,
+            "intermediate_size": 3072,
+            "max_position_embeddings": 512,
+            "relative_attention": true,
+            "position_buckets": 256,
+            "norm_rel_ebd": "layer_norm",
+            "share_att_key": true,
+            "pos_att_type": "p2c|c2p",
+            "layer_norm_eps": 1e-7,
+            "max_relative_positions": -1,
+            "position_biased_input": false,
+            "type_vocab_size": 0
+        }"#;
+        let c = AutoConfig::from_json_str(json).unwrap();
+        assert_eq!(c.model_type(), "deberta-v2");
+        match c {
+            AutoConfig::DebertaV2(d) => {
+                assert_eq!(d.vocab_size, 128_100);
+                assert_eq!(d.hidden_size, 768);
+                assert_eq!(d.position_buckets, 256);
+                assert_eq!(d.max_relative_positions, 512);
+            }
+            other => panic!("expected DebertaV2, got {:?}", other.model_type()),
+        }
     }
 
     /// `albert-base-v2`-style config.json dispatches to
