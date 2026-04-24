@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
+use flodl::nn::{Dropout, Embedding, GELU, GeluApprox, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable};
 
 use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
@@ -68,6 +68,11 @@ pub struct BertConfig {
     pub layer_norm_eps: f64,
     pub hidden_dropout_prob: f64,
     pub attention_probs_dropout_prob: f64,
+    /// FFN activation form (parsed from HF `hidden_act`). Default
+    /// `GeluApprox::None` (erf form) matches `bert-base-uncased`. Loud
+    /// error from [`Self::from_json_str`] on unrecognised activation
+    /// names.
+    pub hidden_act: GeluApprox,
     /// Number of output labels for classification-style task heads. `None`
     /// on base `BertModel` configs; `Some(N)` when the checkpoint was fine-
     /// tuned as `BertForSequenceClassification`, `BertForTokenClassification`,
@@ -96,6 +101,7 @@ impl BertConfig {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.1,
             attention_probs_dropout_prob: 0.1,
+            hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
         }
@@ -117,13 +123,13 @@ impl BertConfig {
     /// Required integer fields return a clear error if missing; dropout and
     /// layer-norm-eps fall back to the BERT defaults.
     ///
-    /// `hidden_act` is not checked: BERT's default (`gelu`) is hardcoded in
-    /// the feed-forward block. A config shipping a non-GELU activation will
-    /// silently be run with GELU — acceptable for now since every
-    /// BERT-family checkpoint on the Hub uses GELU.
+    /// `hidden_act` is parsed and dispatched: `"gelu"` → erf form,
+    /// `"gelu_new"` / `"gelu_pytorch_tanh"` → tanh approximation. Other
+    /// values error loudly.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_f64, optional_i64_or_none, parse_id2label, parse_num_labels, required_i64,
+            optional_f64, optional_hidden_act, optional_i64_or_none, parse_id2label,
+            parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -141,6 +147,7 @@ impl BertConfig {
             layer_norm_eps:               optional_f64(&v, "layer_norm_eps", 1e-12),
             hidden_dropout_prob:          optional_f64(&v, "hidden_dropout_prob", 0.1),
             attention_probs_dropout_prob: optional_f64(&v, "attention_probs_dropout_prob", 0.1),
+            hidden_act: optional_hidden_act(&v, "hidden_act", "gelu")?,
             num_labels,
             id2label,
         })
@@ -304,6 +311,7 @@ impl Module for BertPooler {
 /// decoder stays a clean single-node `.through()` afterwards.
 pub struct BertPredictionHeadTransform {
     dense: Linear,
+    activation: GELU,
     layer_norm: LayerNorm,
 }
 
@@ -311,6 +319,7 @@ impl BertPredictionHeadTransform {
     pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
         Ok(BertPredictionHeadTransform {
             dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            activation: GELU::with_approximate(config.hidden_act),
             layer_norm: LayerNorm::on_device_with_eps(
                 config.hidden_size,
                 config.layer_norm_eps,
@@ -325,7 +334,7 @@ impl Module for BertPredictionHeadTransform {
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
         let x = self.dense.forward(input)?;
-        let x = x.gelu()?;
+        let x = self.activation.forward(&x)?;
         self.layer_norm.forward(&x)
     }
 
@@ -348,6 +357,7 @@ fn bert_layer_config(config: &BertConfig) -> TransformerLayerConfig {
         hidden_dropout_prob:          config.hidden_dropout_prob,
         attention_probs_dropout_prob: config.attention_probs_dropout_prob,
         layer_norm_eps:               config.layer_norm_eps,
+        hidden_act:                   config.hidden_act,
     }
 }
 
@@ -825,6 +835,7 @@ mod tests {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
+            hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
         }

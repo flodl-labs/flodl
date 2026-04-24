@@ -14,7 +14,7 @@ fn main() -> Result<()> {
 
     // Build a small model.
     let model = FlowBuilder::from(Linear::new(4, 16)?)
-        .through(GELU)
+        .through(GELU::new())
         .through(LayerNorm::new(16)?)
         .also(Linear::new(16, 16)?)
         .through(Linear::new(16, 4)?)

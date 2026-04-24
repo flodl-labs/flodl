@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 
-use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
+use flodl::nn::{Dropout, Embedding, GELU, GeluApprox, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{
     DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable,
 };
@@ -61,6 +61,9 @@ pub struct RobertaConfig {
     pub layer_norm_eps: f64,
     pub hidden_dropout_prob: f64,
     pub attention_probs_dropout_prob: f64,
+    /// FFN activation form (parsed from HF `hidden_act`). Default
+    /// `GeluApprox::None` (erf form) matches `roberta-base`.
+    pub hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
@@ -84,6 +87,7 @@ impl RobertaConfig {
             layer_norm_eps: 1e-5,
             hidden_dropout_prob: 0.1,
             attention_probs_dropout_prob: 0.1,
+            hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
         }
@@ -102,7 +106,8 @@ impl RobertaConfig {
     /// dropout probabilities `0.1`.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_f64, optional_i64, parse_id2label, parse_num_labels, required_i64,
+            optional_f64, optional_hidden_act, optional_i64, parse_id2label, parse_num_labels,
+            required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -120,6 +125,7 @@ impl RobertaConfig {
             layer_norm_eps:               optional_f64(&v, "layer_norm_eps", 1e-5),
             hidden_dropout_prob:          optional_f64(&v, "hidden_dropout_prob", 0.1),
             attention_probs_dropout_prob: optional_f64(&v, "attention_probs_dropout_prob", 0.1),
+            hidden_act: optional_hidden_act(&v, "hidden_act", "gelu")?,
             num_labels,
             id2label,
         })
@@ -316,6 +322,7 @@ pub(crate) fn roberta_layer_config(config: &RobertaConfig) -> TransformerLayerCo
         hidden_dropout_prob:          config.hidden_dropout_prob,
         attention_probs_dropout_prob: config.attention_probs_dropout_prob,
         layer_norm_eps:               config.layer_norm_eps,
+        hidden_act:                   config.hidden_act,
     }
 }
 
@@ -628,6 +635,7 @@ impl QaHead<RobertaConfig> {
 /// lowercase. Matches HF Python's `RobertaLMHead`.
 pub struct RobertaLMHeadTransform {
     dense: Linear,
+    activation: GELU,
     layer_norm: LayerNorm,
 }
 
@@ -635,6 +643,7 @@ impl RobertaLMHeadTransform {
     pub fn on_device(config: &RobertaConfig, device: Device) -> Result<Self> {
         Ok(RobertaLMHeadTransform {
             dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            activation: GELU::with_approximate(config.hidden_act),
             layer_norm: LayerNorm::on_device_with_eps(
                 config.hidden_size,
                 config.layer_norm_eps,
@@ -649,7 +658,7 @@ impl Module for RobertaLMHeadTransform {
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
         let x = self.dense.forward(input)?;
-        let x = x.gelu()?;
+        let x = self.activation.forward(&x)?;
         self.layer_norm.forward(&x)
     }
 

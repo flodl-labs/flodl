@@ -29,7 +29,7 @@
 //! `XlmRobertaModel`, `XlmRobertaForSequenceClassification`, etc. by
 //! the names they already know from HF Python.
 
-use flodl::nn::{Dropout, Linear};
+use flodl::nn::{Dropout, GeluApprox, Linear};
 use flodl::{DType, Device, Graph, Result, TensorError, Variable};
 
 use crate::models::roberta::{
@@ -66,6 +66,9 @@ pub struct XlmRobertaConfig {
     pub layer_norm_eps: f64,
     pub hidden_dropout_prob: f64,
     pub attention_probs_dropout_prob: f64,
+    /// FFN activation form (parsed from HF `hidden_act`). Default
+    /// `GeluApprox::None` (erf form) matches `xlm-roberta-base`.
+    pub hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
@@ -91,6 +94,7 @@ impl XlmRobertaConfig {
             layer_norm_eps: 1e-5,
             hidden_dropout_prob: 0.1,
             attention_probs_dropout_prob: 0.1,
+            hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
         }
@@ -112,7 +116,8 @@ impl XlmRobertaConfig {
     /// contents.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_f64, optional_i64, parse_id2label, parse_num_labels, required_i64,
+            optional_f64, optional_hidden_act, optional_i64, parse_id2label, parse_num_labels,
+            required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -130,6 +135,7 @@ impl XlmRobertaConfig {
             layer_norm_eps:               optional_f64(&v, "layer_norm_eps", 1e-5),
             hidden_dropout_prob:          optional_f64(&v, "hidden_dropout_prob", 0.1),
             attention_probs_dropout_prob: optional_f64(&v, "attention_probs_dropout_prob", 0.1),
+            hidden_act: optional_hidden_act(&v, "hidden_act", "gelu")?,
             num_labels,
             id2label,
         })
@@ -153,6 +159,7 @@ impl From<&XlmRobertaConfig> for RobertaConfig {
             layer_norm_eps: c.layer_norm_eps,
             hidden_dropout_prob: c.hidden_dropout_prob,
             attention_probs_dropout_prob: c.attention_probs_dropout_prob,
+            hidden_act: c.hidden_act,
             num_labels: c.num_labels,
             id2label: c.id2label.clone(),
         }

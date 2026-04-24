@@ -123,6 +123,7 @@ unsafe extern "C" {
     pub fn flodl_softmax(t: FlodlTensor, dim: i32, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_log_softmax(t: FlodlTensor, dim: i32, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_gelu(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
+    pub fn flodl_gelu_tanh(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_silu(t: FlodlTensor, result: *mut FlodlTensor) -> *mut i8;
     pub fn flodl_leaky_relu(
         t: FlodlTensor, negative_slope: f64, result: *mut FlodlTensor,

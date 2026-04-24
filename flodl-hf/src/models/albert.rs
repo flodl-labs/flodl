@@ -41,18 +41,21 @@
 //!
 //! ## Activation note
 //!
-//! HF's ALBERT config lists `hidden_act: "gelu_new"` (v1) or
-//! `"gelu"` (v2). flodl-hf applies `GELU` unconditionally; against
-//! v1 checkpoints this introduces a numerically small forward
-//! divergence (`gelu_new` uses the tanh approximation, `gelu` uses
-//! the erf form). `albert-base-v2` and subsequent v2 releases are
-//! unaffected.
+//! Both `albert-base-v1` and `albert-base-v2` ship
+//! `hidden_act: "gelu_new"` — the tanh-approximation form
+//! (`0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`).
+//! [`AlbertConfig::from_json_str`] parses `hidden_act` into a
+//! [`GeluApprox`](flodl::nn::GeluApprox) and the encoder layer plus
+//! [`AlbertMLMHeadTransform`] dispatch to the matching libtorch op.
+//! Picking the wrong form silently produces a ~1e-2 max-abs diff that
+//! compounds across the encoder — large enough to fail any meaningful
+//! parity test, which is exactly how this bug surfaced.
 
 use std::cell::Cell;
 use std::collections::HashMap;
 
 use flodl::nn::{
-    Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter, GELU,
+    Dropout, Embedding, GeluApprox, LayerNorm, Linear, Module, NamedInputModule, Parameter, GELU,
 };
 use flodl::{
     DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable,
@@ -86,6 +89,10 @@ pub struct AlbertConfig {
     pub layer_norm_eps: f64,
     pub hidden_dropout_prob: f64,
     pub attention_probs_dropout_prob: f64,
+    /// FFN activation form (parsed from HF `hidden_act`). Default
+    /// [`GeluApprox::Tanh`] matches both `albert-base-v1` and
+    /// `albert-base-v2` — both ship `hidden_act: "gelu_new"`.
+    pub hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
@@ -108,6 +115,7 @@ impl AlbertConfig {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
+            hidden_act: GeluApprox::Tanh,
             num_labels: None,
             id2label: None,
         }
@@ -125,8 +133,8 @@ impl AlbertConfig {
     /// to file against.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_f64, optional_i64, optional_i64_or_none, parse_id2label, parse_num_labels,
-            required_i64,
+            optional_f64, optional_hidden_act, optional_i64, optional_i64_or_none, parse_id2label,
+            parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -161,6 +169,10 @@ impl AlbertConfig {
             layer_norm_eps:               optional_f64(&v, "layer_norm_eps", 1e-12),
             hidden_dropout_prob:          optional_f64(&v, "hidden_dropout_prob", 0.0),
             attention_probs_dropout_prob: optional_f64(&v, "attention_probs_dropout_prob", 0.0),
+            // ALBERT default is "gelu_new" — both v1 and v2 ship that.
+            // A v3 config (or community fine-tune) that overrides to
+            // "gelu" gets the erf form via the same lookup.
+            hidden_act: optional_hidden_act(&v, "hidden_act", "gelu_new")?,
             num_labels,
             id2label,
         })
@@ -384,6 +396,7 @@ fn albert_layer_config(config: &AlbertConfig) -> TransformerLayerConfig {
         hidden_dropout_prob:          config.hidden_dropout_prob,
         attention_probs_dropout_prob: config.attention_probs_dropout_prob,
         layer_norm_eps:               config.layer_norm_eps,
+        hidden_act:                   config.hidden_act,
     }
 }
 
@@ -597,7 +610,7 @@ impl AlbertMLMHeadTransform {
     pub fn on_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         Ok(AlbertMLMHeadTransform {
             dense: Linear::on_device(config.hidden_size, config.embedding_size, device)?,
-            activation: GELU::new(),
+            activation: GELU::with_approximate(config.hidden_act),
             layer_norm: LayerNorm::on_device_with_eps(
                 config.embedding_size,
                 config.layer_norm_eps,
@@ -718,6 +731,7 @@ mod tests {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
+            hidden_act: GeluApprox::Tanh,
             num_labels: None,
             id2label: None,
         }

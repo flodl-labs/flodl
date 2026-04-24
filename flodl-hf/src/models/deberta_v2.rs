@@ -63,7 +63,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use flodl::nn::{
-    Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter, GELU,
+    Dropout, Embedding, GeluApprox, LayerNorm, Linear, Module, NamedInputModule, Parameter, GELU,
 };
 use flodl::{
     DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable,
@@ -100,6 +100,13 @@ pub struct DebertaV2Config {
     /// when the config field is negative (the v3 convention). Always
     /// concrete in this struct.
     pub max_relative_positions: i64,
+    /// Encoder + LM-head activation form (parsed from HF `hidden_act`).
+    /// Default `GeluApprox::None` (erf form) matches `microsoft/deberta-v3-base`.
+    pub hidden_act: GeluApprox,
+    /// `ContextPooler` activation form (parsed from HF
+    /// `pooler_hidden_act`). Default `GeluApprox::None` (erf form)
+    /// matches the v3-base preset.
+    pub pooler_hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
@@ -122,6 +129,8 @@ impl DebertaV2Config {
             pad_token_id: Some(0),
             position_buckets: 256,
             max_relative_positions: 512,
+            hidden_act: GeluApprox::None,
+            pooler_hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
         }
@@ -135,8 +144,8 @@ impl DebertaV2Config {
     /// exactly what this port doesn't cover.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_bool, optional_f64, optional_i64, optional_i64_or_none, parse_id2label,
-            parse_num_labels, required_i64,
+            optional_bool, optional_f64, optional_hidden_act, optional_i64, optional_i64_or_none,
+            parse_id2label, parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -257,6 +266,8 @@ impl DebertaV2Config {
             pad_token_id:                 optional_i64_or_none(&v, "pad_token_id"),
             position_buckets:             optional_i64(&v, "position_buckets", -1),
             max_relative_positions,
+            hidden_act:                   optional_hidden_act(&v, "hidden_act", "gelu")?,
+            pooler_hidden_act:            optional_hidden_act(&v, "pooler_hidden_act", "gelu")?,
             num_labels,
             id2label,
         })
@@ -279,6 +290,7 @@ impl DebertaV2Config {
             layer_norm_eps:               self.layer_norm_eps,
             position_buckets:             buckets,
             max_relative_positions:       self.max_relative_positions,
+            hidden_act:                   self.hidden_act,
         }
     }
 }
@@ -609,7 +621,7 @@ impl ContextPooler {
         Ok(ContextPooler {
             dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
             dropout: Dropout::new(config.hidden_dropout_prob),
-            activation: GELU::new(),
+            activation: GELU::with_approximate(config.pooler_hidden_act),
         })
     }
 }
@@ -779,7 +791,7 @@ impl DebertaV2LMHead {
         };
         Ok(DebertaV2LMHead {
             dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
-            activation: GELU::new(),
+            activation: GELU::with_approximate(config.hidden_act),
             layer_norm: LayerNorm::on_device_with_eps(
                 config.hidden_size,
                 config.layer_norm_eps,
@@ -868,6 +880,8 @@ mod tests {
             pad_token_id: Some(0),
             position_buckets: 4,
             max_relative_positions: 8,
+            hidden_act: GeluApprox::None,
+            pooler_hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
         }

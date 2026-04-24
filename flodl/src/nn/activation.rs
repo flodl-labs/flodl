@@ -104,21 +104,60 @@ impl Module for Tanh {
     }
 }
 
+/// GELU approximation form.
+///
+/// Default ([`GeluApprox::None`]) is the exact erf-form GELU. The tanh
+/// approximation ([`GeluApprox::Tanh`]) is what HuggingFace ships under
+/// `hidden_act="gelu_new"` (and `"gelu_pytorch_tanh"`), used by ALBERT
+/// (v1+v2), GPT-2, and derivative checkpoints. Picking the wrong form
+/// silently produces a numerically small per-token diff that compounds
+/// across encoder layers — typical end-to-end max-abs-diff is ~1e-2
+/// vs ~1e-5 with the matching form, large enough to fail any
+/// meaningful parity test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GeluApprox {
+    /// Exact erf form: `0.5 * x * (1 + erf(x / sqrt(2)))`. Matches
+    /// PyTorch `F.gelu(x)` and HuggingFace `hidden_act="gelu"`.
+    #[default]
+    None,
+    /// Tanh approximation:
+    /// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
+    /// Matches PyTorch `F.gelu(x, approximate="tanh")` and HuggingFace
+    /// `hidden_act` in {`"gelu_new"`, `"gelu_pytorch_tanh"`}.
+    Tanh,
+}
+
 /// GELU activation (Gaussian Error Linear Unit).
 ///
-/// Uses the exact form: `0.5 * x * (1 + erf(x / sqrt(2)))`
-pub struct GELU;
+/// Default ([`GELU::new`]) is the exact erf form
+/// (`0.5 * x * (1 + erf(x / sqrt(2)))`). For the tanh approximation —
+/// HuggingFace `hidden_act="gelu_new"`, ALBERT, GPT-2 — use
+/// [`GELU::with_approximate(GeluApprox::Tanh)`](GELU::with_approximate).
+pub struct GELU {
+    approximate: GeluApprox,
+}
 
 impl Default for GELU {
     fn default() -> Self {
-        GELU
+        Self { approximate: GeluApprox::None }
     }
 }
 
 impl GELU {
-    /// Create a GELU activation module.
+    /// Erf-form GELU (default). Same as `GELU::with_approximate(GeluApprox::None)`.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Build a GELU module with an explicit [`GeluApprox`] form.
+    /// Mirrors PyTorch `nn.GELU(approximate='none' | 'tanh')`.
+    pub fn with_approximate(approximate: GeluApprox) -> Self {
+        Self { approximate }
+    }
+
+    /// Which approximation form this module dispatches.
+    pub fn approximate(&self) -> GeluApprox {
+        self.approximate
     }
 }
 
@@ -126,7 +165,10 @@ impl Module for GELU {
     fn name(&self) -> &str { "gelu" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        input.gelu()
+        match self.approximate {
+            GeluApprox::None => input.gelu(),
+            GeluApprox::Tanh => input.gelu_tanh(),
+        }
     }
 }
 

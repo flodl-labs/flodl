@@ -86,6 +86,11 @@ commands:
     run: python scripts/parity_distilbert_mlm.py
     docker: hf-parity
 
+  parity-albert:
+    description: Regenerate tests/fixtures/albert_base_v2_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_albert.py
+    docker: hf-parity
+
   parity-deberta-v2:
     description: Regenerate tests/fixtures/deberta_v2_parity.safetensors against HuggingFace reference (microsoft/deberta-v3-base)
     run: python scripts/parity_deberta_v2.py

@@ -57,7 +57,7 @@ pub use parameter::Parameter;
 pub use buffer::Buffer;
 pub use linear::Linear;
 pub use activation::{
-    Identity, ReLU, Sigmoid, Tanh, GELU, SiLU,
+    Identity, ReLU, Sigmoid, Tanh, GELU, GeluApprox, SiLU,
     LeakyReLU, ELU, Softplus, Mish,
     SELU, Hardswish, Hardsigmoid, PReLU,
     Softmax, LogSoftmax, Flatten,
@@ -797,6 +797,31 @@ mod tests {
         let loss = y.sum().unwrap();
         loss.backward().unwrap();
         assert!(x.grad().is_some());
+    }
+
+    /// Both [`GeluApprox`] variants dispatch to libtorch and produce
+    /// mathematically close output (within 1e-2 of each other) but
+    /// must be distinct — bitwise equality at every non-zero input
+    /// would mean the dispatch silently picked the same path.
+    #[test]
+    fn test_gelu_variants_distinct() {
+        // Avoid 0 — both forms agree exactly there.
+        let xs = [0.5_f32, 1.0, -1.0, 2.0];
+        let x = Variable::new(from_f32(&xs, &[xs.len() as i64]), false);
+
+        let erf  = GELU::with_approximate(GeluApprox::None);
+        let tanh = GELU::with_approximate(GeluApprox::Tanh);
+
+        let v_erf  = erf.forward(&x).unwrap().data().to_f32_vec().unwrap();
+        let v_tanh = tanh.forward(&x).unwrap().data().to_f32_vec().unwrap();
+
+        let max_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+        };
+
+        let d_erf_tanh = max_diff(&v_erf, &v_tanh);
+        assert!(d_erf_tanh < 1e-2, "erf/tanh too far: {d_erf_tanh}");
+        assert!(d_erf_tanh > 1e-5, "erf/tanh suspiciously close — same path?");
     }
 
     #[test]

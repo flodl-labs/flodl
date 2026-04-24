@@ -36,7 +36,7 @@
 
 use std::cell::Cell;
 
-use flodl::nn::{Dropout, Embedding, GELU, LayerNorm, Linear, Module, Parameter};
+use flodl::nn::{Dropout, Embedding, GELU, GeluApprox, LayerNorm, Linear, Module, Parameter};
 use flodl::{
     DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable,
 };
@@ -125,6 +125,10 @@ pub struct DistilBertConfig {
     /// LayerNorm epsilon. DistilBERT configs do not ship this field;
     /// defaults to `1e-12` to match the BERT family.
     pub layer_norm_eps: f64,
+    /// FFN activation form (parsed from HF `activation` — DistilBERT
+    /// uses that key, not `hidden_act`). Default `GeluApprox::None`
+    /// (erf form) matches `distilbert-base-uncased`.
+    pub hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
@@ -148,6 +152,7 @@ impl DistilBertConfig {
             seq_classif_dropout: 0.2,
             sinusoidal_pos_embds: false,
             layer_norm_eps: 1e-12,
+            hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
         }
@@ -162,15 +167,13 @@ impl DistilBertConfig {
     /// back to the DistilBERT defaults. Unknown fields are ignored
     /// (architecture lists, torch dtype, `tie_weights_`, …).
     ///
-    /// `activation` is not checked: DistilBERT's default (`gelu`) is
-    /// hardcoded in the feed-forward block. A config shipping a
-    /// non-GELU activation will silently run with GELU; this matches
-    /// the BERT parsing behavior and applies to every public
-    /// DistilBERT checkpoint.
+    /// `activation` is parsed and dispatched: `"gelu"` → erf form,
+    /// `"gelu_new"` / `"gelu_pytorch_tanh"` → tanh approximation. Other
+    /// values error loudly.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_bool, optional_f64, optional_i64, parse_id2label, parse_num_labels,
-            required_i64,
+            optional_bool, optional_f64, optional_hidden_act, optional_i64, parse_id2label,
+            parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -190,6 +193,7 @@ impl DistilBertConfig {
             seq_classif_dropout:     optional_f64(&v, "seq_classif_dropout", 0.2),
             sinusoidal_pos_embds:    optional_bool(&v, "sinusoidal_pos_embds", false),
             layer_norm_eps:          optional_f64(&v, "layer_norm_eps", 1e-12),
+            hidden_act:              optional_hidden_act(&v, "activation", "gelu")?,
             num_labels,
             id2label,
         })
@@ -309,6 +313,7 @@ fn distilbert_layer_config(config: &DistilBertConfig) -> TransformerLayerConfig 
         hidden_dropout_prob:          config.dropout,
         attention_probs_dropout_prob: config.attention_dropout,
         layer_norm_eps:               config.layer_norm_eps,
+        hidden_act:                   config.hidden_act,
     }
 }
 
@@ -635,7 +640,7 @@ impl MaskedLmHead<DistilBertConfig> {
         let graph = fb
             .through(Linear::on_device(config.dim, config.dim, device)?)
             .tag("vocab_transform")
-            .through(GELU::new())
+            .through(GELU::with_approximate(config.hidden_act))
             .through(LayerNorm::on_device_with_eps(
                 config.dim,
                 config.layer_norm_eps,

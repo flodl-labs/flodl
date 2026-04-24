@@ -60,7 +60,7 @@
 
 use std::cell::Cell;
 
-use flodl::nn::{Dropout, LayerNorm, Linear, Module, Parameter, GELU};
+use flodl::nn::{Dropout, GeluApprox, LayerNorm, Linear, Module, Parameter, GELU};
 use flodl::{DType, Device, Result, Tensor, TensorOptions, Variable};
 
 use crate::path::prefix_params;
@@ -87,6 +87,8 @@ pub struct DebertaV2LayerConfig {
     /// Max relative position range after bucketing (512 for v3-base,
     /// taken from `max_position_embeddings` when config says -1).
     pub max_relative_positions: i64,
+    /// FFN activation form (parsed from HF `hidden_act` upstream).
+    pub hidden_act: GeluApprox,
 }
 
 // ─── Relative-position helpers ─────────────────────────────────────────
@@ -422,7 +424,7 @@ impl DebertaV2Intermediate {
     pub fn on_device(config: &DebertaV2LayerConfig, device: Device) -> Result<Self> {
         Ok(DebertaV2Intermediate {
             dense: Linear::on_device(config.hidden_size, config.intermediate_size, device)?,
-            activation: GELU::new(),
+            activation: GELU::with_approximate(config.hidden_act),
         })
     }
 
@@ -548,6 +550,7 @@ mod tests {
             layer_norm_eps:               1e-7,
             position_buckets:             4,
             max_relative_positions:       8,
+            hidden_act:                   GeluApprox::None,
         }
     }
 

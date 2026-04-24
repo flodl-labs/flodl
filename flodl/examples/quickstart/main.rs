@@ -13,7 +13,7 @@ fn main() -> Result<()> {
 
     // Build the model.
     let model = FlowBuilder::from(Linear::new(2, 16)?)
-        .through(GELU)
+        .through(GELU::new())
         .through(LayerNorm::new(16)?)
         .also(Linear::new(16, 16)?)
         .through(Linear::new(16, 2)?)

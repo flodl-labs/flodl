@@ -9,6 +9,7 @@
 
 use serde_json::Value;
 
+use flodl::nn::GeluApprox;
 use flodl::{Result, TensorError};
 
 /// Read a required integer field. Errors if missing, null, or not an
@@ -99,6 +100,52 @@ pub(crate) fn parse_id2label(v: &Value) -> Result<Option<Vec<String>>> {
         }
     }
     Ok(Some(pairs.into_iter().map(|(_, s)| s).collect()))
+}
+
+/// Map an HF `hidden_act` string to a [`GeluApprox`].
+///
+/// Picking the wrong form silently produces a small per-token diff
+/// (~1e-2 max-abs after 12 layers) that compounds across the encoder —
+/// large enough to fail any meaningful parity test. So unrecognised
+/// strings error loudly with a message that names the supported set.
+///
+/// Mappings (case-sensitive — matches HF's `ACT2FN` keys):
+/// - `"gelu"` → [`GeluApprox::None`] (erf form)
+/// - `"gelu_new"` → [`GeluApprox::Tanh`] (tanh approximation,
+///   ALBERT v1+v2, GPT-2)
+/// - `"gelu_pytorch_tanh"` → [`GeluApprox::Tanh`] (HF's newer alias
+///   for the same approximation)
+fn map_hidden_act(s: &str) -> Result<GeluApprox> {
+    match s {
+        "gelu"                   => Ok(GeluApprox::None),
+        "gelu_new"               => Ok(GeluApprox::Tanh),
+        "gelu_pytorch_tanh"      => Ok(GeluApprox::Tanh),
+        other => Err(TensorError::new(&format!(
+            "config.json: unsupported hidden_act = {other:?}. \
+             flodl-hf currently maps {{\"gelu\", \"gelu_new\", \
+             \"gelu_pytorch_tanh\"}} to flodl::nn::GeluApprox; \
+             other activations (e.g. \"relu\", \"silu\") are not \
+             yet wired through the transformer layer. File against \
+             flodl-hf with the failing checkpoint id."
+        ))),
+    }
+}
+
+/// Read the activation field from `config.json`, mapped to a
+/// [`GeluApprox`]. `default` is used when the key is absent or null —
+/// pass `"gelu"` for the BERT-family default (erf form). The presence
+/// of the field is honoured even if it equals the default, so a
+/// derivative checkpoint that explicitly writes `"hidden_act": "gelu"`
+/// behaves the same as one that omits it.
+///
+/// Different families ship the field under different names —
+/// most use `"hidden_act"`, DistilBERT uses `"activation"` — so the
+/// caller passes the key.
+pub(crate) fn optional_hidden_act(
+    v: &Value, key: &str, default: &str,
+) -> Result<GeluApprox> {
+    let raw = v.get(key).and_then(|x| x.as_str()).unwrap_or(default);
+    map_hidden_act(raw)
 }
 
 /// Derive `num_labels` from the config.
