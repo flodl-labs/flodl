@@ -68,7 +68,7 @@ Graph builder for model composition.
 | `nn.LayerNorm(n)` | `LayerNorm::new(n)?` |
 | `nn.Dropout(p)` | `Dropout::new(p)` |
 | `nn.ReLU()` | `ReLU::new()` |
-| `nn.GELU()` | `GELU` |
+| `nn.GELU()` | `GELU::new()` (or `GELU::with_approximate(GeluApprox::Tanh)` for the tanh form) |
 | `nn.Embedding(n, d)` | `Embedding::new(n, d)?` |
 | `nn.LSTM(in, h, layers)` | `LSTM::new(in, h, layers)?` |
 | `nn.GRU(in, h, layers)` | `GRU::new(in, h, layers)?` |

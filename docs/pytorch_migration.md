@@ -657,11 +657,10 @@ nn.Identity()
 ```
 
 ```rust
-// flodl — zero-sized types (no allocation)
+// flodl — unit structs (no allocation, bare-name usage)
 ReLU
 Sigmoid
 Tanh
-GELU
 SiLU
 Mish
 SELU
@@ -670,6 +669,8 @@ Hardsigmoid
 Identity
 
 // Parameterized at construction
+GELU::new()                       // erf form (default)
+GELU::with_approximate(GeluApprox::Tanh)  // tanh approx (HF `gelu_new`/`gelu_pytorch_tanh`)
 LeakyReLU::new(0.01)
 ELU::new(1.0)
 Softplus::new(1.0, 20.0)         // beta, threshold

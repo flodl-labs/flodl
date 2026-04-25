@@ -17,7 +17,7 @@ use flodl::*;
 use flodl::monitor::Monitor;
 
 let model = FlowBuilder::from(Linear::new(2, 16)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(16, 2)?)
     .build()?;
 

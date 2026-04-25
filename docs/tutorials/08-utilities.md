@@ -558,9 +558,9 @@ scheduling:
 ```rust
 // Build model with tagged sections.
 let g = FlowBuilder::from(Linear::new(4, 64)?).tag("encoder")
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(64, 64)?).tag("body")
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(64, 2)?).tag("head")
     .build()?;
 

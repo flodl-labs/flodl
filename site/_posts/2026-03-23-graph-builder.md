@@ -54,7 +54,7 @@ You should be able to look at the chain and see the architecture.
 
 ```rust
 let model = FlowBuilder::from(Linear::new(2, 16)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(16, 2)?)
     .build()?;
 ```
@@ -67,7 +67,7 @@ stop here.
 
 ```rust
 let model = FlowBuilder::from(Linear::new(2, 16)?)
-    .through(GELU)
+    .through(GELU::new())
     .also(Linear::new(16, 16)?)
     .through(Linear::new(16, 2)?)
     .build()?;
@@ -208,7 +208,7 @@ A `Graph` built by the builder implements `Module` — the same trait as
 
 ```rust
 let ffn = FlowBuilder::from(Linear::new(16, 32)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(32, 16)?)
     .build()?;
 

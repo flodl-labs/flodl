@@ -15,7 +15,7 @@ chains, parallel branches, residual connections, and per-element mapping.
 
 ```rust
 let g = FlowBuilder::from(Linear::new(4, 8)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(8, 2)?)
     .build()?;
 ```
@@ -46,7 +46,7 @@ gets added to the module's output:
 
 ```rust
 let g = FlowBuilder::from(Linear::new(8, 8)?)
-    .through(GELU)
+    .through(GELU::new())
     .also(Linear::new(8, 8)?)          // output = input + Linear(input)
     .through(Linear::new(8, 2)?)
     .build()?;
@@ -169,7 +169,7 @@ inside other graphs:
 ```rust
 // Define a reusable block.
 let block = FlowBuilder::from(Linear::new(8, 8)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(LayerNorm::new(8)?)
     .build()?;
 
@@ -193,14 +193,14 @@ Here's a complete model that uses everything from this tutorial:
 // Reusable feed-forward block.
 fn ffn(dim: i64) -> flodl::Result<Graph> {
     FlowBuilder::from(Linear::new(dim, dim)?)
-        .through(GELU)
+        .through(GELU::new())
         .through(LayerNorm::new(dim)?)
         .build()
 }
 
 // Main model.
 let model = FlowBuilder::from(Linear::new(4, 16)?)
-    .through(GELU)
+    .through(GELU::new())
     .split(modules![ffn(16)?, ffn(16)?]).merge(MergeOp::Mean)  // multi-head
     .also(Linear::new(16, 16)?)                                 // residual
     .through(Dropout::new(0.1))

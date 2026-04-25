@@ -187,7 +187,7 @@ The model architecture changed since the checkpoint was saved.
 ```rust
 // Save and load must use the same architecture
 let model = FlowBuilder::from(Linear::new(1, 32)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(32, 1)?)
     .build()?;
 
@@ -195,7 +195,7 @@ model.save_checkpoint("model.fdl")?;
 
 // Later — rebuild the SAME architecture before loading
 let model = FlowBuilder::from(Linear::new(1, 32)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(32, 1)?)
     .build()?;
 
@@ -235,7 +235,7 @@ The graph has no nodes. Make sure you've built the graph with `FlowBuilder`:
 
 ```rust
 let model = FlowBuilder::from(Linear::new(4, 8)?)
-    .through(GELU)
+    .through(GELU::new())
     .build()?;
 // Now model.dot() and model.svg() produce output
 ```

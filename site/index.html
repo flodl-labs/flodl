@@ -253,7 +253,7 @@ commands:
     <pre><span class="kw">use</span> <span class="ty">flodl</span>::*;
 
 <span class="kw">let</span> model = <span class="ty">FlowBuilder</span>::<span class="fn">from</span>(<span class="ty">Linear</span>::<span class="fn">new</span>(<span class="num">4</span>, <span class="num">32</span>)?)
-    .<span class="fn">through</span>(<span class="ty">GELU</span>)                        <span class="cm">// activation</span>
+    .<span class="fn">through</span>(<span class="ty">GELU</span>::<span class="fn">new</span>())                <span class="cm">// activation</span>
     .<span class="fn">through</span>(<span class="ty">LayerNorm</span>::<span class="fn">new</span>(<span class="num">32</span>)?)       <span class="cm">// normalization</span>
     .<span class="fn">also</span>(<span class="ty">Linear</span>::<span class="fn">new</span>(<span class="num">32</span>, <span class="num">32</span>)?)          <span class="cm">// residual: output = input + Linear(input)</span>
     .<span class="fn">through</span>(<span class="ty">Linear</span>::<span class="fn">new</span>(<span class="num">32</span>, <span class="num">1</span>)?)        <span class="cm">// output projection</span>

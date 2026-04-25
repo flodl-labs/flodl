@@ -206,7 +206,7 @@ Tag the nodes you want to monitor when building the graph:
 
 ```rust
 let model = FlowBuilder::from(Linear::new(2, 16)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::new(16, 2)?).tag("output")
     .build()?;
 ```
@@ -538,7 +538,7 @@ fn main() -> Result<()> {
 
     // Build model AFTER seeding — weight initialization uses the seed
     let model = FlowBuilder::from(Linear::new(2, 16)?)
-        .through(GELU)
+        .through(GELU::new())
         .through(Linear::new(16, 2)?)
         .build()?;
 
@@ -565,7 +565,7 @@ fn main() -> Result<()> {
 
     // Build model.
     let model = FlowBuilder::from(Linear::new(2, 16)?)
-        .through(GELU)
+        .through(GELU::new())
         .through(LayerNorm::new(16)?)
         .also(Linear::new(16, 16)?)
         .through(Linear::new(16, 2)?)

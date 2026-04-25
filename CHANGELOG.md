@@ -42,6 +42,10 @@ All nine `*For{SequenceClassification,TokenClassification,QuestionAnswering}` he
 - All nine flodl-hf task heads (BERT / RoBERTa / DistilBERT × SeqCls / TokenCls / QA) now implement `HasGraph` and expose a `config()` accessor so callers can build replicas inside the factory closure.
 - The `distilbert-finetune` example is rewritten to use `setup_head`: the loop is byte-identical to the multi-GPU path, so a user can scale to N GPUs without changing any training code.
 
+### Changed
+
+- **BREAKING — `GELU` now requires a constructor**: the activation gained an `approximate: GeluApprox` field to support both the erf form (HF `gelu`) and the tanh approximation (HF `gelu_new` / `gelu_pytorch_tanh`) needed for ALBERT and other tanh-form checkpoints. The old bare-name usage `.through(GELU)` no longer compiles. Migration: replace `GELU` with `GELU::new()` for the erf default, or `GELU::with_approximate(GeluApprox::Tanh)` for the tanh form. The other 9 unit-struct activations (`ReLU`, `Sigmoid`, `Tanh`, `SiLU`, `Mish`, `SELU`, `Hardswish`, `Hardsigmoid`, `Identity`) are unaffected — bare-name usage still works.
+
 ### Deprecated
 
 - `Ddp::setup()`, `Ddp::setup_with()`, `Ddp::builder()` — use the matching `Trainer::*` methods instead. Same behavior, clearer intent. Compile-time deprecation warnings guide migration. `Ddp::wrap()` remains on `Ddp` as the explicit multi-GPU control tier. Removal targeted for a future release.

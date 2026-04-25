@@ -97,6 +97,7 @@ impl BertModel {
         // bare `BertModel` has no slot for. `load_weights_with_logging`
         // tolerates those and names them on stderr.
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config.to_json_str());
         Ok(graph)
     }
 }
@@ -358,6 +359,7 @@ impl BertForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -381,6 +383,7 @@ impl BertForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -403,6 +406,7 @@ impl BertForQuestionAnswering {
         let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -432,6 +436,7 @@ impl BertForMaskedLM {
         let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -485,6 +490,7 @@ impl RobertaModel {
             RobertaModel::on_device_without_pooler(&config, device)?
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config.to_json_str());
         Ok(graph)
     }
 }
@@ -507,6 +513,7 @@ impl RobertaForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -530,6 +537,7 @@ impl RobertaForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -551,6 +559,7 @@ impl RobertaForQuestionAnswering {
         let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -580,6 +589,7 @@ impl RobertaForMaskedLM {
         let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -617,6 +627,7 @@ impl DistilBertModel {
         let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let graph = DistilBertModel::on_device(&config, device)?;
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config.to_json_str());
         Ok(graph)
     }
 }
@@ -640,6 +651,7 @@ impl DistilBertForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -663,6 +675,7 @@ impl DistilBertForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -684,6 +697,7 @@ impl DistilBertForQuestionAnswering {
         let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -711,6 +725,7 @@ impl DistilBertForMaskedLM {
         let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -756,6 +771,7 @@ impl XlmRobertaModel {
             XlmRobertaModel::on_device_without_pooler(&config, device)?
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config.to_json_str());
         Ok(graph)
     }
 }
@@ -775,6 +791,7 @@ impl XlmRobertaForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -798,6 +815,7 @@ impl XlmRobertaForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -820,6 +838,7 @@ impl XlmRobertaForQuestionAnswering {
         let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -848,6 +867,7 @@ impl XlmRobertaForMaskedLM {
         let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -891,6 +911,7 @@ impl AlbertModel {
             AlbertModel::on_device_without_pooler(&config, device)?
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config.to_json_str());
         Ok(graph)
     }
 }
@@ -909,6 +930,7 @@ impl AlbertForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -930,6 +952,7 @@ impl AlbertForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -951,6 +974,7 @@ impl AlbertForQuestionAnswering {
         let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -979,6 +1003,7 @@ impl AlbertForMaskedLM {
         let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1014,6 +1039,7 @@ impl DebertaV2Model {
         let (config, weights) = fetch_deberta_v2_config_and_weights(repo_id)?;
         let graph = DebertaV2Model::on_device(&config, device)?;
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config.to_json_str());
         Ok(graph)
     }
 }
@@ -1032,6 +1058,7 @@ impl DebertaV2ForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1053,6 +1080,7 @@ impl DebertaV2ForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1073,6 +1101,7 @@ impl DebertaV2ForQuestionAnswering {
         let (config, weights) = fetch_deberta_v2_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1100,6 +1129,7 @@ impl DebertaV2ForMaskedLM {
         let (config, weights) = fetch_deberta_v2_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
+        head.graph().set_source_config(config.to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),

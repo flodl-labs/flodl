@@ -7,7 +7,7 @@
 //!
 //! // Build a model as a computation graph
 //! let model = FlowBuilder::from(Linear::new(4, 8)?)
-//!     .through(GELU)
+//!     .through(GELU::new())
 //!     .through(Linear::new(8, 2)?)
 //!     .build()?;
 //!

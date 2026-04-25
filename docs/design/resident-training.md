@@ -389,7 +389,7 @@ let loader = ResidentLoader::load(
 
 // Build model (already on device)
 let model = FlowBuilder::from(Linear::on_device(input_dim, hidden, device)?)
-    .through(GELU)
+    .through(GELU::new())
     .through(Linear::on_device(hidden, output_dim, device)?)
     .build()?;
 model.train();
