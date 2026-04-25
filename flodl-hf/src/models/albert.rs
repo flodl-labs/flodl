@@ -403,16 +403,22 @@ impl NamedInputModule for AlbertLayerStack {
 
 // ── AlbertPooler ─────────────────────────────────────────────────────────
 
-/// Pooler: take the `[CLS]` hidden state, project through a dense
-/// layer, then `tanh`. Structurally identical to `BertPooler`.
+/// Pooler: take the `[CLS]` hidden state, project through a linear
+/// layer, then `tanh`.
+///
+/// Unlike `BertPooler`, HF's `AlbertModel.pooler` is a flat `nn.Linear`
+/// directly on the model — no `.dense` attribute — so its checkpoint
+/// keys are `albert.pooler.{weight,bias}` rather than
+/// `albert.pooler.dense.{weight,bias}`. The pooler holds its `Linear`
+/// without a `prefix_params` wrapper to match.
 pub struct AlbertPooler {
-    dense: Linear,
+    linear: Linear,
 }
 
 impl AlbertPooler {
     pub fn on_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         Ok(AlbertPooler {
-            dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            linear: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
         })
     }
 }
@@ -422,12 +428,12 @@ impl Module for AlbertPooler {
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
         let cls = input.select(1, 0)?;
-        let pooled = self.dense.forward(&cls)?;
+        let pooled = self.linear.forward(&cls)?;
         pooled.tanh()
     }
 
     fn parameters(&self) -> Vec<Parameter> {
-        prefix_params("dense", self.dense.parameters())
+        self.linear.parameters()
     }
 }
 

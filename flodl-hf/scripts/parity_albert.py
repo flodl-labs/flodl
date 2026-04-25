@@ -11,11 +11,11 @@ We pass `position_ids` explicitly (`arange(seq_len)`) so the fixture
 is reproducible and the flodl graph — which takes `position_ids` as a
 named input — receives the same values HF would compute internally.
 
-`add_pooling_layer=False` matches flodl-hf's
-`AlbertModel::from_pretrained` default: the bare backbone is the
-target of the parity comparison (`last_hidden_state` lives in
-`hidden_size` after the factorised `embedding_hidden_mapping_in`
-projection).
+The pooler is enabled (HF default): `albert-base-v2` ships pooler
+weights, and `AlbertModel::from_pretrained` returns the with-pooler
+graph dynamically. The fixture saves both `last_hidden_state` and
+`pooler_output`; the parity test compares `pooler_output` (the graph's
+final node) — same pattern as `bert_parity.rs`.
 
 Run via `fdl flodl-hf parity-albert`.
 """
@@ -49,13 +49,10 @@ def main() -> None:
     print(f"using {MODEL_ID} @ {sha}")
 
     tok = AutoTokenizer.from_pretrained(MODEL_ID, revision=sha)
-    # `add_pooling_layer=False` matches flodl-hf's pooler-free backbone:
-    # `albert-base-v2` ships pooler weights but the parity target is the
-    # encoder output, and skipping the pooler keeps the comparison
-    # focused on the layers that change between checkpoints.
-    model = AlbertModel.from_pretrained(
-        MODEL_ID, revision=sha, add_pooling_layer=False,
-    ).eval()
+    # Pooler enabled (HF default): matches the with-pooler graph
+    # `AlbertModel::from_pretrained` returns dynamically when the
+    # checkpoint ships pooler weights.
+    model = AlbertModel.from_pretrained(MODEL_ID, revision=sha).eval()
     ensure_refs_main(MODEL_ID, sha)
 
     enc = tok(PROMPT, return_tensors="pt")
@@ -83,6 +80,7 @@ def main() -> None:
         "inputs.token_type_ids":     token_type_ids,
         "inputs.attention_mask":     attention_mask,
         "outputs.last_hidden_state": out.last_hidden_state.contiguous(),
+        "outputs.pooler_output":     out.pooler_output.contiguous(),
     }
     metadata = {
         "source_model":  MODEL_ID,
@@ -98,6 +96,9 @@ def main() -> None:
     print(f"  last_hidden_state {tuple(out.last_hidden_state.shape)} "
           f"range [{out.last_hidden_state.min():.4f}, "
           f"{out.last_hidden_state.max():.4f}]")
+    print(f"  pooler_output     {tuple(out.pooler_output.shape)} "
+          f"range [{out.pooler_output.min():.4f}, "
+          f"{out.pooler_output.max():.4f}]")
 
 
 if __name__ == "__main__":

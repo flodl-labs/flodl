@@ -68,6 +68,15 @@ impl BertModel {
     /// `hf_hub` (using its on-disk cache), parses the config, builds a
     /// matching graph, and loads the safetensors weights.
     ///
+    /// Picks `on_device` (with pooler) when the checkpoint ships pooler
+    /// weights and `on_device_without_pooler` when it doesn't, so an
+    /// encoder-only BERT checkpoint loads strict without missing-key
+    /// errors and a pooler-bearing one keeps its `pooler_output` slot.
+    /// Reach for [`BertModel::on_device`] /
+    /// [`BertModel::on_device_without_pooler`] directly when the call
+    /// site needs a guaranteed shape regardless of what the Hub repo
+    /// happens to ship.
+    ///
     /// `repo_id` is the HF-style identifier, e.g. `"bert-base-uncased"`
     /// or `"google-bert/bert-base-multilingual-cased"`.
     ///
@@ -78,7 +87,11 @@ impl BertModel {
     /// call errors out.
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
-        let graph = BertModel::on_device(&config, device)?;
+        let graph = if weights_have_pooler(&weights)? {
+            BertModel::on_device(&config, device)?
+        } else {
+            BertModel::on_device_without_pooler(&config, device)?
+        };
         // HF base checkpoints (e.g. `bert-base-uncased`) ship as
         // `BertForPreTraining`, which carries MLM + NSP heads that a
         // bare `BertModel` has no slot for. `load_weights_with_logging`
@@ -276,6 +289,33 @@ fn try_load_tokenizer(repo_id: &str) -> Option<HfTokenizer> {
 
 /// Load safetensors into a graph, logging any discarded checkpoint keys
 /// to stderr. Shared by every `from_pretrained` path.
+/// Inspect a safetensors blob and report whether it carries the pooler
+/// `Linear` weights for any of the pooler-bearing families (BERT,
+/// RoBERTa, XLM-R, ALBERT).
+///
+/// Matches both shapes: BERT-style `pooler.dense.{weight,bias}` (a
+/// `BertPooler { dense: Linear }` wrapper) and ALBERT-style flat
+/// `pooler.{weight,bias}` (HF's `AlbertModel.pooler` is a bare
+/// `nn.Linear`). Pooler-less families (DistilBERT, DeBERTa-v2) never
+/// match either shape, so the helper is a safe no-op for them.
+///
+/// Used by every pooler-bearing family's `from_pretrained_on_device`
+/// (and `AutoModel::from_pretrained_for_export_on_device`) to pick
+/// `on_device` vs `on_device_without_pooler` based on what the
+/// checkpoint actually ships, rather than baking a per-family default
+/// that's always wrong for some Hub repos (e.g. `roberta-base` has no
+/// pooler; `bert-base-uncased` does).
+fn weights_have_pooler(weights: &[u8]) -> Result<bool> {
+    let st = SafeTensors::deserialize(weights)
+        .map_err(|e| TensorError::new(&format!("safetensors parse error: {e}")))?;
+    Ok(st.names().iter().any(|n| {
+        n.ends_with("pooler.dense.weight")
+            || n.ends_with("pooler.dense.bias")
+            || n.ends_with("pooler.weight")
+            || n.ends_with("pooler.bias")
+    }))
+}
+
 fn load_weights_with_logging(
     repo_id: &str,
     graph: &Graph,
@@ -414,15 +454,18 @@ impl RobertaModel {
     /// Download a pretrained RoBERTa checkpoint from the HuggingFace
     /// Hub and return a fully-initialised [`Graph`] on CPU.
     ///
-    /// Returns a pooler-free backbone (graph emits
-    /// `last_hidden_state` of shape `[B, S, hidden]`). RoBERTa
-    /// pretraining drops BERT's NSP objective, so most checkpoints
-    /// (including `roberta-base`) don't carry pooler weights; HF
-    /// Python silently random-initialises them on load, which
-    /// produces non-reproducible `pooler_output`. flodl-hf takes the
-    /// opposite default: no pooler, strict weight load. Reach for
-    /// [`RobertaModel::on_device`] if a specific checkpoint is known
-    /// to ship its own pooler.
+    /// Picks `on_device` (with pooler) when the checkpoint ships pooler
+    /// weights and `on_device_without_pooler` when it doesn't, so the
+    /// graph shape matches the Hub repo regardless of whether the
+    /// checkpoint kept BERT's pooler. Most RoBERTa checkpoints
+    /// (including `roberta-base`) drop the pooler with the NSP
+    /// objective, but some downstream-tuned variants keep it. HF
+    /// Python silently random-initialises a missing pooler on load,
+    /// producing non-reproducible `pooler_output`; flodl-hf instead
+    /// builds a pooler-free backbone in that case so the load stays
+    /// strict and reproducible. Reach for [`RobertaModel::on_device`]
+    /// directly when a graph slot for the pooler is needed regardless
+    /// of what the checkpoint ships.
     ///
     /// `repo_id` is the HF-style identifier, e.g. `"roberta-base"` or
     /// `"FacebookAI/roberta-large"`. HF base checkpoints ship as
@@ -436,7 +479,11 @@ impl RobertaModel {
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
-        let graph = RobertaModel::on_device_without_pooler(&config, device)?;
+        let graph = if weights_have_pooler(&weights)? {
+            RobertaModel::on_device(&config, device)?
+        } else {
+            RobertaModel::on_device_without_pooler(&config, device)?
+        };
         load_weights_with_logging(repo_id, &graph, &weights)?;
         Ok(graph)
     }
@@ -684,14 +731,18 @@ impl DistilBertForMaskedLM {
 
 impl XlmRobertaModel {
     /// Download a pretrained XLM-RoBERTa checkpoint from the HuggingFace
-    /// Hub and return a fully-initialised pooler-free [`Graph`] on CPU.
+    /// Hub and return a fully-initialised [`Graph`] on CPU.
     ///
-    /// `repo_id` examples: `"xlm-roberta-base"`, `"xlm-roberta-large"`,
-    /// `"FacebookAI/xlm-roberta-base"`. Like RoBERTa, XLM-R pretraining
-    /// drops BERT's NSP objective so the default Hub loader returns the
-    /// backbone *without* a pooler; HF base checkpoints ship as
+    /// Picks `on_device` (with pooler) when the checkpoint ships pooler
+    /// weights and `on_device_without_pooler` when it doesn't, matching
+    /// whatever the Hub repo carries. `FacebookAI/xlm-roberta-base`
+    /// keeps the pooler; many encoder-only variants (e.g.
+    /// `xlm-roberta-base`) don't. HF base checkpoints ship as
     /// `XLMRobertaForMaskedLM` and the `lm_head.*` keys are tolerated
     /// (logged, ignored) by `load_weights_with_logging`.
+    ///
+    /// `repo_id` examples: `"xlm-roberta-base"`, `"xlm-roberta-large"`,
+    /// `"FacebookAI/xlm-roberta-base"`.
     pub fn from_pretrained(repo_id: &str) -> Result<Graph> {
         Self::from_pretrained_on_device(repo_id, Device::CPU)
     }
@@ -699,7 +750,11 @@ impl XlmRobertaModel {
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
-        let graph = XlmRobertaModel::on_device_without_pooler(&config, device)?;
+        let graph = if weights_have_pooler(&weights)? {
+            XlmRobertaModel::on_device(&config, device)?
+        } else {
+            XlmRobertaModel::on_device_without_pooler(&config, device)?
+        };
         load_weights_with_logging(repo_id, &graph, &weights)?;
         Ok(graph)
     }
@@ -806,29 +861,35 @@ impl XlmRobertaForMaskedLM {
 //
 // Each head mirrors the BERT counterpart on the load side — the
 // family-specific bits (factorised embeddings, cross-layer sharing)
-// are all absorbed by the backbone builder. HF ALBERT checkpoints
-// ship with `pooler_activation` weights that a bare pooler-free
-// backbone has no slot for; `load_weights_with_logging` tolerates
-// and names those on stderr.
+// are all absorbed by the backbone builder. HF ALBERT base checkpoints
+// ship as `AlbertForMaskedLM` with `predictions.*` keys that a bare
+// `AlbertModel` has no slot for; `load_weights_with_logging`
+// tolerates and names those on stderr.
 
 impl AlbertModel {
     /// Download a pretrained ALBERT checkpoint from the HuggingFace
-    /// Hub and return a fully-initialised pooler-free [`Graph`] on
-    /// CPU.
+    /// Hub and return a fully-initialised [`Graph`] on CPU.
+    ///
+    /// Picks `on_device` (with pooler) when the checkpoint ships pooler
+    /// weights and `on_device_without_pooler` when it doesn't.
+    /// `albert-base-v2` ships its pooler as a flat
+    /// `albert.pooler.{weight,bias}` (HF's `AlbertModel.pooler` is a
+    /// bare `nn.Linear`, not a `BertPooler`-style `.dense` wrapper),
+    /// and the dynamic detection picks both shapes.
     ///
     /// `repo_id` examples: `"albert-base-v2"`, `"albert-large-v2"`,
-    /// `"albert/albert-base-v2"`. HF base checkpoints ship as
-    /// `AlbertForMaskedLM`; the `predictions.*` and
-    /// `pooler_activation` keys a bare `AlbertModel` has no slot
-    /// for are tolerated by `load_weights_with_logging` and named
-    /// on stderr.
+    /// `"albert/albert-base-v2"`.
     pub fn from_pretrained(repo_id: &str) -> Result<Graph> {
         Self::from_pretrained_on_device(repo_id, Device::CPU)
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
-        let graph = AlbertModel::on_device_without_pooler(&config, device)?;
+        let graph = if weights_have_pooler(&weights)? {
+            AlbertModel::on_device(&config, device)?
+        } else {
+            AlbertModel::on_device_without_pooler(&config, device)?
+        };
         load_weights_with_logging(repo_id, &graph, &weights)?;
         Ok(graph)
     }
@@ -1160,11 +1221,7 @@ impl AutoModel {
         // `FacebookAI/xlm-roberta-base`). Building with a pooler whose
         // weights aren't in the checkpoint trips the missing-keys
         // validation in `load_safetensors_into_graph_with_rename_allow_unused`.
-        let st = SafeTensors::deserialize(&weights)
-            .map_err(|e| TensorError::new(&format!("safetensors parse error: {e}")))?;
-        let has_pooler = st.names().iter().any(|n|
-            n.ends_with("pooler.dense.weight") || n.ends_with("pooler.dense.bias"));
-        drop(st);
+        let has_pooler = weights_have_pooler(&weights)?;
 
         let graph = match config {
             AutoConfig::Bert(c) => {

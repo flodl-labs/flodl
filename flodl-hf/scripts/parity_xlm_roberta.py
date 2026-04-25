@@ -91,13 +91,11 @@ def main() -> None:
     print(f"  prompt: {len(prompt)} chars across {len(FLORES_LANGS)} scripts")
 
     tok = AutoTokenizer.from_pretrained(MODEL_ID, revision=sha)
-    # `add_pooling_layer=False` matches flodl-hf's
-    # `XlmRobertaModel::from_pretrained` default: the pooler is unused
-    # by the parity comparison and including a randomly-initialised one
-    # would produce non-reproducible output.
-    model = XLMRobertaModel.from_pretrained(
-        MODEL_ID, revision=sha, add_pooling_layer=False,
-    ).eval()
+    # Pooler enabled (HF default): matches the with-pooler graph
+    # `XlmRobertaModel::from_pretrained` returns dynamically when the
+    # checkpoint ships pooler weights. `xlm-roberta-base` does ship
+    # them as `roberta.pooler.dense.{weight,bias}`.
+    model = XLMRobertaModel.from_pretrained(MODEL_ID, revision=sha).eval()
     ensure_refs_main(MODEL_ID, sha)
 
     enc = tok(prompt, return_tensors="pt")
@@ -126,6 +124,7 @@ def main() -> None:
         "inputs.attention_mask":    attention_mask,
         "inputs.sequence_ids":      sequence_ids,
         "outputs.last_hidden_state": out.last_hidden_state.contiguous(),
+        "outputs.pooler_output":    out.pooler_output.contiguous(),
     }
     metadata = {
         "source_model":   MODEL_ID,
@@ -144,6 +143,9 @@ def main() -> None:
     print(f"  last_hidden_state {tuple(out.last_hidden_state.shape)} "
           f"range [{out.last_hidden_state.min():.4f}, "
           f"{out.last_hidden_state.max():.4f}]")
+    print(f"  pooler_output     {tuple(out.pooler_output.shape)} "
+          f"range [{out.pooler_output.min():.4f}, "
+          f"{out.pooler_output.max():.4f}]")
 
 
 if __name__ == "__main__":

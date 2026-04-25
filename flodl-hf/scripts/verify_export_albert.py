@@ -16,13 +16,6 @@ if __name__ == "__main__":
             AlbertModel,
             repo_id="albert/albert-base-v2",
             family_label="albert",
-            # ALBERT pooler naming gap: HF stores the pooler as a flat
-            # Linear (`albert.pooler.{weight,bias}`), but flodl-hf's
-            # AlbertPooler wraps the Linear in a `dense` field, producing
-            # `albert.pooler.dense.{weight,bias}` — a key set HF doesn't
-            # recognize. Until that's restructured, only the encoder
-            # round-trips through AutoModel reload. Tracked as follow-up.
-            extra_kwargs={"add_pooling_layer": False},
-            outputs_to_check=("last_hidden_state",),
+            outputs_to_check=("last_hidden_state", "pooler_output"),
         )
     )
