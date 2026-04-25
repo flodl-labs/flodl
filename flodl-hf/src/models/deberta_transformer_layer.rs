@@ -477,11 +477,13 @@ impl DebertaV2Output {
 /// One DeBERTa-v2 transformer block: disentangled self-attention →
 /// residual + LN → GELU FFN → residual + LN.
 ///
-/// Unlike the cross-family [`TransformerLayer`], this is *not* a
-/// [`Module`] — its `forward` takes four inputs (hidden, mask, relative
-/// position grid, rel_embeddings) which doesn't fit the single-input
-/// trait signature. The encoder calls it directly as part of its own
-/// [`Module::forward_named`] implementation.
+/// Unlike the cross-family
+/// [`crate::models::transformer_layer::TransformerLayer`], this is
+/// *not* a [`Module`] — its `forward` takes four inputs (hidden, mask,
+/// relative position grid, rel_embeddings) which doesn't fit the
+/// single-input trait signature. The encoder calls it directly as part
+/// of its own [`flodl::nn::NamedInputModule::forward_named`]
+/// implementation.
 pub struct DebertaV2TransformerLayer {
     attention_self:   DisentangledSelfAttention,
     attention_output: DebertaV2SelfOutput,

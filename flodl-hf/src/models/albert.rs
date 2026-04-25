@@ -18,7 +18,7 @@
 //!    checkpoint uses `num_hidden_groups=1` and `inner_group_num=1`:
 //!    one transformer block, re-applied `num_hidden_layers` times.
 //!    [`AlbertLayerStack`] wraps a single
-//!    [`TransformerLayer`](crate::models::transformer_layer::TransformerLayer)
+//!    [`crate::models::transformer_layer::TransformerLayer`]
 //!    and forwards `num_hidden_layers` times inside a single
 //!    [`Module`]. Parameters surface once under the tag
 //!    `albert.encoder.albert_layer_groups.0.albert_layers.0` — the
@@ -45,7 +45,7 @@
 //! `hidden_act: "gelu_new"` — the tanh-approximation form
 //! (`0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`).
 //! [`AlbertConfig::from_json_str`] parses `hidden_act` into a
-//! [`GeluApprox`](flodl::nn::GeluApprox) and the encoder layer plus
+//! [`flodl::nn::GeluApprox`] and the encoder layer plus
 //! [`AlbertMLMHeadTransform`] dispatch to the matching libtorch op.
 //! Picking the wrong form silently produces a ~1e-2 max-abs diff that
 //! compounds across the encoder — large enough to fail any meaningful

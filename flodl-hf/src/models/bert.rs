@@ -605,7 +605,7 @@ impl QaHead<BertConfig> {
 /// private corpora. Callers feed masked `input_ids` (with `[MASK]`
 /// tokens at chosen positions) and labels shaped `[batch, seq_len]`
 /// where the loss-relevant positions carry the original token id and
-/// everything else is `-100`. See [`masked_lm_loss`].
+/// everything else is `-100`. See [`crate::task_heads::masked_lm_loss`].
 ///
 /// Parameter keys emitted by the graph (post-dedup):
 /// - `cls.predictions.transform.dense.{weight,bias}`

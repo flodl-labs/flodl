@@ -20,7 +20,7 @@
 //! built with `roberta.*` tags — the backbone and MLM builders here
 //! delegate to the corresponding `roberta.rs` helpers after a trivial
 //! [`From<&XlmRobertaConfig>`](XlmRobertaConfig) for
-//! [`RobertaConfig`](crate::models::roberta::RobertaConfig) conversion.
+//! [`crate::models::roberta::RobertaConfig`] conversion.
 //! A loaded safetensors checkpoint lines up directly without any key
 //! renaming.
 //!
@@ -169,7 +169,7 @@ impl From<&XlmRobertaConfig> for RobertaConfig {
 // ── XlmRobertaModel ──────────────────────────────────────────────────────
 
 /// Assembled XLM-RoBERTa graph — zero-sized marker type mirroring
-/// [`RobertaModel`](crate::models::roberta::RobertaModel).
+/// [`crate::models::roberta::RobertaModel`].
 ///
 /// The returned [`Graph`] has identical input signature and shape to
 /// its RoBERTa equivalent; see that type's documentation for the full
@@ -346,10 +346,9 @@ pub type XlmRobertaForMaskedLM = MaskedLmHead<XlmRobertaConfig>;
 
 impl MaskedLmHead<XlmRobertaConfig> {
     /// Build the full graph: backbone (no pooler) + LM-head transform +
-    /// tied decoder. Delegates to
-    /// [`roberta_masked_lm_graph`](crate::models::roberta::roberta_masked_lm_graph)
-    /// since the graph shape and state_dict keys are identical to
-    /// RoBERTa MLM.
+    /// tied decoder. Delegates to RoBERTa's crate-internal MLM graph
+    /// builder (`roberta_masked_lm_graph`) since the graph shape and
+    /// state_dict keys are identical to RoBERTa MLM.
     pub fn on_device(config: &XlmRobertaConfig, device: Device) -> Result<Self> {
         let rc: RobertaConfig = config.into();
         let graph = roberta_masked_lm_graph(&rc, device)?;

@@ -355,8 +355,8 @@ fn distilbert_backbone_flow(
 ///
 /// 1. `input_ids` (i64, shape `[batch, seq_len]`)
 /// 2. `attention_mask` (f32, shape `[batch, 1, 1, seq_len]`, additive —
-///    build with [`build_extended_attention_mask`] from a plain
-///    `[batch, seq_len]` 0/1 mask)
+///    build with [`crate::models::bert::build_extended_attention_mask`]
+///    from a plain `[batch, seq_len]` 0/1 mask)
 ///
 /// Output shape: `last_hidden_state` — `[batch, seq_len, dim]`. There
 /// is no pooled output; task heads handle CLS extraction themselves.
@@ -583,7 +583,7 @@ impl QaHead<DistilBertConfig> {
 /// Primary use case: **continued pretraining / domain adaptation** on
 /// private corpora. Callers feed masked `input_ids` and labels shaped
 /// `[batch, seq_len]` where loss-relevant positions carry the original
-/// token id and the rest is `-100`. See [`masked_lm_loss`].
+/// token id and the rest is `-100`. See [`crate::task_heads::masked_lm_loss`].
 ///
 /// Parameter keys emitted by the graph (post-dedup):
 /// - `vocab_transform.{weight,bias}`

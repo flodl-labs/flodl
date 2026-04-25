@@ -143,8 +143,8 @@ pub struct TransformerLayerConfig {
     pub layer_norm_eps: f64,
     /// FFN activation form. Each family parses this from its config —
     /// `hidden_act` for BERT/RoBERTa/ALBERT/XLM-R/DeBERTa-v2,
-    /// `activation` for DistilBERT — via
-    /// [`crate::config_json::optional_hidden_act`].
+    /// `activation` for DistilBERT — via the crate-internal
+    /// `optional_hidden_act` JSON helper.
     /// Default [`GeluApprox::None`] (erf form) matches the canonical
     /// `bert-base-uncased` / `roberta-base` / `distilbert-base-uncased`
     /// checkpoints. ALBERT both v1 and v2 ship `"gelu_new"` and need

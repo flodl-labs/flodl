@@ -678,7 +678,7 @@ impl Module for RobertaLMHeadTransform {
 /// Primary use case: **continued pretraining / domain adaptation** on
 /// private corpora. Callers feed masked `input_ids` and labels shaped
 /// `[batch, seq_len]` where loss-relevant positions carry the original
-/// token id and the rest is `-100`. See [`masked_lm_loss`].
+/// token id and the rest is `-100`. See [`crate::task_heads::masked_lm_loss`].
 ///
 /// Parameter keys emitted by the graph (post-dedup):
 /// - `lm_head.dense.{weight,bias}`

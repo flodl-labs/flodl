@@ -654,7 +654,8 @@ impl<C: Clone + EncoderInputs> QaHead<C> {
     }
 
     /// Run the graph on a pre-tokenised `(question, context)` batch
-    /// and extract best spans. See [`extract_best_span`].
+    /// and extract best spans. See the crate-internal
+    /// `extract_best_span` helper for the per-row logit-to-span logic.
     pub fn extract(
         &self,
         enc: &crate::tokenizer::EncodedBatch,
