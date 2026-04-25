@@ -18,11 +18,32 @@
 //! deberta-v2 (dispatched via `AutoConfig::from_json_str` on the repo's
 //! `model_type`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use flodl_hf::export::export_hf_dir;
 use flodl_hf::models::auto::{AutoConfig, AutoModel};
+
+/// Anchor a relative `out_dir` path against `FDL_PROJECT_ROOT` when set.
+///
+/// `fdl` injects this env var inside docker-compose-managed services so
+/// argv paths resolve from the host shell's invocation root regardless
+/// of the container's `working_dir` (which `fdl` overrides per-task to
+/// keep `cd flodl-hf/scripts` etc. working). Without this, a user typing
+/// `flodl-hf/tests/.exports/bert` from the repo root lands the export
+/// at `<container-cwd>/flodl-hf/tests/.exports/bert` instead of
+/// `<workspace-root>/flodl-hf/tests/.exports/bert`. Absolute paths and
+/// host-side runs are unaffected.
+fn resolve_out_dir(arg: &str) -> PathBuf {
+    let p = Path::new(arg);
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    if let Some(root) = std::env::var_os("FDL_PROJECT_ROOT") {
+        return PathBuf::from(root).join(p);
+    }
+    p.to_path_buf()
+}
 
 fn usage() -> ExitCode {
     eprintln!(
@@ -48,7 +69,7 @@ fn main() -> ExitCode {
         eprintln!("error: unexpected extra arguments");
         return usage();
     }
-    let out_dir = PathBuf::from(out_dir);
+    let out_dir = resolve_out_dir(&out_dir);
 
     eprintln!("fetching config.json for {repo_id} ...");
     let config = match AutoConfig::from_pretrained(&repo_id) {
@@ -61,7 +82,11 @@ fn main() -> ExitCode {
     eprintln!("detected family: {}", config.model_type());
 
     eprintln!("loading weights for {repo_id} ...");
-    let graph = match AutoModel::from_pretrained(&repo_id) {
+    // `_for_export` keeps the family pooler so HF AutoModel.from_pretrained
+    // gets every weight it expects on reload. Default `from_pretrained`
+    // strips the pooler for cross-family `last_hidden_state` consistency,
+    // which is wrong for export.
+    let graph = match AutoModel::from_pretrained_for_export(&repo_id) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("error: {e}");

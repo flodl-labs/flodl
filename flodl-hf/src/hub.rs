@@ -1121,6 +1121,44 @@ impl AutoModel {
         load_weights_with_logging(repo_id, &graph, &weights)?;
         Ok(graph)
     }
+
+    /// Download a pretrained model preserving the **full HF base layout**,
+    /// including the pooler where the family defines one.
+    ///
+    /// Use this for round-trip-to-HF export workflows: HF's
+    /// `AutoModel.from_pretrained(<exported_dir>)` expects every parameter
+    /// the original Hub checkpoint shipped, and silently re-initializes
+    /// any it can't find. The default
+    /// [`from_pretrained`](Self::from_pretrained) drops family-specific
+    /// pooler nodes for cross-family `last_hidden_state` consistency, so
+    /// exports built from it are missing pooler weights and fail HF-side
+    /// fidelity checks.
+    ///
+    /// Pooler-bearing families (BERT, RoBERTa, XLM-R, ALBERT) use their
+    /// `on_device` variant; pooler-less families (DistilBERT, DeBERTa-v2)
+    /// behave identically to [`from_pretrained`](Self::from_pretrained).
+    pub fn from_pretrained_for_export(repo_id: &str) -> Result<Graph> {
+        Self::from_pretrained_for_export_on_device(repo_id, Device::CPU)
+    }
+
+    /// Device-aware variant of
+    /// [`from_pretrained_for_export`](Self::from_pretrained_for_export).
+    pub fn from_pretrained_for_export_on_device(
+        repo_id: &str,
+        device: Device,
+    ) -> Result<Graph> {
+        let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let graph = match config {
+            AutoConfig::Bert(c) => BertModel::on_device(&c, device)?,
+            AutoConfig::Roberta(c) => RobertaModel::on_device(&c, device)?,
+            AutoConfig::DistilBert(c) => DistilBertModel::on_device(&c, device)?,
+            AutoConfig::XlmRoberta(c) => XlmRobertaModel::on_device(&c, device)?,
+            AutoConfig::Albert(c) => AlbertModel::on_device(&c, device)?,
+            AutoConfig::DebertaV2(c) => DebertaV2Model::on_device(&c, device)?,
+        };
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        Ok(graph)
+    }
 }
 
 impl AutoModelForSequenceClassification {

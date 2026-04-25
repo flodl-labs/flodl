@@ -527,8 +527,16 @@ pub fn exec_command(
             eprintln!("fdl: [{service}] {inner}");
         }
 
-        // Run via docker compose from the project root (with libtorch env).
-        let docker_cmd = format!("docker compose run --rm {service} bash -c \"{inner}\"");
+        // Surface the container-side workspace root to the inner
+        // process so entry binaries can re-anchor argv path arguments
+        // independently of the per-task `cd <root>/<workdir>` we
+        // injected above. Mirrors the `HF_HOME` pattern: `fdl` owns
+        // the env, the binary just reads it. Without this, a user
+        // typing `flodl-hf/tests/.exports/bert` from the host repo
+        // root resolves against the wrong cwd inside the container.
+        let docker_cmd = format!(
+            "docker compose run --rm -e FDL_PROJECT_ROOT={container_root} {service} bash -c \"{inner}\"",
+        );
         spawn_docker_shell(&docker_cmd, project_root)
     } else {
         // Direct execution (inside container or no docker configured).

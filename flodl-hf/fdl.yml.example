@@ -105,6 +105,11 @@ commands:
     description: Export a Hub repo as a HuggingFace-compatible directory for AutoModel.from_pretrained (model.safetensors + config.json via flodl's own writer)
     path: ./export/
 
+  verify-export-bert:
+    description: Verify HF AutoModel can load a flodl export of bert-base-uncased and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export bert-base-uncased flodl-hf/tests/.exports/bert`.
+    run: python scripts/verify_export_bert.py
+    docker: hf-parity
+
   example:
     description: Runnable examples (see `fdl flodl-hf example` for the list)
     path: ./examples/
