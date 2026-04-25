@@ -422,6 +422,88 @@ where
     load_safetensors_into_graph_with_rename(graph, &bytes, rename)
 }
 
+// ── Saving ────────────────────────────────────────────────────────────────
+
+/// Serialise a graph's parameters and buffers as safetensors bytes.
+///
+/// Iterates [`Graph::named_parameters`] and [`Graph::named_buffers`],
+/// converts each flodl key (slash form, e.g. `bert.pooler.dense/weight`)
+/// to its HF-dotted equivalent via [`hf_key_from_flodl_key`], and writes
+/// every tensor as f32 — the storage dtype flodl uses internally.
+///
+/// Tied parameters (the same `Variable` reachable through multiple tags)
+/// are deduped upstream by `named_parameters`, so each weight ships
+/// once. If two distinct tensors collide on the same HF key after
+/// renaming, the function returns a loud error rather than silently
+/// dropping one — that condition signals a tag-naming conflict in the
+/// model, not a save-layer bug.
+///
+/// Output ordering is deterministic: keys serialise in HF-dotted
+/// alphabetical order so the resulting file diffs cleanly across runs.
+///
+/// The bytes produced are byte-for-byte loadable by HF Python's
+/// `safe_open(...).load_state_dict(...)` for any model whose `state_dict`
+/// matches the saved key set.
+pub fn save_safetensors_from_graph(graph: &Graph) -> Result<Vec<u8>> {
+    use std::collections::BTreeMap;
+
+    // BTreeMap orders keys for deterministic byte output; (shape, bytes)
+    // payload owns the data so the TensorView slices below stay valid.
+    let mut entries: BTreeMap<String, (Vec<usize>, Vec<u8>)> = BTreeMap::new();
+
+    for (flodl_key, param) in graph.named_parameters() {
+        let hf_key = hf_key_from_flodl_key(&flodl_key);
+        let shape: Vec<usize> = param.variable.shape().iter().map(|&d| d as usize).collect();
+        let data = param.variable.data().to_f32_vec()?;
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        if entries.contains_key(&hf_key) {
+            return Err(TensorError::new(&format!(
+                "save_safetensors: HF key {hf_key:?} collision \
+                 — multiple distinct flodl tensors map to the same name; \
+                 fix the conflicting `tag(...)` in the graph",
+            )));
+        }
+        entries.insert(hf_key, (shape, bytes));
+    }
+
+    for (flodl_key, buffer) in graph.named_buffers() {
+        let hf_key = hf_key_from_flodl_key(&flodl_key);
+        let shape: Vec<usize> = buffer.shape().iter().map(|&d| d as usize).collect();
+        let data = buffer.get().to_f32_vec()?;
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        if entries.contains_key(&hf_key) {
+            return Err(TensorError::new(&format!(
+                "save_safetensors: HF key {hf_key:?} collision \
+                 — buffer collides with a parameter or another buffer",
+            )));
+        }
+        entries.insert(hf_key, (shape, bytes));
+    }
+
+    let views: HashMap<String, TensorView<'_>> = entries.iter()
+        .map(|(k, (shape, bytes))| {
+            let view = TensorView::new(Dtype::F32, shape.clone(), bytes.as_slice())
+                .map_err(|e| TensorError::new(&format!(
+                    "safetensors view build for {k:?}: {e}",
+                )))?;
+            Ok::<(String, TensorView<'_>), TensorError>((k.clone(), view))
+        })
+        .collect::<std::result::Result<_, _>>()?;
+
+    safetensors::serialize(&views, &None)
+        .map_err(|e| TensorError::new(&format!("safetensors serialize: {e}")))
+}
+
+/// Serialise a graph and write the bytes to `path`. Thin file wrapper
+/// over [`save_safetensors_from_graph`]; I/O errors carry the path in
+/// the message for easier debugging.
+pub fn save_safetensors_file_from_graph(graph: &Graph, path: &Path) -> Result<()> {
+    let bytes = save_safetensors_from_graph(graph)?;
+    std::fs::write(path, &bytes).map_err(|e| {
+        TensorError::new(&format!("safetensors write {}: {e}", path.display()))
+    })
+}
+
 /// Materialise a safetensors `TensorView` as a CPU f32 `Tensor`, then
 /// move it to `target_device`. Host-side dtype conversion keeps this
 /// module independent of libtorch fp16/bf16 constructors.
@@ -441,7 +523,12 @@ fn tensor_view_to_f32_tensor(view: &TensorView, target_device: Device) -> Result
 /// Rejects integer / bool dtypes — BERT-style checkpoints don't use them
 /// and silently accepting would mean casting integers to floats, which
 /// is almost never the user's intent.
-fn tensor_view_to_f32_vec(view: &TensorView) -> Result<Vec<f32>> {
+///
+/// Public so external callers (e.g. roundtrip tests, custom load
+/// pipelines) can decode safetensors values to f32 with the exact same
+/// dtype rules flodl uses on its load path. Equivalent on the f16 path
+/// to `f32::from(half::f16::from_bits(_))` without pulling in `half`.
+pub fn tensor_view_to_f32_vec(view: &TensorView) -> Result<Vec<f32>> {
     let bytes = view.data();
     match view.dtype() {
         Dtype::F32 => {
@@ -1101,5 +1188,208 @@ mod tests {
                 "expected HF-dotted key missing, got {keys:?}");
         // Sanity check: the parameter count matches Graph's own view.
         assert_eq!(expected.len(), graph.parameters().len());
+    }
+
+    /// Save → load roundtrip via the public API: build a tagged graph
+    /// with deterministic parameter values, save it as safetensors bytes,
+    /// load those bytes into a fresh graph with the same structure, and
+    /// assert every parameter is bit-exact f32 (lossless via the f32
+    /// storage dtype).
+    ///
+    /// This is the strongest invariant the save layer must hold —
+    /// "anything flodl loads, flodl can save and reload identically" —
+    /// and it's what the per-family `_roundtrip_*_live` tests rely on.
+    #[test]
+    fn save_safetensors_load_roundtrip() {
+        use flodl::{FlowBuilder, Linear, Module, Variable};
+
+        let dev = Device::CPU;
+        let in_dim = 3_i64;
+        let out_dim = 2_i64;
+
+        // Source graph with pinned weights.
+        let src = FlowBuilder::new()
+            .through(Linear::on_device(in_dim, out_dim, dev).unwrap())
+            .tag("my.linear")
+            .build().unwrap();
+        let src_weight: Vec<f32> = (0..(in_dim * out_dim) as usize)
+            .map(|i| 0.5 + i as f32 * 0.1).collect();
+        let src_bias: Vec<f32> = (0..out_dim as usize)
+            .map(|i| -1.0 + i as f32 * 0.25).collect();
+        for (k, p) in src.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let t = match hf.as_str() {
+                "my.linear.weight" => Tensor::from_f32(&src_weight, &[out_dim, in_dim], dev).unwrap(),
+                "my.linear.bias"   => Tensor::from_f32(&src_bias,   &[out_dim], dev).unwrap(),
+                other => panic!("unexpected key {other}"),
+            };
+            p.variable.set_data(t);
+        }
+
+        let bytes = save_safetensors_from_graph(&src).unwrap();
+
+        // Destination graph: fresh, same structure, load the saved bytes.
+        let dst = FlowBuilder::new()
+            .through(Linear::on_device(in_dim, out_dim, dev).unwrap())
+            .tag("my.linear")
+            .build().unwrap();
+        load_safetensors_into_graph(&dst, &bytes).unwrap();
+
+        let mut dw: Option<Vec<f32>> = None;
+        let mut db: Option<Vec<f32>> = None;
+        for (k, p) in dst.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let data = p.variable.data().to_f32_vec().unwrap();
+            match hf.as_str() {
+                "my.linear.weight" => dw = Some(data),
+                "my.linear.bias"   => db = Some(data),
+                other => panic!("unexpected key {other}"),
+            }
+        }
+        assert_eq!(dw.unwrap(), src_weight);
+        assert_eq!(db.unwrap(), src_bias);
+
+        let _keep_alive: Vec<Variable> =
+            dst.parameters().into_iter().map(|p| p.variable).collect();
+    }
+
+    /// Saved keys land in HF-dotted form (slash → dot on the last
+    /// segment) and the byte payload of each tensor matches the source's
+    /// little-endian f32 representation. Guards against the save path
+    /// drifting from `hf_key_from_flodl_key` and against endianness bugs
+    /// in the byte assembly.
+    #[test]
+    fn save_safetensors_uses_hf_dotted_keys_and_le_f32() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(2, 1, dev).unwrap())
+            .tag("encoder.layer.0.attention.output.dense")
+            .build().unwrap();
+        let w = vec![0.25_f32, -0.5];
+        let b = vec![1.0_f32];
+        for (k, p) in graph.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let t = match hf.as_str() {
+                "encoder.layer.0.attention.output.dense.weight"
+                    => Tensor::from_f32(&w, &[1, 2], dev).unwrap(),
+                "encoder.layer.0.attention.output.dense.bias"
+                    => Tensor::from_f32(&b, &[1], dev).unwrap(),
+                other => panic!("unexpected key {other}"),
+            };
+            p.variable.set_data(t);
+        }
+
+        let bytes = save_safetensors_from_graph(&graph).unwrap();
+        let st = SafeTensors::deserialize(&bytes).unwrap();
+
+        let names: HashSet<&str> = st.names().iter().map(|s| s.as_str()).collect();
+        assert!(names.contains("encoder.layer.0.attention.output.dense.weight"),
+            "expected HF-dotted key in output, got {names:?}");
+        assert!(names.contains("encoder.layer.0.attention.output.dense.bias"),
+            "expected HF-dotted key in output, got {names:?}");
+
+        let w_view = st.tensor("encoder.layer.0.attention.output.dense.weight").unwrap();
+        assert_eq!(w_view.dtype(), Dtype::F32);
+        assert_eq!(w_view.shape(), &[1_usize, 2]);
+        let w_back: Vec<f32> = w_view.data().chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(w_back, w);
+
+        let b_view = st.tensor("encoder.layer.0.attention.output.dense.bias").unwrap();
+        let b_back: Vec<f32> = b_view.data().chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(b_back, b);
+    }
+
+    /// Tied parameters — same `Variable` reachable under multiple tags —
+    /// are deduped by `named_parameters` upstream, so the saved file
+    /// contains the shared weight exactly once. Verifies the upstream
+    /// guarantee actually flows through to the byte output: a
+    /// hand-rolled tying via [`Linear::from_shared_weight`] yields one
+    /// weight key, not two.
+    #[test]
+    fn save_safetensors_dedups_shared_weights() {
+        use flodl::{FlowBuilder, Linear, Parameter};
+
+        let dev = Device::CPU;
+        let primary = Linear::on_device(2, 2, dev).unwrap();
+        let shared_weight = primary.weight.clone(); // Rc clone, same storage
+        let tied_bias = Parameter::new(
+            Tensor::from_f32(&[0.0_f32, 0.0], &[2], dev).unwrap(),
+            "bias",
+        );
+        let tied = Linear::from_shared_weight(shared_weight, Some(tied_bias));
+
+        let graph = FlowBuilder::new()
+            .through(primary).tag("primary")
+            .through(tied).tag("tied")
+            .build().unwrap();
+
+        let bytes = save_safetensors_from_graph(&graph).unwrap();
+        let st = SafeTensors::deserialize(&bytes).unwrap();
+        let names: HashSet<&str> = st.names().iter().map(|s| s.as_str()).collect();
+
+        // Shared weight ships once under whichever tag named_parameters
+        // visited first. Each Linear's own bias is a distinct Parameter,
+        // so both bias keys appear.
+        let weight_count = ["primary.weight", "tied.weight"].iter()
+            .filter(|k| names.contains(*k))
+            .count();
+        assert_eq!(
+            weight_count, 1,
+            "shared weight must ship exactly once, got {names:?}",
+        );
+        assert!(names.contains("primary.bias"), "primary bias missing in {names:?}");
+        assert!(names.contains("tied.bias"),    "tied bias missing in {names:?}");
+    }
+
+    /// File-path variant: same save → load roundtrip but through disk.
+    /// Exercises the file writer and the path-in-error-message behaviour
+    /// indirectly.
+    #[test]
+    fn save_safetensors_file_roundtrip() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(2, 1, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+        let w = vec![0.1_f32, 0.2];
+        let b = vec![0.3_f32];
+        for (k, p) in graph.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let t = match hf.as_str() {
+                "m.weight" => Tensor::from_f32(&w, &[1, 2], dev).unwrap(),
+                "m.bias"   => Tensor::from_f32(&b, &[1],    dev).unwrap(),
+                other => panic!("unexpected {other}"),
+            };
+            p.variable.set_data(t);
+        }
+
+        let path = std::env::temp_dir()
+            .join(format!("flodl_hf_save_test_{}.safetensors", std::process::id()));
+        save_safetensors_file_from_graph(&graph, &path).unwrap();
+
+        // Load back into a fresh graph through the file API; assert match.
+        let fresh = FlowBuilder::new()
+            .through(Linear::on_device(2, 1, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+        load_safetensors_file_into_graph(&fresh, &path).unwrap();
+
+        let _ = std::fs::remove_file(&path);
+
+        for (k, p) in fresh.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let data = p.variable.data().to_f32_vec().unwrap();
+            match hf.as_str() {
+                "m.weight" => assert_eq!(data, w),
+                "m.bias"   => assert_eq!(data, b),
+                other => panic!("unexpected {other}"),
+            }
+        }
     }
 }
