@@ -111,6 +111,8 @@ pub struct DebertaV2Config {
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
     pub id2label: Option<Vec<String>>,
+    /// See [`crate::models::bert::BertConfig::architectures`].
+    pub architectures: Option<Vec<String>>,
 }
 
 impl DebertaV2Config {
@@ -133,6 +135,7 @@ impl DebertaV2Config {
             pooler_hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 
@@ -145,7 +148,7 @@ impl DebertaV2Config {
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
             optional_bool, optional_f64, optional_hidden_act, optional_i64, optional_i64_or_none,
-            parse_id2label, parse_num_labels, required_i64,
+            parse_architectures, parse_id2label, parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -247,6 +250,7 @@ impl DebertaV2Config {
 
         let id2label = parse_id2label(&v)?;
         let num_labels = parse_num_labels(&v, id2label.as_deref());
+        let architectures = parse_architectures(&v);
 
         // max_relative_positions: -1 means "use max_position_embeddings".
         let max_pos_emb = required_i64(&v, "max_position_embeddings")?;
@@ -270,6 +274,7 @@ impl DebertaV2Config {
             pooler_hidden_act:            optional_hidden_act(&v, "pooler_hidden_act", "gelu")?,
             num_labels,
             id2label,
+            architectures,
         })
     }
 
@@ -284,12 +289,12 @@ impl DebertaV2Config {
     /// `model_type` as v2 under the hood) with
     /// `architectures: ["DebertaV2Model"]`.
     pub fn to_json_str(&self) -> String {
-        use crate::config_json::{emit_hidden_act, emit_id2label};
+        use crate::config_json::{emit_architectures, emit_hidden_act, emit_id2label};
         let mut m = serde_json::Map::new();
         m.insert("model_type".into(), "deberta-v2".into());
         m.insert(
             "architectures".into(),
-            serde_json::Value::Array(vec!["DebertaV2Model".into()]),
+            emit_architectures(self.architectures.as_deref(), "DebertaV2Model"),
         );
         m.insert("vocab_size".into(), self.vocab_size.into());
         m.insert("hidden_size".into(), self.hidden_size.into());
@@ -989,6 +994,7 @@ mod tests {
             pooler_hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 

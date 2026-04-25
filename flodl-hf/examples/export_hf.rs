@@ -65,9 +65,10 @@ struct ExportArgs {
     /// `config.json` without prompting.
     #[option]
     force: bool,
-    /// Write the loaded source config verbatim to `<out>/config.json`
-    /// instead of regenerating via the family's `to_json_str`.
-    /// Checkpoint mode only.
+    /// Also write the loaded source config verbatim to
+    /// `<out>/config.source.json` alongside the canonical `config.json`
+    /// (research / replication provenance — preserves fields the
+    /// canonical `to_json_str` normalises away). Checkpoint mode only.
     #[option]
     preserve_source_config: bool,
 }
@@ -166,9 +167,11 @@ fn dispatch(cli: &ExportArgs) -> Result<(), DispatchError> {
     if !cli.force {
         let model_path = out_dir.join("model.safetensors");
         let config_path = out_dir.join("config.json");
-        if model_path.exists() || config_path.exists() {
+        let source_path = out_dir.join("config.source.json");
+        let preserve_check = cli.preserve_source_config && source_path.exists();
+        if model_path.exists() || config_path.exists() || preserve_check {
             return Err(DispatchError::Runtime(format!(
-                "{} already contains model.safetensors or config.json. Pass --force to overwrite.",
+                "{} already contains model.safetensors / config.json (or config.source.json under --preserve-source-config). Pass --force to overwrite.",
                 out_dir.display(),
             )));
         }
@@ -265,14 +268,51 @@ fn run_checkpoint(
         report.missing.len(),
     );
 
-    let out_config = if preserve_source_config {
-        config_str
-    } else {
-        config.to_json_str()
-    };
+    // Canonical config.json always; --preserve-source-config additionally
+    // writes the verbatim source as config.source.json (research /
+    // replication provenance — keeps the unique fields the canonical
+    // form normalises away addressable, without breaking HF Python's
+    // AutoConfig path which still reads config.json).
+    let canonical_config = config.to_json_str();
+
+    let normalized = source_only_top_level_keys(&config_str, &canonical_config);
+    if !normalized.is_empty() {
+        eprintln!(
+            "note: {} field(s) present in source config not emitted in canonical: {}",
+            normalized.len(),
+            normalized.join(", "),
+        );
+    }
 
     eprintln!("exporting to {} ...", out_dir.display());
-    export_hf_dir(&graph, &out_config, out_dir)?;
+    export_hf_dir(&graph, &canonical_config, out_dir)?;
+
+    if preserve_source_config {
+        let source_path = out_dir.join("config.source.json");
+        std::fs::write(&source_path, &config_str).map_err(|e| {
+            flodl::TensorError::new(&format!(
+                "write {}: {e}",
+                source_path.display(),
+            ))
+        })?;
+        eprintln!(
+            "wrote source config to {} (canonical config.json kept for AutoConfig)",
+            source_path.display(),
+        );
+    }
+
+    let copied = copy_tokenizer_files(&checkpoint_path, out_dir)?;
+    if copied == 0 {
+        eprintln!(
+            "warning: no tokenizer files matched the auto-whitelist next to {}. \
+             Copy them into {} manually if HF Python needs them (tokenizer.json, \
+             vocab.txt, sentencepiece.bpe.model, ...).",
+            checkpoint_path.display(),
+            out_dir.display(),
+        );
+    } else {
+        eprintln!("copied {copied} tokenizer file(s) into {}", out_dir.display());
+    }
 
     println!(
         "exported {} → {}\n  model.safetensors + config.json ready for AutoModel.from_pretrained",
@@ -280,6 +320,89 @@ fn run_checkpoint(
         out_dir.display(),
     );
     Ok(())
+}
+
+/// Tokenizer files HF Python needs alongside `model.safetensors` /
+/// `config.json` to load a model fully. Whitelist is finite and
+/// deliberately narrow — it covers every public Hub checkpoint across
+/// the families flodl-hf supports without sweeping in training logs,
+/// optimizer state, or other run artefacts that happen to live next to
+/// the `.fdl` file.
+const TOKENIZER_WHITELIST: &[&str] = &[
+    // Fast tokenizer + metadata (every modern HF checkpoint ships at least the first).
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    // BERT family WordPiece vocab.
+    "vocab.txt",
+    // GPT/RoBERTa BPE pair.
+    "vocab.json",
+    "merges.txt",
+    // SentencePiece (XLM-R, ALBERT, DeBERTa-v2).
+    "sentencepiece.bpe.model",
+    "spm.model",
+];
+
+/// Walk the checkpoint's parent directory and copy any whitelisted
+/// tokenizer files into `out_dir`. Returns the count of files copied.
+///
+/// Non-recursive: only files directly next to the `.fdl` checkpoint
+/// are considered. Files outside the whitelist (training logs,
+/// optimizer state, README, …) are ignored. Returns the raw count so
+/// the caller can stderr-warn when zero matched without making it an
+/// error — a checkpoint dir without tokenizer files is unusual but
+/// not necessarily wrong (the user may copy them in manually, or the
+/// downstream consumer may not need them).
+fn copy_tokenizer_files(checkpoint_path: &Path, out_dir: &Path) -> flodl::Result<usize> {
+    let parent = match checkpoint_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => return Ok(0),
+    };
+    let mut copied = 0_usize;
+    for name in TOKENIZER_WHITELIST {
+        let src = parent.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        let dst = out_dir.join(name);
+        std::fs::copy(&src, &dst).map_err(|e| {
+            flodl::TensorError::new(&format!(
+                "copy tokenizer file {} -> {}: {e}",
+                src.display(),
+                dst.display(),
+            ))
+        })?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// Top-level keys present in `source_json` but absent from
+/// `canonical_json` — the fields the family's `to_json_str` normalised
+/// away during the canonical re-emit. Returned sorted for stable
+/// output. Both inputs are parsed as objects; non-object inputs return
+/// an empty list (the surrounding flow has already validated parseable
+/// JSON, so this is a defensive no-op).
+fn source_only_top_level_keys(source_json: &str, canonical_json: &str) -> Vec<String> {
+    let src: serde_json::Value = match serde_json::from_str(source_json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let canon: serde_json::Value = match serde_json::from_str(canonical_json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let (Some(src_obj), Some(canon_obj)) = (src.as_object(), canon.as_object()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = src_obj
+        .keys()
+        .filter(|k| !canon_obj.contains_key(k.as_str()))
+        .cloned()
+        .collect();
+    out.sort();
+    out
 }
 
 /// Resolve the sidecar config path for a checkpoint path. Mirrors

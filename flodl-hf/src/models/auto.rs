@@ -154,6 +154,23 @@ impl AutoConfig {
             AutoConfig::DebertaV2(c) => c.to_json_str(),
         }
     }
+
+    /// HF Python class names from the underlying `config.json`'s
+    /// `architectures` field. `None` when the config omitted the field
+    /// or when the array was empty / non-string. Used by
+    /// [`crate::export::build_for_export`] to dispatch a checkpoint to
+    /// the matching task-head builder when re-exporting via
+    /// `fdl flodl-hf export --checkpoint`.
+    pub fn architectures(&self) -> Option<&[String]> {
+        match self {
+            AutoConfig::Bert(c) => c.architectures.as_deref(),
+            AutoConfig::Roberta(c) => c.architectures.as_deref(),
+            AutoConfig::DistilBert(c) => c.architectures.as_deref(),
+            AutoConfig::XlmRoberta(c) => c.architectures.as_deref(),
+            AutoConfig::Albert(c) => c.architectures.as_deref(),
+            AutoConfig::DebertaV2(c) => c.architectures.as_deref(),
+        }
+    }
 }
 
 /// One-liner Hub loader that dispatches to the matching family

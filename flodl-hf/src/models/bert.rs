@@ -84,6 +84,13 @@ pub struct BertConfig {
     /// shipped with an `id2label` / `label2id` mapping. Ordered by integer
     /// id so `vec[k]` reads like HF Python's `config.id2label[k]`.
     pub id2label: Option<Vec<String>>,
+    /// HF Python class name list (e.g. `["BertForSequenceClassification"]`).
+    /// `None` for configs that omit the field; otherwise the verbatim list
+    /// from the source `config.json`. Read by
+    /// [`crate::export::build_for_export`] to dispatch a checkpoint to the
+    /// matching task-head builder, and round-tripped by
+    /// [`Self::to_json_str`] so HF Python re-dispatches to the same class.
+    pub architectures: Option<Vec<String>>,
 }
 
 impl BertConfig {
@@ -104,6 +111,7 @@ impl BertConfig {
             hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 
@@ -128,13 +136,14 @@ impl BertConfig {
     /// values error loudly.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_f64, optional_hidden_act, optional_i64_or_none, parse_id2label,
-            parse_num_labels, required_i64,
+            optional_f64, optional_hidden_act, optional_i64_or_none, parse_architectures,
+            parse_id2label, parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
         let id2label = parse_id2label(&v)?;
         let num_labels = parse_num_labels(&v, id2label.as_deref());
+        let architectures = parse_architectures(&v);
         Ok(BertConfig {
             vocab_size:              required_i64(&v, "vocab_size")?,
             hidden_size:             required_i64(&v, "hidden_size")?,
@@ -150,6 +159,7 @@ impl BertConfig {
             hidden_act: optional_hidden_act(&v, "hidden_act", "gelu")?,
             num_labels,
             id2label,
+            architectures,
         })
     }
 
@@ -164,12 +174,12 @@ impl BertConfig {
     /// [`safetensors_io::save_safetensors_file_from_graph`](crate::safetensors_io::save_safetensors_file_from_graph)
     /// to produce a directory HF Python can load directly.
     pub fn to_json_str(&self) -> String {
-        use crate::config_json::{emit_hidden_act, emit_id2label};
+        use crate::config_json::{emit_architectures, emit_hidden_act, emit_id2label};
         let mut m = serde_json::Map::new();
         m.insert("model_type".into(), "bert".into());
         m.insert(
             "architectures".into(),
-            serde_json::Value::Array(vec!["BertModel".into()]),
+            emit_architectures(self.architectures.as_deref(), "BertModel"),
         );
         m.insert("vocab_size".into(), self.vocab_size.into());
         m.insert("hidden_size".into(), self.hidden_size.into());
@@ -884,6 +894,7 @@ mod tests {
             hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 

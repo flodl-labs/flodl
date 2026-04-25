@@ -97,6 +97,8 @@ pub struct AlbertConfig {
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
     pub id2label: Option<Vec<String>>,
+    /// See [`crate::models::bert::BertConfig::architectures`].
+    pub architectures: Option<Vec<String>>,
 }
 
 impl AlbertConfig {
@@ -118,6 +120,7 @@ impl AlbertConfig {
             hidden_act: GeluApprox::Tanh,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 
@@ -133,8 +136,8 @@ impl AlbertConfig {
     /// to file against.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_f64, optional_hidden_act, optional_i64, optional_i64_or_none, parse_id2label,
-            parse_num_labels, required_i64,
+            optional_f64, optional_hidden_act, optional_i64, optional_i64_or_none,
+            parse_architectures, parse_id2label, parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
@@ -156,6 +159,7 @@ impl AlbertConfig {
         }
         let id2label = parse_id2label(&v)?;
         let num_labels = parse_num_labels(&v, id2label.as_deref());
+        let architectures = parse_architectures(&v);
         Ok(AlbertConfig {
             vocab_size:              required_i64(&v, "vocab_size")?,
             embedding_size:          required_i64(&v, "embedding_size")?,
@@ -175,6 +179,7 @@ impl AlbertConfig {
             hidden_act: optional_hidden_act(&v, "hidden_act", "gelu_new")?,
             num_labels,
             id2label,
+            architectures,
         })
     }
 
@@ -187,12 +192,12 @@ impl AlbertConfig {
     /// `AlbertConfig` defaults both to `1`, so the emitted config loads
     /// as-is.
     pub fn to_json_str(&self) -> String {
-        use crate::config_json::{emit_hidden_act, emit_id2label};
+        use crate::config_json::{emit_architectures, emit_hidden_act, emit_id2label};
         let mut m = serde_json::Map::new();
         m.insert("model_type".into(), "albert".into());
         m.insert(
             "architectures".into(),
-            serde_json::Value::Array(vec!["AlbertModel".into()]),
+            emit_architectures(self.architectures.as_deref(), "AlbertModel"),
         );
         m.insert("vocab_size".into(), self.vocab_size.into());
         m.insert("embedding_size".into(), self.embedding_size.into());
@@ -811,6 +816,7 @@ mod tests {
             hidden_act: GeluApprox::Tanh,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 

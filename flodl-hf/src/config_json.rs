@@ -160,6 +160,27 @@ pub(crate) fn parse_num_labels(v: &Value, id2label: Option<&[String]>) -> Option
         .or_else(|| id2label.map(|v| v.len() as i64))
 }
 
+/// Parse HuggingFace's `architectures` field (e.g.
+/// `["BertForSequenceClassification"]`) into an ordered `Vec<String>`.
+///
+/// HF stores this as a JSON array of class names; the first entry is
+/// the canonical class for dispatch (`AutoModel.from_pretrained` reads
+/// it). Returns `None` when the key is absent, not an array, or empty;
+/// non-string array entries are skipped silently — their presence
+/// would be a malformed config rather than a flodl-hf concern.
+///
+/// Used by [`crate::export::build_for_export`] to dispatch a checkpoint
+/// to the correct task-head builder when re-exporting via
+/// `fdl flodl-hf export --checkpoint`.
+pub(crate) fn parse_architectures(v: &Value) -> Option<Vec<String>> {
+    let arr = v.get("architectures").and_then(|x| x.as_array())?;
+    let names: Vec<String> = arr
+        .iter()
+        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+        .collect();
+    if names.is_empty() { None } else { Some(names) }
+}
+
 // ─── Write helpers (inverse of the readers above) ────────────────────────
 
 /// HF string to emit for a given [`GeluApprox`].
@@ -177,6 +198,25 @@ pub(crate) fn emit_hidden_act(act: GeluApprox) -> &'static str {
         GeluApprox::None => "gelu",
         GeluApprox::Tanh => "gelu_new",
     }
+}
+
+/// Emit the `architectures` field as a JSON array.
+///
+/// When the parsed config carried an `architectures` list, write it
+/// verbatim — preserves the canonical class name (e.g.
+/// `["BertForSequenceClassification"]`) so HF Python re-dispatches to
+/// the same task head, and so flodl-hf's own
+/// [`crate::export::build_for_export`] can re-build the same head on
+/// `--checkpoint` re-export. Otherwise emit `[default_class]`, which
+/// is the family base name (`BertModel`, `RobertaModel`, …).
+pub(crate) fn emit_architectures(stored: Option<&[String]>, default_class: &str) -> Value {
+    let arr: Vec<Value> = match stored {
+        Some(names) if !names.is_empty() => {
+            names.iter().map(|s| Value::from(s.as_str())).collect()
+        }
+        _ => vec![Value::from(default_class)],
+    };
+    Value::Array(arr)
 }
 
 /// Write the `id2label` + `label2id` pair into the given JSON object,

@@ -133,6 +133,8 @@ pub struct DistilBertConfig {
     pub num_labels: Option<i64>,
     /// See [`crate::models::bert::BertConfig::id2label`].
     pub id2label: Option<Vec<String>>,
+    /// See [`crate::models::bert::BertConfig::architectures`].
+    pub architectures: Option<Vec<String>>,
 }
 
 impl DistilBertConfig {
@@ -155,6 +157,7 @@ impl DistilBertConfig {
             hidden_act: GeluApprox::None,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 
@@ -172,13 +175,14 @@ impl DistilBertConfig {
     /// values error loudly.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_bool, optional_f64, optional_hidden_act, optional_i64, parse_id2label,
-            parse_num_labels, required_i64,
+            optional_bool, optional_f64, optional_hidden_act, optional_i64, parse_architectures,
+            parse_id2label, parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
         let id2label = parse_id2label(&v)?;
         let num_labels = parse_num_labels(&v, id2label.as_deref());
+        let architectures = parse_architectures(&v);
         Ok(DistilBertConfig {
             vocab_size:              required_i64(&v, "vocab_size")?,
             dim:                     required_i64(&v, "dim")?,
@@ -196,6 +200,7 @@ impl DistilBertConfig {
             hidden_act:              optional_hidden_act(&v, "activation", "gelu")?,
             num_labels,
             id2label,
+            architectures,
         })
     }
 
@@ -208,12 +213,12 @@ impl DistilBertConfig {
     /// Python `DistilBertConfig` parses it unchanged. Emits
     /// `model_type: "distilbert"` + `architectures: ["DistilBertModel"]`.
     pub fn to_json_str(&self) -> String {
-        use crate::config_json::{emit_hidden_act, emit_id2label};
+        use crate::config_json::{emit_architectures, emit_hidden_act, emit_id2label};
         let mut m = serde_json::Map::new();
         m.insert("model_type".into(), "distilbert".into());
         m.insert(
             "architectures".into(),
-            serde_json::Value::Array(vec!["DistilBertModel".into()]),
+            emit_architectures(self.architectures.as_deref(), "DistilBertModel"),
         );
         m.insert("vocab_size".into(), self.vocab_size.into());
         m.insert("dim".into(), self.dim.into());
