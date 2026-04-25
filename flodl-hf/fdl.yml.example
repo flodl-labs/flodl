@@ -110,6 +110,31 @@ commands:
     run: python scripts/verify_export_bert.py
     docker: hf-parity
 
+  verify-export-roberta:
+    description: Verify HF AutoModel can load a flodl export of roberta-base and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export roberta-base flodl-hf/tests/.exports/roberta`.
+    run: python scripts/verify_export_roberta.py
+    docker: hf-parity
+
+  verify-export-distilbert:
+    description: Verify HF AutoModel can load a flodl export of distilbert-base-uncased and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export distilbert/distilbert-base-uncased flodl-hf/tests/.exports/distilbert`.
+    run: python scripts/verify_export_distilbert.py
+    docker: hf-parity
+
+  verify-export-xlm-roberta:
+    description: Verify HF AutoModel can load a flodl export of xlm-roberta-base and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export FacebookAI/xlm-roberta-base flodl-hf/tests/.exports/xlm-roberta`.
+    run: python scripts/verify_export_xlm_roberta.py
+    docker: hf-parity
+
+  verify-export-albert:
+    description: Verify HF AutoModel can load a flodl export of albert-base-v2 and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export albert/albert-base-v2 flodl-hf/tests/.exports/albert`.
+    run: python scripts/verify_export_albert.py
+    docker: hf-parity
+
+  verify-export-deberta-v2:
+    description: Verify HF AutoModel can load a flodl export of deberta-v3-base and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export microsoft/deberta-v3-base flodl-hf/tests/.exports/deberta-v2`.
+    run: python scripts/verify_export_deberta_v2.py
+    docker: hf-parity
+
   example:
     description: Runnable examples (see `fdl flodl-hf example` for the list)
     path: ./examples/

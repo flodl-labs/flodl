@@ -47,6 +47,7 @@ use crate::models::xlm_roberta::{
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
 };
+use safetensors::SafeTensors;
 #[cfg(feature = "tokenizer")]
 use crate::tokenizer::HfTokenizer;
 
@@ -1134,9 +1135,13 @@ impl AutoModel {
     /// exports built from it are missing pooler weights and fail HF-side
     /// fidelity checks.
     ///
-    /// Pooler-bearing families (BERT, RoBERTa, XLM-R, ALBERT) use their
-    /// `on_device` variant; pooler-less families (DistilBERT, DeBERTa-v2)
-    /// behave identically to [`from_pretrained`](Self::from_pretrained).
+    /// Pooler-bearing families (BERT, RoBERTa, XLM-R, ALBERT) auto-pick
+    /// `on_device` vs `on_device_without_pooler` by inspecting the
+    /// checkpoint: with-pooler when pooler weights ship, without-pooler
+    /// when the Hub repo is encoder-only (e.g. `roberta-base`,
+    /// `FacebookAI/xlm-roberta-base`). Pooler-less families (DistilBERT,
+    /// DeBERTa-v2) behave identically to
+    /// [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_for_export(repo_id: &str) -> Result<Graph> {
         Self::from_pretrained_for_export_on_device(repo_id, Device::CPU)
     }
@@ -1148,12 +1153,49 @@ impl AutoModel {
         device: Device,
     ) -> Result<Graph> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+
+        // Pick with-pooler vs without-pooler dynamically based on what
+        // the checkpoint actually ships. Some Hub repos for pooler-
+        // bearing families are encoder-only (e.g. `roberta-base`,
+        // `FacebookAI/xlm-roberta-base`). Building with a pooler whose
+        // weights aren't in the checkpoint trips the missing-keys
+        // validation in `load_safetensors_into_graph_with_rename_allow_unused`.
+        let st = SafeTensors::deserialize(&weights)
+            .map_err(|e| TensorError::new(&format!("safetensors parse error: {e}")))?;
+        let has_pooler = st.names().iter().any(|n|
+            n.ends_with("pooler.dense.weight") || n.ends_with("pooler.dense.bias"));
+        drop(st);
+
         let graph = match config {
-            AutoConfig::Bert(c) => BertModel::on_device(&c, device)?,
-            AutoConfig::Roberta(c) => RobertaModel::on_device(&c, device)?,
+            AutoConfig::Bert(c) => {
+                if has_pooler {
+                    BertModel::on_device(&c, device)?
+                } else {
+                    BertModel::on_device_without_pooler(&c, device)?
+                }
+            }
+            AutoConfig::Roberta(c) => {
+                if has_pooler {
+                    RobertaModel::on_device(&c, device)?
+                } else {
+                    RobertaModel::on_device_without_pooler(&c, device)?
+                }
+            }
             AutoConfig::DistilBert(c) => DistilBertModel::on_device(&c, device)?,
-            AutoConfig::XlmRoberta(c) => XlmRobertaModel::on_device(&c, device)?,
-            AutoConfig::Albert(c) => AlbertModel::on_device(&c, device)?,
+            AutoConfig::XlmRoberta(c) => {
+                if has_pooler {
+                    XlmRobertaModel::on_device(&c, device)?
+                } else {
+                    XlmRobertaModel::on_device_without_pooler(&c, device)?
+                }
+            }
+            AutoConfig::Albert(c) => {
+                if has_pooler {
+                    AlbertModel::on_device(&c, device)?
+                } else {
+                    AlbertModel::on_device_without_pooler(&c, device)?
+                }
+            }
             AutoConfig::DebertaV2(c) => DebertaV2Model::on_device(&c, device)?,
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
