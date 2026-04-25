@@ -90,6 +90,10 @@ required-features = ["hub", "tokenizer"]
 name = "auto_classify"
 required-features = ["hub", "tokenizer"]
 
+[[example]]
+name = "export_hf"
+required-features = ["hub"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustc-args = ["--cfg", "docsrs"]

@@ -273,6 +273,69 @@ impl DebertaV2Config {
         })
     }
 
+    /// Serialize to a HuggingFace-style `config.json` string.
+    ///
+    /// Inverse of [`Self::from_json_str`]. Emits the full set of knobs
+    /// the parser validates: `relative_attention: true`,
+    /// `share_att_key: true`, `position_biased_input: false`,
+    /// `pos_att_type: "p2c|c2p"`, `norm_rel_ebd: "layer_norm"`,
+    /// `legacy: false`, `type_vocab_size: 0`. Model type is emitted as
+    /// `"deberta-v2"` (matching HF — v3 checkpoints use the same
+    /// `model_type` as v2 under the hood) with
+    /// `architectures: ["DebertaV2Model"]`.
+    pub fn to_json_str(&self) -> String {
+        use crate::config_json::{emit_hidden_act, emit_id2label};
+        let mut m = serde_json::Map::new();
+        m.insert("model_type".into(), "deberta-v2".into());
+        m.insert(
+            "architectures".into(),
+            serde_json::Value::Array(vec!["DebertaV2Model".into()]),
+        );
+        m.insert("vocab_size".into(), self.vocab_size.into());
+        m.insert("hidden_size".into(), self.hidden_size.into());
+        m.insert("num_hidden_layers".into(), self.num_hidden_layers.into());
+        m.insert("num_attention_heads".into(), self.num_attention_heads.into());
+        m.insert("intermediate_size".into(), self.intermediate_size.into());
+        m.insert(
+            "max_position_embeddings".into(),
+            self.max_position_embeddings.into(),
+        );
+        m.insert("type_vocab_size".into(), 0i64.into());
+        if let Some(pad) = self.pad_token_id {
+            m.insert("pad_token_id".into(), pad.into());
+        }
+        m.insert("layer_norm_eps".into(), self.layer_norm_eps.into());
+        m.insert("hidden_dropout_prob".into(), self.hidden_dropout_prob.into());
+        m.insert(
+            "attention_probs_dropout_prob".into(),
+            self.attention_probs_dropout_prob.into(),
+        );
+        m.insert("position_buckets".into(), self.position_buckets.into());
+        m.insert(
+            "max_relative_positions".into(),
+            self.max_relative_positions.into(),
+        );
+        m.insert("hidden_act".into(), emit_hidden_act(self.hidden_act).into());
+        m.insert(
+            "pooler_hidden_act".into(),
+            emit_hidden_act(self.pooler_hidden_act).into(),
+        );
+        // Architecture invariants the parser validates — every published
+        // v3 checkpoint sets these exact values.
+        m.insert("relative_attention".into(), true.into());
+        m.insert("share_att_key".into(), true.into());
+        m.insert("position_biased_input".into(), false.into());
+        m.insert("pos_att_type".into(), "p2c|c2p".into());
+        m.insert("norm_rel_ebd".into(), "layer_norm".into());
+        m.insert("legacy".into(), false.into());
+        emit_id2label(&mut m, self.id2label.as_deref());
+        if let Some(n) = self.num_labels {
+            m.insert("num_labels".into(), n.into());
+        }
+        serde_json::to_string_pretty(&serde_json::Value::Object(m))
+            .expect("serde_json::Map serialization is infallible")
+    }
+
     fn layer_config(&self) -> DebertaV2LayerConfig {
         // position_buckets defaults to max_relative_positions when
         // the config field is negative (mirrors HF's pos_ebd_size logic).
@@ -863,6 +926,48 @@ impl MaskedLmHead<DebertaV2Config> {
 mod tests {
     use super::*;
     use crate::safetensors_io::expected_from_graph;
+
+    /// Round-trip: preset -> to_json_str -> from_json_str recovers the
+    /// same config. DeBERTa-v2's writer emits a wide set of invariants
+    /// the parser validates (`relative_attention: true`,
+    /// `share_att_key: true`, `position_biased_input: false`,
+    /// `pos_att_type: "p2c|c2p"`, `norm_rel_ebd: "layer_norm"`,
+    /// `legacy: false`, `type_vocab_size: 0`) — this test catches any
+    /// drift between the emitted JSON and what the parser accepts.
+    #[test]
+    fn deberta_v2_config_to_json_str_round_trip() {
+        let preset = DebertaV2Config::deberta_v3_base();
+        let s = preset.to_json_str();
+        let recovered = DebertaV2Config::from_json_str(&s).unwrap();
+        assert_eq!(preset.to_json_str(), recovered.to_json_str());
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            v.get("model_type").and_then(|x| x.as_str()),
+            Some("deberta-v2"),
+        );
+        // Validator-trip fields the parser rejects without them.
+        assert_eq!(
+            v.get("relative_attention").and_then(|x| x.as_bool()),
+            Some(true),
+        );
+        assert_eq!(v.get("share_att_key").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(
+            v.get("position_biased_input").and_then(|x| x.as_bool()),
+            Some(false),
+        );
+        assert_eq!(
+            v.get("pos_att_type").and_then(|x| x.as_str()),
+            Some("p2c|c2p"),
+        );
+        assert_eq!(
+            v.get("norm_rel_ebd").and_then(|x| x.as_str()),
+            Some("layer_norm"),
+        );
+        assert_eq!(v.get("legacy").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(v.get("type_vocab_size").and_then(|x| x.as_i64()), Some(0));
+        // pooler_hidden_act present (separate field from hidden_act).
+        assert!(v.get("pooler_hidden_act").is_some());
+    }
 
     fn mini_config() -> DebertaV2Config {
         // Small dims so tests run fast while still exercising the

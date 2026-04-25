@@ -130,6 +130,46 @@ impl RobertaConfig {
             id2label,
         })
     }
+
+    /// Serialize to a HuggingFace-style `config.json` string.
+    ///
+    /// Inverse of [`Self::from_json_str`]. Emits `model_type: "roberta"`
+    /// and `architectures: ["RobertaModel"]` for HF `AutoConfig`
+    /// dispatch, plus every field the parser reads so a round-trip is
+    /// lossless on shape-affecting state.
+    pub fn to_json_str(&self) -> String {
+        use crate::config_json::{emit_hidden_act, emit_id2label};
+        let mut m = serde_json::Map::new();
+        m.insert("model_type".into(), "roberta".into());
+        m.insert(
+            "architectures".into(),
+            serde_json::Value::Array(vec!["RobertaModel".into()]),
+        );
+        m.insert("vocab_size".into(), self.vocab_size.into());
+        m.insert("hidden_size".into(), self.hidden_size.into());
+        m.insert("num_hidden_layers".into(), self.num_hidden_layers.into());
+        m.insert("num_attention_heads".into(), self.num_attention_heads.into());
+        m.insert("intermediate_size".into(), self.intermediate_size.into());
+        m.insert(
+            "max_position_embeddings".into(),
+            self.max_position_embeddings.into(),
+        );
+        m.insert("type_vocab_size".into(), self.type_vocab_size.into());
+        m.insert("pad_token_id".into(), self.pad_token_id.into());
+        m.insert("layer_norm_eps".into(), self.layer_norm_eps.into());
+        m.insert("hidden_dropout_prob".into(), self.hidden_dropout_prob.into());
+        m.insert(
+            "attention_probs_dropout_prob".into(),
+            self.attention_probs_dropout_prob.into(),
+        );
+        m.insert("hidden_act".into(), emit_hidden_act(self.hidden_act).into());
+        emit_id2label(&mut m, self.id2label.as_deref());
+        if let Some(n) = self.num_labels {
+            m.insert("num_labels".into(), n.into());
+        }
+        serde_json::to_string_pretty(&serde_json::Value::Object(m))
+            .expect("serde_json::Map serialization is infallible")
+    }
 }
 
 // ── RobertaEmbeddings ────────────────────────────────────────────────────
@@ -784,6 +824,19 @@ mod tests {
             "output.dense.weight",
         ];
         suffixes.iter().map(|s| format!("roberta.encoder.layer.{i}.{s}")).collect()
+    }
+
+    /// Round-trip: preset -> to_json_str -> from_json_str recovers the
+    /// same config. Guards against missing fields in the emitted JSON
+    /// (parser errors on required_i64) and silent default drift.
+    #[test]
+    fn roberta_config_to_json_str_round_trip() {
+        let preset = RobertaConfig::roberta_base();
+        let s = preset.to_json_str();
+        let recovered = RobertaConfig::from_json_str(&s).unwrap();
+        assert_eq!(preset.to_json_str(), recovered.to_json_str());
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v.get("model_type").and_then(|x| x.as_str()), Some("roberta"));
     }
 
     /// Full key set (199 keys: 5 embeddings + 16×12 layers + 2 pooler)

@@ -101,6 +101,10 @@ commands:
     run: python scripts/parity_deberta_v2.py
     docker: hf-parity
 
+  export:
+    description: Export a Hub repo as a HuggingFace-compatible directory for AutoModel.from_pretrained (model.safetensors + config.json via flodl's own writer)
+    path: ./export/
+
   example:
     description: Runnable examples (see `fdl flodl-hf example` for the list)
     path: ./examples/

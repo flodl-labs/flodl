@@ -152,6 +152,52 @@ impl BertConfig {
             id2label,
         })
     }
+
+    /// Serialize to a HuggingFace-style `config.json` string.
+    ///
+    /// Inverse of [`Self::from_json_str`]: the emitted JSON round-trips
+    /// back to an equal `BertConfig` on every shape-affecting field.
+    /// Includes `model_type: "bert"` + `architectures: ["BertModel"]` so
+    /// HF `AutoConfig` / `AutoModel` can dispatch without extra hints.
+    ///
+    /// Intended for the `fdl flodl-hf export` path — pair with
+    /// [`safetensors_io::save_safetensors_file_from_graph`](crate::safetensors_io::save_safetensors_file_from_graph)
+    /// to produce a directory HF Python can load directly.
+    pub fn to_json_str(&self) -> String {
+        use crate::config_json::{emit_hidden_act, emit_id2label};
+        let mut m = serde_json::Map::new();
+        m.insert("model_type".into(), "bert".into());
+        m.insert(
+            "architectures".into(),
+            serde_json::Value::Array(vec!["BertModel".into()]),
+        );
+        m.insert("vocab_size".into(), self.vocab_size.into());
+        m.insert("hidden_size".into(), self.hidden_size.into());
+        m.insert("num_hidden_layers".into(), self.num_hidden_layers.into());
+        m.insert("num_attention_heads".into(), self.num_attention_heads.into());
+        m.insert("intermediate_size".into(), self.intermediate_size.into());
+        m.insert(
+            "max_position_embeddings".into(),
+            self.max_position_embeddings.into(),
+        );
+        m.insert("type_vocab_size".into(), self.type_vocab_size.into());
+        if let Some(pad) = self.pad_token_id {
+            m.insert("pad_token_id".into(), pad.into());
+        }
+        m.insert("layer_norm_eps".into(), self.layer_norm_eps.into());
+        m.insert("hidden_dropout_prob".into(), self.hidden_dropout_prob.into());
+        m.insert(
+            "attention_probs_dropout_prob".into(),
+            self.attention_probs_dropout_prob.into(),
+        );
+        m.insert("hidden_act".into(), emit_hidden_act(self.hidden_act).into());
+        emit_id2label(&mut m, self.id2label.as_deref());
+        if let Some(n) = self.num_labels {
+            m.insert("num_labels".into(), n.into());
+        }
+        serde_json::to_string_pretty(&serde_json::Value::Object(m))
+            .expect("serde_json::Map serialization is infallible")
+    }
 }
 
 // ── BertEmbeddings ───────────────────────────────────────────────────────
@@ -1017,6 +1063,58 @@ mod tests {
         assert!((c.layer_norm_eps               - 1e-12).abs() < 1e-18);
         assert!((c.hidden_dropout_prob          - 0.1).abs() < 1e-9);
         assert!((c.attention_probs_dropout_prob - 0.1).abs() < 1e-9);
+    }
+
+    /// Round-trip: preset -> to_json_str -> from_json_str recovers the
+    /// same config. Guards against fields the writer forgets to emit
+    /// (any required_i64 that's missing in the emitted JSON errors
+    /// during parse) and against silent default drift.
+    #[test]
+    fn bert_config_to_json_str_round_trip() {
+        let preset = BertConfig::bert_base_uncased();
+        let s = preset.to_json_str();
+        let recovered = BertConfig::from_json_str(&s).unwrap();
+        // Round-trip is idempotent: emitting the recovered config
+        // produces identical JSON.
+        assert_eq!(preset.to_json_str(), recovered.to_json_str());
+        // HF dispatch keys present so AutoConfig loads it.
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v.get("model_type").and_then(|x| x.as_str()), Some("bert"));
+        assert_eq!(
+            v.get("architectures")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()),
+            Some(vec!["BertModel"]),
+        );
+    }
+
+    /// Task-head config survives round-trip: id2label + num_labels +
+    /// non-None pad_token_id all land in the emitted JSON and re-parse.
+    #[test]
+    fn bert_config_to_json_str_preserves_task_head_metadata() {
+        let mut preset = BertConfig::bert_base_uncased();
+        preset.num_labels = Some(3);
+        preset.id2label = Some(vec![
+            "POS".to_string(),
+            "NEG".to_string(),
+            "NEU".to_string(),
+        ]);
+        let s = preset.to_json_str();
+        let r = BertConfig::from_json_str(&s).unwrap();
+        assert_eq!(r.num_labels, Some(3));
+        assert_eq!(
+            r.id2label.as_deref(),
+            Some(&[
+                "POS".to_string(),
+                "NEG".to_string(),
+                "NEU".to_string(),
+            ][..])
+        );
+        // label2id was emitted alongside id2label (HF convention).
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let lab2 = v.get("label2id").and_then(|x| x.as_object()).unwrap();
+        assert_eq!(lab2.get("POS").and_then(|x| x.as_i64()), Some(0));
+        assert_eq!(lab2.get("NEU").and_then(|x| x.as_i64()), Some(2));
     }
 
     /// Smoke test: construct a tiny BERT on CPU, run forward_multi with

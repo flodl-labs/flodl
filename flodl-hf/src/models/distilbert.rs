@@ -198,6 +198,50 @@ impl DistilBertConfig {
             id2label,
         })
     }
+
+    /// Serialize to a HuggingFace-style `config.json` string.
+    ///
+    /// Inverse of [`Self::from_json_str`]. DistilBERT uses HF's
+    /// shorter field names (`dim`, `n_layers`, `n_heads`, `hidden_dim`,
+    /// `activation`, `dropout`, `attention_dropout`) rather than the
+    /// BERT-family names — the emitted JSON matches that shape so the
+    /// Python `DistilBertConfig` parses it unchanged. Emits
+    /// `model_type: "distilbert"` + `architectures: ["DistilBertModel"]`.
+    pub fn to_json_str(&self) -> String {
+        use crate::config_json::{emit_hidden_act, emit_id2label};
+        let mut m = serde_json::Map::new();
+        m.insert("model_type".into(), "distilbert".into());
+        m.insert(
+            "architectures".into(),
+            serde_json::Value::Array(vec!["DistilBertModel".into()]),
+        );
+        m.insert("vocab_size".into(), self.vocab_size.into());
+        m.insert("dim".into(), self.dim.into());
+        m.insert("n_layers".into(), self.n_layers.into());
+        m.insert("n_heads".into(), self.n_heads.into());
+        m.insert("hidden_dim".into(), self.hidden_dim.into());
+        m.insert(
+            "max_position_embeddings".into(),
+            self.max_position_embeddings.into(),
+        );
+        m.insert("pad_token_id".into(), self.pad_token_id.into());
+        m.insert("dropout".into(), self.dropout.into());
+        m.insert("attention_dropout".into(), self.attention_dropout.into());
+        m.insert("qa_dropout".into(), self.qa_dropout.into());
+        m.insert("seq_classif_dropout".into(), self.seq_classif_dropout.into());
+        m.insert(
+            "sinusoidal_pos_embds".into(),
+            self.sinusoidal_pos_embds.into(),
+        );
+        m.insert("layer_norm_eps".into(), self.layer_norm_eps.into());
+        m.insert("activation".into(), emit_hidden_act(self.hidden_act).into());
+        emit_id2label(&mut m, self.id2label.as_deref());
+        if let Some(n) = self.num_labels {
+            m.insert("num_labels".into(), n.into());
+        }
+        serde_json::to_string_pretty(&serde_json::Value::Object(m))
+            .expect("serde_json::Map serialization is infallible")
+    }
 }
 
 // ── DistilBertEmbeddings ─────────────────────────────────────────────────
@@ -686,6 +730,27 @@ mod tests {
         suffixes.iter()
             .map(|s| format!("distilbert.transformer.layer.{i}.{s}"))
             .collect()
+    }
+
+    /// Round-trip: preset -> to_json_str -> from_json_str recovers the
+    /// same config. DistilBERT uses HF's short field names (`dim`,
+    /// `n_layers`, `n_heads`, `hidden_dim`, `activation`) — this test
+    /// catches any drift between the reader and writer.
+    #[test]
+    fn distilbert_config_to_json_str_round_trip() {
+        let preset = DistilBertConfig::distilbert_base_uncased();
+        let s = preset.to_json_str();
+        let recovered = DistilBertConfig::from_json_str(&s).unwrap();
+        assert_eq!(preset.to_json_str(), recovered.to_json_str());
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            v.get("model_type").and_then(|x| x.as_str()),
+            Some("distilbert"),
+        );
+        // Short-form field names present (DistilBERT-specific).
+        assert!(v.get("dim").is_some());
+        assert!(v.get("n_layers").is_some());
+        assert!(v.get("activation").is_some());
     }
 
     /// Backbone keys: 4 embeddings + 16 × n_layers encoder keys.

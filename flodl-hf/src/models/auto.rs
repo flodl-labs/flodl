@@ -139,6 +139,21 @@ impl AutoConfig {
             AutoConfig::DebertaV2(_) => "deberta-v2",
         }
     }
+
+    /// Dispatch to the inner family config's `to_json_str`. Produces
+    /// an HF-compatible `config.json` string that round-trips through
+    /// [`AutoConfig::from_json_str`]. Primary caller:
+    /// [`crate::export::export_hf_dir`].
+    pub fn to_json_str(&self) -> String {
+        match self {
+            AutoConfig::Bert(c) => c.to_json_str(),
+            AutoConfig::Roberta(c) => c.to_json_str(),
+            AutoConfig::DistilBert(c) => c.to_json_str(),
+            AutoConfig::XlmRoberta(c) => c.to_json_str(),
+            AutoConfig::Albert(c) => c.to_json_str(),
+            AutoConfig::DebertaV2(c) => c.to_json_str(),
+        }
+    }
 }
 
 /// One-liner Hub loader that dispatches to the matching family

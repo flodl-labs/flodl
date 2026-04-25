@@ -160,6 +160,43 @@ pub(crate) fn parse_num_labels(v: &Value, id2label: Option<&[String]>) -> Option
         .or_else(|| id2label.map(|v| v.len() as i64))
 }
 
+// ─── Write helpers (inverse of the readers above) ────────────────────────
+
+/// HF string to emit for a given [`GeluApprox`].
+///
+/// `None` → `"gelu"` (erf form), `Tanh` → `"gelu_new"`. Both HF strings
+/// `"gelu_new"` and `"gelu_pytorch_tanh"` parse back to
+/// [`GeluApprox::Tanh`], so a config written with `"gelu_pytorch_tanh"`
+/// and round-tripped through flodl-hf will normalize to `"gelu_new"`.
+/// Picking `"gelu_new"` keeps us in lockstep with every public Hub
+/// checkpoint (ALBERT/GPT-2 variants and the BERT-family forks that use
+/// the tanh form), and every HF transformers release routes it through
+/// the same ACT2FN entry.
+pub(crate) fn emit_hidden_act(act: GeluApprox) -> &'static str {
+    match act {
+        GeluApprox::None => "gelu",
+        GeluApprox::Tanh => "gelu_new",
+    }
+}
+
+/// Write the `id2label` + `label2id` pair into the given JSON object,
+/// mirroring HF's convention (both maps present, string↔integer).
+///
+/// Inverse of [`parse_id2label`]. Keys are stringified integer ids
+/// (`"0"`, `"1"`, …); `label2id` is `{name: id}`. Skipped entirely if
+/// `labels` is `None`.
+pub(crate) fn emit_id2label(out: &mut serde_json::Map<String, Value>, labels: Option<&[String]>) {
+    let Some(labels) = labels else { return };
+    let mut id2 = serde_json::Map::with_capacity(labels.len());
+    let mut lab2 = serde_json::Map::with_capacity(labels.len());
+    for (idx, name) in labels.iter().enumerate() {
+        id2.insert(idx.to_string(), Value::from(name.as_str()));
+        lab2.insert(name.clone(), Value::from(idx as i64));
+    }
+    out.insert("id2label".into(), Value::Object(id2));
+    out.insert("label2id".into(), Value::Object(lab2));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +282,54 @@ mod tests {
     fn parse_num_labels_none_when_both_missing() {
         let v: Value = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(parse_num_labels(&v, None), None);
+    }
+
+    #[test]
+    fn emit_hidden_act_maps_both_variants() {
+        assert_eq!(emit_hidden_act(GeluApprox::None), "gelu");
+        assert_eq!(emit_hidden_act(GeluApprox::Tanh), "gelu_new");
+    }
+
+    #[test]
+    fn emit_hidden_act_round_trips_through_map() {
+        // Every emitted string must parse back to the same enum value.
+        for act in [GeluApprox::None, GeluApprox::Tanh] {
+            let parsed = map_hidden_act(emit_hidden_act(act)).unwrap();
+            assert_eq!(parsed, act);
+        }
+    }
+
+    #[test]
+    fn emit_id2label_writes_both_maps() {
+        let mut m = serde_json::Map::new();
+        let labels = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        emit_id2label(&mut m, Some(&labels));
+
+        let id2 = m.get("id2label").unwrap().as_object().unwrap();
+        assert_eq!(id2.get("0").unwrap().as_str().unwrap(), "A");
+        assert_eq!(id2.get("1").unwrap().as_str().unwrap(), "B");
+        assert_eq!(id2.get("2").unwrap().as_str().unwrap(), "C");
+
+        let lab2 = m.get("label2id").unwrap().as_object().unwrap();
+        assert_eq!(lab2.get("A").unwrap().as_i64().unwrap(), 0);
+        assert_eq!(lab2.get("B").unwrap().as_i64().unwrap(), 1);
+        assert_eq!(lab2.get("C").unwrap().as_i64().unwrap(), 2);
+    }
+
+    #[test]
+    fn emit_id2label_skips_when_none() {
+        let mut m = serde_json::Map::new();
+        emit_id2label(&mut m, None);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn emit_id2label_round_trips_through_parse_id2label() {
+        let mut m = serde_json::Map::new();
+        let labels = vec!["LABEL_0".to_string(), "LABEL_1".to_string()];
+        emit_id2label(&mut m, Some(&labels));
+        let v = Value::Object(m);
+        let parsed = parse_id2label(&v).unwrap().unwrap();
+        assert_eq!(parsed, labels);
     }
 }

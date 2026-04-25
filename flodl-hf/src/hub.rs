@@ -151,11 +151,11 @@ fn fetch_safetensors(api: &Api, repo_id: &str) -> Result<PathBuf> {
         })
 }
 
-/// Pull `config.json` + `model.safetensors` from a Hub repo and return
-/// `(config_string, weights_bytes)`. Config parsing is left to the
-/// caller so the same fetch path serves every model family
-/// (`BertConfig::from_json_str`, `RobertaConfig::from_json_str`, …).
-fn fetch_config_str_and_weights(repo_id: &str) -> Result<(String, Vec<u8>)> {
+/// Fetch a Hub repo's `config.json` as a string, going through
+/// hf-hub's on-disk cache. Extracted from
+/// [`fetch_config_str_and_weights`] so config-only callers (e.g.
+/// [`AutoConfig::from_pretrained`]) don't pay the safetensors read.
+fn fetch_config_str(repo_id: &str) -> Result<String> {
     // `ApiBuilder::from_env()` reads `HF_HOME` for the cache location.
     // `Api::new()` hardcodes `~/.cache/huggingface/hub/` and silently
     // ignores `HF_HOME`, so every run would redownload into the dev
@@ -168,10 +168,21 @@ fn fetch_config_str_and_weights(repo_id: &str) -> Result<(String, Vec<u8>)> {
     let config_path = repo.get("config.json").map_err(|e| {
         TensorError::new(&format!("hf-hub fetch {repo_id}/config.json: {e}"))
     })?;
-    let config_str = std::fs::read_to_string(&config_path).map_err(|e| {
+    std::fs::read_to_string(&config_path).map_err(|e| {
         TensorError::new(&format!("read {}: {e}", config_path.display()))
-    })?;
+    })
+}
 
+/// Pull `config.json` + `model.safetensors` from a Hub repo and return
+/// `(config_string, weights_bytes)`. Config parsing is left to the
+/// caller so the same fetch path serves every model family
+/// (`BertConfig::from_json_str`, `RobertaConfig::from_json_str`, …).
+fn fetch_config_str_and_weights(repo_id: &str) -> Result<(String, Vec<u8>)> {
+    let config_str = fetch_config_str(repo_id)?;
+
+    let api = ApiBuilder::from_env()
+        .build()
+        .map_err(|e| TensorError::new(&format!("hf-hub init: {e}")))?;
     let weights_path = fetch_safetensors(&api, repo_id)?;
     let weights = std::fs::read(&weights_path).map_err(|e| {
         TensorError::new(&format!("read {}: {e}", weights_path.display()))
@@ -1054,6 +1065,22 @@ fn fetch_auto_config_and_weights(repo_id: &str) -> Result<(AutoConfig, Vec<u8>)>
     let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
     let config = AutoConfig::from_json_str(&config_str)?;
     Ok((config, weights))
+}
+
+impl AutoConfig {
+    /// Fetch `config.json` for `repo_id` from the HuggingFace Hub and
+    /// parse it via [`AutoConfig::from_json_str`], dispatching on
+    /// `model_type` to the matching family.
+    ///
+    /// Useful when a caller needs the parsed config independently of
+    /// the weights — e.g. [`crate::export::export_hf_dir`] needs it to
+    /// emit the output dir's `config.json`. hf-hub's on-disk cache
+    /// means repeated calls (including alongside
+    /// [`AutoModel::from_pretrained`]) don't re-download.
+    pub fn from_pretrained(repo_id: &str) -> Result<Self> {
+        let config_str = fetch_config_str(repo_id)?;
+        AutoConfig::from_json_str(&config_str)
+    }
 }
 
 impl AutoModel {
