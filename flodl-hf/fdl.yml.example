@@ -91,6 +91,11 @@ commands:
     run: python scripts/parity_albert.py
     docker: hf-parity
 
+  parity-xlm-roberta:
+    description: Regenerate tests/fixtures/xlm_roberta_base_parity.safetensors against HuggingFace reference (FLORES-200 multilingual prompt)
+    run: python scripts/parity_xlm_roberta.py
+    docker: hf-parity
+
   parity-deberta-v2:
     description: Regenerate tests/fixtures/deberta_v2_parity.safetensors against HuggingFace reference (microsoft/deberta-v3-base)
     run: python scripts/parity_deberta_v2.py
