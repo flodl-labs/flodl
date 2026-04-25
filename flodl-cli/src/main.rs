@@ -75,6 +75,11 @@ fn main() -> ExitCode {
         }
     }
 
+    // Extract `--no-append`, the escape hatch that suppresses any
+    // `append:` suffix declared by a run-kind command. Scoped to this
+    // invocation only — nested `fdl` calls re-evaluate their own flags.
+    let (args, no_append) = extract_no_append(&args);
+
     // Environment selection: `--env X` > `FDL_ENV=X` > first-arg convention.
     // Explicit selectors must resolve to an existing overlay; first-arg
     // detection falls through when the arg matches no overlay. Ambiguous
@@ -136,7 +141,7 @@ fn main() -> ExitCode {
         }
         "add" => {
             let cli: AddArgs = parse_sub("fdl add", &args[1..]);
-            match add::run(cli.target.as_deref()) {
+            match add::run(cli.target.as_deref(), cli.playground, cli.install) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     cli_error!("{e}");
@@ -177,7 +182,7 @@ fn main() -> ExitCode {
             println!("flodl-cli {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        other => dispatch_config(other, &args, active_env.as_deref()),
+        other => dispatch_config(other, &args, active_env.as_deref(), no_append),
     }
 }
 
@@ -1191,7 +1196,12 @@ fn load_project_config(
 /// The graph walk itself lives in [`dispatch::walk_commands`] and is
 /// pure — this wrapper performs the actual IO (process spawning, stdout
 /// writes, exit code mapping) based on the returned [`WalkOutcome`].
-fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
+fn dispatch_config(
+    cmd: &str,
+    args: &[String],
+    env: Option<&str>,
+    no_append: bool,
+) -> ExitCode {
     let cwd = env::current_dir().unwrap_or_default();
     let (project, project_root) = match load_project_config(&cwd, env) {
         Some(pair) => pair,
@@ -1213,13 +1223,16 @@ fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
             user_args,
             docker,
             cwd,
-        } => run::exec_script(
-            &command,
-            append.as_deref(),
-            &user_args,
-            docker.as_deref(),
-            &cwd,
-        ),
+        } => {
+            let effective_append = if no_append { None } else { append.as_deref() };
+            run::exec_script(
+                &command,
+                effective_append,
+                &user_args,
+                docker.as_deref(),
+                &cwd,
+            )
+        }
         WalkOutcome::ExecCommand {
             config,
             preset,
@@ -1424,6 +1437,7 @@ fn print_usage() {
     println!("    -vv                Debug output (per-batch timing, loop internals)");
     println!("    -vvv               Trace output (maximum detail)");
     println!("    -q, --quiet        Suppress all non-error output");
+    println!("    --no-append        Drop a run command's `append:` suffix (cargo / runner defaults)");
     println!();
     println!("COMMANDS:");
     println!("    setup              Interactive guided setup");
@@ -1485,6 +1499,41 @@ fn extract_verbosity(args: &[String]) -> (Vec<String>, Option<u8>) {
     }
 
     (filtered, level)
+}
+
+/// Strip `--no-append` from `args`, returning a bool that is true
+/// when the flag was present anywhere in the input. Scan-anywhere,
+/// consistent with `-v`, `--env`, and the ANSI flags. The flag only
+/// affects run-kind commands (it suppresses their `append:` suffix);
+/// on commands with no append entry it is a silent no-op.
+///
+/// Stops scanning at the first standalone `--`, so a literal
+/// `--no-append` passed *after* the user's `--` is forwarded to the
+/// inner script untouched (an escape hatch for run-scripts whose own
+/// proxy flags happen to collide).
+fn extract_no_append(args: &[String]) -> (Vec<String>, bool) {
+    let mut found = false;
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut past_dashdash = false;
+
+    for arg in args {
+        if past_dashdash {
+            filtered.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            past_dashdash = true;
+            filtered.push(arg.clone());
+            continue;
+        }
+        if arg == "--no-append" {
+            found = true;
+            continue;
+        }
+        filtered.push(arg.clone());
+    }
+
+    (filtered, found)
 }
 
 /// Strip `--ansi` / `--no-ansi` from `args`, returning a
@@ -1785,5 +1834,31 @@ mod tests {
     fn extract_ansi_flags_both_set_errors() {
         let err = extract_ansi_flags(&args(&["fdl", "--ansi", "--no-ansi"])).unwrap_err();
         assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_no_append_absent_returns_false() {
+        let (out, found) = extract_no_append(&args(&["fdl", "test"]));
+        assert_eq!(out, args(&["fdl", "test"]));
+        assert!(!found);
+    }
+
+    #[test]
+    fn extract_no_append_strips_flag_from_anywhere_before_dashdash() {
+        let (out, found) =
+            extract_no_append(&args(&["fdl", "test", "--no-append", "--", "-p", "x"]));
+        assert_eq!(out, args(&["fdl", "test", "--", "-p", "x"]));
+        assert!(found);
+    }
+
+    #[test]
+    fn extract_no_append_preserves_flag_after_dashdash() {
+        // Past the first `--` the token is bound for the inner script,
+        // so don't swallow it — escape hatch for run-scripts whose own
+        // proxy flags collide.
+        let (out, found) =
+            extract_no_append(&args(&["fdl", "test", "--", "--no-append"]));
+        assert_eq!(out, args(&["fdl", "test", "--", "--no-append"]));
+        assert!(!found);
     }
 }

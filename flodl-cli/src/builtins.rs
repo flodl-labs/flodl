@@ -70,19 +70,31 @@ pub struct InitArgs {
     pub with_hf: bool,
 }
 
-/// Add a flodl ecosystem crate as a side playground inside the current
-/// flodl project.
+/// Add a flodl ecosystem crate to the current flodl project.
 ///
-/// Currently supports `flodl-hf` (alias: `hf`). Drops a standalone
-/// cargo crate under `./flodl-hf/` with pinned deps, a one-file
-/// AutoModel example, `fdl.yml` with runnable commands, and a README
-/// documenting feature flavors and next steps. Does NOT mutate the
-/// caller's root `Cargo.toml` or `fdl.yml`.
+/// Currently supports `flodl-hf` (alias: `hf`). Two modes (combinable):
+///
+/// - `--playground`: drops a standalone cargo crate under `./flodl-hf/`
+///   with pinned deps and a one-file AutoModel example, plus a
+///   `flodl-hf:` entry in the root `fdl.yml` so `fdl flodl-hf <cmd>`
+///   routes into it. Try-it-out path; doesn't touch `Cargo.toml`.
+/// - `--install`: appends `flodl-hf = "=X.Y.Z"` (default features) to
+///   the root `Cargo.toml` `[dependencies]`. Wires the crate into the
+///   user's own code; doesn't create a subdir.
+///
+/// With neither flag, an interactive prompt asks. Non-tty stdin errors
+/// loudly rather than silently picking a default.
 #[derive(crate::FdlArgs, Debug)]
 pub struct AddArgs {
     /// Target to scaffold (currently: `flodl-hf` or the alias `hf`).
     #[arg]
     pub target: Option<String>,
+    /// Drop a sandbox playground under `./flodl-hf/`.
+    #[option]
+    pub playground: bool,
+    /// Add as a dependency in the root `Cargo.toml`.
+    #[option]
+    pub install: bool,
 }
 
 /// Install or update fdl globally (~/.local/bin/fdl).

@@ -14,35 +14,45 @@ observed `max_abs_diff` is under 1e-5 across the board.
 
 ## Getting started
 
-Inside an existing flodl project:
+Inside an existing flodl project, two modes (combinable):
 
 ```bash
-fdl add flodl-hf
-cd flodl-hf
-fdl classify
+fdl add flodl-hf --playground   # try it: drops ./flodl-hf/ sandbox crate
+fdl flodl-hf classify           # default RoBERTa sentiment checkpoint
+
+fdl add flodl-hf --install      # wire it: adds flodl-hf to your Cargo.toml
+fdl build                       # cargo pulls + compiles the new dep
 ```
 
-This drops a `flodl-hf/` side crate pinned to the same flodl version
-you already have, with a one-file `AutoModel` example, `fdl.yml` with
-runnable commands, and a README documenting feature flavors and the
-`.bin` → safetensors convert workflow.
+`--playground` drops a side crate at `./flodl-hf/` pinned to your flodl
+version, with a one-file `AutoModel` example, `fdl.yml` runnable
+commands, and a README covering feature flavors and the `.bin` →
+safetensors convert workflow. The `flodl-hf:` entry is also linked into
+your root `fdl.yml`, so `fdl flodl-hf <cmd>` works from project root.
+
+`--install` appends `flodl-hf = "=X.Y.Z"` (default features: `hub` +
+`tokenizer`) to your root `Cargo.toml` `[dependencies]`. Edit the entry
+manually to switch flavors (see [Feature flavors](#feature-flavors)).
+
+`fdl add flodl-hf` with no flag prompts interactively. Non-tty (CI,
+piped input) errors loudly — pass a flag explicitly.
 
 Scaffolding a new project from scratch:
 
 ```bash
 fdl init my-model --with-hf        # or answer "y" at the prompt
-cd my-model/flodl-hf && fdl classify
+cd my-model && fdl flodl-hf classify
 ```
 
-## Manual install
+## Feature flavors
 
-If you prefer to wire `flodl-hf` straight into your main crate's
-`Cargo.toml`, three feature profiles cover the common cases:
+`--install` adds `flodl-hf` with default features (`hub` + `tokenizer`).
+Edit the `Cargo.toml` entry directly to switch flavors:
 
 ### Full HuggingFace experience (default)
 
 ```toml
-flodl-hf = "0.5.2"
+flodl-hf = "=0.5.2"
 ```
 
 Pulls: `safetensors` + `hf-hub` + `tokenizers`. Everything needed to
@@ -55,7 +65,7 @@ is not needed. Drops the `tokenizers` crate and its regex + unicode
 surface.
 
 ```toml
-flodl-hf = { version = "0.5.2", default-features = false, features = ["hub"] }
+flodl-hf = { version = "=0.5.2", default-features = false, features = ["hub"] }
 ```
 
 ### Offline / minimal (safetensors-only)
@@ -65,7 +75,7 @@ checkpoints from local disk. Drops both hub downloads and tokenizers. No
 network, no async runtime, no TLS stack, no regex.
 
 ```toml
-flodl-hf = { version = "0.5.2", default-features = false }
+flodl-hf = { version = "=0.5.2", default-features = false }
 ```
 
 ### Feature matrix

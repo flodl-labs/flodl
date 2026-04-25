@@ -81,10 +81,14 @@ pub struct CommandSpec {
     pub description: Option<String>,
     /// Inline shell command. Mutex with `path`.
     pub run: Option<String>,
-    /// Literal trailing tokens for a `run:` command. User args supplied
-    /// after `--` slot in between `run` and `append`, so a script can
-    /// reserve fdl-owned tokens (e.g. libtest's `-- --nocapture
-    /// --ignored`) and still accept user-supplied args ahead of them.
+    /// Default trailing tokens for a `run:` command. Split on its own
+    /// first `--` into pre/post halves; user args after fdl's first
+    /// `--` are split similarly, then everything merges as
+    /// `[append-pre] [user-pre] -- [append-post] [user-post]`. Append
+    /// seeds defaults; user args last-win on each side. The legacy
+    /// `append: -- --nocapture` shape (empty pre, libtest tokens post)
+    /// keeps working as a degenerate case. Drop entirely with the
+    /// global `--no-append` flag.
     pub append: Option<String>,
     /// Pointer to a child directory containing its own `fdl.yml`. Absolute
     /// or relative to the declaring config's directory. Mutex with `run`.
