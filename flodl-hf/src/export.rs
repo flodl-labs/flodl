@@ -40,8 +40,15 @@
 
 use std::path::Path;
 
-use flodl::{Graph, Result, TensorError};
+use flodl::{Device, Graph, Result, TensorError};
 
+use crate::models::albert::AlbertModel;
+use crate::models::auto::AutoConfig;
+use crate::models::bert::BertModel;
+use crate::models::deberta_v2::DebertaV2Model;
+use crate::models::distilbert::DistilBertModel;
+use crate::models::roberta::RobertaModel;
+use crate::models::xlm_roberta::XlmRobertaModel;
 use crate::safetensors_io::save_safetensors_file_from_graph;
 
 /// Write a HuggingFace-compatible export directory.
@@ -77,6 +84,67 @@ pub fn export_hf_dir(graph: &Graph, config_json: &str, out_dir: &Path) -> Result
     })?;
 
     Ok(())
+}
+
+/// Build a graph matching `config` for HF round-trip export, on `device`.
+///
+/// `has_pooler` selects between with-pooler and without-pooler variants
+/// for pooler-bearing families (BERT, RoBERTa, XLM-R, ALBERT). Pass
+/// `true` when the source checkpoint ships pooler weights — matches
+/// HF `AutoModel.from_pretrained` parity. Pooler-less families
+/// (DistilBERT, DeBERTa-v2) ignore the flag.
+///
+/// Use this when you have a parsed `AutoConfig` (e.g. read from a
+/// flodl checkpoint sidecar) and need to instantiate the matching
+/// graph topology before loading weights via
+/// [`flodl::Graph::load_checkpoint`]. For Hub-fetch flows reach for
+/// [`crate::models::auto::AutoModel::from_pretrained_for_export`]
+/// directly — it builds, fetches, and loads in one call.
+pub fn build_for_export(
+    config: &AutoConfig,
+    has_pooler: bool,
+    device: Device,
+) -> Result<Graph> {
+    match config {
+        AutoConfig::Bert(c) => {
+            if has_pooler {
+                BertModel::on_device(c, device)
+            } else {
+                BertModel::on_device_without_pooler(c, device)
+            }
+        }
+        AutoConfig::Roberta(c) => {
+            if has_pooler {
+                RobertaModel::on_device(c, device)
+            } else {
+                RobertaModel::on_device_without_pooler(c, device)
+            }
+        }
+        AutoConfig::DistilBert(c) => DistilBertModel::on_device(c, device),
+        AutoConfig::XlmRoberta(c) => {
+            if has_pooler {
+                XlmRobertaModel::on_device(c, device)
+            } else {
+                XlmRobertaModel::on_device_without_pooler(c, device)
+            }
+        }
+        AutoConfig::Albert(c) => {
+            if has_pooler {
+                AlbertModel::on_device(c, device)
+            } else {
+                AlbertModel::on_device_without_pooler(c, device)
+            }
+        }
+        AutoConfig::DebertaV2(c) => DebertaV2Model::on_device(c, device),
+    }
+}
+
+/// Convenience: detect pooler presence from a list of checkpoint keys
+/// (e.g. the output of [`flodl::checkpoint_keys`]). Returns `true` when
+/// any key starts with `pooler` — matches the convention used by
+/// flodl-hf's family backbones.
+pub fn keys_have_pooler(keys: &[String]) -> bool {
+    keys.iter().any(|k| k.starts_with("pooler/") || k.starts_with("pooler."))
 }
 
 #[cfg(test)]
@@ -141,5 +209,57 @@ mod tests {
         assert!(nested.join("config.json").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn keys_have_pooler_detects_slash_separator() {
+        let keys = vec![
+            "encoder/layer/0/attention/query/weight".to_string(),
+            "pooler/dense/weight".to_string(),
+            "pooler/dense/bias".to_string(),
+        ];
+        assert!(keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_detects_dot_separator() {
+        let keys = vec![
+            "encoder.layer.0.attention.query.weight".to_string(),
+            "pooler.dense.weight".to_string(),
+        ];
+        assert!(keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_returns_false_for_encoder_only() {
+        let keys = vec![
+            "encoder/layer/0/attention/query/weight".to_string(),
+            "encoder/layer/0/attention/query/bias".to_string(),
+        ];
+        assert!(!keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_does_not_match_substrings() {
+        // A key containing "pooler" mid-string must not false-positive.
+        let keys = vec!["encoder/some_pooler_thing/weight".to_string()];
+        assert!(!keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn build_for_export_dispatches_on_family() {
+        // Each family returns Ok(_); pooler-toggle only affects bert/
+        // roberta/xlm-roberta/albert.
+        for has_pooler in [false, true] {
+            let bert = AutoConfig::Bert(crate::models::bert::BertConfig::bert_base_uncased());
+            assert!(build_for_export(&bert, has_pooler, Device::CPU).is_ok());
+        }
+        // DistilBERT is pooler-less; both bools should produce the same shape.
+        let distil = AutoConfig::DistilBert(
+            crate::models::distilbert::DistilBertConfig::distilbert_base_uncased(),
+        );
+        let g_a = build_for_export(&distil, false, Device::CPU).unwrap();
+        let g_b = build_for_export(&distil, true, Device::CPU).unwrap();
+        assert_eq!(g_a.structural_hash(), g_b.structural_hash());
     }
 }

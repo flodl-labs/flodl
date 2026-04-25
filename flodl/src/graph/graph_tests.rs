@@ -2038,6 +2038,100 @@
     }
 
     #[test]
+    fn test_save_checkpoint_emits_sidecar_when_source_config_set() {
+        use crate::graph::graph::sidecar_config_path;
+
+        let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
+            .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
+            .build()
+            .unwrap();
+
+        let payload = r#"{"model_type":"bert","hidden_size":768}"#;
+        g.set_source_config(payload.to_string());
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sidecar_emit.fdl");
+        let path_str = path.to_str().unwrap();
+
+        g.save_checkpoint(path_str).unwrap();
+
+        let sidecar = sidecar_config_path(path_str);
+        let written = std::fs::read_to_string(&sidecar).unwrap();
+        assert_eq!(written, payload);
+
+        std::fs::remove_file(path_str).ok();
+        std::fs::remove_file(sidecar).ok();
+    }
+
+    #[test]
+    fn test_save_checkpoint_no_sidecar_when_source_config_unset() {
+        use crate::graph::graph::sidecar_config_path;
+
+        let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
+            .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
+            .build()
+            .unwrap();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sidecar_none.fdl");
+        let path_str = path.to_str().unwrap();
+        let sidecar = sidecar_config_path(path_str);
+
+        // Pre-clean any leftover sidecar from a previous test run so the
+        // assertion "no sidecar written" is meaningful.
+        std::fs::remove_file(&sidecar).ok();
+
+        g.save_checkpoint(path_str).unwrap();
+        assert!(!sidecar.exists(), "sidecar must not be written when source_config is unset");
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
+    fn test_sidecar_path_strips_fdl_and_gz() {
+        use crate::graph::graph::sidecar_config_path;
+
+        assert_eq!(
+            sidecar_config_path("/tmp/model.fdl"),
+            std::path::PathBuf::from("/tmp/model.config.json"),
+        );
+        assert_eq!(
+            sidecar_config_path("/tmp/model.fdl.gz"),
+            std::path::PathBuf::from("/tmp/model.config.json"),
+        );
+        assert_eq!(
+            sidecar_config_path("relative/v3.fdl"),
+            std::path::PathBuf::from("relative/v3.config.json"),
+        );
+    }
+
+    #[test]
+    fn test_clear_source_config_disables_sidecar() {
+        use crate::graph::graph::sidecar_config_path;
+
+        let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
+            .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
+            .build()
+            .unwrap();
+
+        g.set_source_config("payload".to_string());
+        assert_eq!(g.source_config().as_deref(), Some("payload"));
+        g.clear_source_config();
+        assert_eq!(g.source_config(), None);
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sidecar_cleared.fdl");
+        let path_str = path.to_str().unwrap();
+        let sidecar = sidecar_config_path(path_str);
+        std::fs::remove_file(&sidecar).ok();
+
+        g.save_checkpoint(path_str).unwrap();
+        assert!(!sidecar.exists(), "cleared source_config must not emit sidecar");
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
     fn test_graph_checkpoint_gz() {
         let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
             .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())

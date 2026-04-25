@@ -72,7 +72,7 @@ pub use loss::{
 pub use optim::{Optimizer, Stateful, SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder, RMSprop, RMSpropBuilder, Adagrad, AdagradBuilder, RAdam, NAdam};
 pub use checkpoint::{
     save_checkpoint, load_checkpoint, save_checkpoint_file, load_checkpoint_file,
-    migrate_checkpoint, migrate_checkpoint_file, checkpoint_version,
+    migrate_checkpoint, migrate_checkpoint_file, checkpoint_version, checkpoint_keys,
     LoadReport, MigrateReport,
 };
 pub use amp::{GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled};

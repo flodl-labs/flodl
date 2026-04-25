@@ -1,4 +1,4 @@
-description: Export a Hub repo as a HuggingFace-compatible directory (model.safetensors + config.json) using flodl's own writer. Auto-detects family (bert/roberta/distilbert/xlm-roberta/albert/deberta-v2).
+description: Export a Hub repo or local flodl checkpoint as a HuggingFace-compatible directory (model.safetensors + config.json) using flodl's own writer. Auto-detects family (bert/roberta/distilbert/xlm-roberta/albert/deberta-v2).
 
 # Argv forwards to the Rust example binary (entry: commands forward argv;
 # run: commands do not — see feedback_cli_docs_three_contexts).

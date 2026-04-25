@@ -1172,6 +1172,13 @@ impl AutoModel {
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        // Capture the source config before consuming it in the match.
+        // Attached to the graph so subsequent `save_checkpoint` calls
+        // emit a `<stem>.config.json` sidecar matching the loaded
+        // architecture; downstream tools (e.g. `fdl flodl-hf export
+        // --checkpoint`) rebuild the family from this without an extra
+        // `--config` argument in the common case.
+        let config_json = config.to_json_str();
         let graph = match config {
             AutoConfig::Bert(c) => BertModel::on_device_without_pooler(&c, device)?,
             AutoConfig::Roberta(c) => RobertaModel::on_device_without_pooler(&c, device)?,
@@ -1181,6 +1188,7 @@ impl AutoModel {
             AutoConfig::DebertaV2(c) => DebertaV2Model::on_device(&c, device)?,
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config_json);
         Ok(graph)
     }
 
@@ -1214,6 +1222,7 @@ impl AutoModel {
         device: Device,
     ) -> Result<Graph> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let config_json = config.to_json_str();
 
         // Pick with-pooler vs without-pooler dynamically based on what
         // the checkpoint actually ships. Some Hub repos for pooler-
@@ -1256,6 +1265,7 @@ impl AutoModel {
             AutoConfig::DebertaV2(c) => DebertaV2Model::on_device(&c, device)?,
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
+        graph.set_source_config(config_json);
         Ok(graph)
     }
 }
@@ -1272,6 +1282,7 @@ impl AutoModelForSequenceClassification {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let config_json = config.to_json_str();
         let head = match config {
             AutoConfig::Bert(c) => {
                 let num_labels = BertForSequenceClassification::num_labels_from_config(&c)?;
@@ -1310,6 +1321,7 @@ impl AutoModelForSequenceClassification {
                 Self::DebertaV2(h)
             }
         };
+        head.graph().set_source_config(config_json);
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1328,6 +1340,7 @@ impl AutoModelForTokenClassification {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let config_json = config.to_json_str();
         let head = match config {
             AutoConfig::Bert(c) => {
                 let num_labels = BertForTokenClassification::num_labels_from_config(&c)?;
@@ -1366,6 +1379,7 @@ impl AutoModelForTokenClassification {
                 Self::DebertaV2(h)
             }
         };
+        head.graph().set_source_config(config_json);
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1386,6 +1400,7 @@ impl AutoModelForQuestionAnswering {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let config_json = config.to_json_str();
         let head = match config {
             AutoConfig::Bert(c) => {
                 let h = BertForQuestionAnswering::on_device(&c, device)?;
@@ -1418,6 +1433,7 @@ impl AutoModelForQuestionAnswering {
                 Self::DebertaV2(h)
             }
         };
+        head.graph().set_source_config(config_json);
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1444,6 +1460,7 @@ impl AutoModelForMaskedLM {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
+        let config_json = config.to_json_str();
         let head = match config {
             AutoConfig::Bert(c) => {
                 let h = BertForMaskedLM::on_device(&c, device)?;
@@ -1476,6 +1493,7 @@ impl AutoModelForMaskedLM {
                 Self::DebertaV2(h)
             }
         };
+        head.graph().set_source_config(config_json);
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),

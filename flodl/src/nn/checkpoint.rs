@@ -237,6 +237,66 @@ pub fn load_checkpoint_file(
 
 /// Peek at the version number of a checkpoint file without reading the full contents.
 ///
+/// Read just the parameter and buffer names from a `.fdl` checkpoint
+/// without loading any tensor data.
+///
+/// Useful when a caller needs to introspect the checkpoint's shape — for
+/// example, to detect optional sub-modules (a pooler, a task head, …)
+/// before constructing the matching graph. Reading is bounded by the
+/// header's entry count, so a malformed file errors at parse rather
+/// than allocating unbounded memory.
+///
+/// Detects gzip from a `.gz` extension. The structural-hash field is
+/// read but not validated — pair this with `load_checkpoint_file` once
+/// the matching graph is built if you need hash validation.
+pub fn checkpoint_keys(path: &str) -> Result<Vec<String>> {
+    let f = std::fs::File::open(path).map_err(io_err)?;
+    let mut r: Box<dyn Read> = if path.ends_with(".gz") {
+        Box::new(flate2::read::GzDecoder::new(f))
+    } else {
+        Box::new(std::io::BufReader::new(f))
+    };
+
+    let mut magic = [0u8; 4];
+    r.read_exact(&mut magic).map_err(io_err)?;
+    if magic != MAGIC {
+        return Err(TensorError::new(
+            "invalid checkpoint: bad magic (expected .fdl checkpoint)",
+        ));
+    }
+    let version = read_u32(&mut r)?;
+    if version == 0 || version > MAX_VERSION {
+        return Err(TensorError::new(&format!(
+            "unsupported checkpoint version {} (this build supports 1..={})",
+            version, MAX_VERSION,
+        )));
+    }
+    // Skip the 32-byte structural hash.
+    let mut _hash = [0u8; HASH_LEN];
+    r.read_exact(&mut _hash).map_err(io_err)?;
+
+    let count = read_u32(&mut r)? as usize;
+    let mut keys = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name_len = read_u32(&mut r)? as usize;
+        let mut name_bytes = vec![0u8; name_len];
+        r.read_exact(&mut name_bytes).map_err(io_err)?;
+        keys.push(String::from_utf8_lossy(&name_bytes).into_owned());
+        // Skip ndim, shape, dtype tag, byte_count + raw payload.
+        let ndim = read_u32(&mut r)? as usize;
+        for _ in 0..ndim {
+            let _ = read_i64(&mut r)?;
+        }
+        let mut tag = [0u8; 1];
+        r.read_exact(&mut tag).map_err(io_err)?;
+        let byte_count = read_u64(&mut r)? as usize;
+        // Skip payload.
+        std::io::copy(&mut r.by_ref().take(byte_count as u64), &mut std::io::sink())
+            .map_err(io_err)?;
+    }
+    Ok(keys)
+}
+
 /// Returns the version field (1 for flodl 0.1.x, 2 for flodl 0.2.0+).
 /// Useful to decide whether a checkpoint needs migration before loading.
 pub fn checkpoint_version(path: &str) -> Result<u32> {
@@ -1718,5 +1778,80 @@ mod tests {
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("unknown dtype tag"), "error: {}", msg);
+    }
+
+    #[test]
+    fn test_checkpoint_keys_peeks_names_without_loading_data() {
+        let params = vec![
+            (
+                "encoder/layer/weight".to_string(),
+                Parameter::new(
+                    Tensor::ones(&[4, 8], crate::tensor::test_opts()).unwrap(),
+                    "weight",
+                ),
+            ),
+            (
+                "pooler/dense/weight".to_string(),
+                Parameter::new(
+                    Tensor::ones(&[8, 8], crate::tensor::test_opts()).unwrap(),
+                    "weight",
+                ),
+            ),
+        ];
+        let buffers = vec![(
+            "encoder/layer/running_mean".to_string(),
+            Buffer::new(
+                Tensor::zeros(&[8], crate::tensor::test_opts()).unwrap(),
+                "running_mean",
+            ),
+        )];
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_checkpoint_keys_peek.fdl");
+        let path_str = path.to_str().unwrap();
+
+        save_checkpoint_file(path_str, &params, &buffers, None).unwrap();
+        let keys = checkpoint_keys(path_str).unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "encoder/layer/weight".to_string(),
+                "pooler/dense/weight".to_string(),
+                "encoder/layer/running_mean".to_string(),
+            ],
+            "params first then buffers, in declaration order",
+        );
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
+    fn test_checkpoint_keys_handles_gzip() {
+        let params = vec![(
+            "x/w".to_string(),
+            Parameter::new(
+                Tensor::ones(&[2, 2], crate::tensor::test_opts()).unwrap(),
+                "w",
+            ),
+        )];
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_checkpoint_keys_gz.fdl.gz");
+        let path_str = path.to_str().unwrap();
+
+        save_checkpoint_file(path_str, &params, &[], None).unwrap();
+        let keys = checkpoint_keys(path_str).unwrap();
+        assert_eq!(keys, vec!["x/w".to_string()]);
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
+    fn test_checkpoint_keys_rejects_bad_magic() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_checkpoint_keys_bad.fdl");
+        std::fs::write(&path, b"NOPEnotacheckpoint").unwrap();
+        let err = checkpoint_keys(path.to_str().unwrap()).unwrap_err();
+        assert!(format!("{err}").contains("bad magic"), "got: {err}");
+        std::fs::remove_file(path).ok();
     }
 }

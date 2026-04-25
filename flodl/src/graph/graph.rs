@@ -1,5 +1,6 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -128,6 +129,17 @@ pub struct Graph {
     // Per-batch loss closure for El Che (set by set_loss_fn(), None = legacy gather path)
     #[allow(clippy::type_complexity)]
     pub(crate) loss_fn: RefCell<Option<Box<dyn Fn(&LossContext) -> Result<Variable>>>>,
+    // Optional opaque metadata attached to the graph (typically a JSON
+    // config from the source the graph was built from, e.g. an HF
+    // `config.json`). When set, [`Graph::save_checkpoint`] emits it as
+    // a `<stem>.config.json` sidecar so downstream tools can recover
+    // the architecture without re-fetching the source.
+    //
+    // flodl itself never inspects the contents — the field is plain
+    // text passed through verbatim. Format and meaning are owned by
+    // the caller (e.g. `flodl-hf`'s `AutoModel::from_pretrained` sets
+    // this to the HF `config.json` it loaded).
+    pub(crate) source_config: RefCell<Option<String>>,
 }
 
 /// Binding between a `DataLoader` and a [`Graph`] for integrated training.
@@ -407,6 +419,7 @@ impl Graph {
             training_step: Cell::new(0),
             data_binding: RefCell::new(None),
             loss_fn: RefCell::new(None),
+            source_config: RefCell::new(None),
         });
 
         if verbose {
@@ -860,11 +873,53 @@ impl Graph {
     ///
     /// Embeds the structural hash for architecture validation on load.
     /// Supports `.gz` extension for gzip compression.
+    ///
+    /// When [`source_config`](Self::source_config) is set on the graph
+    /// (e.g. populated by `flodl_hf::models::auto::AutoModel::from_pretrained`),
+    /// a sidecar `<stem>.config.json` file is written next to the
+    /// checkpoint with the source config verbatim. The stem strips both
+    /// `.fdl` and an optional `.gz` so `model.fdl.gz` produces
+    /// `model.config.json`. Downstream tools (e.g. `fdl flodl-hf export
+    /// --checkpoint`) use this to rebuild the right family without an
+    /// explicit `--config` argument.
     pub fn save_checkpoint(&self, path: &str) -> Result<()> {
         let params = self.named_parameters();
         let buffers = self.named_buffers();
         let hash = self.structural_hash();
-        crate::nn::save_checkpoint_file(path, &params, &buffers, Some(hash))
+        crate::nn::save_checkpoint_file(path, &params, &buffers, Some(hash))?;
+
+        if let Some(content) = self.source_config.borrow().as_ref() {
+            let sidecar = sidecar_config_path(path);
+            std::fs::write(&sidecar, content).map_err(|e| {
+                TensorError::new(&format!(
+                    "save_checkpoint: cannot write sidecar {}: {e}",
+                    sidecar.display()
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Attach an opaque source-config string to the graph.
+    ///
+    /// Typically called by loaders that build a graph from an external
+    /// definition (HF `config.json`, ONNX manifest, …) so subsequent
+    /// `save_checkpoint` calls drop a `<stem>.config.json` sidecar.
+    /// Pass an empty string to attach a non-meaningful sentinel; pass
+    /// `clear_source_config` to drop attachment entirely.
+    pub fn set_source_config(&self, content: String) {
+        *self.source_config.borrow_mut() = Some(content);
+    }
+
+    /// Read the currently-attached source config, if any.
+    pub fn source_config(&self) -> Option<String> {
+        self.source_config.borrow().clone()
+    }
+
+    /// Drop any attached source config so subsequent saves emit no
+    /// sidecar.
+    pub fn clear_source_config(&self) {
+        *self.source_config.borrow_mut() = None;
     }
 
     /// Load parameters and buffers from a checkpoint file.
@@ -974,6 +1029,22 @@ impl Graph {
 
         hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
     }
+}
+
+/// Derive the sidecar config-json path for a checkpoint path.
+///
+/// Strips a trailing `.gz` (compression marker) if present, then
+/// replaces the extension with `config.json`. Stem is preserved
+/// verbatim so paths like `/some/dir/v3.fdl` map to
+/// `/some/dir/v3.config.json`.
+pub(crate) fn sidecar_config_path(checkpoint: &str) -> PathBuf {
+    let mut p = PathBuf::from(checkpoint);
+    if p.extension().and_then(|e| e.to_str()) == Some("gz") {
+        // Drop the .gz to expose the inner extension (.fdl, .ckpt, ...).
+        p.set_extension("");
+    }
+    p.set_extension("config.json");
+    p
 }
 
 impl Module for Graph {

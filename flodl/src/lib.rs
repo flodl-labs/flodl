@@ -63,7 +63,7 @@ pub use nn::{
     SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder,
     RMSprop, RMSpropBuilder, Adagrad, AdagradBuilder, RAdam, NAdam,
     save_checkpoint, load_checkpoint, save_checkpoint_file, load_checkpoint_file,
-    migrate_checkpoint, migrate_checkpoint_file, checkpoint_version,
+    migrate_checkpoint, migrate_checkpoint_file, checkpoint_version, checkpoint_keys,
     LoadReport, MigrateReport,
     GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled,
     Identity, ReLU, Sigmoid, Tanh, GELU, GeluApprox, SiLU,

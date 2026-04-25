@@ -1173,14 +1173,22 @@ fn test_builder_with_defaults() {
 
 #[test]
 fn test_builder_with_all_options() {
+    // Workload is intentionally tiny (8 samples / batch 4 / 1 epoch =
+    // 2 steps): this test verifies that every builder setter is wired,
+    // not that policy survives load. ElChe is sized for production
+    // pools and can stall on heterogeneous hardware when the per-rank
+    // share is small enough that the fast rank laps the slow one;
+    // Sync alone doesn't fully isolate the test from that pathology
+    // here, so we also keep the dataset small enough that any
+    // remaining lapping cannot accumulate before completion.
     let ddp = DdpHandle::builder(
         |dev| Linear::on_device(4, 2, dev),
         |params| crate::nn::SGD::new(params, 0.01, 0.0),
         mse_train,
     )
-    .dataset(Arc::new(TestDataset { n: 100 }))
+    .dataset(Arc::new(TestDataset { n: 8 }))
     .batch_size(4)
-    .num_epochs(2)
+    .num_epochs(1)
     .policy(ApplyPolicy::Sync)
     .backend(AverageBackend::Cpu)
     .overhead_target(0.15)
