@@ -88,6 +88,16 @@ pub fn classify_path_step(
         };
     }
 
+    // Bare project invocation with no entry but available sub-commands:
+    // mirror the top-level `fdl` UX and print help instead of erroring on
+    // a missing entry point. Only kicks in when tail is empty — any extra
+    // tokens still flow through to the existing exec/error path.
+    if tail.is_empty() && child_cfg.entry.is_none() && !child_cfg.commands.is_empty() {
+        return PathOutcome::ShowHelp {
+            child: Box::new(child_cfg),
+        };
+    }
+
     PathOutcome::Exec {
         child: Box::new(child_cfg),
         child_dir,
@@ -436,6 +446,36 @@ mod tests {
         let tail = vec!["quick".to_string(), "--help".to_string()];
         let out = classify_path_step(&spec, "sub", tmp.path(), &tail, None);
         assert!(matches!(out, PathOutcome::Descend { .. }));
+    }
+
+    #[test]
+    fn classify_bare_no_entry_with_subcommands_shows_help() {
+        // Bare `fdl <project>` on a project that defines `commands:` but
+        // no top-level `entry:` should print help, not error with
+        // "no entry point defined". Mirrors the top-level `fdl` UX.
+        let tmp = TempDir::new();
+        mkcmd(
+            tmp.path(),
+            "sub",
+            "commands:\n  foo:\n    run: echo foo\n",
+        );
+        let spec = path_spec();
+        let tail: Vec<String> = vec![];
+        let out = classify_path_step(&spec, "sub", tmp.path(), &tail, None);
+        assert!(matches!(out, PathOutcome::ShowHelp { .. }));
+    }
+
+    #[test]
+    fn classify_no_entry_no_subcommands_still_falls_through() {
+        // No entry, no sub-commands: keep the existing exec path so the
+        // downstream "no entry point defined" error fires for genuinely
+        // misconfigured projects.
+        let tmp = TempDir::new();
+        mkcmd(tmp.path(), "sub", "description: empty\n");
+        let spec = path_spec();
+        let tail: Vec<String> = vec![];
+        let out = classify_path_step(&spec, "sub", tmp.path(), &tail, None);
+        assert!(matches!(out, PathOutcome::Exec { .. }));
     }
 
     #[test]
