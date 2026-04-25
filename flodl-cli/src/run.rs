@@ -324,12 +324,81 @@ fn spawn_docker_shell(command: &str, project_root: &Path) -> ExitCode {
 
 // ── Run-kind execution ──────────────────────────────────────────────────
 
+/// POSIX-quote a single token so it round-trips through `sh -c` / `bash
+/// -c` as one argument. Empty strings become `''`; tokens containing
+/// only safe characters pass through unchanged; everything else is
+/// wrapped in single quotes with embedded `'` escaped as `'\''`.
+pub(crate) fn posix_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let safe = s.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '+' | '@' | ',')
+    });
+    if safe {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Compose the final shell command from `run` + (POSIX-quoted)
+/// `user_args` + `append`. The pieces are joined with single spaces;
+/// missing parts collapse cleanly.
+pub(crate) fn compose_run_command(
+    run: &str,
+    user_args: &[String],
+    append: Option<&str>,
+) -> String {
+    let mut out = String::from(run.trim());
+    for a in user_args {
+        out.push(' ');
+        out.push_str(&posix_quote(a));
+    }
+    if let Some(suffix) = append {
+        let suffix = suffix.trim();
+        if !suffix.is_empty() {
+            out.push(' ');
+            out.push_str(suffix);
+        }
+    }
+    out
+}
+
 /// Run an inline `run:` script, optionally wrapped in Docker.
-pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> ExitCode {
+///
+/// `user_args` (from CLI tokens after `--`) are POSIX-quoted and spliced
+/// between `command` and `append`, so a script like `cargo test live`
+/// with `append: -- --nocapture --ignored` still receives its libtest
+/// flags after a user-supplied `-p flodl-hf`.
+pub fn exec_script(
+    command: &str,
+    append: Option<&str>,
+    user_args: &[String],
+    docker_service: Option<&str>,
+    cwd: &Path,
+) -> ExitCode {
+    let inner_cmd = compose_run_command(command, user_args, append);
+
     match docker_service {
         Some(service) if !inside_docker() => {
-            let docker_cmd =
-                format!("docker compose run --rm {service} bash -c \"{command}\"");
+            // Quote the whole composed command for the outer
+            // `bash -c` so user args containing shell metacharacters
+            // don't escape the inner shell.
+            let docker_cmd = format!(
+                "docker compose run --rm {service} bash -c {}",
+                posix_quote(&inner_cmd)
+            );
             spawn_docker_shell(&docker_cmd, cwd)
         }
         _ => {
@@ -340,7 +409,7 @@ pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> E
             };
 
             match std::process::Command::new(shell)
-                .args([flag, command])
+                .args([flag, inner_cmd.as_str()])
                 .current_dir(cwd)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
@@ -511,10 +580,16 @@ fn shell_join(args: &[String]) -> String {
 
 // ── Help output ─────────────────────────────────────────────────────────
 
-/// Print help for a `run:`-kind command. Shows the inline script that
-/// will execute and the Docker service (if any). `run:` commands do not
-/// forward argv, so there are no flags or positionals to document.
-pub fn print_run_help(name: &str, description: Option<&str>, run: &str, docker: Option<&str>) {
+/// Print help for a `run:`-kind command. Shows the inline script,
+/// any `append:` suffix, the Docker service (if any), and the `--`
+/// forwarding contract.
+pub fn print_run_help(
+    name: &str,
+    description: Option<&str>,
+    run: &str,
+    append: Option<&str>,
+    docker: Option<&str>,
+) {
     if let Some(desc) = description {
         eprintln!("{} {desc}", style::bold(name));
     } else {
@@ -522,17 +597,24 @@ pub fn print_run_help(name: &str, description: Option<&str>, run: &str, docker: 
     }
     eprintln!();
     eprintln!("{}:", style::yellow("Usage"));
-    eprintln!("    fdl {name}");
+    eprintln!("    fdl {name} [-- <user-args>...]");
     eprintln!();
     eprintln!("{}:", style::yellow("Runs"));
+    let composed = match append.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(suffix) => format!("{run} [<user-args>] {suffix}"),
+        None => format!("{run} [<user-args>]"),
+    };
     if let Some(svc) = docker {
-        eprintln!("    {} {svc} -c {run:?}", style::dim("docker compose run --rm"));
+        eprintln!(
+            "    {} {svc} -c {composed:?}",
+            style::dim("docker compose run --rm")
+        );
     } else {
-        eprintln!("    {run}");
+        eprintln!("    {composed}");
     }
     eprintln!();
     eprintln!(
-        "{} run:-kind commands do not forward argv; the script runs as declared.",
+        "{} pass extra args after `--` and they slot in between the run line and the append suffix.",
         style::dim("Note:"),
     );
 }
@@ -1151,4 +1233,59 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn posix_quote_passes_safe_strings_through() {
+        assert_eq!(posix_quote("hello"), "hello");
+        assert_eq!(posix_quote("-p"), "-p");
+        assert_eq!(posix_quote("flodl-hf"), "flodl-hf");
+        assert_eq!(posix_quote("a/b.c"), "a/b.c");
+        assert_eq!(posix_quote("KEY=val"), "KEY=val");
+    }
+
+    #[test]
+    fn posix_quote_wraps_unsafe_strings() {
+        assert_eq!(posix_quote(""), "''");
+        assert_eq!(posix_quote("foo bar"), "'foo bar'");
+        assert_eq!(posix_quote("a$b"), "'a$b'");
+        assert_eq!(posix_quote("a\"b"), "'a\"b'");
+    }
+
+    #[test]
+    fn posix_quote_escapes_embedded_single_quotes() {
+        assert_eq!(posix_quote("it's"), "'it'\\''s'");
+        assert_eq!(posix_quote("'"), "''\\'''");
+    }
+
+    #[test]
+    fn compose_run_command_no_extras_passes_run_through() {
+        assert_eq!(compose_run_command("echo hello", &[], None), "echo hello");
+    }
+
+    #[test]
+    fn compose_run_command_inserts_user_args_between_run_and_append() {
+        let user = vec!["-p".to_string(), "flodl-hf".to_string()];
+        let out = compose_run_command("cargo test live", &user, Some("-- --nocapture --ignored"));
+        assert_eq!(out, "cargo test live -p flodl-hf -- --nocapture --ignored");
+    }
+
+    #[test]
+    fn compose_run_command_quotes_user_args_with_spaces() {
+        let user = vec!["--name".to_string(), "with space".to_string()];
+        let out = compose_run_command("cmd", &user, None);
+        assert_eq!(out, "cmd --name 'with space'");
+    }
+
+    #[test]
+    fn compose_run_command_omits_empty_append() {
+        let out = compose_run_command("cmd", &["arg".to_string()], Some(""));
+        assert_eq!(out, "cmd arg");
+        let out2 = compose_run_command("cmd", &["arg".to_string()], Some("   "));
+        assert_eq!(out2, "cmd arg");
+    }
 }

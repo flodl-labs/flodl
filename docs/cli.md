@@ -704,9 +704,10 @@ fdl train --help
 
 Path-kind sub-commands with an `entry:` forward every extra argv token to
 the underlying binary, where the derived parser validates it. `run:`-kind
-commands (shown in the next section) are closed scripts and do not
-forward extra args; use shell-level `$VAR` inside the script if you need
-dynamic values.
+commands (shown in the next section) forward argv only after an explicit
+`--` separator -- `fdl test-live -- -p flodl-hf` splices `-p flodl-hf`
+into the script, while `fdl test-live -p flodl-hf` errors loudly. Stray
+args before `--` are rejected with a hint pointing at the right form.
 
 `#[derive(FdlArgs)]` is re-exported as `flodl_cli::FdlArgs`. See the
 [`flodl-cli-macros`
@@ -721,6 +722,9 @@ of three kinds, chosen by which fields are set:
 
 - **Run** -- `run:` is set. Executes the inline shell script, optionally
   wrapped in `docker compose run --rm <service>` when `docker:` is set.
+  An optional `append:` field declares literal trailing tokens
+  (typically the libtest `-- --nocapture --ignored` portion) that should
+  follow any user-supplied args.
 - **Path** -- `path:` is set (or, by convention, the entry is empty/null
   and a sibling directory named `<command>/` with its own `fdl.yml`
   exists). Loads the nested manifest and recurses.
@@ -735,11 +739,13 @@ description: flodl - Rust deep learning framework
 commands:
   test:
     description: Run all CPU tests
-    run: cargo test -- --nocapture
+    run: cargo test
+    append: -- --nocapture
     docker: dev
   cuda-test:
     description: Run CUDA tests (parallel)
-    run: cargo test --features cuda -- --nocapture
+    run: cargo test --features cuda
+    append: -- --nocapture
     docker: cuda
   shell:
     run: bash
@@ -748,16 +754,53 @@ commands:
 ```
 
 ```bash
-fdl test              # runs "test" in the "dev" docker service
-fdl cuda-test         # runs in the "cuda" service
-fdl shell             # opens an interactive shell
-fdl ddp-bench --list  # dispatches into the ddp-bench sub-command
+fdl test                              # runs "test" in the "dev" docker service
+fdl cuda-test                         # runs in the "cuda" service
+fdl test -- -p flodl-hf --test foo    # forwards `-p flodl-hf --test foo` to cargo
+fdl shell                             # opens an interactive shell
+fdl ddp-bench --list                  # dispatches into the ddp-bench sub-command
 ```
 
 When a `run:` command declares `docker: <service>`, `fdl` wraps it in
 `docker compose run --rm <service> bash -c "…"`. Without `docker:`, it
 runs on the host. `docker:` is only valid on `run:` commands --
 declaring it on a `path:` or preset entry is rejected at load time.
+
+#### Forwarding extra args with `--` and `append:`
+
+`run:`-kind commands accept user args after an explicit `--` separator
+on the CLI. The composed shell command is:
+
+```
+[run:]  +  [user args after --]  +  [append:]
+```
+
+Args before `--` are rejected loudly (with a hint showing the right
+form). Args after `--` are POSIX-quoted and spliced between the run
+line and the append suffix. So:
+
+```yaml
+test-live:
+  run: cargo test live
+  append: -- --nocapture --ignored
+  docker: dev
+```
+
+```bash
+fdl test-live                                       # cargo test live -- --nocapture --ignored
+fdl test-live -- -p flodl-hf                        # cargo test live -p flodl-hf -- --nocapture --ignored
+fdl test-live -- --test xlm_roberta_parity          # cargo test live --test xlm_roberta_parity -- --nocapture --ignored
+fdl test-live -p flodl-hf                           # error: use `fdl test-live -- -p flodl-hf`
+```
+
+`append:` is purely structural: it lets the script author reserve
+trailing tokens (libtest harness flags, fixed test-name filters, etc.)
+that should always follow any user-supplied args. There is no opt-in or
+opt-out flag; the user typing `--` *is* the explicit forwarding signal.
+Commands without an `append:` simply receive the user args at the tail.
+
+`append:` without `run:` is rejected at load time: it only forwards
+tokens for inline run-scripts.
 
 ### Declaring flags in Rust
 
@@ -1062,14 +1105,16 @@ checkpoints, etc.). The canonical pattern:
 - Test name ends in `_live`.
 - Test is annotated `#[ignore = "live: requires network"]` (or similar
   reason) so `fdl test` skips it by default.
-- `fdl test-live` delegates to
-  `cargo test live -- --nocapture --ignored`, which picks them up.
+- `fdl test-live` delegates to `cargo test live` with
+  `-- --nocapture --ignored` declared as `append:`, which picks them up.
+  Pass cargo flags after `--` to scope (e.g.
+  `fdl test-live -- -p flodl-hf --test xlm_roberta_parity`).
 
 flodl-hf uses this for its PyTorch parity tests
 (`bert_parity_vs_pytorch_live`, `bert_tokenizer_matches_parity_fixture_live`,
-and the RoBERTa / DistilBERT siblings), each asserting
-`max_abs_diff <= 1e-5` on logits or hidden state against a pinned HF
-Python reference. Weights cache under `.hf-cache/` via
+and the RoBERTa / DistilBERT / ALBERT / XLM-RoBERTa siblings), each
+asserting `max_abs_diff <= 1e-5` on logits or hidden state against a
+pinned HF Python reference. Weights cache under `.hf-cache/` via
 `HF_HOME=/workspace/.hf-cache` in the Docker service.
 
 Any project (not just flodl itself) can adopt the `_live` suffix +

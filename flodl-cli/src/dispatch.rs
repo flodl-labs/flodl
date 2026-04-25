@@ -100,9 +100,14 @@ pub fn classify_path_step(
 /// every impure action (spawning, printing, exit code); the walker just
 /// returns the terminal state.
 pub enum WalkOutcome {
-    /// Top-level or nested `Run` — caller runs the inline script.
+    /// Top-level or nested `Run` — caller runs the inline script,
+    /// composing `command` + `user_args` (POSIX-quoted) + `append`.
+    /// `user_args` carries everything the caller typed after `--` on
+    /// the CLI (or the empty slice when `--` was absent).
     RunScript {
         command: String,
+        append: Option<String>,
+        user_args: Vec<String>,
         docker: Option<String>,
         cwd: PathBuf,
     },
@@ -137,6 +142,7 @@ pub enum WalkOutcome {
         name: String,
         description: Option<String>,
         run: String,
+        append: Option<String>,
         docker: Option<String>,
     },
     /// The top-level or descended-into name doesn't exist in the current
@@ -197,11 +203,34 @@ pub fn walk_commands(
                         name,
                         description: spec.description,
                         run: command,
+                        append: spec.append,
                         docker: spec.docker,
                     };
                 }
+                // Split tail on the first `--`: anything before is
+                // unexpected (no fdl-side flags exist for run-kind), and
+                // anything after is forwarded to the script. Loud
+                // rejection of stray args mirrors the loud-errors-over-
+                // silent rule.
+                let (before, after) = match current_tail.iter().position(|a| a == "--") {
+                    Some(idx) => {
+                        let after = current_tail[idx + 1..].to_vec();
+                        let before = current_tail[..idx].to_vec();
+                        (before, after)
+                    }
+                    None => (current_tail.clone(), Vec::new()),
+                };
+                if !before.is_empty() {
+                    return WalkOutcome::Error(format!(
+                        "command `{name}` does not accept extra args; \
+                         use `fdl {name} -- {}` to forward them to the script",
+                        before.join(" ")
+                    ));
+                }
                 return WalkOutcome::RunScript {
                     command,
+                    append: spec.append,
+                    user_args: after,
                     docker: spec.docker,
                     cwd: current_dir,
                 };
@@ -466,8 +495,16 @@ mod tests {
         let commands = top_commands("commands:\n  greet:\n    run: echo hello\n");
         let out = walk_commands("greet", &[], &commands, tmp.path(), None);
         match out {
-            WalkOutcome::RunScript { command, docker, cwd } => {
+            WalkOutcome::RunScript {
+                command,
+                append,
+                user_args,
+                docker,
+                cwd,
+            } => {
                 assert_eq!(command, "echo hello");
+                assert!(append.is_none());
+                assert!(user_args.is_empty());
                 assert!(docker.is_none());
                 assert_eq!(cwd, tmp.path());
             }
@@ -503,15 +540,70 @@ mod tests {
                 name,
                 description,
                 run,
+                append,
                 docker,
             } => {
                 assert_eq!(name, "test");
                 assert_eq!(description.as_deref(), Some("Run all CPU tests"));
                 assert_eq!(run, "cargo test");
+                assert!(append.is_none());
                 assert_eq!(docker.as_deref(), Some("dev"));
             }
             _ => panic!("expected PrintRunHelp"),
         }
+    }
+
+    #[test]
+    fn walk_run_forwards_args_after_double_dash() {
+        let tmp = TempDir::new();
+        let commands = top_commands(
+            "commands:\n  test:\n    run: cargo test live\n    append: -- --nocapture --ignored\n",
+        );
+        let tail = args(&["--", "-p", "flodl-hf"]);
+        let out = walk_commands("test", &tail, &commands, tmp.path(), None);
+        match out {
+            WalkOutcome::RunScript {
+                command,
+                append,
+                user_args,
+                ..
+            } => {
+                assert_eq!(command, "cargo test live");
+                assert_eq!(append.as_deref(), Some("-- --nocapture --ignored"));
+                assert_eq!(user_args, vec!["-p".to_string(), "flodl-hf".to_string()]);
+            }
+            _ => panic!("expected RunScript"),
+        }
+    }
+
+    #[test]
+    fn walk_run_rejects_stray_args_before_double_dash() {
+        let tmp = TempDir::new();
+        let commands = top_commands("commands:\n  test:\n    run: cargo test\n");
+        let tail = args(&["-p", "flodl-hf"]);
+        let out = walk_commands("test", &tail, &commands, tmp.path(), None);
+        match out {
+            WalkOutcome::Error(msg) => {
+                assert!(
+                    msg.contains("does not accept extra args")
+                        && msg.contains("fdl test -- -p flodl-hf"),
+                    "got: {msg}"
+                );
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn walk_run_rejects_stray_args_even_with_double_dash_after() {
+        let tmp = TempDir::new();
+        let commands = top_commands("commands:\n  test:\n    run: cargo test\n");
+        // Stray `-p flodl-hf` BEFORE `--` is rejected even though `--`
+        // appears later. The rule is structural: the tail must be empty
+        // up to `--`.
+        let tail = args(&["-p", "flodl-hf", "--", "extra"]);
+        let out = walk_commands("test", &tail, &commands, tmp.path(), None);
+        assert!(matches!(out, WalkOutcome::Error(_)));
     }
 
     #[test]

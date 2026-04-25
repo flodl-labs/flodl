@@ -1209,9 +1209,17 @@ fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
     match outcome {
         WalkOutcome::RunScript {
             command,
+            append,
+            user_args,
             docker,
             cwd,
-        } => run::exec_script(&command, docker.as_deref(), &cwd),
+        } => run::exec_script(
+            &command,
+            append.as_deref(),
+            &user_args,
+            docker.as_deref(),
+            &cwd,
+        ),
         WalkOutcome::ExecCommand {
             config,
             preset,
@@ -1239,9 +1247,16 @@ fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
             name,
             description,
             run,
+            append,
             docker,
         } => {
-            run::print_run_help(&name, description.as_deref(), &run, docker.as_deref());
+            run::print_run_help(
+                &name,
+                description.as_deref(),
+                &run,
+                append.as_deref(),
+                docker.as_deref(),
+            );
             ExitCode::SUCCESS
         }
         WalkOutcome::UnknownCommand { name } => {

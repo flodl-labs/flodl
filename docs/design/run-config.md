@@ -61,7 +61,8 @@ commands:
     docker: dev
   cuda-test:
     description: Run CUDA tests (parallel, excludes NCCL/Graph)
-    run: cargo test --features cuda -- --nocapture
+    run: cargo test --features cuda
+    append: -- --nocapture
     docker: cuda
   self-build:
     description: Rebuild fdl CLI after changes

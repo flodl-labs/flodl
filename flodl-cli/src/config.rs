@@ -81,6 +81,11 @@ pub struct CommandSpec {
     pub description: Option<String>,
     /// Inline shell command. Mutex with `path`.
     pub run: Option<String>,
+    /// Literal trailing tokens for a `run:` command. User args supplied
+    /// after `--` slot in between `run` and `append`, so a script can
+    /// reserve fdl-owned tokens (e.g. libtest's `-- --nocapture
+    /// --ignored`) and still accept user-supplied args ahead of them.
+    pub append: Option<String>,
     /// Pointer to a child directory containing its own `fdl.yml`. Absolute
     /// or relative to the declaring config's directory. Mutex with `run`.
     /// `None` + no other fields = "use the convention path
@@ -119,6 +124,13 @@ impl CommandSpec {
             return Err(
                 "command declares `docker:` without `run:`; \
                  `docker:` only wraps inline run-scripts"
+                    .to_string(),
+            );
+        }
+        if self.append.is_some() && self.run.is_none() {
+            return Err(
+                "command declares `append:` without `run:`; \
+                 `append:` only forwards trailing tokens for inline run-scripts"
                     .to_string(),
             );
         }
@@ -174,6 +186,8 @@ impl<'de> Deserialize<'de> for CommandSpec {
             #[serde(default)]
             run: Option<String>,
             #[serde(default)]
+            append: Option<String>,
+            #[serde(default)]
             path: Option<String>,
             #[serde(default)]
             docker: Option<String>,
@@ -196,6 +210,7 @@ impl<'de> Deserialize<'de> for CommandSpec {
         Ok(Self {
             description: inner.description,
             run: inner.run,
+            append: inner.append,
             path: inner.path,
             docker: inner.docker,
             ddp: inner.ddp,
