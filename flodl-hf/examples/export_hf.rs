@@ -14,6 +14,12 @@
 //! cargo run --release --example export_hf -- bert-base-uncased /tmp/bert-exported
 //! ```
 //!
+//! Argv parsing + `--help` + `--fdl-schema` are handled by `flodl-cli`'s
+//! [`FdlArgs`] derive, so help is identical whether the user types
+//! `fdl flodl-hf export -h` (rendered by fdl from the cached schema) or
+//! `fdl flodl-hf export` with missing args (rendered by this binary
+//! through the same renderer).
+//!
 //! Supported families: bert, roberta, distilbert, xlm-roberta, albert,
 //! deberta-v2 (dispatched via `AutoConfig::from_json_str` on the repo's
 //! `model_type`).
@@ -21,8 +27,21 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use flodl_cli::{parse_or_schema, FdlArgs};
 use flodl_hf::export::export_hf_dir;
 use flodl_hf::models::auto::{AutoConfig, AutoModel};
+
+/// Export a Hub repo as a HuggingFace-compatible directory (model.safetensors + config.json) using flodl's own writer. Auto-detects family (bert/roberta/distilbert/xlm-roberta/albert/deberta-v2).
+#[derive(FdlArgs, Debug)]
+struct ExportArgs {
+    /// HuggingFace repo id (e.g. `bert-base-uncased`).
+    #[arg]
+    hf_repo_id: String,
+    /// Output directory; written as
+    /// `<out_dir>/model.safetensors` + `<out_dir>/config.json`.
+    #[arg]
+    out_dir: String,
+}
 
 /// Anchor a relative `out_dir` path against `FDL_PROJECT_ROOT` when set.
 ///
@@ -45,34 +64,12 @@ fn resolve_out_dir(arg: &str) -> PathBuf {
     p.to_path_buf()
 }
 
-fn usage() -> ExitCode {
-    eprintln!(
-        "usage: export_hf <hf_repo_id> <out_dir>\n\
-         \n\
-         example: export_hf bert-base-uncased /tmp/bert-exported\n\
-         \n\
-         Writes <out_dir>/model.safetensors + <out_dir>/config.json.\n\
-         Supported families: bert, roberta, distilbert, xlm-roberta, albert, deberta-v2.",
-    );
-    ExitCode::from(64) // EX_USAGE
-}
-
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    let Some(repo_id) = args.next() else {
-        return usage();
-    };
-    let Some(out_dir) = args.next() else {
-        return usage();
-    };
-    if args.next().is_some() {
-        eprintln!("error: unexpected extra arguments");
-        return usage();
-    }
-    let out_dir = resolve_out_dir(&out_dir);
+    let cli: ExportArgs = parse_or_schema();
+    let out_dir = resolve_out_dir(&cli.out_dir);
 
-    eprintln!("fetching config.json for {repo_id} ...");
-    let config = match AutoConfig::from_pretrained(&repo_id) {
+    eprintln!("fetching config.json for {} ...", cli.hf_repo_id);
+    let config = match AutoConfig::from_pretrained(&cli.hf_repo_id) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
@@ -81,12 +78,12 @@ fn main() -> ExitCode {
     };
     eprintln!("detected family: {}", config.model_type());
 
-    eprintln!("loading weights for {repo_id} ...");
+    eprintln!("loading weights for {} ...", cli.hf_repo_id);
     // `_for_export` keeps the family pooler so HF AutoModel.from_pretrained
     // gets every weight it expects on reload. Default `from_pretrained`
     // strips the pooler for cross-family `last_hidden_state` consistency,
     // which is wrong for export.
-    let graph = match AutoModel::from_pretrained_for_export(&repo_id) {
+    let graph = match AutoModel::from_pretrained_for_export(&cli.hf_repo_id) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("error: {e}");
@@ -102,7 +99,7 @@ fn main() -> ExitCode {
 
     println!(
         "exported {} → {}\n  model.safetensors + config.json ready for AutoModel.from_pretrained",
-        repo_id,
+        cli.hf_repo_id,
         out_dir.display(),
     );
     ExitCode::SUCCESS

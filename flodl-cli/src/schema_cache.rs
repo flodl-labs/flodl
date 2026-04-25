@@ -74,14 +74,45 @@ pub fn write_cache(path: &Path, schema: &Schema) -> Result<(), String> {
 /// Probe a binary for its schema by running `<entry> --fdl-schema` via the
 /// shell and parsing stdout as JSON.
 ///
-/// The entry is run with `cwd = cmd_dir` so relative paths (e.g. in
-/// `cargo run` contexts) resolve correctly. On failure returns a string
-/// error rather than panicking — callers almost always want to fall back.
-pub fn probe(entry: &str, cmd_dir: &Path) -> Result<Schema, String> {
+/// `cmd_dir` is the directory containing the `fdl.yml` that declared the
+/// entry — it serves as the cwd for the shell unless the entry is wrapped
+/// through docker (then the wrap walks up to the nearest
+/// `docker-compose.yml` for compose's cwd).
+///
+/// `docker_service` carries the `docker:` field from the resolved
+/// command config. When set AND we're not already inside a container,
+/// the invocation is wrapped as
+/// `docker compose run --rm <service> bash -c '<entry> --fdl-schema'`
+/// so cargo entries that need libtorch get probed inside the dev
+/// container instead of failing silently on the host. When unset, the
+/// entry runs directly on the host.
+///
+/// On failure returns a string error rather than panicking — callers
+/// almost always want to fall back to the inline schema (or none).
+pub fn probe(entry: &str, cmd_dir: &Path, docker_service: Option<&str>) -> Result<Schema, String> {
     if entry.trim().is_empty() {
         return Err("entry is empty".into());
     }
-    let invocation = format!("{entry} --fdl-schema");
+
+    let inner = format!("{entry} --fdl-schema");
+    let (invocation, run_cwd) = match docker_service {
+        Some(svc) if !inside_docker() => {
+            let compose_root = find_docker_compose_root(cmd_dir).ok_or_else(|| {
+                format!(
+                    "cannot probe schema: docker:{svc} declared but no \
+                     docker-compose.yml found above {}",
+                    cmd_dir.display()
+                )
+            })?;
+            let wrapped = format!(
+                "docker compose run --rm {svc} bash -c {}",
+                posix_quote(&inner)
+            );
+            (wrapped, compose_root)
+        }
+        _ => (inner, cmd_dir.to_path_buf()),
+    };
+
     let (shell, flag) = if cfg!(target_os = "windows") {
         ("cmd", "/C")
     } else {
@@ -89,7 +120,7 @@ pub fn probe(entry: &str, cmd_dir: &Path) -> Result<Schema, String> {
     };
     let output = Command::new(shell)
         .args([flag, &invocation])
-        .current_dir(cmd_dir)
+        .current_dir(&run_cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -120,6 +151,55 @@ pub fn probe(entry: &str, cmd_dir: &Path) -> Result<Schema, String> {
 /// Probing must be explicit (`fdl <cmd> --refresh-schema`) for those.
 pub fn is_cargo_entry(entry: &str) -> bool {
     entry.trim_start().starts_with("cargo ")
+}
+
+/// True when this process is running inside a Docker container. Mirrors
+/// the `/.dockerenv` heuristic used elsewhere in the crate.
+fn inside_docker() -> bool {
+    Path::new("/.dockerenv").exists()
+}
+
+/// Climb from `start` looking for a directory containing
+/// `docker-compose.yml` (the compose root used as cwd for `docker
+/// compose` invocations). Returns `None` if none is found before
+/// hitting the filesystem root.
+fn find_docker_compose_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join("docker-compose.yml").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// POSIX-quote a single token so it survives `bash -c` as one argument.
+/// Local copy to avoid pulling `run.rs` into `schema_cache.rs` for one
+/// helper.
+fn posix_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let safe = s.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '+' | '@' | ',')
+    });
+    if safe {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 #[cfg(test)]
@@ -284,7 +364,7 @@ JSON
         }
 
         let entry = script.to_string_lossy();
-        let schema = probe(&entry, tmp.path()).expect("probe should succeed");
+        let schema = probe(&entry, tmp.path(), None).expect("probe should succeed");
         let model = schema.options.get("model").expect("model opt");
         assert_eq!(model.ty, "string");
         assert_eq!(model.short.as_deref(), Some("m"));
@@ -301,7 +381,7 @@ JSON
             let perm = fs::Permissions::from_mode(0o755);
             fs::set_permissions(&script, perm).unwrap();
         }
-        let err = probe(&script.to_string_lossy(), tmp.path())
+        let err = probe(&script.to_string_lossy(), tmp.path(), None)
             .expect_err("non-json must fail");
         assert!(err.contains("no JSON") || err.contains("valid JSON"),
             "err was: {err}");
@@ -324,7 +404,7 @@ JSON
             let perm = fs::Permissions::from_mode(0o755);
             fs::set_permissions(&script, perm).unwrap();
         }
-        let err = probe(&script.to_string_lossy(), tmp.path())
+        let err = probe(&script.to_string_lossy(), tmp.path(), None)
             .expect_err("semantic fail must propagate");
         assert!(err.contains("validation") || err.contains("reserved"),
             "err was: {err}");

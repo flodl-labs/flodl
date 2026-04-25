@@ -1389,7 +1389,7 @@ fn cmd_refresh_schema(
     };
 
     eprintln!("Probing `{entry} --fdl-schema`...");
-    let schema = match schema_cache::probe(entry, cmd_dir) {
+    let schema = match schema_cache::probe(entry, cmd_dir, cmd_config.docker.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             cli_error!("{e}");

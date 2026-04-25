@@ -44,7 +44,12 @@ pub trait FdlArgsTrait: Sized {
 ///
 /// - `--fdl-schema` anywhere in argv: print the JSON schema to stdout, exit 0.
 /// - `--help` / `-h` anywhere in argv: print help to stdout, exit 0.
-/// - Otherwise: parse via `T::try_parse_from`.
+/// - Otherwise: parse via `T::try_parse_from`. On parse error (missing
+///   required positional, unknown flag, invalid value, ...) the error
+///   message AND the rendered help are printed to stderr; the binary
+///   exits with code 2. Showing help on error keeps `<bin>` (no args)
+///   and `<bin> --help` consistent for binaries that previously dumped
+///   usage on missing-args.
 pub fn parse_or_schema<T: FdlArgsTrait>() -> T {
     let argv: Vec<String> = std::env::args().collect();
     parse_or_schema_from::<T>(&argv)
@@ -71,6 +76,8 @@ pub fn parse_or_schema_from<T: FdlArgsTrait>(argv: &[String]) -> T {
         Ok(t) => t,
         Err(msg) => {
             eprintln!("{msg}");
+            eprintln!();
+            eprintln!("{}", T::render_help());
             std::process::exit(2);
         }
     }

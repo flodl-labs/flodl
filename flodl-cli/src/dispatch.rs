@@ -190,6 +190,10 @@ pub fn walk_commands(
     let mut enclosing: Option<CommandConfig> = None;
     let mut current_dir: PathBuf = project_root.to_path_buf();
     let mut name: String = cmd_name.to_string();
+    // `qualified` tracks the space-separated path the user typed
+    // (`flodl-hf export`) so help renderers can show the correct
+    // invocation. `name` is always the leaf used for command-map lookup.
+    let mut qualified: String = cmd_name.to_string();
     let mut current_tail: Vec<String> = tail.to_vec();
 
     loop {
@@ -210,7 +214,7 @@ pub fn walk_commands(
                     .expect("Run kind guarantees `run` is set");
                 if current_tail.iter().any(|a| a == "--help" || a == "-h") {
                     return WalkOutcome::PrintRunHelp {
-                        name,
+                        name: qualified,
                         description: spec.description,
                         run: command,
                         append: spec.append,
@@ -256,6 +260,8 @@ pub fn walk_commands(
                         commands = child.commands.clone();
                         enclosing = Some(*child);
                         current_dir = new_dir;
+                        qualified.push(' ');
+                        qualified.push_str(&new_name);
                         name = new_name;
                         // classify_path_step returned Descend because
                         // current_tail[0] named a nested command; consume
@@ -267,14 +273,14 @@ pub fn walk_commands(
                     PathOutcome::ShowHelp { child } => {
                         return WalkOutcome::PrintCommandHelp {
                             config: child,
-                            name,
+                            name: qualified,
                         };
                     }
                     PathOutcome::RefreshSchema { child, child_dir } => {
                         return WalkOutcome::RefreshSchema {
                             config: child,
                             cmd_dir: child_dir,
-                            cmd_name: name,
+                            cmd_name: qualified,
                         };
                     }
                     PathOutcome::Exec { child, child_dir } => {
