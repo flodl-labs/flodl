@@ -1284,5 +1284,5 @@ investigate why the worker is unresponsive. Repeated timeouts (check
 
 ---
 
-Previous: [Tutorial 13: Data Loading](tutorials/13-data-loading.md) |
+Previous: [Tutorial 14: HuggingFace Integration](tutorials/14-flodl-hf.md) |
 Next: [PyTorch Migration Guide](pytorch_migration.md)

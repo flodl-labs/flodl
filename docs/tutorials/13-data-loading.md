@@ -309,4 +309,4 @@ let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
 ---
 
 Previous: [DDP Builder](12-async-ddp.md) |
-Next: [DDP Reference](../ddp.md)
+Next: [Tutorial 14: HuggingFace Integration](14-flodl-hf.md)
