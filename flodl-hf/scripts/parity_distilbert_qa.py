@@ -4,7 +4,7 @@
 Fixture model: `distilbert/distilbert-base-cased-distilled-squad`
 (extractive QA, canonical SQuAD fine-tune).
 
-Run via `fdl flodl-hf parity-distilbert-qa`.
+Run via `fdl flodl-hf parity distilbert-qa`.
 """
 
 from __future__ import annotations

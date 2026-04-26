@@ -1,7 +1,7 @@
 //! PyTorch parity for `BertModel::from_pretrained("bert-base-uncased")`.
 //!
 //! Loads a committed safetensors fixture built by
-//! `flodl-hf/scripts/parity_bert.py` (run via `fdl flodl-hf parity-bert`) and
+//! `flodl-hf/scripts/parity_bert.py` (run via `fdl flodl-hf parity bert`) and
 //! compares flodl's pooled output against the Python `BertModel` reference on
 //! the same pinned inputs.
 //!
@@ -65,7 +65,7 @@ fn bert_parity_vs_pytorch_live() {
     let dev = Device::CPU;
 
     let fixture_bytes = std::fs::read(Path::new(FIXTURE))
-        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity-bert` to regenerate)"));
+        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity bert` to regenerate)"));
     let st = SafeTensors::deserialize(&fixture_bytes)
         .expect("parse parity fixture");
 

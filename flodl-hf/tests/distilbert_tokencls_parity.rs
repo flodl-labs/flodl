@@ -1,8 +1,8 @@
 //! PyTorch parity for `DistilBertForTokenClassification`.
 //!
 //! Fixture model: `dslim/distilbert-NER`. Loads the fixture from
-//! `flodl-hf/scripts/parity_distilbert_tokencls.py` (`fdl flodl-hf
-//! parity-distilbert-tokencls`) and compares flodl's `[B, S, num_labels]`
+//! `flodl-hf/scripts/parity_distilbert_tokencls.py` (`fdl flodl-hf parity
+//! distilbert-tokencls`) and compares flodl's `[B, S, num_labels]`
 //! logits against HF Python on the same pinned input.
 //!
 //! `_live` — pulls real weights from the Hub. Run with `fdl test-live`.
@@ -37,7 +37,7 @@ fn distilbert_tokencls_parity_vs_pytorch_live() {
     let dev = Device::CPU;
 
     let bytes = std::fs::read(Path::new(FIXTURE))
-        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity-distilbert-tokencls` to regenerate)"));
+        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity distilbert-tokencls` to regenerate)"));
     let st = SafeTensors::deserialize(&bytes).expect("parse parity fixture");
 
     let ids = st.tensor("inputs.input_ids").unwrap();

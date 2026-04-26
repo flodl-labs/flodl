@@ -13,7 +13,7 @@ sequential `0..S`, computed internally both by HF Python and by the
 flodl graph, so they aren't stored either. The fixture therefore
 carries only `input_ids` + `attention_mask`.
 
-Run via `fdl flodl-hf parity-distilbert`.
+Run via `fdl flodl-hf parity distilbert`.
 """
 
 from __future__ import annotations

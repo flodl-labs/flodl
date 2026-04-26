@@ -7,7 +7,7 @@ pair and writes inputs + start/end logits to
 
 Fixture model: `csarron/bert-base-uncased-squad-v1` (SQuAD v1, 2-wide head).
 
-Run via `fdl flodl-hf parity-bert-qa`.
+Run via `fdl flodl-hf parity bert-qa`.
 """
 
 from __future__ import annotations

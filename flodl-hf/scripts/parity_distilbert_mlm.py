@@ -10,7 +10,7 @@ MLM checkpoint distilled from `bert-base-uncased`. HF's
 `tie_weights()` ties `vocab_projector.weight` to
 `distilbert.embeddings.word_embeddings.weight` after load.
 
-Run via `fdl flodl-hf parity-distilbert-mlm`.
+Run via `fdl flodl-hf parity distilbert-mlm`.
 """
 
 from __future__ import annotations

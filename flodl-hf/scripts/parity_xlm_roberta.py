@@ -16,7 +16,7 @@ chosen to exercise the multilingual SentencePiece vocabulary in a
 single forward pass. Pinning to FLORES-200 devtest row 0 keeps the
 fixture reproducible across runs.
 
-Run via `fdl flodl-hf parity-xlm-roberta`.
+Run via `fdl flodl-hf parity xlm-roberta`.
 """
 
 from __future__ import annotations

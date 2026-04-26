@@ -307,7 +307,7 @@ network access (for Hub downloads) and cache weights under
 `./.hf-cache/` via the `HF_HOME` env var.
 
 The parity fixtures themselves are regenerated through
-`fdl flodl-hf parity-bert` and siblings (one command per checkpoint,
+`fdl flodl-hf parity bert` and siblings (one command per checkpoint,
 twelve total). These run a Python Docker service
 (`hf-parity`, `python:3.12-slim` + torch 2.8.0 CPU) to produce the
 reference outputs; flodl-hf then consumes the resulting safetensors

@@ -4,7 +4,7 @@
 Fixture model: `dslim/distilbert-NER` (PER/ORG/LOC/MISC; 9-label BIO
 scheme including `O`).
 
-Run via `fdl flodl-hf parity-distilbert-tokencls`.
+Run via `fdl flodl-hf parity distilbert-tokencls`.
 """
 
 from __future__ import annotations

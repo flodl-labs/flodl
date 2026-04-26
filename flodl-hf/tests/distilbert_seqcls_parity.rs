@@ -1,8 +1,8 @@
 //! PyTorch parity for `DistilBertForSequenceClassification`.
 //!
 //! Loads the fixture from
-//! `flodl-hf/scripts/parity_distilbert_seqcls.py` (`fdl flodl-hf
-//! parity-distilbert-seqcls`) and compares flodl's logits against the
+//! `flodl-hf/scripts/parity_distilbert_seqcls.py` (`fdl flodl-hf parity
+//! distilbert-seqcls`) and compares flodl's logits against the
 //! HF Python reference. Fixture model:
 //! `lxyuan/distilbert-base-multilingual-cased-sentiments-student`
 //! (3-label sentiment).
@@ -39,7 +39,7 @@ fn distilbert_seqcls_parity_vs_pytorch_live() {
     let dev = Device::CPU;
 
     let bytes = std::fs::read(Path::new(FIXTURE))
-        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity-distilbert-seqcls` to regenerate)"));
+        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity distilbert-seqcls` to regenerate)"));
     let st = SafeTensors::deserialize(&bytes).expect("parse parity fixture");
 
     let ids = st.tensor("inputs.input_ids").unwrap();

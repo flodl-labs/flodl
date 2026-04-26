@@ -2,7 +2,7 @@
 //!
 //! Fixture model: `distilbert/distilbert-base-cased-distilled-squad`.
 //! Loads the fixture from `flodl-hf/scripts/parity_distilbert_qa.py`
-//! (`fdl flodl-hf parity-distilbert-qa`) and compares flodl's
+//! (`fdl flodl-hf parity distilbert-qa`) and compares flodl's
 //! `[B, S, 2]` logits against HF Python's
 //! `stack([start_logits, end_logits], dim=-1)` on the same pinned
 //! (question, context) pair.
@@ -39,7 +39,7 @@ fn distilbert_qa_parity_vs_pytorch_live() {
     let dev = Device::CPU;
 
     let bytes = std::fs::read(Path::new(FIXTURE))
-        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity-distilbert-qa` to regenerate)"));
+        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity distilbert-qa` to regenerate)"));
     let st = SafeTensors::deserialize(&bytes).expect("parse parity fixture");
 
     let ids = st.tensor("inputs.input_ids").unwrap();

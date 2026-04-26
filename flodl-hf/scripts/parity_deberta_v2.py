@@ -13,7 +13,7 @@ means the base model does NOT consume absolute positions, and
 `type_vocab_size=0` means no `token_type_ids` — so the fixture saves
 only `input_ids` + `attention_mask`.
 
-Run via `fdl flodl-hf parity-deberta-v2`.
+Run via `fdl flodl-hf parity deberta-v2`.
 """
 
 from __future__ import annotations

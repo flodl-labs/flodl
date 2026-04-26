@@ -8,7 +8,7 @@ input and writes both the tokenised inputs and the reference logits to
 Fixture model: `cardiffnlp/twitter-roberta-base-sentiment-latest`
 (3-label sentiment: negative / neutral / positive).
 
-Run via `fdl flodl-hf parity-roberta-seqcls`.
+Run via `fdl flodl-hf parity roberta-seqcls`.
 """
 
 from __future__ import annotations

@@ -17,7 +17,7 @@ graph dynamically. The fixture saves both `last_hidden_state` and
 `pooler_output`; the parity test compares `pooler_output` (the graph's
 final node) — same pattern as `bert_parity.rs`.
 
-Run via `fdl flodl-hf parity-albert`.
+Run via `fdl flodl-hf parity albert`.
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ same weights used by every downstream RoBERTa fine-tune. HF's
 checkpoint is overwritten to match `roberta.embeddings.word_embeddings.weight`;
 `lm_head.bias` and `lm_head.decoder.bias` are likewise tied.
 
-Run via `fdl flodl-hf parity-roberta-mlm`.
+Run via `fdl flodl-hf parity roberta-mlm`.
 """
 
 from __future__ import annotations

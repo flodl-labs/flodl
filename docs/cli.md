@@ -1179,12 +1179,12 @@ fdl flodl-hf example roberta-embed    # + roberta-classify / -ner / -qa
 fdl flodl-hf example distilbert-embed # + distilbert-classify / -ner / -qa
 
 # Parity-fixture regeneration (contributors; twelve per-head commands)
-fdl flodl-hf parity-bert              # bert-base-uncased backbone fixture
-fdl flodl-hf parity-bert-seqcls       # per-head fixtures
-fdl flodl-hf parity-bert-tokencls
-fdl flodl-hf parity-bert-qa
-fdl flodl-hf parity-roberta           # + seqcls / tokencls / qa
-fdl flodl-hf parity-distilbert        # + seqcls / tokencls / qa
+fdl flodl-hf parity bert              # bert-base-uncased backbone fixture
+fdl flodl-hf parity bert-seqcls       # per-head fixtures
+fdl flodl-hf parity bert-tokencls
+fdl flodl-hf parity bert-qa
+fdl flodl-hf parity roberta           # + seqcls / tokencls / qa
+fdl flodl-hf parity distilbert        # + seqcls / tokencls / qa
 ```
 
 Parity regen runs in a dedicated `hf-parity` Docker service

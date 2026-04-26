@@ -9,7 +9,7 @@ RoBERTa computes `position_ids` internally from `input_ids` using its
 padding-offset convention, so the fixture does NOT save them — the
 flodl graph follows the same path.
 
-Run via `fdl flodl-hf parity-roberta`.
+Run via `fdl flodl-hf parity roberta`.
 """
 
 from __future__ import annotations

@@ -1,0 +1,113 @@
+description: Regenerate parity fixtures from HuggingFace reference (used by *_parity_live tests)
+
+# Each entry runs a Python script in the hf-parity container that loads the
+# upstream HuggingFace model on a pinned input and writes the reference
+# outputs + provenance metadata to flodl-hf/tests/fixtures/<family>_parity.safetensors.
+#
+# `fdl flodl-hf parity all` runs every entry in sequence (fail-soft, prints
+# PASS/FAIL grid at the end). Two seqcls fixtures (bert-seqcls,
+# roberta-seqcls) ship .bin-only on the Hub and need a one-time
+# convert_bin_to_safetensors.py prestep — `all` handles this; the
+# individual entries inline it.
+
+commands:
+  all:
+    description: Regenerate every parity fixture in sequence (fail-soft, PASS/FAIL summary at end)
+    run: python scripts/parity_all.py
+    docker: hf-parity
+
+  bert:
+    description: Regenerate tests/fixtures/bert_base_uncased_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_bert.py
+    docker: hf-parity
+
+  bert-seqcls:
+    description: Regenerate tests/fixtures/bert_seqcls_parity.safetensors (BertForSequenceClassification)
+    # The emotion checkpoint is .bin-only; convert to safetensors into the
+    # flodl-converted cache first so from_pretrained picks it up for the
+    # matching _live test.
+    run: python scripts/convert_bin_to_safetensors.py nateraw/bert-base-uncased-emotion && python scripts/parity_bert_seqcls.py
+    docker: hf-parity
+
+  bert-tokencls:
+    description: Regenerate tests/fixtures/bert_tokencls_parity.safetensors (BertForTokenClassification)
+    run: python scripts/parity_bert_tokencls.py
+    docker: hf-parity
+
+  bert-qa:
+    description: Regenerate tests/fixtures/bert_qa_parity.safetensors (BertForQuestionAnswering)
+    run: python scripts/parity_bert_qa.py
+    docker: hf-parity
+
+  bert-mlm:
+    description: Regenerate tests/fixtures/bert_mlm_parity.safetensors (BertForMaskedLM)
+    run: python scripts/parity_bert_mlm.py
+    docker: hf-parity
+
+  roberta:
+    description: Regenerate tests/fixtures/roberta_base_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_roberta.py
+    docker: hf-parity
+
+  roberta-seqcls:
+    description: Regenerate tests/fixtures/roberta_seqcls_parity.safetensors (RobertaForSequenceClassification)
+    # The cardiffnlp sentiment checkpoint ships only `pytorch_model.bin`;
+    # convert to safetensors first so from_pretrained picks it up for the
+    # matching _live test.
+    run: python scripts/convert_bin_to_safetensors.py cardiffnlp/twitter-roberta-base-sentiment-latest && python scripts/parity_roberta_seqcls.py
+    docker: hf-parity
+
+  roberta-tokencls:
+    description: Regenerate tests/fixtures/roberta_tokencls_parity.safetensors (RobertaForTokenClassification)
+    run: python scripts/parity_roberta_tokencls.py
+    docker: hf-parity
+
+  roberta-qa:
+    description: Regenerate tests/fixtures/roberta_qa_parity.safetensors (RobertaForQuestionAnswering)
+    run: python scripts/parity_roberta_qa.py
+    docker: hf-parity
+
+  roberta-mlm:
+    description: Regenerate tests/fixtures/roberta_mlm_parity.safetensors (RobertaForMaskedLM)
+    run: python scripts/parity_roberta_mlm.py
+    docker: hf-parity
+
+  distilbert:
+    description: Regenerate tests/fixtures/distilbert_base_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_distilbert.py
+    docker: hf-parity
+
+  distilbert-seqcls:
+    description: Regenerate tests/fixtures/distilbert_seqcls_parity.safetensors (DistilBertForSequenceClassification)
+    run: python scripts/parity_distilbert_seqcls.py
+    docker: hf-parity
+
+  distilbert-tokencls:
+    description: Regenerate tests/fixtures/distilbert_tokencls_parity.safetensors (DistilBertForTokenClassification)
+    run: python scripts/parity_distilbert_tokencls.py
+    docker: hf-parity
+
+  distilbert-qa:
+    description: Regenerate tests/fixtures/distilbert_qa_parity.safetensors (DistilBertForQuestionAnswering)
+    run: python scripts/parity_distilbert_qa.py
+    docker: hf-parity
+
+  distilbert-mlm:
+    description: Regenerate tests/fixtures/distilbert_mlm_parity.safetensors (DistilBertForMaskedLM)
+    run: python scripts/parity_distilbert_mlm.py
+    docker: hf-parity
+
+  albert:
+    description: Regenerate tests/fixtures/albert_base_v2_parity.safetensors against HuggingFace reference
+    run: python scripts/parity_albert.py
+    docker: hf-parity
+
+  xlm-roberta:
+    description: Regenerate tests/fixtures/xlm_roberta_base_parity.safetensors against HuggingFace reference (FLORES-200 multilingual prompt)
+    run: python scripts/parity_xlm_roberta.py
+    docker: hf-parity
+
+  deberta-v2:
+    description: Regenerate tests/fixtures/deberta_v2_parity.safetensors against HuggingFace reference (microsoft/deberta-v3-base)
+    run: python scripts/parity_deberta_v2.py
+    docker: hf-parity

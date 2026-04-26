@@ -11,7 +11,7 @@ between the decoder and the word-embedding table is preserved; HF's
 `tie_weights()` runs after load, so any redundant `cls.predictions.decoder.weight`
 in the checkpoint is overwritten to match the embedding.
 
-Run via `fdl flodl-hf parity-bert-mlm`.
+Run via `fdl flodl-hf parity bert-mlm`.
 """
 
 from __future__ import annotations

@@ -8,7 +8,7 @@ logits to `flodl-hf/tests/fixtures/roberta_qa_parity.safetensors`.
 Fixture model: `deepset/roberta-base-squad2` (SQuAD v2, standard
 reference for RoBERTa QA).
 
-Run via `fdl flodl-hf parity-roberta-qa`.
+Run via `fdl flodl-hf parity roberta-qa`.
 """
 
 from __future__ import annotations
