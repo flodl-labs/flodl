@@ -350,10 +350,20 @@ fn build_deberta_v2_for_export(
 
 /// Convenience: detect pooler presence from a list of checkpoint keys
 /// (e.g. the output of [`flodl::checkpoint_keys`]). Returns `true` when
-/// any key starts with `pooler` — matches the convention used by
-/// flodl-hf's family backbones.
+/// any key matches one of the family pooler suffixes
+/// (`pooler.dense.{weight,bias}` for BERT/RoBERTa/XLM-R,
+/// `pooler.{weight,bias}` for ALBERT). Mirrors the safetensors-side
+/// `weights_have_pooler` check while normalising the `/` tag separator
+/// flodl checkpoints use between qualified tag boundaries
+/// (e.g. `bert.pooler/dense.weight`).
 pub fn keys_have_pooler(keys: &[String]) -> bool {
-    keys.iter().any(|k| k.starts_with("pooler/") || k.starts_with("pooler."))
+    keys.iter().any(|k| {
+        let normalised = k.replace('/', ".");
+        normalised.ends_with("pooler.dense.weight")
+            || normalised.ends_with("pooler.dense.bias")
+            || normalised.ends_with("pooler.weight")
+            || normalised.ends_with("pooler.bias")
+    })
 }
 
 #[cfg(test)]

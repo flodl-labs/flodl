@@ -57,6 +57,12 @@ This is the canonical pattern in flodl for parametrising what was previously a u
 
 - `Ddp::setup()`, `Ddp::setup_with()`, `Ddp::builder()` — use the matching `Trainer::*` methods instead. Same behavior, clearer intent. Compile-time deprecation warnings guide migration. `Ddp::wrap()` remains on `Ddp` as the explicit multi-GPU control tier. Removal targeted for a future release.
 
+### Fixed
+
+- **flodl-hf `--checkpoint` re-export round-trip on base backbones.** `AutoModel::from_pretrained_for_export` was preserving the Hub config's `architectures` field verbatim (e.g. `["BertForMaskedLM"]` for `bert-base-uncased`) while the actual built graph mirrored HF's `AutoModel.from_pretrained` and dropped the head. The sidecar then drove `build_for_export` to rebuild the head class, producing a structural-hash mismatch on `Graph::load_checkpoint`. Now normalised to the base class name (`BertModel`, `RobertaModel`, `DistilBertModel`, `XLMRobertaModel`, `AlbertModel`, `DebertaV2Model`) so `--hub` and `--checkpoint` modes round-trip bit-identically.
+- **`flodl_hf::export::keys_have_pooler`** misclassified saved checkpoints whose pooler keys carry a tag-qualified prefix (e.g. `bert.pooler/dense.weight`). The `starts_with("pooler/")` check only matched bare layouts and silently returned `false` for every BERT-family base checkpoint. Fixed to normalise the `/` tag separator and `ends_with` against the family pooler suffixes, mirroring the safetensors-side `weights_have_pooler`.
+- **`DebertaV2Config::from_json_str`** now accepts `pos_att_type` as either the pipe-separated string (`"p2c|c2p"`, the v3 base convention) or a JSON array (`["p2c", "c2p"]`, what `transformers` re-emits when re-saving fine-tuned heads — `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`, `deepset/deberta-v3-base-squad2`, etc.). Previously array configs failed parsing with an empty-string error.
+
 ## [0.5.2] - 2026-04-22
 
 ### Added

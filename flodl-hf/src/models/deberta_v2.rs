@@ -182,8 +182,24 @@ impl DebertaV2Config {
             ));
         }
 
-        // Required: pos_att_type contains both c2p and p2c.
-        let pos_att_raw = v.get("pos_att_type").and_then(|x| x.as_str()).unwrap_or("");
+        // Required: pos_att_type contains both c2p and p2c. HF ships
+        // this either as a pipe-separated string (`"p2c|c2p"`, the v3
+        // base convention used by `microsoft/deberta-v3-base`) or as a
+        // JSON array (`["p2c", "c2p"]`, what `transformers` re-emits
+        // when re-saving fine-tuned heads — see e.g.
+        // `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`,
+        // `deepset/deberta-v3-base-squad2`).
+        let pos_att_raw = match v.get("pos_att_type") {
+            Some(s) if s.is_string() => s.as_str().unwrap_or("").to_string(),
+            Some(arr) if arr.is_array() => arr
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join("|"),
+            _ => String::new(),
+        };
         let has_c2p = pos_att_raw.contains("c2p");
         let has_p2c = pos_att_raw.contains("p2c");
         if !(has_c2p && has_p2c) {

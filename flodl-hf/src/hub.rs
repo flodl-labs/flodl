@@ -1252,7 +1252,6 @@ impl AutoModel {
         device: Device,
     ) -> Result<Graph> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
-        let config_json = config.to_json_str();
 
         // Pick with-pooler vs without-pooler dynamically based on what
         // the checkpoint actually ships. Some Hub repos for pooler-
@@ -1262,37 +1261,64 @@ impl AutoModel {
         // validation in `load_safetensors_into_graph_with_rename_allow_unused`.
         let has_pooler = weights_have_pooler(&weights)?;
 
-        let graph = match config {
-            AutoConfig::Bert(c) => {
-                if has_pooler {
+        // Normalise `architectures` to the base class name on each
+        // family arm. The Hub's source config typically tags a head
+        // class (e.g. `bert-base-uncased` ships
+        // `architectures: ["BertForMaskedLM"]`) while this loader,
+        // mirroring HF's `AutoModel.from_pretrained`, builds the base
+        // backbone and silently drops head keys. The sidecar emitted
+        // by a subsequent `save_checkpoint` must reflect what was
+        // actually built, otherwise `build_for_export` re-dispatches
+        // to the head class on `--checkpoint` re-export and produces
+        // a graph whose structural hash no longer matches the saved
+        // file (see `flodl-hf/tests/checkpoint_export_soak.rs`).
+        let (graph, config_json) = match config {
+            AutoConfig::Bert(mut c) => {
+                let g = if has_pooler {
                     BertModel::on_device(&c, device)?
                 } else {
                     BertModel::on_device_without_pooler(&c, device)?
-                }
+                };
+                c.architectures = Some(vec!["BertModel".into()]);
+                (g, AutoConfig::Bert(c).to_json_str())
             }
-            AutoConfig::Roberta(c) => {
-                if has_pooler {
+            AutoConfig::Roberta(mut c) => {
+                let g = if has_pooler {
                     RobertaModel::on_device(&c, device)?
                 } else {
                     RobertaModel::on_device_without_pooler(&c, device)?
-                }
+                };
+                c.architectures = Some(vec!["RobertaModel".into()]);
+                (g, AutoConfig::Roberta(c).to_json_str())
             }
-            AutoConfig::DistilBert(c) => DistilBertModel::on_device(&c, device)?,
-            AutoConfig::XlmRoberta(c) => {
-                if has_pooler {
+            AutoConfig::DistilBert(mut c) => {
+                let g = DistilBertModel::on_device(&c, device)?;
+                c.architectures = Some(vec!["DistilBertModel".into()]);
+                (g, AutoConfig::DistilBert(c).to_json_str())
+            }
+            AutoConfig::XlmRoberta(mut c) => {
+                let g = if has_pooler {
                     XlmRobertaModel::on_device(&c, device)?
                 } else {
                     XlmRobertaModel::on_device_without_pooler(&c, device)?
-                }
+                };
+                c.architectures = Some(vec!["XLMRobertaModel".into()]);
+                (g, AutoConfig::XlmRoberta(c).to_json_str())
             }
-            AutoConfig::Albert(c) => {
-                if has_pooler {
+            AutoConfig::Albert(mut c) => {
+                let g = if has_pooler {
                     AlbertModel::on_device(&c, device)?
                 } else {
                     AlbertModel::on_device_without_pooler(&c, device)?
-                }
+                };
+                c.architectures = Some(vec!["AlbertModel".into()]);
+                (g, AutoConfig::Albert(c).to_json_str())
             }
-            AutoConfig::DebertaV2(c) => DebertaV2Model::on_device(&c, device)?,
+            AutoConfig::DebertaV2(mut c) => {
+                let g = DebertaV2Model::on_device(&c, device)?;
+                c.architectures = Some(vec!["DebertaV2Model".into()]);
+                (g, AutoConfig::DebertaV2(c).to_json_str())
+            }
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
         graph.set_source_config(config_json);
