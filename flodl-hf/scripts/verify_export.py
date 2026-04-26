@@ -181,7 +181,19 @@ def pick_extra_kwargs(
     has_pooler = any(k.endswith(s) for k in keys for s in pooler_suffixes)
     if has_pooler:
         return {}, ("last_hidden_state", "pooler_output")
-    return {"add_pooling_layer": False}, ("last_hidden_state",)
+    # `add_pooling_layer` exists on BERT-family AutoModel classes
+    # (BertModel, RobertaModel, DistilBertModel, XLMRobertaModel,
+    # AlbertModel) but not on DeBERTa-v2's `DebertaV2Model`, which is
+    # pooler-less by design. Probe the constructor signature so we
+    # only pass the kwarg where it's accepted.
+    import inspect
+    try:
+        params = inspect.signature(cls.__init__).parameters
+    except (ValueError, TypeError):
+        params = {}
+    if "add_pooling_layer" in params:
+        return {"add_pooling_layer": False}, ("last_hidden_state",)
+    return {}, ("last_hidden_state",)
 
 
 def dispatch_for_cls_outputs(cls: type) -> tuple[str, ...]:

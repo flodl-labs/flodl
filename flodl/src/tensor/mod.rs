@@ -354,6 +354,42 @@ impl Tensor {
         Ok(Self::from_raw(handle))
     }
 
+    /// Construct a tensor from raw little-endian host bytes at the
+    /// given `dtype`. The `data` length must equal
+    /// `shape.iter().product::<i64>() as usize * dtype.element_size()`.
+    /// libtorch copies the bytes (no aliasing into the input slice).
+    ///
+    /// Use when shuttling tensor payloads through formats like
+    /// safetensors that store dtype + raw bytes; for typed inputs use
+    /// the dtype-specific helpers (`from_f32`, `from_f64`, `from_i64`).
+    pub fn from_blob(data: &[u8], shape: &[i64], dtype: DType, device: Device) -> Result<Self> {
+        let numel: i64 = shape.iter().product();
+        let expected = numel as usize * dtype.element_size();
+        if data.len() != expected {
+            return Err(TensorError::new(&format!(
+                "Tensor::from_blob: data is {} bytes, expected {expected} \
+                 (numel={numel} × {} bytes/elem for {dtype:?})",
+                data.len(),
+                dtype.element_size(),
+            )));
+        }
+        let mut shape = shape.to_vec();
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let (dt, di) = device.to_ffi();
+        let err = unsafe {
+            ffi::flodl_from_blob(
+                data.as_ptr() as *mut c_void,
+                shape.as_mut_ptr(),
+                shape.len() as i32,
+                dtype as i32,
+                dt, di,
+                &mut handle,
+            )
+        };
+        check_err(err)?;
+        Ok(Self::from_raw(handle))
+    }
+
     // --- Like constructors ---
 
     /// Create a tensor of zeros with the same shape, dtype, and device as `t`.
@@ -583,13 +619,35 @@ impl Tensor {
     // --- Data access ---
 
     /// Copy tensor data to a `Vec<f32>`. Transparently moves to CPU first
-    /// if the tensor lives on CUDA. Non-f32 dtypes are cast via libtorch.
+    /// if the tensor lives on CUDA. Non-f32 dtypes are cast to f32 on
+    /// device via libtorch before the host copy.
     pub fn to_f32_vec(&self) -> Result<Vec<f32>> {
+        if self.dtype() != DType::Float32 {
+            return self.to_dtype(DType::Float32)?.to_f32_vec();
+        }
         let n = self.numel() as usize;
         let mut buf = vec![0f32; n];
         let bytes = (n * 4) as i64;
         let err = unsafe {
             ffi::flodl_copy_data(self.handle, buf.as_mut_ptr() as *mut c_void, bytes)
+        };
+        check_err(err)?;
+        Ok(buf)
+    }
+
+    /// Copy tensor data to a `Vec<u8>` of raw little-endian bytes at
+    /// the tensor's native dtype. The result is `numel * element_size()`
+    /// bytes, ready to write into a format like safetensors that stores
+    /// dtype + raw bytes. Moves to CPU first if needed.
+    ///
+    /// Use [`to_f32_vec`](Self::to_f32_vec) / [`to_f64_vec`](Self::to_f64_vec)
+    /// when you want a typed cast; use this when you want the bytes
+    /// exactly as libtorch lays them out for the current dtype.
+    pub fn to_blob(&self) -> Result<Vec<u8>> {
+        let bytes = self.numel() as usize * self.dtype().element_size();
+        let mut buf = vec![0u8; bytes];
+        let err = unsafe {
+            ffi::flodl_copy_data(self.handle, buf.as_mut_ptr() as *mut c_void, bytes as i64)
         };
         check_err(err)?;
         Ok(buf)
@@ -1248,6 +1306,31 @@ mod tests {
         assert_eq!(t.shape(), vec![3]);
         let data = t.to_f32_vec().unwrap();
         assert_eq!(data, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_from_blob_f16_roundtrip() {
+        // IEEE 754 binary16 bit patterns: 1.0, -1.0, 0.5, 0.0
+        let bits: [u16; 4] = [0x3C00, 0xBC00, 0x3800, 0x0000];
+        let bytes: Vec<u8> = bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+
+        let t = Tensor::from_blob(&bytes, &[4], DType::Float16, test_device()).unwrap();
+        assert_eq!(t.dtype(), DType::Float16);
+        assert_eq!(t.shape(), vec![4]);
+
+        // to_blob returns the same f16 bytes back.
+        assert_eq!(t.to_blob().unwrap(), bytes);
+
+        // to_f32_vec routes through to_dtype(F32) and produces the
+        // mathematical values, not raw bit reinterpretation.
+        assert_eq!(t.to_f32_vec().unwrap(), vec![1.0, -1.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn test_from_blob_size_mismatch() {
+        let bytes = vec![0u8; 6]; // 3 f16 values = 6 bytes, claim shape needing 4.
+        let err = Tensor::from_blob(&bytes, &[4], DType::Float16, test_device());
+        assert!(err.is_err(), "expected size mismatch error");
     }
 
     #[test]

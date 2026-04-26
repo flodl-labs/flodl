@@ -19,7 +19,7 @@ use std::path::Path;
 
 use safetensors::{tensor::TensorView, SafeTensors};
 
-use flodl::nn::Module;
+use flodl::nn::{cast_parameters, Module};
 use flodl::{DType, Device, Tensor, Variable};
 use flodl_hf::models::deberta_v2::DebertaV2Model;
 
@@ -94,6 +94,11 @@ fn deberta_v2_parity_vs_pytorch_live() {
     let hidden_ref_shape = shape_i64(&hidden_ref_view);
 
     let graph = DebertaV2Model::from_pretrained("microsoft/deberta-v3-base").unwrap();
+    // microsoft/deberta-v3-base ships pure f16; flodl now preserves source
+    // dtype on load. The reference fixture is f32, so cast to f32 to match
+    // the reference's precision budget. (For f16 forward parity one would
+    // also regenerate the fixture in f16 — out of scope here.)
+    cast_parameters(&graph.parameters(), DType::Float32);
     graph.eval();
 
     let out = graph

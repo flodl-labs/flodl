@@ -393,27 +393,50 @@ impl DebertaV2Config {
 /// `[B, S]` mask.
 ///
 /// DeBERTa masks both query and key dimensions (HF's `get_attention_mask`),
-/// unlike BERT which only masks keys. Output is a float additive bias:
-/// `0.0` where attention is permitted, `f32::MIN` where blocked.
-pub fn build_deberta_attention_mask(flat_mask: &Tensor) -> Result<Tensor> {
+/// unlike BERT which only masks keys. Output is an additive bias of
+/// dtype `target_dtype`: `0.0` where attention is permitted, the
+/// dtype's most-negative finite value where blocked. The dtype is
+/// chosen to match the attention scores it'll be added to — F32 for
+/// f32 weights, F16 / BF16 for half-precision weights — so the
+/// addition doesn't trip libtorch's same-dtype matmul check.
+pub fn build_deberta_attention_mask(flat_mask: &Tensor, target_dtype: DType) -> Result<Tensor> {
     let shape = flat_mask.shape();
     assert_eq!(shape.len(), 2, "flat_mask must be [B, S], got shape {shape:?}");
     let batch = shape[0];
     let seq = shape[1];
 
-    // Cast to f32 if it isn't already.
-    let flat = flat_mask.to_dtype(DType::Float32)?;
+    let flat = flat_mask.to_dtype(target_dtype)?;
     // [B, 1, 1, S] and [B, 1, S, 1] then outer-product via multiplication.
     let k_mask = flat.reshape(&[batch, 1, 1, seq])?; // attending-to-key
     let q_mask = flat.reshape(&[batch, 1, seq, 1])?; // attending-from-query
     let grid = q_mask.mul(&k_mask)?; // [B, 1, S, S]  1 where both valid
-    // Convert {0, 1} to {-inf, 0}: (grid - 1) * -f32::MIN  →  use masked_fill
-    // Where grid == 0, fill with f32::MIN; else leave at 0.
+    // Convert {0, 1} to {-large, 0}. Use the dtype's most-negative
+    // finite value (matches HF's `torch.finfo(dtype).min`) — using
+    // f32::MIN here would overflow f16's ±65504 range and libtorch
+    // would refuse the masked_fill cast.
     let zero_base = Tensor::zeros(&[batch, 1, seq, seq], TensorOptions {
-        dtype: DType::Float32, device: flat.device(),
+        dtype: target_dtype, device: flat.device(),
     })?;
     let zero_positions = grid.eq_scalar(0.0)?;
-    zero_base.masked_fill(&zero_positions, f32::MIN as f64)
+    zero_base.masked_fill(&zero_positions, dtype_min_finite(target_dtype))
+}
+
+/// Most-negative finite value representable in `dtype`, returned as
+/// f64 for consumption by libtorch scalar ops. Mirrors HF Python's
+/// `torch.finfo(dtype).min`. Used to populate attention mask bias
+/// without overflowing the target dtype's range.
+fn dtype_min_finite(dtype: DType) -> f64 {
+    match dtype {
+        DType::Float32 => f32::MIN as f64,
+        // bf16 shares f32's exponent range; finite min is essentially the same.
+        DType::BFloat16 => f32::MIN as f64,
+        // f16 finite range is +/- 65504.
+        DType::Float16 => -65504.0,
+        // f64 finfo.min ~= -1.8e308.
+        DType::Float64 => f64::MIN,
+        // Integer dtypes have no use for this, but fall back to f32 min.
+        DType::Int32 | DType::Int64 => f32::MIN as f64,
+    }
 }
 
 // ─── DebertaV2Embeddings ─────────────────────────────────────────────────
@@ -488,19 +511,23 @@ impl NamedInputModule for DebertaV2Embeddings {
 
         // Mask-gate: multiply post-LN embeddings by [B, S, 1] mask so
         // padding positions are zeroed before entering the encoder.
-        // The flat mask arrives via refs; cast to f32 if necessary.
+        // The flat mask arrives via refs in whatever dtype the caller
+        // chose (i64 from a tokenizer, f32 from a manual build); cast
+        // to match the LayerNorm's output so the multiply doesn't trip
+        // libtorch's same-dtype check when weights are f16 / bf16.
         let gated = if let Some(mask_var) = refs.get("attention_mask") {
+            let target_dtype = ln.data().dtype();
             let mask_data = mask_var.data();
-            let mask_f32 = if mask_data.dtype() == DType::Float32 {
+            let mask_cast = if mask_data.dtype() == target_dtype {
                 mask_data
             } else {
-                mask_data.to_dtype(DType::Float32)?
+                mask_data.to_dtype(target_dtype)?
             };
-            let shape = mask_f32.shape();
+            let shape = mask_cast.shape();
             // Mask from the tokenizer is [B, S]; unsqueeze last dim for
             // broadcast with [B, S, H].
             let mask_unsq = Variable::new(
-                mask_f32.reshape(&[shape[0], shape[1], 1])?,
+                mask_cast.reshape(&[shape[0], shape[1], 1])?,
                 false,
             );
             ln.mul(&mask_unsq)?
@@ -638,7 +665,10 @@ impl NamedInputModule for DebertaV2Encoder {
             )
         })?;
         let flat = mask.data();
-        let extended = Variable::new(build_deberta_attention_mask(&flat)?, false);
+        // Match the additive bias dtype to the hidden states so attention
+        // arithmetic stays single-dtype (libtorch refuses Float+Half mixes).
+        let hidden_dtype = input.data().dtype();
+        let extended = Variable::new(build_deberta_attention_mask(&flat, hidden_dtype)?, false);
 
         // Relative-position grid (deterministic given seq_len, no grad).
         let rel_pos = build_relative_position(
@@ -1234,6 +1264,40 @@ mod tests {
         assert_eq!(out.shape(), vec![batch, seq, cfg.hidden_size]);
     }
 
+    /// Backbone forward runs end-to-end in f16: cast every parameter
+    /// to half-precision, then run the same shape smoke. Guards the
+    /// `build_deberta_attention_mask` + embeddings mask-gate dtype
+    /// threading — without those, the additive bias / mask multiply
+    /// would be Float while the hidden states are Half, tripping
+    /// libtorch's same-dtype check.
+    #[test]
+    fn backbone_forward_shape_f16() {
+        use flodl::nn::{cast_parameters, Module};
+
+        let cfg = mini_config();
+        let dev = Device::CPU;
+        let graph = DebertaV2Model::on_device(&cfg, dev).unwrap();
+        cast_parameters(&graph.parameters(), DType::Float16);
+        graph.eval();
+
+        let batch = 1;
+        let seq = 4;
+        let input_ids = Variable::new(
+            Tensor::from_i64(&[1, 2, 3, 4], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let mask = Variable::new(
+            Tensor::ones(&[batch, seq], TensorOptions {
+                dtype: DType::Int64, device: dev,
+            }).unwrap(),
+            false,
+        );
+        let out = graph.forward_multi(&[input_ids, mask]).unwrap();
+        assert_eq!(out.shape(), vec![batch, seq, cfg.hidden_size]);
+        assert_eq!(out.data().dtype(), DType::Float16,
+            "forward output must remain f16 throughout the encoder");
+    }
+
     /// Sequence-classification head: [B, num_labels] output.
     #[test]
     fn seqcls_head_forward_shape() {
@@ -1290,7 +1354,7 @@ mod tests {
     fn deberta_mask_shape_and_values() {
         let dev = Device::CPU;
         let flat = Tensor::from_f32(&[1.0, 1.0, 0.0], &[1, 3], dev).unwrap();
-        let extended = build_deberta_attention_mask(&flat).unwrap();
+        let extended = build_deberta_attention_mask(&flat, DType::Float32).unwrap();
         assert_eq!(extended.shape(), vec![1, 1, 3, 3]);
         let data = extended.to_f32_vec().unwrap();
         // Row-major [1, 1, 3, 3]: (q, k)

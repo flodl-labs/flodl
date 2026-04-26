@@ -43,7 +43,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use flodl::{Device, Graph, Result, Tensor, TensorError};
+use flodl::{DType, Device, Graph, Result, Tensor, TensorError};
 use safetensors::{tensor::TensorView, Dtype, SafeTensors};
 
 use crate::path::hf_key_from_flodl_key;
@@ -333,7 +333,7 @@ fn load_safetensors_core(
         let view = st.tensor(original)
             .map_err(|e| TensorError::new(&format!("safetensors tensor {original}: {e}")))?;
         let device = param.variable.data().device();
-        let src = tensor_view_to_f32_tensor(&view, device)?;
+        let src = tensor_view_to_tensor(&view, device)?;
         param.variable.set_data(src);
     }
 
@@ -348,7 +348,7 @@ fn load_safetensors_core(
         })?;
         let view = st.tensor(original)
             .map_err(|e| TensorError::new(&format!("safetensors tensor {original}: {e}")))?;
-        let src = tensor_view_to_f32_tensor(&view, buffer.device())?;
+        let src = tensor_view_to_tensor(&view, buffer.device())?;
         buffer.set(src);
     }
 
@@ -502,15 +502,15 @@ where
 pub fn save_safetensors_from_graph(graph: &Graph) -> Result<Vec<u8>> {
     use std::collections::BTreeMap;
 
-    // BTreeMap orders keys for deterministic byte output; (shape, bytes)
+    // BTreeMap orders keys for deterministic byte output; (dtype, shape, bytes)
     // payload owns the data so the TensorView slices below stay valid.
-    let mut entries: BTreeMap<String, (Vec<usize>, Vec<u8>)> = BTreeMap::new();
+    let mut entries: BTreeMap<String, (Dtype, Vec<usize>, Vec<u8>)> = BTreeMap::new();
 
     for (flodl_key, param) in graph.named_parameters() {
         let hf_key = hf_canonical_save_key(&hf_key_from_flodl_key(&flodl_key));
         let shape: Vec<usize> = param.variable.shape().iter().map(|&d| d as usize).collect();
-        let data = param.variable.data().to_f32_vec()?;
-        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let dtype = param.variable.data().dtype();
+        let bytes = param.variable.data().to_blob()?;
         if entries.contains_key(&hf_key) {
             return Err(TensorError::new(&format!(
                 "save_safetensors: HF key {hf_key:?} collision \
@@ -518,26 +518,26 @@ pub fn save_safetensors_from_graph(graph: &Graph) -> Result<Vec<u8>> {
                  fix the conflicting `tag(...)` in the graph",
             )));
         }
-        entries.insert(hf_key, (shape, bytes));
+        entries.insert(hf_key, (dtype_to_safetensors(dtype)?, shape, bytes));
     }
 
     for (flodl_key, buffer) in graph.named_buffers() {
         let hf_key = hf_canonical_save_key(&hf_key_from_flodl_key(&flodl_key));
         let shape: Vec<usize> = buffer.shape().iter().map(|&d| d as usize).collect();
-        let data = buffer.get().to_f32_vec()?;
-        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let dtype = buffer.get().dtype();
+        let bytes = buffer.get().to_blob()?;
         if entries.contains_key(&hf_key) {
             return Err(TensorError::new(&format!(
                 "save_safetensors: HF key {hf_key:?} collision \
                  — buffer collides with a parameter or another buffer",
             )));
         }
-        entries.insert(hf_key, (shape, bytes));
+        entries.insert(hf_key, (dtype_to_safetensors(dtype)?, shape, bytes));
     }
 
     let views: HashMap<String, TensorView<'_>> = entries.iter()
-        .map(|(k, (shape, bytes))| {
-            let view = TensorView::new(Dtype::F32, shape.clone(), bytes.as_slice())
+        .map(|(k, (dtype, shape, bytes))| {
+            let view = TensorView::new(*dtype, shape.clone(), bytes.as_slice())
                 .map_err(|e| TensorError::new(&format!(
                     "safetensors view build for {k:?}: {e}",
                 )))?;
@@ -547,6 +547,22 @@ pub fn save_safetensors_from_graph(graph: &Graph) -> Result<Vec<u8>> {
 
     safetensors::serialize(&views, &None)
         .map_err(|e| TensorError::new(&format!("safetensors serialize: {e}")))
+}
+
+/// Map a flodl `DType` to the safetensors `Dtype` that uses the same
+/// in-memory bit layout. Integer dtypes are rejected — flodl's exporter
+/// only emits learnable parameter / buffer payloads, which are floats.
+fn dtype_to_safetensors(dtype: DType) -> Result<Dtype> {
+    match dtype {
+        DType::Float32 => Ok(Dtype::F32),
+        DType::Float64 => Ok(Dtype::F64),
+        DType::Float16 => Ok(Dtype::F16),
+        DType::BFloat16 => Ok(Dtype::BF16),
+        DType::Int32 | DType::Int64 => Err(TensorError::new(&format!(
+            "save_safetensors: integer dtype {dtype:?} not supported \
+             — only floating-point parameters / buffers can be serialised",
+        ))),
+    }
 }
 
 /// Serialise a graph and write the bytes to `path`. Thin file wrapper
@@ -559,18 +575,25 @@ pub fn save_safetensors_file_from_graph(graph: &Graph, path: &Path) -> Result<()
     })
 }
 
-/// Materialise a safetensors `TensorView` as a CPU f32 `Tensor`, then
-/// move it to `target_device`. Host-side dtype conversion keeps this
-/// module independent of libtorch fp16/bf16 constructors.
-fn tensor_view_to_f32_tensor(view: &TensorView, target_device: Device) -> Result<Tensor> {
+/// Materialise a safetensors `TensorView` as a `Tensor` on
+/// `target_device`, **preserving the source dtype**. Raw bytes are
+/// shuttled through libtorch's `from_blob` (which copies internally),
+/// so the resulting tensor has the same dtype as the safetensors file
+/// — F16 stays F16, BF16 stays BF16, F32 stays F32, F64 stays F64.
+fn tensor_view_to_tensor(view: &TensorView, target_device: Device) -> Result<Tensor> {
     let shape: Vec<i64> = view.shape().iter().map(|&s| s as i64).collect();
-    let data = tensor_view_to_f32_vec(view)?;
-    let cpu = Tensor::from_f32(&data, &shape, Device::CPU)?;
-    if target_device == Device::CPU {
-        Ok(cpu)
-    } else {
-        cpu.to_device(target_device)
-    }
+    let dtype = match view.dtype() {
+        Dtype::F32 => DType::Float32,
+        Dtype::F64 => DType::Float64,
+        Dtype::F16 => DType::Float16,
+        Dtype::BF16 => DType::BFloat16,
+        other => {
+            return Err(TensorError::new(&format!(
+                "unsupported safetensors dtype {other:?} — floats (F32/F64/BF16/F16) only",
+            )));
+        }
+    };
+    Tensor::from_blob(view.data(), &shape, dtype, target_device)
 }
 
 /// Decode a safetensors `TensorView`'s raw bytes as a flat `Vec<f32>`.
@@ -987,13 +1010,14 @@ mod tests {
         }
     }
 
-    /// BF16 checkpoint → f32 graph. bf16 is exactly the top 16 bits of a
-    /// finite f32, so values representable as bf16 must roundtrip exactly
-    /// after the host-side widen. Guards the `from_bits((bits as u32) << 16)`
-    /// path against endianness / shift bugs.
+    /// BF16 checkpoint preserves dtype on load. bf16 is exactly the top
+    /// 16 bits of a finite f32, so values representable as bf16 round-
+    /// trip exactly through libtorch's f16/bf16 storage. Verifies both
+    /// dtype preservation and value correctness via to_f32_vec()'s
+    /// libtorch cast.
     #[test]
-    fn load_safetensors_bf16_casts_to_f32() {
-        use flodl::{FlowBuilder, Linear};
+    fn load_safetensors_bf16_preserves_dtype() {
+        use flodl::{DType, FlowBuilder, Linear};
 
         let dev = Device::CPU;
         let graph = FlowBuilder::new()
@@ -1021,6 +1045,8 @@ mod tests {
 
         for (k, p) in graph.named_parameters() {
             let hf = hf_key_from_flodl_key(&k);
+            assert_eq!(p.variable.data().dtype(), DType::BFloat16,
+                "{hf}: dtype must be preserved as BF16 after load");
             let data = p.variable.data().to_f32_vec().unwrap();
             match hf.as_str() {
                 "m.weight" => assert_eq!(data, exact_w),
@@ -1030,11 +1056,13 @@ mod tests {
         }
     }
 
-    /// F16 checkpoint → f32 graph. Tests both normal and subnormal paths
-    /// of the host-side converter, plus +/- zero.
+    /// F16 checkpoint preserves dtype on load. Tests +1, -1, +0.5, +0
+    /// — values representable bit-exactly in f16, so to_f32_vec()'s
+    /// libtorch f16→f32 cast is lossless and gives back the original
+    /// mathematical values.
     #[test]
-    fn load_safetensors_f16_casts_to_f32() {
-        use flodl::{FlowBuilder, Linear};
+    fn load_safetensors_f16_preserves_dtype() {
+        use flodl::{DType, FlowBuilder, Linear};
 
         let dev = Device::CPU;
         let graph = FlowBuilder::new()
@@ -1063,12 +1091,85 @@ mod tests {
 
         for (k, p) in graph.named_parameters() {
             let hf = hf_key_from_flodl_key(&k);
+            assert_eq!(p.variable.data().dtype(), DType::Float16,
+                "{hf}: dtype must be preserved as F16 after load");
             let data = p.variable.data().to_f32_vec().unwrap();
             match hf.as_str() {
                 "m.weight" => assert_eq!(data, vec![1.0, -1.0, 0.5, 0.0]),
                 "m.bias"   => assert_eq!(data, vec![1.0, 1.0, 1.0, 1.0]),
                 other => panic!("unexpected {other}"),
             }
+        }
+    }
+
+    /// Full round-trip: F16 safetensors → load → save → bit-exact F16
+    /// safetensors. This is the contract the verify-export matrix runner
+    /// relies on for DeBERTa-v3 (pure F16 upstream).
+    #[test]
+    fn save_safetensors_f16_roundtrip_byte_exact() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(1, 4, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+
+        let f16_bits: [u16; 4] = [0x3C00, 0xBC00, 0x3800, 0x0000];
+        let bytes_w: Vec<u8> = f16_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let bytes_b: Vec<u8> = (0..4).flat_map(|_| 0x3C00u16.to_le_bytes()).collect();
+
+        let src = serialize_entries(&[
+            ("m.weight", Dtype::F16, vec![4, 1], bytes_w.clone()),
+            ("m.bias",   Dtype::F16, vec![4],    bytes_b.clone()),
+        ]);
+        load_safetensors_into_graph(&graph, &src).unwrap();
+
+        let saved = save_safetensors_from_graph(&graph).unwrap();
+        let saved_st = SafeTensors::deserialize(&saved).unwrap();
+        for (k, expected_bytes) in [("m.weight", &bytes_w), ("m.bias", &bytes_b)] {
+            let v = saved_st.tensor(k).unwrap();
+            assert_eq!(v.dtype(), Dtype::F16, "{k}: must save back as F16");
+            assert_eq!(v.data(), expected_bytes.as_slice(),
+                "{k}: F16 bytes must be bit-exact through load+save");
+        }
+    }
+
+    /// Same contract as the F16 round-trip, but for BF16. BF16 is the
+    /// dtype of choice for many recent LLMs — we want to be sure
+    /// flodl preserves it without surprise downcasts.
+    #[test]
+    fn save_safetensors_bf16_roundtrip_byte_exact() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(2, 2, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+
+        // BF16 = top 16 bits of f32. These f32s have zero low bits → exact bf16.
+        let exact_w = [1.0_f32, 2.0, -0.5, 0.25];
+        let exact_b = [0.0_f32, -1.0];
+        let to_bf16_bytes = |data: &[f32]| -> Vec<u8> {
+            data.iter().flat_map(|f| ((f.to_bits() >> 16) as u16).to_le_bytes()).collect()
+        };
+        let bytes_w = to_bf16_bytes(&exact_w);
+        let bytes_b = to_bf16_bytes(&exact_b);
+
+        let src = serialize_entries(&[
+            ("m.weight", Dtype::BF16, vec![2, 2], bytes_w.clone()),
+            ("m.bias",   Dtype::BF16, vec![2],    bytes_b.clone()),
+        ]);
+        load_safetensors_into_graph(&graph, &src).unwrap();
+
+        let saved = save_safetensors_from_graph(&graph).unwrap();
+        let saved_st = SafeTensors::deserialize(&saved).unwrap();
+        for (k, expected_bytes) in [("m.weight", &bytes_w), ("m.bias", &bytes_b)] {
+            let v = saved_st.tensor(k).unwrap();
+            assert_eq!(v.dtype(), Dtype::BF16, "{k}: must save back as BF16");
+            assert_eq!(v.data(), expected_bytes.as_slice(),
+                "{k}: BF16 bytes must be bit-exact through load+save");
         }
     }
 

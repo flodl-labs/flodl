@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use hf_hub::api::sync::ApiBuilder;
-use safetensors::{tensor::TensorView, Dtype, SafeTensors};
+use safetensors::{tensor::TensorView, SafeTensors};
 
 use flodl::Graph;
 use flodl_hf::export::export_hf_dir;
@@ -159,9 +159,10 @@ pub fn run_roundtrip(graph: &Graph, repo_id: &str, family_label: &str) {
         let h_view = hf_st.tensor(hf_orig).unwrap();
         assert_eq!(
             f_view.dtype(),
-            Dtype::F32,
-            "{family_label}: flodl-saved tensor {fk:?} dtype {:?}, expected F32",
+            h_view.dtype(),
+            "{family_label}: flodl-saved tensor {fk:?} dtype {:?} != HF reference {:?}",
             f_view.dtype(),
+            h_view.dtype(),
         );
         let f_shape = f_view.shape().to_vec();
         let h_shape = h_view.shape().to_vec();
@@ -288,9 +289,10 @@ pub fn run_export_roundtrip(
         let h_view = hf_st.tensor(hf_orig).unwrap();
         assert_eq!(
             f_view.dtype(),
-            Dtype::F32,
-            "{family_label}: exported tensor {fk:?} dtype {:?}, expected F32",
+            h_view.dtype(),
+            "{family_label}: exported tensor {fk:?} dtype {:?} != HF reference {:?}",
             f_view.dtype(),
+            h_view.dtype(),
         );
         assert_eq!(
             f_view.shape(),
