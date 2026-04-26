@@ -1108,7 +1108,7 @@ fn print_path_hint(bin_dir: &std::path::Path) -> ExitCode {
 fn fetch_latest_github_tag() -> Option<String> {
     use std::process::{Command, Stdio};
     let output = Command::new("curl")
-        .args(["-sI", "https://github.com/fab2s/floDl/releases/latest"])
+        .args(["-sI", "https://github.com/flodl-labs/flodl/releases/latest"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -1160,7 +1160,7 @@ fn download_release_binary(tag: &str, home: &std::path::Path) -> Result<std::pat
 
     let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
     let artifact = format!("flodl-cli-{os}-{arch}{ext}");
-    let url = format!("https://github.com/fab2s/floDl/releases/download/{tag}/{artifact}");
+    let url = format!("https://github.com/flodl-labs/flodl/releases/download/{tag}/{artifact}");
 
     let tmp = home.join(".flodl").join("tmp");
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create temp dir: {e}"))?;

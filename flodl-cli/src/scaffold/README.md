@@ -58,7 +58,7 @@ PY
 After conversion, `AutoModel::from_pretrained(repo_id)` picks up the local safetensors transparently via the `$HF_HOME/flodl-converted/<repo_id>/` cache. You only need to convert each checkpoint once.
 
 If you prefer the committed script from the flodl repo, grab
-[`convert_bin_to_safetensors.py`](https://github.com/fab2s/floDl/blob/main/flodl-hf/scripts/convert_bin_to_safetensors.py) and run it directly:
+[`convert_bin_to_safetensors.py`](https://github.com/flodl-labs/flodl/blob/main/flodl-hf/scripts/convert_bin_to_safetensors.py) and run it directly:
 
 ```bash
 pip install torch transformers safetensors

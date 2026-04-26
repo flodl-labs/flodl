@@ -506,7 +506,7 @@ flodl = { workspace = true }
     fn parse_git_dep_errors() {
         let c = r#"
 [dependencies]
-flodl = { git = "https://github.com/fab2s/floDl" }
+flodl = { git = "https://github.com/flodl-labs/flodl" }
 "#;
         let err = parse_flodl_dep(c).unwrap_err();
         assert!(err.contains("git dependency"), "got: {err}");

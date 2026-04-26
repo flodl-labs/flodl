@@ -12,4 +12,4 @@ The `build.rs` script expects libtorch to be available. Set `LIBTORCH_PATH` to t
 
 MIT — see [LICENSE](../LICENSE).
 
-Repository: <https://github.com/fab2s/floDl>
+Repository: <https://github.com/flodl-labs/flodl>

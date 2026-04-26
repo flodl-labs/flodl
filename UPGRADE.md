@@ -190,6 +190,6 @@ framework side.
 
 ## Reporting issues
 
-Please file [GitHub issues](https://github.com/fab2s/floDl/issues)
+Please file [GitHub issues](https://github.com/flodl-labs/flodl/issues)
 with a minimal reproducing `fdl.yml` and the exact error message if
 anything in this guide leaves you stuck.

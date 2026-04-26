@@ -126,7 +126,7 @@ fn home_dir() -> Option<PathBuf> {
 // GitHub source download
 // ---------------------------------------------------------------------------
 
-const REPO: &str = "fab2s/floDl";
+const REPO: &str = "flodl-labs/flodl";
 
 /// Get the latest release tag from GitHub.
 fn fetch_latest_tag() -> Option<String> {
@@ -142,7 +142,7 @@ fn fetch_latest_tag() -> Option<String> {
     for line in stdout.lines() {
         let lower = line.to_lowercase();
         if lower.starts_with("location:") {
-            // https://github.com/fab2s/floDl/releases/tag/0.3.0
+            // https://github.com/flodl-labs/flodl/releases/tag/0.3.0
             let tag = line.rsplit('/').next()?.trim();
             if !tag.is_empty() {
                 return Some(tag.to_string());

@@ -8,8 +8,8 @@ floDl builds against libtorch via FFI, so all development happens inside
 Docker. Everything is driven by the `fdl` CLI:
 
 ```bash
-git clone https://github.com/fab2s/floDl.git
-cd floDl
+git clone https://github.com/flodl-labs/flodl.git
+cd flodl
 ./fdl setup     # detect hardware, download libtorch, build dev container
 ./fdl shell     # interactive shell inside the container
 ./fdl test      # run all tests (CPU)

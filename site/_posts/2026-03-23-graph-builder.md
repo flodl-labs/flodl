@@ -293,10 +293,10 @@ Everything else follows.
 ---
 
 *flodl is open source:
-[GitHub](https://github.com/fab2s/floDl) |
+[GitHub](https://github.com/flodl-labs/flodl) |
 [crates.io](https://crates.io/crates/flodl) |
 [docs](https://docs.rs/flodl) |
-[showcase example](https://github.com/fab2s/floDl/tree/main/flodl/examples/showcase/)*
+[showcase example](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/showcase/)*
 
 *The graph builder tutorial:
-[step-by-step guide](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md)*
+[step-by-step guide](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/05-graph-builder.md)*

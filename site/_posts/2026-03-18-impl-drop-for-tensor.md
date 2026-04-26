@@ -289,11 +289,11 @@ All of those were solutions to the same problem: a language runtime that
 cannot see GPU memory. Rust doesn't solve this problem. Rust makes it not
 exist.
 
-The result is [flodl](https://github.com/fab2s/floDl), a deep learning
+The result is [flodl](https://github.com/flodl-labs/flodl), a deep learning
 framework where the memory management story is seven lines long and the rest
 is math. On a real training workload (recurrent attention with a 9-component
 loss stack), it runs
-[19% faster than PyTorch](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md)
+[19% faster than PyTorch](https://github.com/flodl-labs/flodl/blob/main/docs/benchmark.md)
 on the same GPU. Not because Rust is faster at matrix multiplication. The CUDA
 kernels are identical. But the space between kernel launches is where Rust's
 ownership model pays off: no GC pauses, no interpreter overhead, no per-op
@@ -309,7 +309,7 @@ everyone who understood that resource management belongs in the type system.
 ---
 
 *flodl is open source:
-[GitHub](https://github.com/fab2s/floDl) |
+[GitHub](https://github.com/flodl-labs/flodl) |
 [crates.io](https://crates.io/crates/flodl) |
 [docs](https://docs.rs/flodl) |
 [benchmark](https://flodl.dev/benchmark)*

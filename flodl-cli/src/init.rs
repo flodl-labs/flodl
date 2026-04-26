@@ -187,7 +187,7 @@ fn resolve_flodl_dep() -> String {
     if let Some(version) = crates_io_version() {
         format!("flodl = \"{}\"", version)
     } else {
-        "flodl = { git = \"https://github.com/fab2s/floDl.git\" }".into()
+        "flodl = { git = \"https://github.com/flodl-labs/flodl.git\" }".into()
     }
 }
 

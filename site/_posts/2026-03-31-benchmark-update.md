@@ -154,12 +154,12 @@ compounds with the per-epoch speed advantage.
 ## Reproduce
 
 > **Update (flodl 0.5.1):** `make bench*` became `fdl bench [<preset>]`.
-> See [docs/benchmark.md](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md#reproduce)
+> See [docs/benchmark.md](https://github.com/flodl-labs/flodl/blob/main/docs/benchmark.md#reproduce)
 > for the current invocations.
 
 ```bash
-git clone https://github.com/fab2s/floDl.git
-cd floDl
+git clone https://github.com/flodl-labs/flodl.git
+cd flodl
 
 # Quick single-round
 make bench
@@ -169,7 +169,7 @@ make bench-publish
 ```
 
 Same Docker setup, same methodology. The
-[full benchmark report](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md)
+[full benchmark report](https://github.com/flodl-labs/flodl/blob/main/docs/benchmark.md)
 documents the protocol, environment, and statistical model in detail.
 
 ## Where this goes
@@ -189,7 +189,7 @@ Zero regressions. That's the number.
 ---
 
 *flodl is open source:
-[GitHub](https://github.com/fab2s/floDl) |
+[GitHub](https://github.com/flodl-labs/flodl) |
 [crates.io](https://crates.io/crates/flodl) |
 [docs](https://docs.rs/flodl) |
 [benchmark](/benchmark)*

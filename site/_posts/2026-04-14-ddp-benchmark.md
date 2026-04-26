@@ -159,7 +159,7 @@ Every run produces a timeline (JSON, CSV, HTML) with GPU utilization
 traces, sync event markers, idle gap analysis, and per-epoch
 convergence data. The [full report](/ddp-benchmark) has the complete
 results for all 70 runs, and the
-[detailed data](https://github.com/fab2s/flodl/blob/main/docs/ddp-benchmark.md)
+[detailed data](https://github.com/flodl-labs/flodl/blob/main/docs/ddp-benchmark.md)
 is on GitHub with reproduction instructions.
 
 Eight models, each chosen to stress a different aspect:
@@ -187,11 +187,11 @@ network hop.
 The [full DDP benchmark report](/ddp-benchmark) is available on the
 website with per-model tables, convergence trajectories, GPU idle
 analysis, and El Che calibration data. The
-[raw report](https://github.com/fab2s/flodl/blob/main/docs/ddp-benchmark.md)
+[raw report](https://github.com/flodl-labs/flodl/blob/main/docs/ddp-benchmark.md)
 on GitHub includes reproduction instructions.
 
-[GitHub](https://github.com/fab2s/flodl) &#124;
+[GitHub](https://github.com/flodl-labs/flodl) &#124;
 [Documentation](https://flodl.dev/guide/) &#124;
 [DDP Benchmark](/ddp-benchmark) &#124;
-[DDP Report (GitHub)](https://github.com/fab2s/flodl/blob/main/docs/ddp-benchmark.md) &#124;
-[Changelog](https://github.com/fab2s/flodl/blob/main/CHANGELOG.md)
+[DDP Report (GitHub)](https://github.com/flodl-labs/flodl/blob/main/docs/ddp-benchmark.md) &#124;
+[Changelog](https://github.com/flodl-labs/flodl/blob/main/CHANGELOG.md)

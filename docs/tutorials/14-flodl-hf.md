@@ -360,8 +360,8 @@ and prints top labels, entities, or extracted spans.
 
 ## Further reading
 
-- [`flodl-hf` crate README](https://github.com/fab2s/floDl/blob/main/flodl-hf/README.md)
-- [flodl-hf examples](https://github.com/fab2s/floDl/tree/main/flodl-hf/examples)
+- [`flodl-hf` crate README](https://github.com/flodl-labs/flodl/blob/main/flodl-hf/README.md)
+- [flodl-hf examples](https://github.com/flodl-labs/flodl/tree/main/flodl-hf/examples)
 - [The floDl CLI](../cli.md) (see `fdl add`, `fdl flodl-hf`, `fdl test-live`)
 
 ---

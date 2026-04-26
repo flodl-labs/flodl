@@ -293,7 +293,7 @@ for results on mixed consumer hardware.
 
 ## Further reading
 
-- [Full porting guide](https://github.com/fab2s/floDl/blob/main/ai/skills/port/guide.md) (30+ modules, all patterns)
+- [Full porting guide](https://github.com/flodl-labs/flodl/blob/main/ai/skills/port/guide.md) (30+ modules, all patterns)
 - [API reference](cli.md#fdl-api-ref) (via `fdl api-ref`)
 - [Graph builder tutorial](tutorials/05-graph-builder.md)
 - [Training tutorial](tutorials/04-training.md)

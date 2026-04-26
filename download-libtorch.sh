@@ -19,7 +19,7 @@
 
 set -e
 
-REPO="fab2s/floDl"
+REPO="flodl-labs/flodl"
 
 # --- Drop the legacy --project flag ---
 # fdl auto-detects the install location, so --project is a no-op.
@@ -90,7 +90,7 @@ error: could not obtain fdl binary.
 
   Alternative: clone the repo and use fdl directly:
     git clone https://github.com/$REPO.git
-    cd floDl && ./fdl libtorch download $*
+    cd flodl && ./fdl libtorch download $*
 EOF
     exit 1
 fi

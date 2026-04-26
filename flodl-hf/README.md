@@ -174,4 +174,4 @@ task shapes across every family.
 
 ## License
 
-floDl is open-sourced software licensed under the [MIT license](https://github.com/fab2s/floDl/blob/main/LICENSE).
+floDl is open-sourced software licensed under the [MIT license](https://github.com/flodl-labs/flodl/blob/main/LICENSE).

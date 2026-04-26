@@ -204,4 +204,4 @@ We ship what works. We're honest about what doesn't. We keep going.
 ---
 
 [Full DDP reference](/guide/ddp) | [Tutorial: DDP Builder](/guide/tutorials/12-async-ddp) |
-[CLI docs](/guide/cli) | [GitHub](https://github.com/fab2s/floDl)
+[CLI docs](/guide/cli) | [GitHub](https://github.com/flodl-labs/flodl)

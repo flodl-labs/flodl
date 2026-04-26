@@ -3,7 +3,7 @@
 #
 # This script exists for backwards compatibility with the original
 #
-#   curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/init.sh | sh -s my-project
+#   curl -sL https://raw.githubusercontent.com/flodl-labs/flodl/main/init.sh | sh -s my-project
 #
 # one-liner. New users should install fdl once and use it directly
 # from then on:
@@ -17,7 +17,7 @@
 
 set -e
 
-REPO="fab2s/floDl"
+REPO="flodl-labs/flodl"
 
 if [ "$#" -eq 0 ]; then
     cat >&2 <<'EOF'
@@ -90,7 +90,7 @@ error: could not obtain fdl binary.
 
   Alternative: clone the repo and run fdl directly:
     git clone https://github.com/$REPO.git
-    cd floDl && ./fdl init $1
+    cd flodl && ./fdl init $1
 EOF
     exit 1
 fi

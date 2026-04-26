@@ -18,7 +18,7 @@ curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
 ```
 
 See the
-[full CLI reference](https://github.com/fab2s/floDl/blob/main/docs/cli.md)
+[full CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md)
 for every command, flag, and the `fdl.yml` manifest format.
 
 ## Design principles
@@ -79,8 +79,8 @@ equally to the flodl source checkout and to anything you scaffolded with
   cache that powers project-aware help and completion. The derive lives
   in the [`flodl-cli-macros`](https://crates.io/crates/flodl-cli-macros)
   crate (re-exported here) -- see its
-  [README](https://github.com/fab2s/floDl/blob/main/flodl-cli-macros/README.md)
-  or the [CLI reference](https://github.com/fab2s/floDl/blob/main/docs/cli.md#declaring-flags-in-rust)
+  [README](https://github.com/flodl-labs/flodl/blob/main/flodl-cli-macros/README.md)
+  or the [CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md#declaring-flags-in-rust)
   for the full attribute surface and a worked example.
 
 ### In the flodl source checkout specifically
@@ -166,7 +166,7 @@ curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
 
 Binaries are published for Linux x86_64/aarch64, macOS arm64, and Windows
 x86_64 on every
-[GitHub Release](https://github.com/fab2s/floDl/releases).
+[GitHub Release](https://github.com/flodl-labs/flodl/releases).
 
 ## Command tour
 
@@ -224,11 +224,11 @@ Override with `--cpu` or `--cuda <version>`.
 
 ## Links
 
-- [Full CLI reference](https://github.com/fab2s/floDl/blob/main/docs/cli.md) - every command, every flag, with examples
+- [Full CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md) - every command, every flag, with examples
 - [floDl framework](https://flodl.dev) - the Rust deep learning framework `fdl` was built for
-- [GitHub Releases](https://github.com/fab2s/floDl/releases) - pre-compiled binaries
-- [GitHub repository](https://github.com/fab2s/floDl)
+- [GitHub Releases](https://github.com/flodl-labs/flodl/releases) - pre-compiled binaries
+- [GitHub repository](https://github.com/flodl-labs/flodl)
 
 ## License
 
-floDl is open-sourced software licensed under the [MIT license](https://github.com/fab2s/floDl/blob/main/LICENSE).
+floDl is open-sourced software licensed under the [MIT license](https://github.com/flodl-labs/flodl/blob/main/LICENSE).

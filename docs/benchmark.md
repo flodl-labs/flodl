@@ -314,8 +314,8 @@ The benchmark suite runs entirely in Docker. No local Rust or Python
 installation required.
 
 ```bash
-git clone https://github.com/fab2s/floDl.git
-cd floDl
+git clone https://github.com/flodl-labs/flodl.git
+cd flodl
 
 # Quick single-round benchmark
 fdl bench

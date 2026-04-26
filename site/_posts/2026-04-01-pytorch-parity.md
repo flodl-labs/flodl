@@ -187,7 +187,7 @@ All at the crate root, `use flodl::*` and go. `orthogonal` for RNNs,
 
 ### Tensor ops: 100+
 
-The full list is in the [migration guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md), but highlights:
+The full list is in the [migration guide](https://github.com/flodl-labs/flodl/blob/main/docs/pytorch_migration.md), but highlights:
 
 - **Trig**: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
 - **Numerically stable**: `log1p`, `expm1`, `log2`, `log10`, `erf`, `erfc`
@@ -221,7 +221,7 @@ the numerical gradient, the test fails. No untested backward paths.
 ## What this means
 
 If you've been waiting for "does it have X?", the answer is probably yes now.
-The [migration guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md) has
+The [migration guide](https://github.com/flodl-labs/flodl/blob/main/docs/pytorch_migration.md) has
 side-by-side code for every op, every module, every pattern. Same names,
 same semantics.
 
@@ -235,10 +235,10 @@ curl -sL https://flodl.dev/init.sh | sh -s my-project
 cd my-project && make run
 ```
 
-The full changelog is on [GitHub](https://github.com/fab2s/floDl/blob/main/CHANGELOG.md).
+The full changelog is on [GitHub](https://github.com/flodl-labs/flodl/blob/main/CHANGELOG.md).
 
 ---
 
-*flodl is open source (MIT). Star us on [GitHub](https://github.com/fab2s/floDl),
-try the [tutorials](https://github.com/fab2s/floDl/blob/main/docs/tutorials/01-tensors.md),
-or dive into the [migration guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md).*
+*flodl is open source (MIT). Star us on [GitHub](https://github.com/flodl-labs/flodl),
+try the [tutorials](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/01-tensors.md),
+or dive into the [migration guide](https://github.com/flodl-labs/flodl/blob/main/docs/pytorch_migration.md).*

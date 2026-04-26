@@ -806,8 +806,8 @@ non-blocking GPUs, fault tolerance, or NCCL is unavailable.
 ## Worked Example: ResNet-20 on CIFAR-10, A/B testable
 
 The
-[`ddp-bench/src/models/resnet_graph.rs`](https://github.com/fab2s/floDl/blob/main/ddp-bench/src/models/resnet_graph.rs)
-+ [`harness.rs`](https://github.com/fab2s/floDl/blob/main/ddp-bench/src/harness.rs)
+[`ddp-bench/src/models/resnet_graph.rs`](https://github.com/flodl-labs/flodl/blob/main/ddp-bench/src/models/resnet_graph.rs)
++ [`harness.rs`](https://github.com/flodl-labs/flodl/blob/main/ddp-bench/src/harness.rs)
 pair is the canonical end-to-end DDP recipe in the repo. It wires together
 every moving part — model factory, train function, optimizer, scheduler,
 `Timeline`, `Monitor`, `record_scalar`, both Graph and Builder modes —
@@ -1005,7 +1005,7 @@ and the builder loop above produce the same LR schedule for the same
 ### 5. Drive it from `fdl.yaml`
 
 The
-[`ddp-bench/fdl.yml.example`](https://github.com/fab2s/floDl/blob/main/ddp-bench/fdl.yml.example)
+[`ddp-bench/fdl.yml.example`](https://github.com/flodl-labs/flodl/blob/main/ddp-bench/fdl.yml.example)
 turns the matrix into named presets under the sub-command's `commands:`
 map:
 

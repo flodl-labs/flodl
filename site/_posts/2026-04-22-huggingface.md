@@ -224,7 +224,7 @@ family-specific embeddings, pooler, and task heads. The collapse cuts
 `max_abs_diff <= 1e-5` on all eight pinned checkpoints because the
 parity tests gate the refactor.
 
-What's next on the [roadmap](https://github.com/fab2s/floDl/blob/main/ROADMAP.md):
+What's next on the [roadmap](https://github.com/flodl-labs/flodl/blob/main/ROADMAP.md):
 
 - **ModernBERT** (RoPE, GeGLU, alternating local/global attention)
 - **LLaMA** (RoPE, GQA, SwiGLU)
@@ -244,14 +244,14 @@ fine-tuning them.
   entry points, the tokenizer, loading from local disk, and the parity
   test infrastructure.
 - **Skim the crate README**:
-  [flodl-hf on GitHub](https://github.com/fab2s/floDl/tree/main/flodl-hf)
+  [flodl-hf on GitHub](https://github.com/flodl-labs/flodl/tree/main/flodl-hf)
   is the short version, with the install matrix and a code block per
   task shape.
 - **Try it**: `cargo new my-model && cd my-model && fdl init . --with-hf`
   drops a working AutoModel scaffold in under thirty seconds (assuming
   libtorch is already provisioned).
 - **Read the changelog**: the
-  [0.5.2 entry](https://github.com/fab2s/floDl/blob/main/CHANGELOG.md)
+  [0.5.2 entry](https://github.com/flodl-labs/flodl/blob/main/CHANGELOG.md)
   is the per-feature record, including the flodl-internal pieces (SDPA
   FFI, `torch.embedding` FFI with `padding_idx`, `LayerNorm` epsilon).
 
