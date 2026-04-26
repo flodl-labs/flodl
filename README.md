@@ -72,7 +72,7 @@ optimizer.step()
 
 ```rust
 let model = FlowBuilder::from(Linear::new(2, 16)?)
-    .through(GELU::new())
+    .through(GELU)
     .through(LayerNorm::new(16)?)
     .through(Linear::new(16, 2)?)
     .build()?;
@@ -141,7 +141,7 @@ build your model:
 use flodl::*;
 
 let model = FlowBuilder::from(Linear::new(2, 16)?)
-    .through(GELU::new())
+    .through(GELU)
     .through(LayerNorm::new(16)?)
     .also(Linear::new(16, 16)?)     // residual connection
     .through(Linear::new(16, 2)?)
@@ -172,7 +172,7 @@ readable data flow — no boilerplate, no `nn.Module` subclassing.
 
 ```rust
 let model = FlowBuilder::from(Linear::new(2, 16)?)
-    .through(GELU::new())                        // activation
+    .through(GELU)                        // activation
     .through(LayerNorm::new(16)?)         // normalization
     .also(Linear::new(16, 16)?)           // residual connection
     .through(Linear::new(16, 2)?)         // output projection

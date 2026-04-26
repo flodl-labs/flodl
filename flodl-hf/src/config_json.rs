@@ -110,14 +110,14 @@ pub(crate) fn parse_id2label(v: &Value) -> Result<Option<Vec<String>>> {
 /// strings error loudly with a message that names the supported set.
 ///
 /// Mappings (case-sensitive — matches HF's `ACT2FN` keys):
-/// - `"gelu"` → [`GeluApprox::None`] (erf form)
+/// - `"gelu"` → [`GeluApprox::Exact`] (erf form)
 /// - `"gelu_new"` → [`GeluApprox::Tanh`] (tanh approximation,
 ///   ALBERT v1+v2, GPT-2)
 /// - `"gelu_pytorch_tanh"` → [`GeluApprox::Tanh`] (HF's newer alias
 ///   for the same approximation)
 fn map_hidden_act(s: &str) -> Result<GeluApprox> {
     match s {
-        "gelu"                   => Ok(GeluApprox::None),
+        "gelu"                   => Ok(GeluApprox::Exact),
         "gelu_new"               => Ok(GeluApprox::Tanh),
         "gelu_pytorch_tanh"      => Ok(GeluApprox::Tanh),
         other => Err(TensorError::new(&format!(
@@ -195,7 +195,7 @@ pub(crate) fn parse_architectures(v: &Value) -> Option<Vec<String>> {
 /// the same ACT2FN entry.
 pub(crate) fn emit_hidden_act(act: GeluApprox) -> &'static str {
     match act {
-        GeluApprox::None => "gelu",
+        GeluApprox::Exact => "gelu",
         GeluApprox::Tanh => "gelu_new",
     }
 }
@@ -326,14 +326,14 @@ mod tests {
 
     #[test]
     fn emit_hidden_act_maps_both_variants() {
-        assert_eq!(emit_hidden_act(GeluApprox::None), "gelu");
+        assert_eq!(emit_hidden_act(GeluApprox::Exact), "gelu");
         assert_eq!(emit_hidden_act(GeluApprox::Tanh), "gelu_new");
     }
 
     #[test]
     fn emit_hidden_act_round_trips_through_map() {
         // Every emitted string must parse back to the same enum value.
-        for act in [GeluApprox::None, GeluApprox::Tanh] {
+        for act in [GeluApprox::Exact, GeluApprox::Tanh] {
             let parsed = map_hidden_act(emit_hidden_act(act)).unwrap();
             assert_eq!(parsed, act);
         }

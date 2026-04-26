@@ -312,7 +312,7 @@ use flodl::monitor::Monitor;
 fn main() -> Result<()> {
     // --- Model ---
     let model = FlowBuilder::from(Linear::new(4, 32)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(32)?)
         .also(Linear::new(32, 32)?)       // residual connection
         .through(Linear::new(32, 1)?)

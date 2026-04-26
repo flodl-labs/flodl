@@ -172,8 +172,8 @@ fn classify_architecture(arch: &str) -> Result<HeadKind> {
 /// `Model` (base backbone), `ForSequenceClassification`,
 /// `ForTokenClassification`, `ForQuestionAnswering`, `ForMaskedLM`. An
 /// absent or unrecognised non-`For*` value falls back to base. A
-/// `For{Other}` value not in the list above errors loudly through
-/// [`classify_architecture`] rather than silently misdispatching.
+/// `For{Other}` value not in the list above errors loudly rather than
+/// silently misdispatching.
 ///
 /// Use this when you have a parsed `AutoConfig` (e.g. read from a
 /// flodl checkpoint sidecar) and need to instantiate the matching

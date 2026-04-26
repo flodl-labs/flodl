@@ -145,7 +145,7 @@ pub struct TransformerLayerConfig {
     /// `hidden_act` for BERT/RoBERTa/ALBERT/XLM-R/DeBERTa-v2,
     /// `activation` for DistilBERT — via the crate-internal
     /// `optional_hidden_act` JSON helper.
-    /// Default [`GeluApprox::None`] (erf form) matches the canonical
+    /// Default [`GeluApprox::Exact`] (erf form) matches the canonical
     /// `bert-base-uncased` / `roberta-base` / `distilbert-base-uncased`
     /// checkpoints. ALBERT both v1 and v2 ship `"gelu_new"` and need
     /// [`GeluApprox::Tanh`].
@@ -317,7 +317,7 @@ mod tests {
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
             layer_norm_eps: 1e-12,
-            hidden_act: GeluApprox::None,
+            hidden_act: GeluApprox::Exact,
         }
     }
 

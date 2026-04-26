@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_gelu() {
-        let gelu = GELU::new();
+        let gelu = GELU;
         let x = Variable::new(from_f32(&[0.0, 1.0, -1.0], &[3]), true);
         let y = gelu.forward(&x).unwrap();
         let data = y.data().to_f32_vec().unwrap();
@@ -809,8 +809,8 @@ mod tests {
         let xs = [0.5_f32, 1.0, -1.0, 2.0];
         let x = Variable::new(from_f32(&xs, &[xs.len() as i64]), false);
 
-        let erf  = GELU::with_approximate(GeluApprox::None);
-        let tanh = GELU::with_approximate(GeluApprox::Tanh);
+        let erf  = GELU::exact();
+        let tanh = GELU::tanh();
 
         let v_erf  = erf.forward(&x).unwrap().data().to_f32_vec().unwrap();
         let v_tanh = tanh.forward(&x).unwrap().data().to_f32_vec().unwrap();

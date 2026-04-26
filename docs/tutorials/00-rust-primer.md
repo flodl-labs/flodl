@@ -273,7 +273,7 @@ use flodl::*;
 
 fn main() -> Result<()> {
     let model = FlowBuilder::from(Linear::new(1, 32)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(Linear::new(32, 1)?)
         .build()?;
 

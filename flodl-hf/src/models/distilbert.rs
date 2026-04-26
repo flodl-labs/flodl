@@ -126,7 +126,7 @@ pub struct DistilBertConfig {
     /// defaults to `1e-12` to match the BERT family.
     pub layer_norm_eps: f64,
     /// FFN activation form (parsed from HF `activation` — DistilBERT
-    /// uses that key, not `hidden_act`). Default `GeluApprox::None`
+    /// uses that key, not `hidden_act`). Default `GeluApprox::Exact`
     /// (erf form) matches `distilbert-base-uncased`.
     pub hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
@@ -154,7 +154,7 @@ impl DistilBertConfig {
             seq_classif_dropout: 0.2,
             sinusoidal_pos_embds: false,
             layer_norm_eps: 1e-12,
-            hidden_act: GeluApprox::None,
+            hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
             architectures: None,

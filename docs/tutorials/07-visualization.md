@@ -14,7 +14,7 @@ Two methods on `Graph`:
 
 ```rust
 let g = FlowBuilder::from(Linear::new(4, 8)?)
-    .through(GELU::new())
+    .through(GELU)
     .also(Linear::new(8, 8)?)
     .through(Linear::new(8, 2)?)
     .build()?;

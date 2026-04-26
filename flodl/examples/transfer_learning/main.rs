@@ -16,7 +16,7 @@ fn main() -> Result<()> {
     println!("=== Phase 1: Train encoder ===");
 
     let encoder = FlowBuilder::from(Linear::new(4, 16)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(16)?)
         .tag("encoded")
         .through(Linear::new(16, 4)?)
@@ -56,7 +56,7 @@ fn main() -> Result<()> {
 
     // New architecture reuses the encoder layers but adds a different head.
     let model = FlowBuilder::from(Linear::new(4, 16)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(16)?)
         .tag("encoded")
         .also(Linear::new(16, 16)?)      // new: residual connection

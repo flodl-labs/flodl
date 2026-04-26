@@ -101,10 +101,10 @@ pub struct DebertaV2Config {
     /// concrete in this struct.
     pub max_relative_positions: i64,
     /// Encoder + LM-head activation form (parsed from HF `hidden_act`).
-    /// Default `GeluApprox::None` (erf form) matches `microsoft/deberta-v3-base`.
+    /// Default `GeluApprox::Exact` (erf form) matches `microsoft/deberta-v3-base`.
     pub hidden_act: GeluApprox,
     /// `ContextPooler` activation form (parsed from HF
-    /// `pooler_hidden_act`). Default `GeluApprox::None` (erf form)
+    /// `pooler_hidden_act`). Default `GeluApprox::Exact` (erf form)
     /// matches the v3-base preset.
     pub pooler_hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
@@ -131,8 +131,8 @@ impl DebertaV2Config {
             pad_token_id: Some(0),
             position_buckets: 256,
             max_relative_positions: 512,
-            hidden_act: GeluApprox::None,
-            pooler_hidden_act: GeluApprox::None,
+            hidden_act: GeluApprox::Exact,
+            pooler_hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
             architectures: None,
@@ -990,8 +990,8 @@ mod tests {
             pad_token_id: Some(0),
             position_buckets: 4,
             max_relative_positions: 8,
-            hidden_act: GeluApprox::None,
-            pooler_hidden_act: GeluApprox::None,
+            hidden_act: GeluApprox::Exact,
+            pooler_hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
             architectures: None,

@@ -13,7 +13,7 @@ Any `Graph` can be labeled with `.label()`:
 
 ```rust
 let encoder = FlowBuilder::from(Linear::new(4, 8)?)
-    .through(GELU::new())
+    .through(GELU)
     .through(Linear::new(8, 4)?)
     .label("encoder")
     .build()?;

@@ -42,7 +42,7 @@ pub(crate) struct StateEntry {
 ///
 /// ```ignore
 /// let g = FlowBuilder::from(Linear::new(4, 8)?)
-///     .through(GELU::new())
+///     .through(GELU)
 ///     .through(Linear::new(8, 2)?)
 ///     .build()?;
 ///

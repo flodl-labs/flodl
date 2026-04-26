@@ -30,7 +30,7 @@ fn main() -> Result<()> {
 
     // --- Model: Linear(1,32) -> GELU -> LayerNorm -> residual -> Linear(32,1) ---
     let model = FlowBuilder::from(Linear::new(1, 32)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(32)?)
         .also(Linear::new(32, 32)?)   // residual connection
         .through(Linear::new(32, 1)?)
@@ -114,7 +114,7 @@ fn main() -> Result<()> {
 
     // Rebuild architecture and load weights.
     let model2 = FlowBuilder::from(Linear::new(1, 32)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(32)?)
         .also(Linear::new(32, 32)?)
         .through(Linear::new(32, 1)?)
@@ -167,7 +167,7 @@ mod tests {
         let y_data = y.reshape(&[n, 1])?;
 
         let model = FlowBuilder::from(Linear::new(1, 32)?)
-            .through(GELU::new())
+            .through(GELU)
             .through(LayerNorm::new(32)?)
             .also(Linear::new(32, 32)?)
             .through(Linear::new(32, 1)?)

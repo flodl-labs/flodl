@@ -17,7 +17,7 @@ use super::MergeOp;
 /// use flodl::*;
 ///
 /// let g = FlowBuilder::from(Linear::new(4, 8)?)
-///     .through(GELU::new())
+///     .through(GELU)
 ///     .through(LayerNorm::new(8)?)
 ///     .also(Linear::new(8, 8)?)           // residual connection
 ///     .through(Linear::new(8, 2)?)

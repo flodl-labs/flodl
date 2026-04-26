@@ -661,6 +661,7 @@ nn.Identity()
 ReLU
 Sigmoid
 Tanh
+GELU                       // erf form (default) — GELU::tanh() for the tanh approximation
 SiLU
 Mish
 SELU
@@ -669,8 +670,6 @@ Hardsigmoid
 Identity
 
 // Parameterized at construction
-GELU::new()                       // erf form (default)
-GELU::with_approximate(GeluApprox::Tanh)  // tanh approx (HF `gelu_new`/`gelu_pytorch_tanh`)
 LeakyReLU::new(0.01)
 ELU::new(1.0)
 Softplus::new(1.0, 20.0)         // beta, threshold

@@ -106,7 +106,7 @@ impl Module for Tanh {
 
 /// GELU approximation form.
 ///
-/// Default ([`GeluApprox::None`]) is the exact erf-form GELU. The tanh
+/// Default ([`GeluApprox::Exact`]) is the erf-form GELU. The tanh
 /// approximation ([`GeluApprox::Tanh`]) is what HuggingFace ships under
 /// `hidden_act="gelu_new"` (and `"gelu_pytorch_tanh"`), used by ALBERT
 /// (v1+v2), GPT-2, and derivative checkpoints. Picking the wrong form
@@ -114,12 +114,17 @@ impl Module for Tanh {
 /// across encoder layers — typical end-to-end max-abs-diff is ~1e-2
 /// vs ~1e-5 with the matching form, large enough to fail any
 /// meaningful parity test.
+///
+/// Adding a new variant later (e.g. a polynomial fit) is the reason
+/// this is an enum rather than a `bool`: each downstream `match` site
+/// fails to compile until the new path is handled, which is exactly
+/// what we want for a numerically-distinct activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GeluApprox {
     /// Exact erf form: `0.5 * x * (1 + erf(x / sqrt(2)))`. Matches
     /// PyTorch `F.gelu(x)` and HuggingFace `hidden_act="gelu"`.
     #[default]
-    None,
+    Exact,
     /// Tanh approximation:
     /// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
     /// Matches PyTorch `F.gelu(x, approximate="tanh")` and HuggingFace
@@ -129,44 +134,81 @@ pub enum GeluApprox {
 
 /// GELU activation (Gaussian Error Linear Unit).
 ///
-/// Default ([`GELU::new`]) is the exact erf form
-/// (`0.5 * x * (1 + erf(x / sqrt(2)))`). For the tanh approximation —
-/// HuggingFace `hidden_act="gelu_new"`, ALBERT, GPT-2 — use
-/// [`GELU::with_approximate(GeluApprox::Tanh)`](GELU::with_approximate).
+/// The bare name [`GELU`](struct@GELU) (used in value position, e.g.
+/// `.through(GELU)`) resolves to the erf-form default and works
+/// identically to the other unit-struct activations (`ReLU`, `SiLU`, …).
+/// For the tanh approximation — HuggingFace `hidden_act="gelu_new"`,
+/// ALBERT, GPT-2 — write [`GELU::tanh()`]. The explicit erf form is
+/// [`GELU::exact()`] for symmetry, and [`GELU::with_approximate`]
+/// accepts a runtime [`GeluApprox`] (used by `flodl-hf` config loaders).
+///
+/// ```ignore
+/// use flodl::nn::{GELU, GeluApprox};
+///
+/// let g0 = GELU;                              // erf form (default)
+/// let g1 = GELU::exact();                     // same, explicit
+/// let g2 = GELU::tanh();                      // tanh approximation
+/// let g3 = GELU::with_approximate(GeluApprox::Tanh); // runtime-chosen form
+/// ```
+///
+/// This is the canonical pattern in flodl for parametrising what was
+/// previously a unit-struct module: a `const` of the type re-exports
+/// the default-constructed value under the bare type name, so existing
+/// usage like `.through(GELU)` keeps working while opt-in constructors
+/// (`::tanh()`, …) cover the variants.
 pub struct GELU {
     approximate: GeluApprox,
 }
 
 impl Default for GELU {
     fn default() -> Self {
-        Self { approximate: GeluApprox::None }
+        Self::exact()
     }
 }
 
 impl GELU {
-    /// Erf-form GELU (default). Same as `GELU::with_approximate(GeluApprox::None)`.
-    pub fn new() -> Self {
-        Self::default()
+    /// Erf-form GELU: `0.5 * x * (1 + erf(x / sqrt(2)))`. The default,
+    /// matching PyTorch `nn.GELU()` and HuggingFace `hidden_act="gelu"`.
+    pub const fn exact() -> Self {
+        Self { approximate: GeluApprox::Exact }
     }
 
-    /// Build a GELU module with an explicit [`GeluApprox`] form.
-    /// Mirrors PyTorch `nn.GELU(approximate='none' | 'tanh')`.
-    pub fn with_approximate(approximate: GeluApprox) -> Self {
+    /// Tanh-approximation GELU:
+    /// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
+    /// Matches PyTorch `nn.GELU(approximate='tanh')` and HuggingFace
+    /// `hidden_act` in {`"gelu_new"`, `"gelu_pytorch_tanh"`} — required
+    /// for ALBERT, GPT-2, and derivative checkpoints.
+    pub const fn tanh() -> Self {
+        Self { approximate: GeluApprox::Tanh }
+    }
+
+    /// Build a GELU module with a runtime-chosen [`GeluApprox`].
+    /// Mirrors PyTorch `nn.GELU(approximate='none' | 'tanh')`. Used by
+    /// `flodl-hf` config loaders that map `hidden_act` strings to a
+    /// [`GeluApprox`] value at load time.
+    pub const fn with_approximate(approximate: GeluApprox) -> Self {
         Self { approximate }
     }
 
     /// Which approximation form this module dispatches.
-    pub fn approximate(&self) -> GeluApprox {
+    pub const fn approximate(&self) -> GeluApprox {
         self.approximate
     }
 }
+
+/// Default-constructed [`GELU`](struct@GELU) (erf form), exposed so the
+/// bare type name works in value position: `.through(GELU)`.
+///
+/// See [`struct@GELU`] for the full pattern rationale.
+#[allow(non_upper_case_globals)]
+pub const GELU: GELU = GELU::exact();
 
 impl Module for GELU {
     fn name(&self) -> &str { "gelu" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
         match self.approximate {
-            GeluApprox::None => input.gelu(),
+            GeluApprox::Exact => input.gelu(),
             GeluApprox::Tanh => input.gelu_tanh(),
         }
     }

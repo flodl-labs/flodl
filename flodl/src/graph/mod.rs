@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! let encoder = FlowBuilder::from(Linear::new(4, 8)?)
-//!     .through(GELU::new())
+//!     .through(GELU)
 //!     .label("encoder")
 //!     .build()?;
 //!

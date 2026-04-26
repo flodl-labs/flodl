@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 
     // Build the model (starts in float32).
     let model = FlowBuilder::from(Linear::new(8, 32)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(32)?)
         .also(Linear::new(32, 32)?)
         .through(Linear::new(32, 4)?)

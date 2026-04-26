@@ -42,9 +42,16 @@ All nine `*For{SequenceClassification,TokenClassification,QuestionAnswering}` he
 - All nine flodl-hf task heads (BERT / RoBERTa / DistilBERT × SeqCls / TokenCls / QA) now implement `HasGraph` and expose a `config()` accessor so callers can build replicas inside the factory closure.
 - The `distilbert-finetune` example is rewritten to use `setup_head`: the loop is byte-identical to the multi-GPU path, so a user can scale to N GPUs without changing any training code.
 
-### Changed
+#### `GELU` now carries an approximation form (BC-clean)
 
-- **BREAKING — `GELU` now requires a constructor**: the activation gained an `approximate: GeluApprox` field to support both the erf form (HF `gelu`) and the tanh approximation (HF `gelu_new` / `gelu_pytorch_tanh`) needed for ALBERT and other tanh-form checkpoints. The old bare-name usage `.through(GELU)` no longer compiles. Migration: replace `GELU` with `GELU::new()` for the erf default, or `GELU::with_approximate(GeluApprox::Tanh)` for the tanh form. The other 9 unit-struct activations (`ReLU`, `Sigmoid`, `Tanh`, `SiLU`, `Mish`, `SELU`, `Hardswish`, `Hardsigmoid`, `Identity`) are unaffected — bare-name usage still works.
+`GELU` gains an `approximate: GeluApprox` field so flodl can dispatch both the erf form (PyTorch `nn.GELU()`, HF `hidden_act="gelu"`) and the tanh approximation (HF `hidden_act` in {`"gelu_new"`, `"gelu_pytorch_tanh"`}) required by ALBERT, GPT-2, and derivative checkpoints. The bare-name usage `.through(GELU)` keeps compiling: `pub const GELU: GELU = GELU::exact();` re-exports the default-constructed value under the type name, so existing code is untouched.
+
+- **`GELU::exact()`** — erf form, the default; same as bare `GELU`.
+- **`GELU::tanh()`** — tanh approximation; pick this for ALBERT, GPT-2, and HF `gelu_new` / `gelu_pytorch_tanh` checkpoints.
+- **`GELU::with_approximate(approx)`** — runtime-chosen form, used by `flodl-hf` config loaders that map `hidden_act` strings to a [`GeluApprox`] value at load time.
+- **`GeluApprox` enum** — `Exact` (default) | `Tanh`. Adding a new variant later (e.g. a polynomial fit) makes every downstream `match` site fail to compile until handled, which is what we want for a numerically-distinct activation.
+
+This is the canonical pattern in flodl for parametrising what was previously a unit-struct module without breaking BC: `pub struct GELU { … }` carries the field, a `pub const GELU: GELU = GELU::exact();` named identically (Rust puts types and consts in separate namespaces) keeps bare-name value usage working, and opt-in constructors cover the variants.
 
 ### Deprecated
 

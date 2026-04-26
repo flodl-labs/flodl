@@ -15,7 +15,7 @@ fn main() -> Result<()> {
 
     // Build a model with tagged intermediate nodes.
     let model = FlowBuilder::from(Linear::new(4, 16)?)
-        .through(GELU::new())
+        .through(GELU)
         .tag("hidden")
         .through(LayerNorm::new(16)?)
         .also(Linear::new(16, 16)?)

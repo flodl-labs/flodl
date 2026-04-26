@@ -67,7 +67,7 @@ pub struct XlmRobertaConfig {
     pub hidden_dropout_prob: f64,
     pub attention_probs_dropout_prob: f64,
     /// FFN activation form (parsed from HF `hidden_act`). Default
-    /// `GeluApprox::None` (erf form) matches `xlm-roberta-base`.
+    /// `GeluApprox::Exact` (erf form) matches `xlm-roberta-base`.
     pub hidden_act: GeluApprox,
     /// See [`crate::models::bert::BertConfig::num_labels`].
     pub num_labels: Option<i64>,
@@ -96,7 +96,7 @@ impl XlmRobertaConfig {
             layer_norm_eps: 1e-5,
             hidden_dropout_prob: 0.1,
             attention_probs_dropout_prob: 0.1,
-            hidden_act: GeluApprox::None,
+            hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
             architectures: None,

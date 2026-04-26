@@ -16,7 +16,7 @@ same forward pass with no extra machinery:
 
 ```rust
 let g = FlowBuilder::from(Linear::new(4, 8)?).tag("hidden")
-    .through(GELU::new())
+    .through(GELU)
     .through(cross_attention).using(&["hidden"])
     .build()?;
 ```
@@ -194,7 +194,7 @@ combined using the router's weights:
 
 ```rust
 let g = FlowBuilder::from(Linear::new(4, 8)?).tag("features")
-    .through(GELU::new())
+    .through(GELU)
     .gate(SoftmaxRouter::new(8, 3)?, modules![expert_a, expert_b, expert_c])
         .using(&["features"])
     .through(Linear::new(8, 2)?)
@@ -240,7 +240,7 @@ Only the selected branch runs:
 
 ```rust
 let g = FlowBuilder::from(Linear::new(4, 8)?).tag("features")
-    .through(GELU::new())
+    .through(GELU)
     .switch(ArgmaxSelector::new(8, 2)?, modules![light_path, heavy_path])
         .using(&["features"])
     .through(Linear::new(8, 2)?)
@@ -291,13 +291,13 @@ let h = 8;
 
 // Reusable sub-graph.
 let block = FlowBuilder::from(Linear::new(h, h)?)
-    .through(GELU::new())
+    .through(GELU)
     .through(LayerNorm::new(h)?)
     .build()?;
 
 // Main model.
 let model = FlowBuilder::from(Linear::new(4, h)?).tag("input")
-    .through(GELU::new())
+    .through(GELU)
     .split(modules![Linear::new(h, h)?, Linear::new(h, h)?])
         .merge(MergeOp::Mean)
     .also(Linear::new(h, h)?)

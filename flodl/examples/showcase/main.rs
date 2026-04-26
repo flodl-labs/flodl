@@ -58,7 +58,7 @@ use flodl::monitor::Monitor;
 /// Feed-forward block: Linear -> GELU -> LayerNorm.
 fn ffn_block(dim: i64) -> flodl::Result<Graph> {
     FlowBuilder::from(Linear::new(dim, dim)?)
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(dim)?)
         .build()
 }
@@ -524,7 +524,7 @@ fn build_showcase() -> flodl::Result<Graph> {
         .tag("input")
 
         // .through() chains modules sequentially: stream -> module -> stream
-        .through(GELU::new())
+        .through(GELU)
         .through(LayerNorm::new(H)?)
         .through(RmsNorm::new())
 

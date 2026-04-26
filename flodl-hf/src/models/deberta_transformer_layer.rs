@@ -552,7 +552,7 @@ mod tests {
             layer_norm_eps:               1e-7,
             position_buckets:             4,
             max_relative_positions:       8,
-            hidden_act:                   GeluApprox::None,
+            hidden_act:                   GeluApprox::Exact,
         }
     }
 

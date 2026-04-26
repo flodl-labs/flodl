@@ -69,7 +69,7 @@ pub struct BertConfig {
     pub hidden_dropout_prob: f64,
     pub attention_probs_dropout_prob: f64,
     /// FFN activation form (parsed from HF `hidden_act`). Default
-    /// `GeluApprox::None` (erf form) matches `bert-base-uncased`. Loud
+    /// `GeluApprox::Exact` (erf form) matches `bert-base-uncased`. Loud
     /// error from [`Self::from_json_str`] on unrecognised activation
     /// names.
     pub hidden_act: GeluApprox,
@@ -108,7 +108,7 @@ impl BertConfig {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.1,
             attention_probs_dropout_prob: 0.1,
-            hidden_act: GeluApprox::None,
+            hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
             architectures: None,
@@ -891,7 +891,7 @@ mod tests {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
-            hidden_act: GeluApprox::None,
+            hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
             architectures: None,
