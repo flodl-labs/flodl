@@ -13,6 +13,10 @@ commands:
     description: Verify a flodl export by loading it through HF AutoModelFor* and forwarding bit-exact vs the Hub source. Auto-detects family + head from <dir>/config.json (model_type + architectures[0]). Stage first with `fdl flodl-hf export --hub <repo> --out <dir>`.
     path: ./verify-export/
 
+  verify-matrix:
+    description: Run `fdl flodl-hf export` then `verify-export` across the head matrix (6 families x 5 heads = 30 cells). Fail-soft, prints PASS/FAIL grid. Filters via `-- --families bert,albert --heads base,seqcls`. Quarterly-manual gate; downloads ~10+ GB.
+    path: ./verify-matrix/
+
   parity:
     description: Regenerate parity fixtures from HuggingFace reference (used by *_parity_live tests). `parity all` regenerates everything in sequence.
     path: ./parity/

@@ -1335,7 +1335,7 @@ impl AutoModel {
         }
     }
 
-    /// Base-backbone path of [`from_pretrained_for_export_on_device`].
+    /// Base-backbone path of [`Self::from_pretrained_for_export_on_device`].
     /// Stays separate from the auto-dispatcher so the
     /// `<Family>Model::on_device` vs `<Family>Model::on_device_without_pooler`
     /// pooler-presence logic doesn't bleed into the head paths
