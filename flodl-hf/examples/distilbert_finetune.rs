@@ -11,6 +11,13 @@
 //! swapping the inline pairs for a proper [`DataSet`](flodl::DataSet)
 //! implementation.
 //!
+//! After the fine-tune the trained head is saved as a flodl
+//! `.fdl` checkpoint plus auto-emitted `<stem>.config.json` sidecar
+//! under `target/distilbert_finetune/`, and the example prints the
+//! two host-side `fdl` commands to re-export it as a
+//! HuggingFace-compatible directory and verify the export with HF
+//! Python (`AutoModelFor*` loadability).
+//!
 //! Run with:
 //!
 //! ```text
@@ -19,7 +26,7 @@
 //! cargo run --release --example distilbert_finetune
 //! ```
 
-use flodl::{clip_grad_norm, Adam, Device, Module, Result, Tensor, Trainer, Variable};
+use flodl::{clip_grad_norm, Adam, Device, Module, Result, Tensor, TensorError, Trainer, Variable};
 use flodl_hf::models::distilbert::DistilBertForSequenceClassification;
 use flodl_hf::tokenizer::HfTokenizer;
 
@@ -101,6 +108,36 @@ fn main() -> Result<()> {
     println!(
         "\nafter fine-tuning, {:?} -> NEGATIVE={:.3}, POSITIVE={:.3}",
         train[0].0, flat[0], flat[1],
+    );
+
+    // Persist the fine-tuned head for the export → verify recipe
+    // below. Path is project-relative under `target/` so it is
+    // visible on the host through the dev-container bind mount.
+    // `from_pretrained` already stamped the graph's source_config
+    // with `architectures: ["DistilBertForSequenceClassification"]`,
+    // so `save_checkpoint` automatically drops the matching
+    // `<stem>.config.json` sidecar; no hand-rolled config write
+    // needed for downstream `--checkpoint` re-export.
+    let scratch_dir = "target/distilbert_finetune";
+    std::fs::create_dir_all(scratch_dir).map_err(|e| {
+        TensorError::new(&format!("create {scratch_dir}: {e}"))
+    })?;
+    let ckpt_path = format!("{scratch_dir}/sst2_finetuned.fdl");
+    let export_dir = format!("{scratch_dir}/sst2_export");
+    head.graph().save_checkpoint(&ckpt_path)?;
+    println!(
+        "\ncheckpoint    -> {ckpt_path}\nsidecar config -> {scratch_dir}/sst2_finetuned.config.json",
+    );
+
+    // Recipe printed instead of self-orchestrated: the example runs
+    // inside the `dev` container while `verify-export` needs the
+    // `hf-parity` container, so spawning them from in-process would
+    // require docker-in-docker. Host-side `fdl` brings up each
+    // container itself, same pattern as `fdl flodl-hf verify-matrix`.
+    println!(
+        "\nNext steps (run from host):\n  \
+         fdl flodl-hf export --checkpoint {ckpt_path} --out {export_dir}\n  \
+         fdl flodl-hf verify-export {export_dir} --no-hub-source",
     );
 
     Ok(())
