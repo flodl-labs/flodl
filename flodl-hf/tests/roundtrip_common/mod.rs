@@ -6,7 +6,7 @@
 //! 3. Reads the HF reference safetensors directly from the `hf-hub`
 //!    cache.
 //! 4. Asserts every flodl-saved key exists on the HF side (after
-//!    [`bert_legacy_key_rename`] canonicalisation), shapes agree, and
+//!    [`bert_legacy_layernorm_rename`] canonicalisation), shapes agree, and
 //!    bytes are bit-exact.
 //!
 //! Helpers below cover the parts that don't change between families.
@@ -24,7 +24,7 @@ use safetensors::{tensor::TensorView, Dtype, SafeTensors};
 use flodl::Graph;
 use flodl_hf::export::export_hf_dir;
 use flodl_hf::safetensors_io::{
-    bert_legacy_key_rename, save_safetensors_file_from_graph, tensor_view_to_f32_vec,
+    bert_legacy_layernorm_rename, save_safetensors_file_from_graph, tensor_view_to_f32_vec,
 };
 
 /// Resolve the on-disk safetensors path that `from_pretrained` would
@@ -98,7 +98,7 @@ fn decode_f32(view: &TensorView<'_>, key: &str) -> Vec<f32> {
 /// `repo_id`'s on-disk HF reference. Asserts:
 ///
 /// - every flodl-saved key is present on the HF side after applying
-///   [`bert_legacy_key_rename`] to the HF keys;
+///   [`bert_legacy_layernorm_rename`] to the HF keys;
 /// - shapes agree on every shared key;
 /// - tensor bytes are bit-exact (f32 in / f32 out, no numerical work
 ///   between load and save).
@@ -127,7 +127,7 @@ pub fn run_roundtrip(graph: &Graph, repo_id: &str, family_label: &str) {
     // so flodl-saved keys (already canonical) line up.
     let mut hf_canonical: HashMap<String, String> = HashMap::new();
     for name in hf_st.names() {
-        let canonical = bert_legacy_key_rename(name);
+        let canonical = bert_legacy_layernorm_rename(name);
         if let Some(prev) = hf_canonical.insert(canonical.clone(), name.to_string()) {
             panic!(
                 "{family_label}: HF-side rename collision: {prev:?} and {name:?} \
@@ -273,7 +273,7 @@ pub fn run_export_roundtrip(
 
     let mut hf_canonical: HashMap<String, String> = HashMap::new();
     for name in hf_st.names() {
-        let canonical = bert_legacy_key_rename(name);
+        let canonical = bert_legacy_layernorm_rename(name);
         hf_canonical.insert(canonical, name.to_string());
     }
 

@@ -393,6 +393,61 @@ pub fn bert_legacy_key_rename(checkpoint_key: &str) -> String {
     }
 }
 
+/// HF-canonical LayerNorm rename: rewrite legacy `LayerNorm.gamma` /
+/// `LayerNorm.beta` suffixes to the modern `LayerNorm.weight` /
+/// `LayerNorm.bias` form. Pure suffix rename, leaves every other key
+/// untouched. Used by the round-trip comparators in
+/// `tests/roundtrip_common/mod.rs` to canonicalise HF-reference
+/// safetensors against flodl exports — flodl always saves the modern
+/// names; older HF checkpoints (e.g. `bert-base-uncased`) ship the
+/// legacy names. Distinct from [`bert_legacy_key_rename`], which is
+/// the *load-side* HF-to-flodl rename and additionally maps the MLM
+/// decoder-bias tying alias (no longer needed by the comparator since
+/// [`hf_canonical_save_key`] makes flodl saves match HF canonical
+/// keys for that case).
+pub fn bert_legacy_layernorm_rename(checkpoint_key: &str) -> String {
+    if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.gamma") {
+        format!("{prefix}LayerNorm.weight")
+    } else if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.beta") {
+        format!("{prefix}LayerNorm.bias")
+    } else {
+        checkpoint_key.to_string()
+    }
+}
+
+/// Inverse of [`bert_legacy_key_rename`] for the MLM decoder-bias tying
+/// case: rewrite flodl's internal `cls.predictions.decoder.bias` /
+/// `lm_head.decoder.bias` parameter name back to the canonical HF key
+/// (`cls.predictions.bias` / `lm_head.bias`) at save time.
+///
+/// Why save-side renames matter: HF Python's `BertForMaskedLM` /
+/// `RobertaForMaskedLM` declare `self.bias` as the storage parameter
+/// and then alias it via `self.decoder.bias = self.bias`. When HF's
+/// `from_pretrained` loads a state_dict that has only
+/// `cls.predictions.decoder.bias` (flodl's internal name), the
+/// owning `cls.predictions.bias` parameter ends up on the meta device
+/// and `tie_weights()` doesn't always materialise it on torch 2.x —
+/// forward then fails with "Tensor on device meta is not on the
+/// expected device cpu" inside the decoder's `addmm`. Emitting the
+/// canonical HF key makes the load route through the correct owning
+/// parameter and keeps the alias materialised.
+///
+/// Applied by [`save_safetensors_from_graph`] after [`crate::path::hf_key_from_flodl_key`]
+/// converts the flodl tag separator to dotted form. The
+/// `LayerNorm.gamma`/`beta` legacy names are NOT inverted on save —
+/// flodl emits the modern `weight`/`bias` form, which both HF Python
+/// and the Rust `_live` head-roundtrip comparator already canonicalise
+/// to.
+pub fn hf_canonical_save_key(hf_key: &str) -> String {
+    if hf_key == "cls.predictions.decoder.bias" {
+        return "cls.predictions.bias".to_string();
+    }
+    if hf_key == "lm_head.decoder.bias" {
+        return "lm_head.bias".to_string();
+    }
+    hf_key.to_string()
+}
+
 /// Read a safetensors file from disk and load it into `graph`.
 ///
 /// Thin wrapper around [`load_safetensors_into_graph`]. I/O errors are
@@ -452,7 +507,7 @@ pub fn save_safetensors_from_graph(graph: &Graph) -> Result<Vec<u8>> {
     let mut entries: BTreeMap<String, (Vec<usize>, Vec<u8>)> = BTreeMap::new();
 
     for (flodl_key, param) in graph.named_parameters() {
-        let hf_key = hf_key_from_flodl_key(&flodl_key);
+        let hf_key = hf_canonical_save_key(&hf_key_from_flodl_key(&flodl_key));
         let shape: Vec<usize> = param.variable.shape().iter().map(|&d| d as usize).collect();
         let data = param.variable.data().to_f32_vec()?;
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
@@ -467,7 +522,7 @@ pub fn save_safetensors_from_graph(graph: &Graph) -> Result<Vec<u8>> {
     }
 
     for (flodl_key, buffer) in graph.named_buffers() {
-        let hf_key = hf_key_from_flodl_key(&flodl_key);
+        let hf_key = hf_canonical_save_key(&hf_key_from_flodl_key(&flodl_key));
         let shape: Vec<usize> = buffer.shape().iter().map(|&d| d as usize).collect();
         let data = buffer.get().to_f32_vec()?;
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();

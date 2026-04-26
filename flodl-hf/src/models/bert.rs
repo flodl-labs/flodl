@@ -163,6 +163,20 @@ impl BertConfig {
         })
     }
 
+    /// Replace the `architectures` field with `[arch_class]` and return
+    /// `self`. Used by every `from_pretrained*` to pin the source-config
+    /// sidecar to the class actually built, so a subsequent
+    /// `save_checkpoint` → `--checkpoint` re-export round-trips through
+    /// [`crate::export::classify_architecture`] regardless of what the
+    /// upstream Hub config advertised (e.g. `bert-base-uncased` ships
+    /// `architectures: ["BertForPreTraining"]` but a user loading via
+    /// `BertForMaskedLM::from_pretrained` is building an MLM head and the
+    /// sidecar should reflect that).
+    pub fn with_architectures(mut self, arch_class: &str) -> Self {
+        self.architectures = Some(vec![arch_class.to_string()]);
+        self
+    }
+
     /// Serialize to a HuggingFace-style `config.json` string.
     ///
     /// Inverse of [`Self::from_json_str`]: the emitted JSON round-trips

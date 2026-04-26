@@ -200,14 +200,59 @@ fn run_hub(repo_id: &str, out_dir: &Path) -> flodl::Result<()> {
     eprintln!("loading weights for {repo_id} ...");
     let graph = AutoModel::from_pretrained_for_export(repo_id)?;
 
+    // Use the graph's source_config (already set by
+    // `from_pretrained_for_export` with `architectures` normalised to
+    // the base class — `bert-base-uncased` advertises
+    // `["BertForMaskedLM"]`, but the loader builds the base backbone
+    // and drops the head; the normalised config reflects what was
+    // actually built). Falling back to `config.to_json_str()` would
+    // re-emit the pre-normalised head class and confuse downstream
+    // `AutoModelFor*` consumers (they'd look for head keys that aren't
+    // there). Fall through is defensive — `from_pretrained_for_export`
+    // sets it unconditionally on every supported family.
+    let canonical = graph
+        .source_config()
+        .unwrap_or_else(|| config.to_json_str());
+
+    // Stamp the source repo into config.json so `verify-export` can
+    // recover it without an explicit `--hub-source` flag. Canonical
+    // `to_json_str()` doesn't emit `_name_or_path`, so this flodl-
+    // specific field is the only path back to the source after export.
+    // HF's `from_pretrained` ignores unknown top-level keys, so this is
+    // forward-compatible with AutoConfig consumers.
+    let stamped = inject_source_repo(&canonical, repo_id)?;
+
     eprintln!("exporting to {} ...", out_dir.display());
-    export_hf_dir(&graph, &config.to_json_str(), out_dir)?;
+    export_hf_dir(&graph, &stamped, out_dir)?;
 
     println!(
         "exported {repo_id} → {}\n  model.safetensors + config.json ready for AutoModel.from_pretrained",
         out_dir.display(),
     );
     Ok(())
+}
+
+/// Insert `flodl_source_repo: <repo_id>` into the canonical config
+/// JSON so the matching `verify-export` invocation can recover the
+/// Hub source without an explicit flag.
+fn inject_source_repo(canonical: &str, repo_id: &str) -> flodl::Result<String> {
+    let mut v: serde_json::Value = serde_json::from_str(canonical).map_err(|e| {
+        flodl::TensorError::new(&format!(
+            "inject_source_repo: parse canonical config: {e}"
+        ))
+    })?;
+    let obj = v.as_object_mut().ok_or_else(|| {
+        flodl::TensorError::new("inject_source_repo: canonical config is not a JSON object")
+    })?;
+    obj.insert(
+        "flodl_source_repo".into(),
+        serde_json::Value::String(repo_id.to_string()),
+    );
+    serde_json::to_string_pretty(&v).map_err(|e| {
+        flodl::TensorError::new(&format!(
+            "inject_source_repo: re-serialize canonical config: {e}"
+        ))
+    })
 }
 
 /// Checkpoint mode: read sidecar (or --config), build matching graph,

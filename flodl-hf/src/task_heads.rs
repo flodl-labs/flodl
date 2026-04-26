@@ -411,6 +411,12 @@ impl<C: Clone> ClassificationHead<C> {
 
     /// Borrow the underlying [`Graph`].
     pub fn graph(&self) -> &Graph { &self.graph }
+    /// Consume `self` and return the underlying [`Graph`]. Used by
+    /// `fdl flodl-hf export --hub` after auto-dispatching on the
+    /// upstream `architectures[0]` — the head wrapper isn't needed
+    /// past the load, only the graph (with `source_config` already
+    /// set by `from_pretrained_on_device`).
+    pub fn into_graph(self) -> Graph { self.graph }
     /// Borrow the config this head was built from.
     pub fn config(&self) -> &C { &self.config }
     /// Label names indexed by class id.
@@ -504,6 +510,9 @@ impl<C: Clone> TaggingHead<C> {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    /// Consume `self` and return the underlying [`Graph`] (used by
+    /// the auto-dispatching Hub-mode export path).
+    pub fn into_graph(self) -> Graph { self.graph }
     pub fn config(&self) -> &C { &self.config }
     pub fn labels(&self) -> &[String] { &self.id2label }
 
@@ -616,6 +625,9 @@ impl<C: Clone> QaHead<C> {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    /// Consume `self` and return the underlying [`Graph`] (used by
+    /// the auto-dispatching Hub-mode export path).
+    pub fn into_graph(self) -> Graph { self.graph }
     pub fn config(&self) -> &C { &self.config }
 
     #[cfg(feature = "tokenizer")]
@@ -706,6 +718,9 @@ impl<C: Clone> MaskedLmHead<C> {
     }
 
     pub fn graph(&self) -> &Graph { &self.graph }
+    /// Consume `self` and return the underlying [`Graph`] (used by
+    /// the auto-dispatching Hub-mode export path).
+    pub fn into_graph(self) -> Graph { self.graph }
     pub fn config(&self) -> &C { &self.config }
 
     #[cfg(feature = "tokenizer")]

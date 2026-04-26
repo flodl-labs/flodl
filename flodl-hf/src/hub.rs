@@ -97,7 +97,7 @@ impl BertModel {
         // bare `BertModel` has no slot for. `load_weights_with_logging`
         // tolerates those and names them on stderr.
         load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config.to_json_str());
+        graph.set_source_config(config.with_architectures("BertModel").to_json_str());
         Ok(graph)
     }
 }
@@ -359,7 +359,9 @@ impl BertForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(
+            config.with_architectures("BertForSequenceClassification").to_json_str(),
+        );
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -383,7 +385,9 @@ impl BertForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(
+            config.with_architectures("BertForTokenClassification").to_json_str(),
+        );
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -406,7 +410,9 @@ impl BertForQuestionAnswering {
         let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(
+            config.with_architectures("BertForQuestionAnswering").to_json_str(),
+        );
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -436,7 +442,9 @@ impl BertForMaskedLM {
         let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(
+            config.with_architectures("BertForMaskedLM").to_json_str(),
+        );
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -490,7 +498,7 @@ impl RobertaModel {
             RobertaModel::on_device_without_pooler(&config, device)?
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config.to_json_str());
+        graph.set_source_config(config.with_architectures("RobertaModel").to_json_str());
         Ok(graph)
     }
 }
@@ -513,7 +521,7 @@ impl RobertaForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("RobertaForSequenceClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -537,7 +545,7 @@ impl RobertaForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("RobertaForTokenClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -559,7 +567,7 @@ impl RobertaForQuestionAnswering {
         let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("RobertaForQuestionAnswering").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -589,7 +597,7 @@ impl RobertaForMaskedLM {
         let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("RobertaForMaskedLM").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -627,7 +635,7 @@ impl DistilBertModel {
         let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let graph = DistilBertModel::on_device(&config, device)?;
         load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config.to_json_str());
+        graph.set_source_config(config.with_architectures("DistilBertModel").to_json_str());
         Ok(graph)
     }
 }
@@ -651,7 +659,7 @@ impl DistilBertForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DistilBertForSequenceClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -675,7 +683,7 @@ impl DistilBertForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DistilBertForTokenClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -697,7 +705,7 @@ impl DistilBertForQuestionAnswering {
         let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DistilBertForQuestionAnswering").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -725,7 +733,7 @@ impl DistilBertForMaskedLM {
         let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DistilBertForMaskedLM").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -771,7 +779,7 @@ impl XlmRobertaModel {
             XlmRobertaModel::on_device_without_pooler(&config, device)?
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config.to_json_str());
+        graph.set_source_config(config.with_architectures("XLMRobertaModel").to_json_str());
         Ok(graph)
     }
 }
@@ -791,7 +799,7 @@ impl XlmRobertaForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("XLMRobertaForSequenceClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -815,7 +823,7 @@ impl XlmRobertaForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("XLMRobertaForTokenClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -838,7 +846,7 @@ impl XlmRobertaForQuestionAnswering {
         let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("XLMRobertaForQuestionAnswering").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -867,7 +875,7 @@ impl XlmRobertaForMaskedLM {
         let (config, weights) = fetch_xlm_roberta_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("XLMRobertaForMaskedLM").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -911,7 +919,7 @@ impl AlbertModel {
             AlbertModel::on_device_without_pooler(&config, device)?
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config.to_json_str());
+        graph.set_source_config(config.with_architectures("AlbertModel").to_json_str());
         Ok(graph)
     }
 }
@@ -930,7 +938,7 @@ impl AlbertForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("AlbertForSequenceClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -952,7 +960,7 @@ impl AlbertForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("AlbertForTokenClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -974,7 +982,7 @@ impl AlbertForQuestionAnswering {
         let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("AlbertForQuestionAnswering").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1003,7 +1011,7 @@ impl AlbertForMaskedLM {
         let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("AlbertForMaskedLM").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1039,7 +1047,7 @@ impl DebertaV2Model {
         let (config, weights) = fetch_deberta_v2_config_and_weights(repo_id)?;
         let graph = DebertaV2Model::on_device(&config, device)?;
         load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config.to_json_str());
+        graph.set_source_config(config.with_architectures("DebertaV2Model").to_json_str());
         Ok(graph)
     }
 }
@@ -1058,7 +1066,7 @@ impl DebertaV2ForSequenceClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DebertaV2ForSequenceClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1080,7 +1088,7 @@ impl DebertaV2ForTokenClassification {
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DebertaV2ForTokenClassification").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1101,7 +1109,7 @@ impl DebertaV2ForQuestionAnswering {
         let (config, weights) = fetch_deberta_v2_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DebertaV2ForQuestionAnswering").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1129,7 +1137,7 @@ impl DebertaV2ForMaskedLM {
         let (config, weights) = fetch_deberta_v2_config_and_weights(repo_id)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
-        head.graph().set_source_config(config.to_json_str());
+        head.graph().set_source_config(config.with_architectures("DebertaV2ForMaskedLM").to_json_str());
         #[cfg(feature = "tokenizer")]
         let head = match try_load_tokenizer(repo_id) {
             Some(tok) => head.with_tokenizer(tok),
@@ -1202,20 +1210,39 @@ impl AutoModel {
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
-        // Capture the source config before consuming it in the match.
-        // Attached to the graph so subsequent `save_checkpoint` calls
-        // emit a `<stem>.config.json` sidecar matching the loaded
-        // architecture; downstream tools (e.g. `fdl flodl-hf export
-        // --checkpoint`) rebuild the family from this without an extra
-        // `--config` argument in the common case.
-        let config_json = config.to_json_str();
-        let graph = match config {
-            AutoConfig::Bert(c) => BertModel::on_device_without_pooler(&c, device)?,
-            AutoConfig::Roberta(c) => RobertaModel::on_device_without_pooler(&c, device)?,
-            AutoConfig::DistilBert(c) => DistilBertModel::on_device(&c, device)?,
-            AutoConfig::XlmRoberta(c) => XlmRobertaModel::on_device_without_pooler(&c, device)?,
-            AutoConfig::Albert(c) => AlbertModel::on_device_without_pooler(&c, device)?,
-            AutoConfig::DebertaV2(c) => DebertaV2Model::on_device(&c, device)?,
+        // Capture the source config before consuming it in the match,
+        // and normalise `architectures` per family to the base class
+        // name actually being built (e.g. `bert-base-uncased` ships
+        // `architectures: ["BertForPreTraining"]` but this loader
+        // builds a bare `BertModel` with the head dropped). Without
+        // normalisation, a subsequent `save_checkpoint` sidecar would
+        // carry an arch name that `classify_architecture` rejects on
+        // `--checkpoint` re-export.
+        let (graph, config_json) = match config {
+            AutoConfig::Bert(c) => (
+                BertModel::on_device_without_pooler(&c, device)?,
+                c.with_architectures("BertModel").to_json_str(),
+            ),
+            AutoConfig::Roberta(c) => (
+                RobertaModel::on_device_without_pooler(&c, device)?,
+                c.with_architectures("RobertaModel").to_json_str(),
+            ),
+            AutoConfig::DistilBert(c) => (
+                DistilBertModel::on_device(&c, device)?,
+                c.with_architectures("DistilBertModel").to_json_str(),
+            ),
+            AutoConfig::XlmRoberta(c) => (
+                XlmRobertaModel::on_device_without_pooler(&c, device)?,
+                c.with_architectures("XLMRobertaModel").to_json_str(),
+            ),
+            AutoConfig::Albert(c) => (
+                AlbertModel::on_device_without_pooler(&c, device)?,
+                c.with_architectures("AlbertModel").to_json_str(),
+            ),
+            AutoConfig::DebertaV2(c) => (
+                DebertaV2Model::on_device(&c, device)?,
+                c.with_architectures("DebertaV2Model").to_json_str(),
+            ),
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
         graph.set_source_config(config_json);
@@ -1241,6 +1268,24 @@ impl AutoModel {
     /// `FacebookAI/xlm-roberta-base`). Pooler-less families (DistilBERT,
     /// DeBERTa-v2) behave identically to
     /// [`from_pretrained`](Self::from_pretrained).
+    ///
+    /// **Auto-detect head from `architectures[0]`** (no `--head` flag).
+    /// The upstream config's `architectures[0]` suffix decides which
+    /// head this loader builds:
+    ///
+    /// | suffix                          | builder                                |
+    /// |---------------------------------|-----------------------------------------|
+    /// | `*ForSequenceClassification`    | `AutoModelForSequenceClassification`    |
+    /// | `*ForTokenClassification`       | `AutoModelForTokenClassification`       |
+    /// | `*ForQuestionAnswering`         | `AutoModelForQuestionAnswering`         |
+    /// | `*ForMaskedLM`                  | `AutoModelForMaskedLM`                  |
+    /// | `*Model` / no `For`             | base backbone (this method's old default) |
+    /// | unrecognised `For{Other}`       | base backbone, with an info message     |
+    ///
+    /// Multi-head pretrained class names (`BertForPreTraining` etc.)
+    /// fall back to the base backbone — mirrors HF Python's
+    /// `AutoModel.from_pretrained` behaviour, where loading a
+    /// pretraining checkpoint as `AutoModel` silently drops the heads.
     pub fn from_pretrained_for_export(repo_id: &str) -> Result<Graph> {
         Self::from_pretrained_for_export_on_device(repo_id, Device::CPU)
     }
@@ -1251,6 +1296,51 @@ impl AutoModel {
         repo_id: &str,
         device: Device,
     ) -> Result<Graph> {
+        // Auto-detect the head from architectures[0]. Fetch only
+        // config.json first (cheap) so we can decide the dispatch
+        // without paying the full safetensors download for paths that
+        // delegate to a head loader (which fetches its own).
+        let config_str = fetch_config_str(repo_id)?;
+        let probe = AutoConfig::from_json_str(&config_str)?;
+        let arch_first = probe
+            .architectures()
+            .and_then(|a| a.first().cloned());
+        let head_kind = match arch_first.as_deref() {
+            Some(arch) => classify_for_hub_export(arch),
+            None => HubExportHead::Base,
+        };
+
+        match head_kind {
+            HubExportHead::Base => Self::base_from_pretrained_for_export(repo_id, device),
+            HubExportHead::SeqCls => {
+                let head = crate::models::auto::AutoModelForSequenceClassification
+                    ::from_pretrained_on_device(repo_id, device)?;
+                Ok(head.into_graph())
+            }
+            HubExportHead::TokCls => {
+                let head = crate::models::auto::AutoModelForTokenClassification
+                    ::from_pretrained_on_device(repo_id, device)?;
+                Ok(head.into_graph())
+            }
+            HubExportHead::Qa => {
+                let head = crate::models::auto::AutoModelForQuestionAnswering
+                    ::from_pretrained_on_device(repo_id, device)?;
+                Ok(head.into_graph())
+            }
+            HubExportHead::Mlm => {
+                let head = crate::models::auto::AutoModelForMaskedLM
+                    ::from_pretrained_on_device(repo_id, device)?;
+                Ok(head.into_graph())
+            }
+        }
+    }
+
+    /// Base-backbone path of [`from_pretrained_for_export_on_device`].
+    /// Stays separate from the auto-dispatcher so the
+    /// `<Family>Model::on_device` vs `<Family>Model::on_device_without_pooler`
+    /// pooler-presence logic doesn't bleed into the head paths
+    /// (heads carry their own pooler / classifier wiring already).
+    fn base_from_pretrained_for_export(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
 
         // Pick with-pooler vs without-pooler dynamically based on what
@@ -1264,7 +1354,7 @@ impl AutoModel {
         // Normalise `architectures` to the base class name on each
         // family arm. The Hub's source config typically tags a head
         // class (e.g. `bert-base-uncased` ships
-        // `architectures: ["BertForMaskedLM"]`) while this loader,
+        // `architectures: ["BertForPreTraining"]`) while this loader,
         // mirroring HF's `AutoModel.from_pretrained`, builds the base
         // backbone and silently drops head keys. The sidecar emitted
         // by a subsequent `save_checkpoint` must reflect what was
@@ -1273,56 +1363,89 @@ impl AutoModel {
         // a graph whose structural hash no longer matches the saved
         // file (see `flodl-hf/tests/checkpoint_export_soak.rs`).
         let (graph, config_json) = match config {
-            AutoConfig::Bert(mut c) => {
+            AutoConfig::Bert(c) => {
                 let g = if has_pooler {
                     BertModel::on_device(&c, device)?
                 } else {
                     BertModel::on_device_without_pooler(&c, device)?
                 };
-                c.architectures = Some(vec!["BertModel".into()]);
-                (g, AutoConfig::Bert(c).to_json_str())
+                (g, c.with_architectures("BertModel").to_json_str())
             }
-            AutoConfig::Roberta(mut c) => {
+            AutoConfig::Roberta(c) => {
                 let g = if has_pooler {
                     RobertaModel::on_device(&c, device)?
                 } else {
                     RobertaModel::on_device_without_pooler(&c, device)?
                 };
-                c.architectures = Some(vec!["RobertaModel".into()]);
-                (g, AutoConfig::Roberta(c).to_json_str())
+                (g, c.with_architectures("RobertaModel").to_json_str())
             }
-            AutoConfig::DistilBert(mut c) => {
+            AutoConfig::DistilBert(c) => {
                 let g = DistilBertModel::on_device(&c, device)?;
-                c.architectures = Some(vec!["DistilBertModel".into()]);
-                (g, AutoConfig::DistilBert(c).to_json_str())
+                (g, c.with_architectures("DistilBertModel").to_json_str())
             }
-            AutoConfig::XlmRoberta(mut c) => {
+            AutoConfig::XlmRoberta(c) => {
                 let g = if has_pooler {
                     XlmRobertaModel::on_device(&c, device)?
                 } else {
                     XlmRobertaModel::on_device_without_pooler(&c, device)?
                 };
-                c.architectures = Some(vec!["XLMRobertaModel".into()]);
-                (g, AutoConfig::XlmRoberta(c).to_json_str())
+                (g, c.with_architectures("XLMRobertaModel").to_json_str())
             }
-            AutoConfig::Albert(mut c) => {
+            AutoConfig::Albert(c) => {
                 let g = if has_pooler {
                     AlbertModel::on_device(&c, device)?
                 } else {
                     AlbertModel::on_device_without_pooler(&c, device)?
                 };
-                c.architectures = Some(vec!["AlbertModel".into()]);
-                (g, AutoConfig::Albert(c).to_json_str())
+                (g, c.with_architectures("AlbertModel").to_json_str())
             }
-            AutoConfig::DebertaV2(mut c) => {
+            AutoConfig::DebertaV2(c) => {
                 let g = DebertaV2Model::on_device(&c, device)?;
-                c.architectures = Some(vec!["DebertaV2Model".into()]);
-                (g, AutoConfig::DebertaV2(c).to_json_str())
+                (g, c.with_architectures("DebertaV2Model").to_json_str())
             }
         };
         load_weights_with_logging(repo_id, &graph, &weights)?;
         graph.set_source_config(config_json);
         Ok(graph)
+    }
+}
+
+/// Internal head-dispatch tag for the auto-detecting
+/// `from_pretrained_for_export` path. Mirrors `export::HeadKind` but
+/// kept separate because the Hub-mode policy is more permissive:
+/// unrecognised `For{Other}` suffixes fall back to base instead of
+/// erroring (a `bert-base-uncased` checkpoint advertising
+/// `BertForPreTraining` is a real Hub case that should still produce
+/// a base backbone, mirroring HF Python's `AutoModel.from_pretrained`).
+enum HubExportHead {
+    Base,
+    SeqCls,
+    TokCls,
+    Qa,
+    Mlm,
+}
+
+/// Permissive variant of `export::classify_architecture` for Hub-mode
+/// auto-dispatch. Unsupported `For{Other}` (multi-head pretraining
+/// classes etc.) falls back to base instead of erroring; the
+/// downstream `<Family>Model::on_device` path tolerates head-class
+/// keys via `allow_unused` on weight load. Recognised heads dispatch
+/// to the matching `AutoModelFor*` loader.
+fn classify_for_hub_export(arch: &str) -> HubExportHead {
+    if arch.ends_with("ForSequenceClassification") {
+        HubExportHead::SeqCls
+    } else if arch.ends_with("ForTokenClassification") {
+        HubExportHead::TokCls
+    } else if arch.ends_with("ForQuestionAnswering") {
+        HubExportHead::Qa
+    } else if arch.ends_with("ForMaskedLM") {
+        HubExportHead::Mlm
+    } else {
+        // `*Model` / no-`For` / unsupported `For{Other}` → base.
+        // Multi-head class names like `BertForPreTraining` land here,
+        // matching HF Python's `AutoModel.from_pretrained` policy of
+        // building the base backbone and silently dropping the heads.
+        HubExportHead::Base
     }
 }
 
@@ -1338,43 +1461,48 @@ impl AutoModelForSequenceClassification {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
-        let config_json = config.to_json_str();
-        let head = match config {
+        let (head, config_json) = match config {
             AutoConfig::Bert(c) => {
                 let num_labels = BertForSequenceClassification::num_labels_from_config(&c)?;
                 let h = BertForSequenceClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Bert(h)
+                let cj = c.with_architectures("BertForSequenceClassification").to_json_str();
+                (Self::Bert(h), cj)
             }
             AutoConfig::Roberta(c) => {
                 let num_labels = RobertaForSequenceClassification::num_labels_from_config(&c)?;
                 let h = RobertaForSequenceClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Roberta(h)
+                let cj = c.with_architectures("RobertaForSequenceClassification").to_json_str();
+                (Self::Roberta(h), cj)
             }
             AutoConfig::DistilBert(c) => {
                 let num_labels = DistilBertForSequenceClassification::num_labels_from_config(&c)?;
                 let h = DistilBertForSequenceClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DistilBert(h)
+                let cj = c.with_architectures("DistilBertForSequenceClassification").to_json_str();
+                (Self::DistilBert(h), cj)
             }
             AutoConfig::XlmRoberta(c) => {
                 let num_labels = XlmRobertaForSequenceClassification::num_labels_from_config(&c)?;
                 let h = XlmRobertaForSequenceClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::XlmRoberta(h)
+                let cj = c.with_architectures("XLMRobertaForSequenceClassification").to_json_str();
+                (Self::XlmRoberta(h), cj)
             }
             AutoConfig::Albert(c) => {
                 let num_labels = AlbertForSequenceClassification::num_labels_from_config(&c)?;
                 let h = AlbertForSequenceClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Albert(h)
+                let cj = c.with_architectures("AlbertForSequenceClassification").to_json_str();
+                (Self::Albert(h), cj)
             }
             AutoConfig::DebertaV2(c) => {
                 let num_labels = DebertaV2ForSequenceClassification::num_labels_from_config(&c)?;
                 let h = DebertaV2ForSequenceClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DebertaV2(h)
+                let cj = c.with_architectures("DebertaV2ForSequenceClassification").to_json_str();
+                (Self::DebertaV2(h), cj)
             }
         };
         head.graph().set_source_config(config_json);
@@ -1396,43 +1524,48 @@ impl AutoModelForTokenClassification {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
-        let config_json = config.to_json_str();
-        let head = match config {
+        let (head, config_json) = match config {
             AutoConfig::Bert(c) => {
                 let num_labels = BertForTokenClassification::num_labels_from_config(&c)?;
                 let h = BertForTokenClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Bert(h)
+                let cj = c.with_architectures("BertForTokenClassification").to_json_str();
+                (Self::Bert(h), cj)
             }
             AutoConfig::Roberta(c) => {
                 let num_labels = RobertaForTokenClassification::num_labels_from_config(&c)?;
                 let h = RobertaForTokenClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Roberta(h)
+                let cj = c.with_architectures("RobertaForTokenClassification").to_json_str();
+                (Self::Roberta(h), cj)
             }
             AutoConfig::DistilBert(c) => {
                 let num_labels = DistilBertForTokenClassification::num_labels_from_config(&c)?;
                 let h = DistilBertForTokenClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DistilBert(h)
+                let cj = c.with_architectures("DistilBertForTokenClassification").to_json_str();
+                (Self::DistilBert(h), cj)
             }
             AutoConfig::XlmRoberta(c) => {
                 let num_labels = XlmRobertaForTokenClassification::num_labels_from_config(&c)?;
                 let h = XlmRobertaForTokenClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::XlmRoberta(h)
+                let cj = c.with_architectures("XLMRobertaForTokenClassification").to_json_str();
+                (Self::XlmRoberta(h), cj)
             }
             AutoConfig::Albert(c) => {
                 let num_labels = AlbertForTokenClassification::num_labels_from_config(&c)?;
                 let h = AlbertForTokenClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Albert(h)
+                let cj = c.with_architectures("AlbertForTokenClassification").to_json_str();
+                (Self::Albert(h), cj)
             }
             AutoConfig::DebertaV2(c) => {
                 let num_labels = DebertaV2ForTokenClassification::num_labels_from_config(&c)?;
                 let h = DebertaV2ForTokenClassification::on_device(&c, num_labels, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DebertaV2(h)
+                let cj = c.with_architectures("DebertaV2ForTokenClassification").to_json_str();
+                (Self::DebertaV2(h), cj)
             }
         };
         head.graph().set_source_config(config_json);
@@ -1456,37 +1589,42 @@ impl AutoModelForQuestionAnswering {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
-        let config_json = config.to_json_str();
-        let head = match config {
+        let (head, config_json) = match config {
             AutoConfig::Bert(c) => {
                 let h = BertForQuestionAnswering::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Bert(h)
+                let cj = c.with_architectures("BertForQuestionAnswering").to_json_str();
+                (Self::Bert(h), cj)
             }
             AutoConfig::Roberta(c) => {
                 let h = RobertaForQuestionAnswering::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Roberta(h)
+                let cj = c.with_architectures("RobertaForQuestionAnswering").to_json_str();
+                (Self::Roberta(h), cj)
             }
             AutoConfig::DistilBert(c) => {
                 let h = DistilBertForQuestionAnswering::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DistilBert(h)
+                let cj = c.with_architectures("DistilBertForQuestionAnswering").to_json_str();
+                (Self::DistilBert(h), cj)
             }
             AutoConfig::XlmRoberta(c) => {
                 let h = XlmRobertaForQuestionAnswering::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::XlmRoberta(h)
+                let cj = c.with_architectures("XLMRobertaForQuestionAnswering").to_json_str();
+                (Self::XlmRoberta(h), cj)
             }
             AutoConfig::Albert(c) => {
                 let h = AlbertForQuestionAnswering::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Albert(h)
+                let cj = c.with_architectures("AlbertForQuestionAnswering").to_json_str();
+                (Self::Albert(h), cj)
             }
             AutoConfig::DebertaV2(c) => {
                 let h = DebertaV2ForQuestionAnswering::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DebertaV2(h)
+                let cj = c.with_architectures("DebertaV2ForQuestionAnswering").to_json_str();
+                (Self::DebertaV2(h), cj)
             }
         };
         head.graph().set_source_config(config_json);
@@ -1516,37 +1654,42 @@ impl AutoModelForMaskedLM {
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
-        let config_json = config.to_json_str();
-        let head = match config {
+        let (head, config_json) = match config {
             AutoConfig::Bert(c) => {
                 let h = BertForMaskedLM::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Bert(h)
+                let cj = c.with_architectures("BertForMaskedLM").to_json_str();
+                (Self::Bert(h), cj)
             }
             AutoConfig::Roberta(c) => {
                 let h = RobertaForMaskedLM::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Roberta(h)
+                let cj = c.with_architectures("RobertaForMaskedLM").to_json_str();
+                (Self::Roberta(h), cj)
             }
             AutoConfig::DistilBert(c) => {
                 let h = DistilBertForMaskedLM::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DistilBert(h)
+                let cj = c.with_architectures("DistilBertForMaskedLM").to_json_str();
+                (Self::DistilBert(h), cj)
             }
             AutoConfig::XlmRoberta(c) => {
                 let h = XlmRobertaForMaskedLM::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::XlmRoberta(h)
+                let cj = c.with_architectures("XLMRobertaForMaskedLM").to_json_str();
+                (Self::XlmRoberta(h), cj)
             }
             AutoConfig::Albert(c) => {
                 let h = AlbertForMaskedLM::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::Albert(h)
+                let cj = c.with_architectures("AlbertForMaskedLM").to_json_str();
+                (Self::Albert(h), cj)
             }
             AutoConfig::DebertaV2(c) => {
                 let h = DebertaV2ForMaskedLM::on_device(&c, device)?;
                 load_weights_with_logging(repo_id, h.graph(), &weights)?;
-                Self::DebertaV2(h)
+                let cj = c.with_architectures("DebertaV2ForMaskedLM").to_json_str();
+                (Self::DebertaV2(h), cj)
             }
         };
         head.graph().set_source_config(config_json);
@@ -1626,5 +1769,107 @@ mod tests {
             .forward_multi(&[input_ids, position_ids, token_type_ids, attention_mask])
             .unwrap();
         assert_eq!(out.shape(), vec![batch, 768]);
+    }
+
+    /// Tiny synthetic BERT config — small enough that allocating a head
+    /// graph in unit tests is millisecond-scale. Mirrors the
+    /// `tiny_bert_config` private helper in `models/bert.rs` tests.
+    fn tiny_bert_config() -> crate::models::bert::BertConfig {
+        crate::models::bert::BertConfig {
+            vocab_size: 32,
+            hidden_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            intermediate_size: 32,
+            max_position_embeddings: 8,
+            type_vocab_size: 2,
+            pad_token_id: Some(0),
+            layer_norm_eps: 1e-12,
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            hidden_act: flodl::nn::GeluApprox::Exact,
+            num_labels: None,
+            id2label: None,
+            architectures: None,
+        }
+    }
+
+    /// Sidecar path naming mirror of flodl's `sidecar_config_path`:
+    /// strip `.gz` if present, then replace the trailing extension with
+    /// `config.json`. Used by `save_checkpoint` when `source_config`
+    /// is set on the graph.
+    fn sidecar_for_checkpoint(checkpoint: &str) -> std::path::PathBuf {
+        let mut p = std::path::PathBuf::from(checkpoint);
+        if p.extension().and_then(|e| e.to_str()) == Some("gz") {
+            p.set_extension("");
+        }
+        p.set_extension("config.json");
+        p
+    }
+
+    /// Regression test for the head-side architecture normalisation:
+    /// every `<Family>For{Head}::from_pretrained_on_device` MUST stamp
+    /// `source_config` with `architectures: ["<Family>For{Head}"]`,
+    /// regardless of what the upstream Hub config advertised. Otherwise
+    /// a subsequent `save_checkpoint → --checkpoint re-export` cycle
+    /// trips `classify_architecture` on the multi-head class name some
+    /// Hub repos ship (`bert-base-uncased` → `BertForPreTraining`,
+    /// which `classify_architecture` rejects loudly).
+    ///
+    /// The test simulates the from_pretrained_on_device contract
+    /// without hitting the Hub: synthesizes a config whose upstream
+    /// `architectures` is `BertForPreTraining`, then applies the same
+    /// `with_architectures("BertForMaskedLM")` call the loader does
+    /// before stamping `source_config`. save_checkpoint emits the
+    /// sidecar; build_for_export reads it and dispatches to MLM.
+    #[test]
+    fn head_save_checkpoint_emits_normalised_architectures_sidecar() {
+        use crate::export::build_for_export;
+        use crate::models::auto::AutoConfig;
+        use crate::models::bert::BertForMaskedLM;
+        use flodl::Device;
+
+        // Upstream-style config carrying the multi-head class name a
+        // user pulling `bert-base-uncased` from the Hub would see.
+        let upstream = tiny_bert_config().with_architectures("BertForPreTraining");
+
+        // Build the MLM head and stamp source_config exactly the way
+        // BertForMaskedLM::from_pretrained_on_device does post-fix.
+        let head = BertForMaskedLM::on_device(&upstream, Device::CPU).unwrap();
+        head.graph().set_source_config(
+            upstream.with_architectures("BertForMaskedLM").to_json_str(),
+        );
+
+        // save_checkpoint emits the sidecar.
+        let pid = std::process::id();
+        let ckpt = std::env::temp_dir().join(format!("flodl_hf_mlm_norm_{pid}.fdl"));
+        let ckpt_str = ckpt.to_string_lossy().to_string();
+        head.graph().save_checkpoint(&ckpt_str).unwrap();
+        let sidecar = sidecar_for_checkpoint(&ckpt_str);
+        let sidecar_str = std::fs::read_to_string(&sidecar).unwrap();
+
+        // Sidecar carries the head class, not the upstream multi-head class.
+        let parsed = AutoConfig::from_json_str(&sidecar_str).unwrap();
+        let arch = parsed.architectures().unwrap();
+        assert_eq!(
+            arch,
+            ["BertForMaskedLM"],
+            "save_checkpoint sidecar must reflect the head class actually built; \
+             without the with_architectures call upstream's BertForPreTraining \
+             would leak through and fail classify_architecture on re-export",
+        );
+
+        // build_for_export dispatches without an "unsupported architecture" error
+        // and produces a graph with the same structural hash as the original.
+        let rebuilt = build_for_export(&parsed, false, Device::CPU).unwrap();
+        assert_eq!(
+            rebuilt.structural_hash(),
+            head.graph().structural_hash(),
+            "build_for_export from sidecar must rebuild the same MLM topology",
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&ckpt);
+        let _ = std::fs::remove_file(&sidecar);
     }
 }

@@ -240,6 +240,20 @@ impl AutoModelForSequenceClassification {
         }
     }
 
+    /// Consume `self` and return the underlying [`Graph`](flodl::Graph)
+    /// of the inner concrete head. Used by `fdl flodl-hf export --hub`
+    /// after auto-dispatching on the upstream `architectures[0]`.
+    pub fn into_graph(self) -> flodl::Graph {
+        match self {
+            Self::Bert(h) => h.into_graph(),
+            Self::Roberta(h) => h.into_graph(),
+            Self::DistilBert(h) => h.into_graph(),
+            Self::XlmRoberta(h) => h.into_graph(),
+            Self::Albert(h) => h.into_graph(),
+            Self::DebertaV2(h) => h.into_graph(),
+        }
+    }
+
     /// Label names indexed by class id.
     pub fn labels(&self) -> &[String] {
         match self {
@@ -294,6 +308,20 @@ impl AutoModelForTokenClassification {
         }
     }
 
+    /// Consume `self` and return the underlying [`Graph`](flodl::Graph)
+    /// of the inner concrete head. Used by `fdl flodl-hf export --hub`
+    /// after auto-dispatching on the upstream `architectures[0]`.
+    pub fn into_graph(self) -> flodl::Graph {
+        match self {
+            Self::Bert(h) => h.into_graph(),
+            Self::Roberta(h) => h.into_graph(),
+            Self::DistilBert(h) => h.into_graph(),
+            Self::XlmRoberta(h) => h.into_graph(),
+            Self::Albert(h) => h.into_graph(),
+            Self::DebertaV2(h) => h.into_graph(),
+        }
+    }
+
     pub fn labels(&self) -> &[String] {
         match self {
             Self::Bert(h) => h.labels(),
@@ -345,6 +373,20 @@ impl AutoModelForQuestionAnswering {
             Self::XlmRoberta(h) => h.graph(),
             Self::Albert(h) => h.graph(),
             Self::DebertaV2(h) => h.graph(),
+        }
+    }
+
+    /// Consume `self` and return the underlying [`Graph`](flodl::Graph)
+    /// of the inner concrete head. Used by `fdl flodl-hf export --hub`
+    /// after auto-dispatching on the upstream `architectures[0]`.
+    pub fn into_graph(self) -> flodl::Graph {
+        match self {
+            Self::Bert(h) => h.into_graph(),
+            Self::Roberta(h) => h.into_graph(),
+            Self::DistilBert(h) => h.into_graph(),
+            Self::XlmRoberta(h) => h.into_graph(),
+            Self::Albert(h) => h.into_graph(),
+            Self::DebertaV2(h) => h.into_graph(),
         }
     }
 
@@ -425,6 +467,20 @@ impl AutoModelForMaskedLM {
             Self::XlmRoberta(h) => h.graph(),
             Self::Albert(h) => h.graph(),
             Self::DebertaV2(h) => h.graph(),
+        }
+    }
+
+    /// Consume `self` and return the underlying [`Graph`](flodl::Graph)
+    /// of the inner concrete head. Used by `fdl flodl-hf export --hub`
+    /// after auto-dispatching on the upstream `architectures[0]`.
+    pub fn into_graph(self) -> flodl::Graph {
+        match self {
+            Self::Bert(h) => h.into_graph(),
+            Self::Roberta(h) => h.into_graph(),
+            Self::DistilBert(h) => h.into_graph(),
+            Self::XlmRoberta(h) => h.into_graph(),
+            Self::Albert(h) => h.into_graph(),
+            Self::DebertaV2(h) => h.into_graph(),
         }
     }
 

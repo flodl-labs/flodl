@@ -105,34 +105,38 @@ commands:
     description: Export a Hub repo as a HuggingFace-compatible directory for AutoModel.from_pretrained (model.safetensors + config.json via flodl's own writer)
     path: ./export/
 
+  verify-export:
+    description: Verify a flodl export by loading it through HF AutoModelFor* and forwarding bit-exact vs the Hub source. Auto-detects family + head from <dir>/config.json (model_type + architectures[0]). Stage first with `fdl flodl-hf export --hub <repo> --out <dir>`.
+    path: ./verify-export/
+
   verify-export-bert:
-    description: Verify HF AutoModel can load a flodl export of bert-base-uncased and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export bert-base-uncased flodl-hf/tests/.exports/bert`.
-    run: python scripts/verify_export_bert.py
+    description: Smoke-test wrapper — verify an export of bert-base-uncased. Stage first with `fdl flodl-hf export --hub bert-base-uncased --out flodl-hf/tests/.exports/bert`.
+    run: python scripts/verify_export.py flodl-hf/tests/.exports/bert --hub-source bert-base-uncased
     docker: hf-parity
 
   verify-export-roberta:
-    description: Verify HF AutoModel can load a flodl export of roberta-base and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export roberta-base flodl-hf/tests/.exports/roberta`.
-    run: python scripts/verify_export_roberta.py
+    description: Smoke-test wrapper — verify an export of roberta-base. Stage first with `fdl flodl-hf export --hub roberta-base --out flodl-hf/tests/.exports/roberta`.
+    run: python scripts/verify_export.py flodl-hf/tests/.exports/roberta --hub-source roberta-base
     docker: hf-parity
 
   verify-export-distilbert:
-    description: Verify HF AutoModel can load a flodl export of distilbert-base-uncased and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export distilbert/distilbert-base-uncased flodl-hf/tests/.exports/distilbert`.
-    run: python scripts/verify_export_distilbert.py
+    description: Smoke-test wrapper — verify an export of distilbert-base-uncased. Stage first with `fdl flodl-hf export --hub distilbert/distilbert-base-uncased --out flodl-hf/tests/.exports/distilbert`.
+    run: python scripts/verify_export.py flodl-hf/tests/.exports/distilbert --hub-source distilbert/distilbert-base-uncased
     docker: hf-parity
 
   verify-export-xlm-roberta:
-    description: Verify HF AutoModel can load a flodl export of xlm-roberta-base and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export FacebookAI/xlm-roberta-base flodl-hf/tests/.exports/xlm-roberta`.
-    run: python scripts/verify_export_xlm_roberta.py
+    description: Smoke-test wrapper — verify an export of xlm-roberta-base. Stage first with `fdl flodl-hf export --hub FacebookAI/xlm-roberta-base --out flodl-hf/tests/.exports/xlm-roberta`.
+    run: python scripts/verify_export.py flodl-hf/tests/.exports/xlm-roberta --hub-source FacebookAI/xlm-roberta-base
     docker: hf-parity
 
   verify-export-albert:
-    description: Verify HF AutoModel can load a flodl export of albert-base-v2 and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export albert/albert-base-v2 flodl-hf/tests/.exports/albert`.
-    run: python scripts/verify_export_albert.py
+    description: Smoke-test wrapper — verify an export of albert-base-v2. Stage first with `fdl flodl-hf export --hub albert/albert-base-v2 --out flodl-hf/tests/.exports/albert`.
+    run: python scripts/verify_export.py flodl-hf/tests/.exports/albert --hub-source albert/albert-base-v2
     docker: hf-parity
 
   verify-export-deberta-v2:
-    description: Verify HF AutoModel can load a flodl export of deberta-v3-base and forward bit-exact vs the Hub source. Stage first with `fdl flodl-hf export microsoft/deberta-v3-base flodl-hf/tests/.exports/deberta-v2`.
-    run: python scripts/verify_export_deberta_v2.py
+    description: Smoke-test wrapper — verify an export of deberta-v3-base. Stage first with `fdl flodl-hf export --hub microsoft/deberta-v3-base --out flodl-hf/tests/.exports/deberta-v2`.
+    run: python scripts/verify_export.py flodl-hf/tests/.exports/deberta-v2 --hub-source microsoft/deberta-v3-base
     docker: hf-parity
 
   example:

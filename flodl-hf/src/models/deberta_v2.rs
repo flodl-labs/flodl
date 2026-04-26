@@ -294,6 +294,14 @@ impl DebertaV2Config {
         })
     }
 
+    /// Replace the `architectures` field with `[arch_class]` and return
+    /// `self`. See [`crate::models::bert::BertConfig::with_architectures`]
+    /// for rationale — every family shares the same fix.
+    pub fn with_architectures(mut self, arch_class: &str) -> Self {
+        self.architectures = Some(vec![arch_class.to_string()]);
+        self
+    }
+
     /// Serialize to a HuggingFace-style `config.json` string.
     ///
     /// Inverse of [`Self::from_json_str`]. Emits the full set of knobs
