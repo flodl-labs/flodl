@@ -106,6 +106,11 @@ pub mod schema_cache;
 /// First-run and reconfiguration wizard (`fdl setup`).
 pub mod setup;
 
+/// Daily update check against crates.io for `flodl-cli` and
+/// project-pinned `flodl` / `flodl-hf`. Opt out via
+/// `FDL_NO_UPDATE_CHECK=1` or the global config file.
+pub mod update_check;
+
 /// AI-skill bundles: packaging and installing the `/port` skill and
 /// similar assistant integrations.
 pub mod skill;

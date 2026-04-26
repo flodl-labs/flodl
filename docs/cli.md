@@ -103,6 +103,61 @@ derived argument structs (see [Declaring flags in Rust](#declaring-flags-in-rust
 
 ---
 
+## Update checks
+
+`fdl` probes crates.io once per day for newer versions of itself
+(`flodl-cli`) and, when run inside a Cargo project, the user-facing
+flodl crates the project depends on (`flodl`, `flodl-hf`). Outdated
+crates are surfaced as one-line nudges at the end of the user's
+command, after their normal output, so they never block work.
+
+The first run prints a one-time disclosure pointing at the opt-outs;
+subsequent runs are silent unless an update is found.
+
+| Behavior              | Trigger                                                                   |
+|-----------------------|---------------------------------------------------------------------------|
+| Disabled this run     | `FDL_NO_UPDATE_CHECK=1` env var (wins over everything else)               |
+| Disabled in CI        | `CI=true` env var (auto-detected from any standard CI runner)             |
+| Disabled in container | `/.dockerenv` present (avoids ephemeral cache + redundant probes)         |
+| Disabled persistently | Set `update_check.enabled = false` in `<config-dir>/flodl/config.json`    |
+
+`<config-dir>` follows platform conventions:
+- Linux / BSD: `$XDG_CONFIG_HOME` if set, else `~/.config`
+- macOS: `~/Library/Application Support`
+- Windows: `%APPDATA%`
+
+Config-file shape (auto-managed except `enabled`):
+
+```json
+{
+  "update_check": {
+    "enabled": true,
+    "last_check": 1714138800,
+    "latest_known": {
+      "flodl-cli": "0.5.2",
+      "flodl": "0.5.2",
+      "flodl-hf": "0.5.2"
+    },
+    "first_run_seen": true
+  }
+}
+```
+
+The probe uses `curl --max-time 2` and silently skips on every failure
+mode — the user's command is never delayed past the timeout, and a
+broken or offline network just means today's check didn't update the
+cache. Pre-release versions are ignored; nudges only fire against the
+crate's `max_stable_version`.
+
+Updating from a nudge:
+
+```bash
+fdl install --check               # update fdl itself
+cargo update                      # update flodl/flodl-hf in your project
+```
+
+---
+
 ## 1. Standalone: no project required
 
 These commands work from any directory. They don't need an `fdl.yml`, a

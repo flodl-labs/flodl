@@ -12,6 +12,35 @@ fn main() {
         .unwrap_or_else(|_| "/usr/local/libtorch".to_string());
     let libtorch = PathBuf::from(&libtorch);
 
+    // Preflight: confirm libtorch is actually present before cc::Build
+    // launches a multi-minute compile that would otherwise fail with a
+    // cryptic `fatal error: torch/torch.h: No such file or directory`
+    // deep in the C++ output. Pointing users at `fdl setup` is the
+    // canonical fix; the manual override is documented for users who
+    // are bypassing fdl on purpose.
+    // Match the same header file cc::Build's include path resolves
+    // (`include/torch/csrc/api/include`); presence here is the
+    // canonical "libtorch is installed" sentinel for both the
+    // pre-built and source-built variants.
+    let torch_header = libtorch
+        .join("include/torch/csrc/api/include/torch/torch.h");
+    if !torch_header.exists() {
+        eprintln!(
+            "\nflodl-sys: libtorch not found at `{}`\n\
+             (expected `{}` to exist).\n\n\
+             Recommended fix: install `flodl-cli` and run `fdl setup` from\n\
+             your project root. It auto-detects your hardware, downloads or\n\
+             builds the matching libtorch variant, and points LIBTORCH_PATH\n\
+             at it for you.\n\n\
+             Manual override: set LIBTORCH_PATH=/path/to/libtorch where the\n\
+             directory contains both `include/torch/csrc/api/include/torch/torch.h`\n\
+             and `lib/libtorch.so` (or the platform equivalent).\n",
+            libtorch.display(),
+            torch_header.display(),
+        );
+        std::process::exit(1);
+    }
+
     // Unity build: shim.cpp #includes the topic-focused ops_*.cpp files so the
     // C++ compiler parses torch/torch.h exactly once. Splitting into separate
     // TUs would multiply torch.h parse cost (~17s/TU) since cc::Build rebuilds

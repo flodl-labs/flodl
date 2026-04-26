@@ -8,7 +8,8 @@
 
 use flodl_cli::{
     add, api_ref, builtins, cli_error, completions, config, context, diagnose, dispatch, init,
-    libtorch, overlay, parse_or_schema_from, run, schema, schema_cache, setup, skill, style, util,
+    libtorch, overlay, parse_or_schema_from, run, schema, schema_cache, setup, skill, style,
+    update_check, util,
 };
 
 use builtins::{
@@ -28,6 +29,14 @@ use context::Context;
 // ---------------------------------------------------------------------------
 
 fn main() -> ExitCode {
+    // RAII guard fires the daily crates.io update check from Drop, so
+    // it runs after the user's command output regardless of which
+    // match arm computes the ExitCode (and on early `return`s too).
+    // The check is silent on every failure mode and respects
+    // `FDL_NO_UPDATE_CHECK=1`, `CI=true`, in-container detection, and
+    // the `update_check.enabled` config field.
+    let _update_check_guard = update_check::Guard::new();
+
     let raw_args: Vec<String> = env::args().collect();
 
     // Extract global color flags before anything else — subsequent help
