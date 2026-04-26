@@ -13,8 +13,10 @@
 //!
 //! After the fine-tune the trained head is saved as a flodl
 //! `.fdl` checkpoint plus auto-emitted `<stem>.config.json` sidecar
-//! under `target/distilbert_finetune/`, and the example prints the
-//! two host-side `fdl` commands to re-export it as a
+//! and a `tokenizer.json` next to it (so the downstream export step
+//! picks the tokenizer up via its auto-copy whitelist) under
+//! `target/distilbert_finetune/`. The example then prints the two
+//! host-side `fdl` commands to re-export it as a
 //! HuggingFace-compatible directory and verify the export with HF
 //! Python (`AutoModelFor*` loadability).
 //!
@@ -123,10 +125,18 @@ fn main() -> Result<()> {
         TensorError::new(&format!("create {scratch_dir}: {e}"))
     })?;
     let ckpt_path = format!("{scratch_dir}/sst2_finetuned.fdl");
+    let tokenizer_path = format!("{scratch_dir}/tokenizer.json");
     let export_dir = format!("{scratch_dir}/sst2_export");
     head.graph().save_checkpoint(&ckpt_path)?;
+    // Persist the tokenizer next to the checkpoint so
+    // `fdl flodl-hf export --checkpoint` picks it up via the
+    // auto-tokenizer-copy whitelist. Without this, the export step
+    // would warn "no tokenizer files matched" and downstream
+    // `verify-export` (with hub source) would fail forward parity
+    // for lack of an `AutoTokenizer`.
+    tok.save(&tokenizer_path)?;
     println!(
-        "\ncheckpoint    -> {ckpt_path}\nsidecar config -> {scratch_dir}/sst2_finetuned.config.json",
+        "\ncheckpoint    -> {ckpt_path}\nsidecar config -> {scratch_dir}/sst2_finetuned.config.json\ntokenizer     -> {tokenizer_path}",
     );
 
     // Recipe printed instead of self-orchestrated: the example runs

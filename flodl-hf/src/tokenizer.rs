@@ -104,6 +104,23 @@ impl HfTokenizer {
         &self.inner
     }
 
+    /// Serialize the tokenizer to a `tokenizer.json` file at `path`.
+    ///
+    /// Pair with [`Self::from_pretrained`] / [`Self::from_file`] to
+    /// persist a fine-tuned model's tokenizer next to its `.fdl`
+    /// checkpoint so `fdl flodl-hf export --checkpoint` picks it up
+    /// via the auto-tokenizer-copy whitelist. The output is the same
+    /// JSON form HuggingFace's fast-tokenizer ecosystem (`tokenizers`,
+    /// HF Python's `AutoTokenizer.from_pretrained`) reads back.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.inner
+            .save(path.as_ref(), true)
+            .map_err(|e| TensorError::new(&format!(
+                "tokenizer save to {}: {e}",
+                path.as_ref().display(),
+            )))
+    }
+
     /// Encode a batch of texts into [`EncodedBatch`] on CPU.
     pub fn encode(&self, texts: &[&str]) -> Result<EncodedBatch> {
         self.encode_on_device(texts, Device::CPU)
@@ -248,5 +265,50 @@ mod tests {
 
         let err = hf.encode(&[]).unwrap_err();
         assert!(format!("{err}").contains("empty batch"));
+    }
+
+    #[test]
+    fn save_and_reload_round_trips() {
+        // Use a WordLevel tokenizer with a fixed vocabulary so the
+        // re-loaded copy can encode the same string and produce the
+        // same ids. BPE::default() has no merges/vocab, so any
+        // non-empty string would be UNK or rejected.
+        use std::collections::HashMap;
+        use std::process;
+        use tokenizers::models::wordlevel::WordLevel;
+        use tokenizers::pre_tokenizers::whitespace::Whitespace;
+
+        let mut vocab: HashMap<String, u32> = HashMap::new();
+        for (i, w) in ["[UNK]", "hello", "world", "rust"].iter().enumerate() {
+            vocab.insert((*w).to_string(), i as u32);
+        }
+        let wl = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".into())
+            .build()
+            .expect("WordLevel build");
+        let mut inner = Tokenizer::new(wl);
+        inner.with_pre_tokenizer(Some(Whitespace {}));
+        let hf = HfTokenizer::from_inner(inner);
+
+        // Same temp-dir convention as flodl-hf/src/export.rs
+        // (`unique_tempdir`): temp_dir + pid + tag, no dev-dep.
+        let dir = std::env::temp_dir()
+            .join(format!("flodl_hf_tokenizer_save_{}", process::id()));
+        std::fs::create_dir_all(&dir).expect("create_dir_all");
+        let path = dir.join("tokenizer.json");
+        hf.save(&path).expect("save");
+        assert!(path.is_file(), "tokenizer.json was not written");
+
+        let reloaded = HfTokenizer::from_file(&path).expect("from_file");
+        let original_ids = hf.encode(&["hello world"]).unwrap();
+        let reloaded_ids = reloaded.encode(&["hello world"]).unwrap();
+        assert_eq!(
+            original_ids.input_ids.data().to_i64_vec().unwrap(),
+            reloaded_ids.input_ids.data().to_i64_vec().unwrap(),
+            "round-trip changed input_ids",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

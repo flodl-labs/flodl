@@ -1309,8 +1309,29 @@ impl AutoModel {
             Some(arch) => classify_for_hub_export(arch),
             None => HubExportHead::Base,
         };
+        Self::from_pretrained_for_export_with_head_on_device(repo_id, head_kind, device)
+    }
 
-        match head_kind {
+    /// Force a specific head class instead of dispatching on
+    /// `architectures[0]`. Useful for re-exporting a pretraining
+    /// checkpoint as a feature-extraction encoder
+    /// ([`HubExportHead::Base`]) or for cross-checking the base path
+    /// against a checkpoint that advertises a head.
+    pub fn from_pretrained_for_export_with_head(
+        repo_id: &str,
+        head: HubExportHead,
+    ) -> Result<Graph> {
+        Self::from_pretrained_for_export_with_head_on_device(repo_id, head, Device::CPU)
+    }
+
+    /// Device-aware variant of
+    /// [`from_pretrained_for_export_with_head`](Self::from_pretrained_for_export_with_head).
+    pub fn from_pretrained_for_export_with_head_on_device(
+        repo_id: &str,
+        head: HubExportHead,
+        device: Device,
+    ) -> Result<Graph> {
+        match head {
             HubExportHead::Base => Self::base_from_pretrained_for_export(repo_id, device),
             HubExportHead::SeqCls => {
                 let head = crate::models::auto::AutoModelForSequenceClassification
@@ -1410,19 +1431,47 @@ impl AutoModel {
     }
 }
 
-/// Internal head-dispatch tag for the auto-detecting
-/// `from_pretrained_for_export` path. Mirrors `export::HeadKind` but
-/// kept separate because the Hub-mode policy is more permissive:
-/// unrecognised `For{Other}` suffixes fall back to base instead of
-/// erroring (a `bert-base-uncased` checkpoint advertising
-/// `BertForPreTraining` is a real Hub case that should still produce
-/// a base backbone, mirroring HF Python's `AutoModel.from_pretrained`).
-enum HubExportHead {
+/// Head class to force when calling
+/// [`AutoModel::from_pretrained_for_export_with_head`]. Use [`Self::Base`]
+/// to bypass the `architectures[0]` auto-dispatch and load the bare
+/// backbone (handy for re-exporting a pretraining checkpoint as a
+/// feature-extraction encoder, or for stress-testing the base path
+/// against a checkpoint that advertises a head).
+///
+/// Mirrors `export::HeadKind` but kept separate because the Hub-mode
+/// auto-dispatch policy is more permissive: unrecognised `For{Other}`
+/// suffixes fall back to base instead of erroring (a `bert-base-uncased`
+/// checkpoint advertising `BertForPreTraining` is a real Hub case that
+/// should still produce a base backbone, mirroring HF Python's
+/// `AutoModel.from_pretrained`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubExportHead {
     Base,
     SeqCls,
     TokCls,
     Qa,
     Mlm,
+}
+
+impl HubExportHead {
+    /// Parse the CLI-facing token form (`base`, `seqcls`, `tokcls`,
+    /// `qa`, `mlm`). The auto-dispatch alias `auto` is intentionally
+    /// not recognised here; callers route `auto` through the bare
+    /// [`AutoModel::from_pretrained_for_export`] path which already
+    /// reads `architectures[0]`.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "base" => Ok(Self::Base),
+            "seqcls" => Ok(Self::SeqCls),
+            "tokcls" => Ok(Self::TokCls),
+            "qa" => Ok(Self::Qa),
+            "mlm" => Ok(Self::Mlm),
+            other => Err(TensorError::new(&format!(
+                "unsupported head `{other}`; expected one of \
+                 auto|base|seqcls|tokcls|qa|mlm"
+            ))),
+        }
+    }
 }
 
 /// Permissive variant of `export::classify_architecture` for Hub-mode
@@ -1724,6 +1773,31 @@ impl HfTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_export_head_parse_round_trip() {
+        assert_eq!(HubExportHead::parse("base").unwrap(), HubExportHead::Base);
+        assert_eq!(HubExportHead::parse("seqcls").unwrap(), HubExportHead::SeqCls);
+        assert_eq!(HubExportHead::parse("tokcls").unwrap(), HubExportHead::TokCls);
+        assert_eq!(HubExportHead::parse("qa").unwrap(), HubExportHead::Qa);
+        assert_eq!(HubExportHead::parse("mlm").unwrap(), HubExportHead::Mlm);
+    }
+
+    #[test]
+    fn hub_export_head_parse_rejects_auto_alias() {
+        // `auto` is the CLI-only sentinel; the typed enum demands an
+        // explicit head and routes auto-dispatch through the bare
+        // `from_pretrained_for_export` path.
+        let err = HubExportHead::parse("auto").unwrap_err().to_string();
+        assert!(err.contains("auto|base|seqcls"), "missing hint: {err}");
+    }
+
+    #[test]
+    fn hub_export_head_parse_rejects_unknown() {
+        let err = HubExportHead::parse("classifier").unwrap_err().to_string();
+        assert!(err.contains("classifier"), "missing offending value: {err}");
+        assert!(err.contains("auto|base|seqcls"), "missing hint: {err}");
+    }
 
     /// Live-network integration test: pulls `bert-base-uncased` from the
     /// HuggingFace Hub, builds the graph, loads the weights, and runs a

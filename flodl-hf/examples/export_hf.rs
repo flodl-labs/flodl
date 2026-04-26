@@ -5,6 +5,9 @@
 //! - `--hub <repo_id>`: fetch `config.json` + `model.safetensors` from
 //!   the HuggingFace Hub, rebuild the matching flodl graph via
 //!   `AutoModel::from_pretrained_for_export`, and write the export.
+//!   Pass `--head <kind>` to override the auto-dispatch on
+//!   `architectures[0]` (e.g. `--head base` re-exports a pretraining
+//!   checkpoint as a feature-extraction encoder).
 //! - `--checkpoint <file.fdl>`: load weights from a local flodl
 //!   checkpoint, rebuild the matching architecture from the sidecar
 //!   `<stem>.config.json` (or an explicit `--config <file>`) and write
@@ -39,6 +42,7 @@ use std::process::ExitCode;
 use flodl::{Device, Graph};
 use flodl_cli::{parse_or_schema, FdlArgs, FdlArgsTrait};
 use flodl_hf::export::{build_for_export, export_hf_dir, keys_have_pooler};
+use flodl_hf::hub::HubExportHead;
 use flodl_hf::models::auto::{AutoConfig, AutoModel};
 
 /// Export a Hub repo or local flodl checkpoint as a HuggingFace-compatible directory (model.safetensors + config.json) using flodl's own writer. Auto-detects family (bert/roberta/distilbert/xlm-roberta/albert/deberta-v2).
@@ -71,6 +75,14 @@ struct ExportArgs {
     /// canonical `to_json_str` normalises away). Checkpoint mode only.
     #[option]
     preserve_source_config: bool,
+    /// Force a specific head class instead of dispatching on the
+    /// repo's `architectures[0]`. Hub mode only. Values:
+    /// `auto` (default) | `base` | `seqcls` | `tokcls` | `qa` | `mlm`.
+    /// `base` re-exports the bare backbone even when the upstream
+    /// config advertises a head, handy for treating a pretraining
+    /// checkpoint as a feature-extraction encoder.
+    #[option]
+    head: Option<String>,
 }
 
 /// Anchor a relative path against `FDL_PROJECT_ROOT` when set.
@@ -158,6 +170,18 @@ fn dispatch(cli: &ExportArgs) -> Result<(), DispatchError> {
             "--config is only meaningful with --checkpoint.".into(),
         ));
     }
+    if cli.head.is_some() && cli.checkpoint.is_some() {
+        return Err(DispatchError::Usage(
+            "--head is Hub-mode only (checkpoint mode reads the architecture from the sidecar config)."
+                .into(),
+        ));
+    }
+    let head_override = match cli.head.as_deref() {
+        None | Some("auto") => None,
+        Some(other) => Some(
+            HubExportHead::parse(other).map_err(|e| DispatchError::Usage(e.to_string()))?,
+        ),
+    };
 
     let out_arg = cli
         .out
@@ -178,7 +202,7 @@ fn dispatch(cli: &ExportArgs) -> Result<(), DispatchError> {
     }
 
     if let Some(repo_id) = cli.hub.as_deref() {
-        run_hub(repo_id, &out_dir)?;
+        run_hub(repo_id, &out_dir, head_override)?;
     } else if let Some(checkpoint_path) = cli.checkpoint.as_deref() {
         run_checkpoint(
             checkpoint_path,
@@ -191,14 +215,25 @@ fn dispatch(cli: &ExportArgs) -> Result<(), DispatchError> {
     Ok(())
 }
 
-/// Hub mode: fetch and rebuild via `AutoModel::from_pretrained_for_export`.
-fn run_hub(repo_id: &str, out_dir: &Path) -> flodl::Result<()> {
+/// Hub mode: fetch and rebuild via `AutoModel::from_pretrained_for_export`
+/// (or the explicit-head variant when `head_override` is set).
+fn run_hub(
+    repo_id: &str,
+    out_dir: &Path,
+    head_override: Option<HubExportHead>,
+) -> flodl::Result<()> {
     eprintln!("fetching config.json for {repo_id} ...");
     let config = AutoConfig::from_pretrained(repo_id)?;
     eprintln!("detected family: {}", config.model_type());
 
     eprintln!("loading weights for {repo_id} ...");
-    let graph = AutoModel::from_pretrained_for_export(repo_id)?;
+    let graph = match head_override {
+        Some(head) => {
+            eprintln!("forcing head class: {head:?} (overrides architectures[0])");
+            AutoModel::from_pretrained_for_export_with_head(repo_id, head)?
+        }
+        None => AutoModel::from_pretrained_for_export(repo_id)?,
+    };
 
     // Use the graph's source_config (already set by
     // `from_pretrained_for_export` with `architectures` normalised to

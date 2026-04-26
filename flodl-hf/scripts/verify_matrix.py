@@ -107,19 +107,26 @@ def run_cell(cell: dict, staging_root: Path, keep: bool) -> bool:
         ):
             return False
 
-    if not run_step(
-        f"{family}/{head}",
-        [
-            "fdl",
-            "flodl-hf",
-            "export",
-            "--hub",
-            repo,
-            "--out",
-            str(rel_dir),
-            "--force",
-        ],
-    ):
+    # `--head base` forces the bare-backbone path (bypassing the
+    # `architectures[0]` auto-dispatch) for cells whose `head` is
+    # `base`. Without this, pretraining checkpoints like
+    # `bert-base-uncased` (which advertise `BertForMaskedLM`) would
+    # collapse the base cell into the mlm cell, leaving the bare
+    # backbone path uncovered. Other heads use auto-dispatch, which
+    # already lines up with the `architectures[0]` we're testing.
+    export_cmd = [
+        "fdl",
+        "flodl-hf",
+        "export",
+        "--hub",
+        repo,
+        "--out",
+        str(rel_dir),
+        "--force",
+    ]
+    if head == "base":
+        export_cmd.extend(["--head", "base"])
+    if not run_step(f"{family}/{head}", export_cmd):
         return False
 
     if not run_step(

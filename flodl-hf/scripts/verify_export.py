@@ -259,18 +259,44 @@ def report_load(model_kind: str, repo_or_dir: str, info) -> None:
     or missing keys, since either points at parameter-name drift the
     Rust roundtrip tests would have missed.
 
+    Exception: when loading the bare `AutoModel`, missing `pooler.*`
+    keys are tolerated. Some pretraining checkpoints (notably
+    `roberta-base`) ship encoder-only safetensors and HF Python
+    initialises the pooler from scratch with a "newly initialized"
+    warning rather than a load failure. flodl's base export mirrors
+    this faithfully (no random pooler weights baked in), so the
+    "missing" set lines up with what HF would report against the
+    upstream repo itself; treating it as a fail would punish an
+    accurate round-trip. Unexpected keys remain a hard fail.
+
     `info` is the `_LoadingInfo` namedtuple-like dict returned by
     `from_pretrained(..., output_loading_info=True)`.
     """
     missing = info.get("missing_keys") or []
     unexpected = info.get("unexpected_keys") or []
+    benign_missing: list[str] = []
+    if model_kind == "AutoModel":
+        kept = []
+        for k in missing:
+            if k.startswith("pooler."):
+                benign_missing.append(k)
+            else:
+                kept.append(k)
+        missing = kept
     if missing or unexpected:
         raise SystemExit(
             f"FAIL loadability ({model_kind} <- {repo_or_dir}):\n"
             f"  {len(missing)} missing key(s): {missing[:10]}\n"
             f"  {len(unexpected)} unexpected key(s): {unexpected[:10]}"
         )
-    print(f"PASS loadability ({model_kind} <- {repo_or_dir})")
+    if benign_missing:
+        print(
+            f"PASS loadability ({model_kind} <- {repo_or_dir}) "
+            f"[tolerating {len(benign_missing)} pooler key(s) "
+            f"not present in source: {benign_missing}]"
+        )
+    else:
+        print(f"PASS loadability ({model_kind} <- {repo_or_dir})")
 
 
 def main() -> int:
