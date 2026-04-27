@@ -102,6 +102,26 @@ commands:
     run: python scripts/parity_albert.py
     docker: hf-parity
 
+  albert-seqcls:
+    description: Regenerate tests/fixtures/albert_seqcls_parity.safetensors (AlbertForSequenceClassification)
+    run: python scripts/parity_albert_seqcls.py
+    docker: hf-parity
+
+  albert-tokencls:
+    description: Regenerate tests/fixtures/albert_tokencls_parity.safetensors (AlbertForTokenClassification)
+    run: python scripts/parity_albert_tokencls.py
+    docker: hf-parity
+
+  albert-qa:
+    description: Regenerate tests/fixtures/albert_qa_parity.safetensors (AlbertForQuestionAnswering)
+    run: python scripts/parity_albert_qa.py
+    docker: hf-parity
+
+  albert-mlm:
+    description: Regenerate tests/fixtures/albert_mlm_parity.safetensors (AlbertForMaskedLM)
+    run: python scripts/parity_albert_mlm.py
+    docker: hf-parity
+
   xlm-roberta:
     description: Regenerate tests/fixtures/xlm_roberta_base_parity.safetensors against HuggingFace reference (FLORES-200 multilingual prompt)
     run: python scripts/parity_xlm_roberta.py

@@ -49,6 +49,10 @@ MANIFEST: list[tuple[str, list[list[str]]]] = [
     ("distilbert-qa", [["python", "scripts/parity_distilbert_qa.py"]]),
     ("distilbert-mlm", [["python", "scripts/parity_distilbert_mlm.py"]]),
     ("albert", [["python", "scripts/parity_albert.py"]]),
+    ("albert-seqcls", [["python", "scripts/parity_albert_seqcls.py"]]),
+    ("albert-tokencls", [["python", "scripts/parity_albert_tokencls.py"]]),
+    ("albert-qa", [["python", "scripts/parity_albert_qa.py"]]),
+    ("albert-mlm", [["python", "scripts/parity_albert_mlm.py"]]),
     ("xlm-roberta", [["python", "scripts/parity_xlm_roberta.py"]]),
     ("deberta-v2", [["python", "scripts/parity_deberta_v2.py"]]),
 ]
