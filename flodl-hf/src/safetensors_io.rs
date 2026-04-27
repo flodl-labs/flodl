@@ -801,6 +801,112 @@ mod tests {
     }
 
     #[test]
+    fn weights_have_pooler_detects_bert_style() {
+        let bytes = serialize_entries(&[
+            ("bert.embeddings.word_embeddings.weight",
+                Dtype::F32, vec![2, 4], f32_le_bytes(&[0.0; 8])),
+            ("bert.pooler.dense.weight",
+                Dtype::F32, vec![4, 4], f32_le_bytes(&[0.0; 16])),
+            ("bert.pooler.dense.bias",
+                Dtype::F32, vec![4], f32_le_bytes(&[0.0; 4])),
+        ]);
+        assert!(weights_have_pooler(&bytes).unwrap());
+    }
+
+    #[test]
+    fn weights_have_pooler_detects_albert_style_flat() {
+        // ALBERT ships a flat `pooler.{weight,bias}` (bare nn.Linear,
+        // no `.dense` wrapper). The detector matches both shapes.
+        let bytes = serialize_entries(&[
+            ("albert.embeddings.word_embeddings.weight",
+                Dtype::F32, vec![2, 4], f32_le_bytes(&[0.0; 8])),
+            ("albert.pooler.weight",
+                Dtype::F32, vec![4, 4], f32_le_bytes(&[0.0; 16])),
+            ("albert.pooler.bias",
+                Dtype::F32, vec![4], f32_le_bytes(&[0.0; 4])),
+        ]);
+        assert!(weights_have_pooler(&bytes).unwrap());
+    }
+
+    #[test]
+    fn weights_have_pooler_returns_false_for_encoder_only() {
+        // RoBERTa-style: encoder weights only, no pooler. Mirrors
+        // `roberta-base` Hub repo which drops the pooler with the NSP
+        // objective.
+        let bytes = serialize_entries(&[
+            ("roberta.embeddings.word_embeddings.weight",
+                Dtype::F32, vec![2, 4], f32_le_bytes(&[0.0; 8])),
+            ("roberta.encoder.layer.0.attention.self.query.weight",
+                Dtype::F32, vec![4, 4], f32_le_bytes(&[0.0; 16])),
+        ]);
+        assert!(!weights_have_pooler(&bytes).unwrap());
+    }
+
+    #[test]
+    fn weights_have_pooler_errors_on_invalid_safetensors() {
+        // Garbage bytes must surface as a parse error rather than panic
+        // or return a meaningless boolean.
+        let err = weights_have_pooler(b"not a safetensors blob")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("safetensors parse error"), "got: {err}");
+    }
+
+    #[test]
+    fn bert_legacy_layernorm_rename_rewrites_gamma_and_beta() {
+        assert_eq!(
+            bert_legacy_layernorm_rename("bert.embeddings.LayerNorm.gamma"),
+            "bert.embeddings.LayerNorm.weight",
+        );
+        assert_eq!(
+            bert_legacy_layernorm_rename("bert.embeddings.LayerNorm.beta"),
+            "bert.embeddings.LayerNorm.bias",
+        );
+    }
+
+    #[test]
+    fn bert_legacy_layernorm_rename_passthrough_for_modern_keys() {
+        // Modern HF saves already use weight/bias — must not be mangled.
+        let key = "bert.embeddings.LayerNorm.weight";
+        assert_eq!(bert_legacy_layernorm_rename(key), key);
+    }
+
+    #[test]
+    fn bert_legacy_layernorm_rename_does_not_touch_mlm_alias() {
+        // Distinct from `bert_legacy_key_rename`: the LayerNorm-only
+        // helper leaves the MLM decoder-bias alias alone.
+        let k = "cls.predictions.bias";
+        assert_eq!(bert_legacy_layernorm_rename(k), k);
+    }
+
+    #[test]
+    fn hf_canonical_save_key_inverts_mlm_decoder_bias_alias() {
+        assert_eq!(
+            hf_canonical_save_key("cls.predictions.decoder.bias"),
+            "cls.predictions.bias",
+        );
+        assert_eq!(
+            hf_canonical_save_key("lm_head.decoder.bias"),
+            "lm_head.bias",
+        );
+    }
+
+    #[test]
+    fn hf_canonical_save_key_passthrough_for_unrelated_keys() {
+        // Only the two MLM tied-bias keys are rewritten — every other
+        // key passes through unchanged. LayerNorm modern names stay
+        // modern (legacy gamma/beta are not the inverse here; flodl
+        // saves modern names directly).
+        for k in [
+            "bert.embeddings.word_embeddings.weight",
+            "bert.embeddings.LayerNorm.weight",
+            "bert.encoder.layer.0.attention.self.query.bias",
+        ] {
+            assert_eq!(hf_canonical_save_key(k), k);
+        }
+    }
+
+    #[test]
     fn all_keys_match_returns_ok() {
         let expected = vec![
             ExpectedParam { key: "bert.embeddings.word_embeddings.weight".into(), shape: vec![30522, 768] },
