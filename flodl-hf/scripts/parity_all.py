@@ -59,6 +59,9 @@ MANIFEST: list[tuple[str, list[list[str]]]] = [
     ("xlm-roberta-qa", [["python", "scripts/parity_xlm_roberta_qa.py"]]),
     ("xlm-roberta-mlm", [["python", "scripts/parity_xlm_roberta_mlm.py"]]),
     ("deberta-v2", [["python", "scripts/parity_deberta_v2.py"]]),
+    ("deberta-v2-seqcls", [["python", "scripts/parity_deberta_v2_seqcls.py"]]),
+    ("deberta-v2-tokencls", [["python", "scripts/parity_deberta_v2_tokencls.py"]]),
+    ("deberta-v2-qa", [["python", "scripts/parity_deberta_v2_qa.py"]]),
 ]
 
 

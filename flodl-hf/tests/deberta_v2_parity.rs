@@ -14,6 +14,53 @@
 //!
 //! `_live` — pulls the real `microsoft/deberta-v3-base` weights from
 //! the Hub (first run only; hf-hub caches). Run with `fdl test-live`.
+//!
+//! ## DeBERTa-v2 MLM parity gap
+//!
+//! Note that this matrix has parity tests for the encoder backbone +
+//! `seqcls` / `tokencls` / `qa` heads but NOT for the `mlm` head, in
+//! contrast to the other 5 encoder families. This is a deliberate gap
+//! after a layered upstream investigation. Three independent
+//! constraints converge to make MLM parity untestable on
+//! DeBERTa-v2/v3 today:
+//!
+//! 1. **DeBERTa V3 lineage uses RTD pretraining (no MLM head weights).**
+//!    `microsoft/deberta-v3-base` and every downstream V3 fine-tune
+//!    were pretrained with replacement-token-detection (ELECTRA-style),
+//!    so HF's `DebertaV2ForMaskedLM` random-initializes the 6 missing
+//!    `cls.predictions.*` keys at load time. flodl does the same with
+//!    a different RNG, producing two unrelated MLM heads. Empirical
+//!    `max_abs_diff ≈ 2e+1`, ~200,000x over any sane tolerance.
+//!
+//! 2. **Japanese ML community contributions ship RTD discriminator
+//!    weights, not vocab-MLM.** Notably the Kyoto University NLP Lab's
+//!    `ku-nlp/deberta-v3-base-japanese` (a continued-pretraining of
+//!    DeBERTa-v3-base on a 540B-token Japanese corpus) — a popular
+//!    institutional checkpoint with real fill-mask usage — was
+//!    investigated as a candidate. Its checkpoint stores
+//!    `mask_predictions.classifier [1, 768]`, the binary RTD
+//!    discriminator head, not the MLM-vocab-sized weights. The same
+//!    RTD-style storage appears across the V3 community lineage. We
+//!    note the institutional work this represents — `ku-nlp` is the
+//!    rare DeBERTa-v3-family checkpoint with serious continued
+//!    pretraining behind it; the gap is structural to V3, not to the
+//!    Japanese fine-tune.
+//!
+//! 3. **DeBERTa V2 (xlarge / xxlarge) ships real MLM weights but
+//!    requires unsupported ConvLayer.** V2 predates the V3 RTD switch
+//!    and stores actual trained MLM head weights at
+//!    `lm_predictions.lm_head.*`. However, `microsoft/deberta-v2-xlarge`
+//!    enables `conv_kernel_size = 3` (the optional V2 ConvLayer
+//!    feature), which flodl-hf has not implemented. Most published v3
+//!    checkpoints disable this layer, which is why V3 loads cleanly
+//!    while V2 doesn't.
+//!
+//! Closing this gap requires either (a) implementing V2 ConvLayer
+//! support in flodl-hf so V2 xlarge parity becomes testable, or
+//! (b) waiting for a future DeBERTa-v3 community fine-tune to ship
+//! genuine vocab-MLM weights under the standard `cls.predictions.*`
+//! key path. Both are reasonable v0.5.x or later work; not blocking
+//! the encoder-family release.
 
 use std::path::Path;
 

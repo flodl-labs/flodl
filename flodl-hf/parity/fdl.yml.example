@@ -151,3 +151,18 @@ commands:
     description: Regenerate tests/fixtures/deberta_v2_parity.safetensors against HuggingFace reference (microsoft/deberta-v3-base)
     run: python scripts/parity_deberta_v2.py
     docker: hf-parity
+
+  deberta-v2-seqcls:
+    description: Regenerate tests/fixtures/deberta_v2_seqcls_parity.safetensors (DebertaV2ForSequenceClassification)
+    run: python scripts/parity_deberta_v2_seqcls.py
+    docker: hf-parity
+
+  deberta-v2-tokencls:
+    description: Regenerate tests/fixtures/deberta_v2_tokencls_parity.safetensors (DebertaV2ForTokenClassification)
+    run: python scripts/parity_deberta_v2_tokencls.py
+    docker: hf-parity
+
+  deberta-v2-qa:
+    description: Regenerate tests/fixtures/deberta_v2_qa_parity.safetensors (DebertaV2ForQuestionAnswering)
+    run: python scripts/parity_deberta_v2_qa.py
+    docker: hf-parity
