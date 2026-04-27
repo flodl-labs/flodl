@@ -45,7 +45,7 @@ use crate::models::xlm_roberta::{
 use crate::tokenizer::HfTokenizer;
 
 use super::{
-    fetch_config_str, fetch_config_str_and_weights, load_weights_with_logging,
+    fetch_config_and_weights, fetch_config_str, load_weights_with_logging,
     weights_have_pooler,
 };
 #[cfg(feature = "tokenizer")]
@@ -56,9 +56,7 @@ use super::try_load_tokenizer;
 /// `AutoModelFor*::from_pretrained` path so model-type dispatch
 /// happens exactly once per call.
 fn fetch_auto_config_and_weights(repo_id: &str) -> Result<(AutoConfig, Vec<u8>)> {
-    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
-    let config = AutoConfig::from_json_str(&config_str)?;
-    Ok((config, weights))
+    fetch_config_and_weights(repo_id, AutoConfig::from_json_str)
 }
 
 impl AutoConfig {

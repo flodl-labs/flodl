@@ -3,13 +3,11 @@
 use flodl::{Device, Graph, Result};
 
 use crate::models::roberta::{
-    RobertaForMaskedLM, RobertaForQuestionAnswering, RobertaForSequenceClassification,
-    RobertaForTokenClassification, RobertaModel,
+    RobertaConfig, RobertaForMaskedLM, RobertaForQuestionAnswering,
+    RobertaForSequenceClassification, RobertaForTokenClassification, RobertaModel,
 };
 
-use super::{
-    fetch_roberta_config_and_weights, load_weights_with_logging, weights_have_pooler,
-};
+use super::{fetch_config_and_weights, load_weights_with_logging, weights_have_pooler};
 #[cfg(feature = "tokenizer")]
 use super::try_load_tokenizer;
 
@@ -41,7 +39,7 @@ impl RobertaModel {
 
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
-        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, RobertaConfig::from_json_str)?;
         let graph = if weights_have_pooler(&weights)? {
             RobertaModel::on_device(&config, device)?
         } else {
@@ -67,7 +65,7 @@ impl RobertaForSequenceClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, RobertaConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -91,7 +89,7 @@ impl RobertaForTokenClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, RobertaConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -114,7 +112,7 @@ impl RobertaForQuestionAnswering {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, RobertaConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(config.with_architectures("RobertaForQuestionAnswering").to_json_str());
@@ -144,7 +142,7 @@ impl RobertaForMaskedLM {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_roberta_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, RobertaConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(config.with_architectures("RobertaForMaskedLM").to_json_str());

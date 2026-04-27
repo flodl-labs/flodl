@@ -10,13 +10,11 @@
 use flodl::{Device, Graph, Result};
 
 use crate::models::albert::{
-    AlbertForMaskedLM, AlbertForQuestionAnswering, AlbertForSequenceClassification,
-    AlbertForTokenClassification, AlbertModel,
+    AlbertConfig, AlbertForMaskedLM, AlbertForQuestionAnswering,
+    AlbertForSequenceClassification, AlbertForTokenClassification, AlbertModel,
 };
 
-use super::{
-    fetch_albert_config_and_weights, load_weights_with_logging, weights_have_pooler,
-};
+use super::{fetch_config_and_weights, load_weights_with_logging, weights_have_pooler};
 #[cfg(feature = "tokenizer")]
 use super::try_load_tokenizer;
 
@@ -38,7 +36,7 @@ impl AlbertModel {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
-        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, AlbertConfig::from_json_str)?;
         let graph = if weights_have_pooler(&weights)? {
             AlbertModel::on_device(&config, device)?
         } else {
@@ -60,7 +58,7 @@ impl AlbertForSequenceClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, AlbertConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -82,7 +80,7 @@ impl AlbertForTokenClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, AlbertConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -105,7 +103,7 @@ impl AlbertForQuestionAnswering {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, AlbertConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(config.with_architectures("AlbertForQuestionAnswering").to_json_str());
@@ -134,7 +132,7 @@ impl AlbertForMaskedLM {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_albert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, AlbertConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(config.with_architectures("AlbertForMaskedLM").to_json_str());

@@ -3,13 +3,11 @@
 use flodl::{Device, Graph, Result};
 
 use crate::models::bert::{
-    BertForMaskedLM, BertForQuestionAnswering, BertForSequenceClassification,
+    BertConfig, BertForMaskedLM, BertForQuestionAnswering, BertForSequenceClassification,
     BertForTokenClassification, BertModel,
 };
 
-use super::{
-    fetch_bert_config_and_weights, load_weights_with_logging, weights_have_pooler,
-};
+use super::{fetch_config_and_weights, load_weights_with_logging, weights_have_pooler};
 #[cfg(feature = "tokenizer")]
 use super::try_load_tokenizer;
 
@@ -48,7 +46,7 @@ impl BertModel {
     /// partial is returned — the graph is either fully loaded or the
     /// call errors out.
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
-        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, BertConfig::from_json_str)?;
         let graph = if weights_have_pooler(&weights)? {
             BertModel::on_device(&config, device)?
         } else {
@@ -79,7 +77,7 @@ impl BertForSequenceClassification {
 
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, BertConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -105,7 +103,7 @@ impl BertForTokenClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, BertConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -131,7 +129,7 @@ impl BertForQuestionAnswering {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, BertConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(
@@ -163,7 +161,7 @@ impl BertForMaskedLM {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_bert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, BertConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(

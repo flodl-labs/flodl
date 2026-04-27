@@ -24,12 +24,6 @@ use hf_hub::api::sync::{Api, ApiBuilder};
 
 use flodl::{Graph, Result, TensorError};
 
-use crate::models::albert::AlbertConfig;
-use crate::models::bert::BertConfig;
-use crate::models::deberta_v2::DebertaV2Config;
-use crate::models::distilbert::DistilBertConfig;
-use crate::models::roberta::RobertaConfig;
-use crate::models::xlm_roberta::XlmRobertaConfig;
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
 };
@@ -152,51 +146,21 @@ fn fetch_config_str_and_weights(repo_id: &str) -> Result<(String, Vec<u8>)> {
     Ok((config_str, weights))
 }
 
-/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
-/// [`BertConfig`]. Keeps the BERT `from_pretrained` call sites tidy.
-fn fetch_bert_config_and_weights(repo_id: &str) -> Result<(BertConfig, Vec<u8>)> {
+/// Pull `config.json` + `model.safetensors` from a Hub repo, parse the
+/// config via `parse`, and return `(config, weights)`. Generic over the
+/// family's config type so each family's `from_pretrained` impl stays a
+/// one-liner without 6 near-identical per-family wrappers.
+///
+/// `parse` is typically a family `from_json_str` associated function
+/// (e.g. `BertConfig::from_json_str`); the closure form keeps callers
+/// from needing turbofish syntax since `C` is inferred from `parse`'s
+/// return type.
+fn fetch_config_and_weights<C, F>(repo_id: &str, parse: F) -> Result<(C, Vec<u8>)>
+where
+    F: FnOnce(&str) -> Result<C>,
+{
     let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
-    let config = BertConfig::from_json_str(&config_str)?;
-    Ok((config, weights))
-}
-
-/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
-/// [`RobertaConfig`].
-fn fetch_roberta_config_and_weights(repo_id: &str) -> Result<(RobertaConfig, Vec<u8>)> {
-    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
-    let config = RobertaConfig::from_json_str(&config_str)?;
-    Ok((config, weights))
-}
-
-/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
-/// [`DistilBertConfig`].
-fn fetch_distilbert_config_and_weights(repo_id: &str) -> Result<(DistilBertConfig, Vec<u8>)> {
-    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
-    let config = DistilBertConfig::from_json_str(&config_str)?;
-    Ok((config, weights))
-}
-
-/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
-/// [`XlmRobertaConfig`].
-fn fetch_xlm_roberta_config_and_weights(repo_id: &str) -> Result<(XlmRobertaConfig, Vec<u8>)> {
-    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
-    let config = XlmRobertaConfig::from_json_str(&config_str)?;
-    Ok((config, weights))
-}
-
-/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
-/// [`AlbertConfig`].
-fn fetch_albert_config_and_weights(repo_id: &str) -> Result<(AlbertConfig, Vec<u8>)> {
-    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
-    let config = AlbertConfig::from_json_str(&config_str)?;
-    Ok((config, weights))
-}
-
-/// Convenience wrapper: [`fetch_config_str_and_weights`] + parse as
-/// [`DebertaV2Config`].
-fn fetch_deberta_v2_config_and_weights(repo_id: &str) -> Result<(DebertaV2Config, Vec<u8>)> {
-    let (config_str, weights) = fetch_config_str_and_weights(repo_id)?;
-    let config = DebertaV2Config::from_json_str(&config_str)?;
+    let config = parse(&config_str)?;
     Ok((config, weights))
 }
 

@@ -9,11 +9,11 @@
 use flodl::{Device, Graph, Result};
 
 use crate::models::distilbert::{
-    DistilBertForMaskedLM, DistilBertForQuestionAnswering,
+    DistilBertConfig, DistilBertForMaskedLM, DistilBertForQuestionAnswering,
     DistilBertForSequenceClassification, DistilBertForTokenClassification, DistilBertModel,
 };
 
-use super::{fetch_distilbert_config_and_weights, load_weights_with_logging};
+use super::{fetch_config_and_weights, load_weights_with_logging};
 #[cfg(feature = "tokenizer")]
 use super::try_load_tokenizer;
 
@@ -34,7 +34,7 @@ impl DistilBertModel {
 
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
-        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, DistilBertConfig::from_json_str)?;
         let graph = DistilBertModel::on_device(&config, device)?;
         load_weights_with_logging(repo_id, &graph, &weights)?;
         graph.set_source_config(config.with_architectures("DistilBertModel").to_json_str());
@@ -57,7 +57,7 @@ impl DistilBertForSequenceClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, DistilBertConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -81,7 +81,7 @@ impl DistilBertForTokenClassification {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, DistilBertConfig::from_json_str)?;
         let num_labels = Self::num_labels_from_config(&config)?;
         let head = Self::on_device(&config, num_labels, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
@@ -104,7 +104,7 @@ impl DistilBertForQuestionAnswering {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, DistilBertConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(config.with_architectures("DistilBertForQuestionAnswering").to_json_str());
@@ -132,7 +132,7 @@ impl DistilBertForMaskedLM {
     }
 
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Self> {
-        let (config, weights) = fetch_distilbert_config_and_weights(repo_id)?;
+        let (config, weights) = fetch_config_and_weights(repo_id, DistilBertConfig::from_json_str)?;
         let head = Self::on_device(&config, device)?;
         load_weights_with_logging(repo_id, head.graph(), &weights)?;
         head.graph().set_source_config(config.with_architectures("DistilBertForMaskedLM").to_json_str());
