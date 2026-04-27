@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use safetensors::{tensor::TensorView, SafeTensors};
+use safetensors::SafeTensors;
 
 use flodl::nn::Module;
 use flodl::{Device, Tensor, Variable};
@@ -20,17 +20,8 @@ const MODEL_ID: &str = "csarron/bert-base-uncased-squad-v1";
 
 const LOGITS_TOL: f32 = 1e-5;
 
-fn parse_i64(v: &TensorView<'_>) -> Vec<i64> {
-    v.data().chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
-}
-fn parse_f32(v: &TensorView<'_>) -> Vec<f32> {
-    v.data().chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
-}
-fn shape_i64(v: &TensorView<'_>) -> Vec<i64> { v.shape().iter().map(|&d| d as i64).collect() }
-fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "shape mismatch: {} vs {}", a.len(), b.len());
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
-}
+mod parity_common;
+use parity_common::{max_abs_diff, parse_f32, parse_i64, shape_i64};
 
 #[test]
 #[ignore = "network + ~440MB cache write"]
