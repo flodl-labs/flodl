@@ -608,6 +608,17 @@ impl<M: Module> GpuWorker<M> {
     ) -> Result<(f64, f64)> {
         self.sync_before_forward()?;
 
+        // Pin all CUDA work for this call to compute_stream. The
+        // AccumulateGrad nodes for this worker's parameters are pinned to
+        // compute_stream in GpuWorker::new (see `_grad_accumulators`). The
+        // gradient-producing kernels invoked here must arrive on the same
+        // stream or libtorch fires the input_buffer.cpp:240
+        // "AccumulateGrad node's stream does not match" warning.
+        // dispatch_next_chunk already wraps the chunk loop in StreamGuard,
+        // so this nests harmlessly there. Direct callers (custom training
+        // loops, tests) need it here for the same guarantee.
+        let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
+
         let start = Instant::now();
 
         // User-provided forward + loss computation

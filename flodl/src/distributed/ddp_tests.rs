@@ -1227,7 +1227,31 @@
         }
     }
 
+    // DO NOT REMOVE the #[ignore] attribute below.
+    //
+    // This test exercises Trainer::setup_with -> Graph::distribute (NCCL
+    // multi-GPU) and MUST run isolated. Without #[ignore] it falls into
+    // cuda-test-all's first leg (`cargo test --features cuda`, parallel,
+    // non-ignored), where NCCL communicator init does CUDA context
+    // manipulation that corrupts concurrent CUBLAS operations on shared
+    // GPU threads. Symptom is hard CUBLAS_STATUS_EXECUTION_FAILED errors
+    // across hundreds of otherwise-unrelated tests, not just a warning.
+    // Empirically validated on 2026-04-01 across the existing NCCL test
+    // surface. The device save/restore inside NcclComms methods is
+    // production-correct (prevents device leaking in training loops) but
+    // not enough for parallel test execution.
+    //
+    // Separately: this test goes through the unpinned Graph::distribute
+    // path. That is fine today (everything on default stream, AccumulateGrad
+    // and gradients match), but will need its own `_grad_accumulators`-style
+    // stream pin (mirroring `flodl/src/distributed/ddp_run/worker.rs`) once
+    // CUDA Graph capture is wired into El Che, or once model-parallel /
+    // sharded paths force non-default streams on this entry point. Until
+    // then the #[ignore] keeps this test compatible with the NCCL exclusivity
+    // rule, matching its siblings (test_el_che_full_training_loop,
+    // test_el_che_tagged_outputs_gathered).
     #[test]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-nccl"]
     fn test_el_che_loop_body_emits_gathered_across_replicas() {
         // Verify multi-trace API works under DDP: each replica's emits land in
         // its own loop's named_store, gather across ranks/batches concatenates
