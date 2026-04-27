@@ -84,7 +84,11 @@ use crate::models::xlm_roberta::{
 /// Each variant wraps the fully-parsed family-specific config so callers
 /// can match on the variant to know which architecture the checkpoint
 /// belongs to. Parse via [`AutoConfig::from_json_str`].
+///
+/// Marked `#[non_exhaustive]` so future family additions do not break
+/// caller `match` arms; write a `_ => …` arm to stay forward-compatible.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AutoConfig {
     Bert(BertConfig),
     Roberta(RobertaConfig),
@@ -225,6 +229,10 @@ pub struct AutoModel;
 /// [`AutoModelForSequenceClassification::from_pretrained`](crate::hub)
 /// (behind the `hub` feature) to build one, then
 /// [`predict`](Self::predict) to classify raw text.
+///
+/// Marked `#[non_exhaustive]` so future family additions do not break
+/// caller `match` arms; write a `_ => …` arm to stay forward-compatible.
+#[non_exhaustive]
 pub enum AutoModelForSequenceClassification {
     Bert(BertForSequenceClassification),
     Roberta(RobertaForSequenceClassification),
@@ -238,6 +246,10 @@ pub enum AutoModelForSequenceClassification {
 /// Build via
 /// [`AutoModelForTokenClassification::from_pretrained`](crate::hub)
 /// and call [`predict`](Self::predict) to tag raw text.
+///
+/// Marked `#[non_exhaustive]` so future family additions do not break
+/// caller `match` arms; write a `_ => …` arm to stay forward-compatible.
+#[non_exhaustive]
 pub enum AutoModelForTokenClassification {
     Bert(BertForTokenClassification),
     Roberta(RobertaForTokenClassification),
@@ -251,6 +263,10 @@ pub enum AutoModelForTokenClassification {
 /// [`AutoModelForQuestionAnswering::from_pretrained`](crate::hub)
 /// and call [`answer`](Self::answer) for one `(question, context)`
 /// pair.
+///
+/// Marked `#[non_exhaustive]` so future family additions do not break
+/// caller `match` arms; write a `_ => …` arm to stay forward-compatible.
+#[non_exhaustive]
 pub enum AutoModelForQuestionAnswering {
     Bert(BertForQuestionAnswering),
     Roberta(RobertaForQuestionAnswering),
@@ -482,6 +498,10 @@ impl AutoModelForQuestionAnswering {
 /// [`EncoderInputs::MASK_TOKEN`](crate::task_heads::EncoderInputs::MASK_TOKEN),
 /// so callers write one `fill_mask` call regardless of the underlying
 /// family.
+///
+/// Marked `#[non_exhaustive]` so future family additions do not break
+/// caller `match` arms; write a `_ => …` arm to stay forward-compatible.
+#[non_exhaustive]
 pub enum AutoModelForMaskedLM {
     Bert(BertForMaskedLM),
     Roberta(RobertaForMaskedLM),

@@ -19,7 +19,12 @@ Loop bodies can now publish multiple named auxiliary outputs per iteration witho
 - **Read side unchanged**: emit-published names land in `Graph::traces(name)` and `LossContext::traces[name]` alongside legacy single-trace streams. `Graph::traces_named(name)` is available when you want to skip the legacy fallback.
 - **Sparse emits supported**: a step that doesn't publish a given name simply doesn't grow that name's vector. `traces["name"].len() <= n_iter`, equal to the count of iterations where the name was published.
 - **Collision detection**: trace namespace is validated once per graph (cached via `Cell<bool>`) on first observation, either via `Graph::traces`, `Graph::traces_named`, or `el_che_snapshot_traces` / `gather_tags_and_traces` on the El Che path. Panics on cross-loop emit-name reuse or emit-name vs post-loop-trace-tag collisions; tag and trace key spaces are otherwise separate (`LossContext::tags` vs `LossContext::traces`).
-- **Works under `Graph::distribute`**: each replica's body, built by the factory closure, owns its own `named_trace_buf`; the gather pipeline (`el_che_snapshot_traces`, `gather_detached_traces`, `el_che_set_gathered_traces`) walks named buffers alongside legacy ones and concatenates per `(name, step_idx)` across ranks and batches.
+- **DDP integration via `Graph::distribute`**: full multi-trace support across replicas, not a single-GPU-only feature.
+  - Each replica's body, built by the factory closure, owns its own `named_trace_buf` (per-replica emit storage). No host-side `Rc<RefCell>` for replicas to share — that was the failure mode the API was designed to avoid.
+  - The gather pipeline (`el_che_snapshot_traces`, `gather_detached_traces`, `el_che_set_gathered_traces`) walks `named_trace_buf` alongside the legacy single-stream `trace_buf`, moving each step's `Variable` to the gather device and concatenating per `(emit_name, step_idx)` across ranks and batches. The loss closure observing `ctx.traces["name"]` sees one combined `Vec<Variable>` per step regardless of how many replicas published it.
+  - `validate_trace_namespace` runs from the gather path too, so cross-loop emit-name collisions and emit-vs-tag collisions are caught under DDP — they don't silently merge into the same key on the host side.
+  - Backward through gathered traces is supported: the loss closure can read `ctx.traces["name"]` and let its `Variable`s feed into the loss; the autograd graph spans the per-replica forward + the host-side loss.
+  - Test coverage: `test_el_che_loop_body_emits_gathered_across_replicas` exercises the full path — two named emits per iteration, gather across replicas, loss-closure consumption with backward through grad-bearing parameters.
 
 Motivation: `Module::trace() -> Option<Variable>` is one stream per loop, requires four pieces of side-channel state on the body (RefCell field + side-effect write in `forward` + getter + `reset()` cleanup), and the natural `Rc<RefCell>` workaround for multiple streams breaks under DDP because `Graph::distribute` builds fresh bodies per replica while loss closures registered on the host capture only the host's buffer. `LoopBody::step` removes the side-channel pattern entirely and makes multi-stream a free side effect.
 
@@ -67,6 +72,52 @@ All nine `*For{SequenceClassification,TokenClassification,QuestionAnswering}` he
 
 This is the canonical pattern in flodl for parametrising what was previously a unit-struct module without breaking BC: `pub struct GELU { … }` carries the field, a `pub const GELU: GELU = GELU::exact();` named identically (Rust puts types and consts in separate namespaces) keeps bare-name value usage working, and opt-in constructors cover the variants.
 
+#### flodl-hf: ALBERT family + task heads
+
+ALBERT (`albert-base-v1` / `albert-base-v2` reference checkpoints) joins the family roster, with both architecture deltas that distinguish ALBERT from BERT plumbed through end-to-end.
+
+- **`AlbertConfig` / `AlbertModel`** — backbone with **factorised embeddings** (token / position / type embeddings live in a smaller `embedding_size` space, lifted into `hidden_size` via a single `embedding_hidden_mapping_in` projection; embedding LayerNorm runs in embedding space) and **cross-layer parameter sharing** (one transformer block re-applied `num_hidden_layers` times). The encoder block itself is mathematically identical to BERT (post-LN, GELU activation), so the shared `TransformerLayer` carries the implementation; only the weight-key suffixes differ.
+- **`AlbertLayerStack`**: wraps the single shared block and forwards `num_hidden_layers` times inside one `Module`, surfacing parameters under the HF state_dict tag `albert.encoder.albert_layer_groups.0.albert_layers.0`. Configs with `num_hidden_groups > 1` or `inner_group_num > 1` are rejected at `from_json_str` time — every public `albert-*` checkpoint as of 0.5.3 sits at `1`/`1`; the axis can grow when a non-trivial checkpoint appears.
+- **`AlbertPooler`**: tanh-activated `[CLS]` pooler, bit-exact against HF reference.
+- **`AlbertMLMHeadTransform` + `AlbertForMaskedLM`**: dedicated `hidden -> dense -> activation -> LayerNorm -> embedding_size` transform feeding a tied decoder back to vocabulary, mirroring HF's `AlbertMLMHead`.
+- **Full task-head set**: `AlbertForSequenceClassification`, `AlbertForTokenClassification`, `AlbertForQuestionAnswering`, `AlbertForMaskedLM` — type aliases over the family-agnostic task-head generics, all exposing `forward_encoded` / `compute_loss` like the BERT-family heads.
+- **`hidden_act` dispatch**: ALBERT ships `gelu_new` (tanh approximation); `AlbertConfig::from_json_str` parses `hidden_act` into `GeluApprox::Tanh` and the encoder layer plus MLM head transform call the matching libtorch op. ALBERT was the integration that motivated the GELU approximation-form work above — picking the wrong form silently produces ~1e-2 max-abs diff.
+- **Auto dispatch**: `AutoConfig::Albert` and `AutoModelFor*::Albert` variants extend the family dispatch.
+
+#### flodl-hf: XLM-RoBERTa family + task heads
+
+XLM-RoBERTa (`xlm-roberta-base` reference checkpoint and the multilingual fine-tunes built on top) joins as a structural sibling to RoBERTa.
+
+- **`XlmRobertaConfig` / `XlmRobertaModel`** — architecturally identical to RoBERTa: same encoder layers, same `roberta.*` state_dict prefix, same tied-decoder MLM head, same position-id convention. HF's `XLMRobertaModel` subclasses `RobertaModel` without structural changes; this port follows suit, delegating to the RoBERTa graph builders after a trivial `From<&XlmRobertaConfig> for RobertaConfig` conversion. Loaded safetensors line up directly without any key renaming.
+- **Distinct config struct, not a type alias**: keeps the HF `model_type: "xlm-roberta"` signal typed through `AutoConfig`, and leaves room for XLM-R-only fields to grow without churning `RobertaConfig`. Field layout mirrors `RobertaConfig` exactly.
+- **Full task-head set**: `XlmRobertaForSequenceClassification`, `XlmRobertaForTokenClassification`, `XlmRobertaForQuestionAnswering`, `XlmRobertaForMaskedLM`, all over the family-agnostic generics with `forward_encoded` / `compute_loss`.
+- **Tokenizer**: SentencePiece over the ~250k multilingual vocabulary (vs RoBERTa's 50k BPE) is handled by `HfTokenizer::from_pretrained` transparently — from the model's perspective, `input_ids` are `input_ids`.
+- **Auto dispatch**: `AutoConfig::XlmRoberta` and `AutoModelFor*::XlmRoberta` variants extend the family dispatch.
+
+#### flodl-hf: DeBERTa-v2 / DeBERTa-v3 family + task heads
+
+DeBERTa-v2 / DeBERTa-v3 (`microsoft/deberta-v3-{xsmall,small,base,large}` and SQuAD / NLI fine-tunes on top) joins with disentangled self-attention. DeBERTa-v3 ships under HF's `deberta-v2` architecture name (the v3 distinction is a config knob, not a separate class), so this port covers both.
+
+- **`DebertaV2Config` / `DebertaV2Model`** — backbone with three load-bearing departures from the BERT family:
+  1. **Disentangled attention** — each layer computes content-to-content + content-to-position + position-to-content scores, scaled by `sqrt(head_dim * 3)`. Implemented in a dedicated `crate::models::deberta_transformer_layer`, separate from the shared `TransformerLayer` because the math is fundamentally different.
+  2. **No absolute positional embedding** — position information is carried by the encoder's `rel_embeddings` table and threaded into every layer as a disentangled bias.
+  3. **Mask-gated embeddings** — post-LayerNorm, the embedding output is multiplied element-wise by the padding mask, zeroing pad positions before they enter the encoder.
+- **`DebertaV2Encoder`** + **`ContextPooler`** — DeBERTa-v2's `pooler_output` is `tanh(dropout(linear(last_hidden[:, 0])))`, distinct from BERT's tanh-only pooler. The sequence-classification head dispatches via the family-generic `ClassificationHead<DebertaV2Config>` over the `ContextPooler`.
+- **`build_deberta_attention_mask`** — public helper exposed for callers wiring `forward_multi` directly outside the head wrappers.
+- **Task-head coverage**: `DebertaV2ForSequenceClassification`, `DebertaV2ForTokenClassification`, `DebertaV2ForQuestionAnswering` are bit-exact against HF Python on pinned checkpoints. `DebertaV2ForMaskedLM` is wired in but does not have a working pinned reference: V3 checkpoints ship no MLM weights (V3 trains via Replaced-Token-Detection — the MLM head is random-init by design), and V2 xlarge ships real MLM weights but uses `conv_kernel_size=3`, which this port does not implement. The investigation is documented in `flodl-hf/tests/deberta_v2_parity.rs` module-doc; ConvLayer support would unblock V2 xlarge MLM parity.
+- **Config strictness**: `from_json_str` rejects `share_att_key=false`, missing `c2p` / `p2c` in `pos_att_type`, `relative_attention=false`, `position_biased_input=true`, `norm_rel_ebd != "layer_norm"`, non-zero `conv_kernel_size`, `embedding_size != hidden_size`, and `legacy=true`. Each rejection names the failing knob. This matches every public `microsoft/deberta-v3-*` checkpoint; DeBERTa-v1 and other variants surface a specific parse-time error.
+- **Auto dispatch**: `AutoConfig::DebertaV2` and `AutoModelFor*::DebertaV2` variants extend the family dispatch.
+
+#### flodl-hf: Masked-language-modeling heads across all six families
+
+A fourth task shape — masked-language modeling — joins sequence classification, token classification, and question answering. All six families ship a `*ForMaskedLM` wrapper that consumes raw text and returns the top-k fill-mask candidates with probabilities, mirroring HF Python's `pipeline("fill-mask")`.
+
+- **Type aliases over `MaskedLmHead<Cfg>`**: `BertForMaskedLM`, `RobertaForMaskedLM`, `DistilBertForMaskedLM`, `XlmRobertaForMaskedLM`, `AlbertForMaskedLM`, `DebertaV2ForMaskedLM` — same `from_pretrained` / `forward_encoded` / `compute_loss` / `predict` shape as the other task heads.
+- **`AutoModelForMaskedLM` enum**: family-agnostic dispatch, mirrors the existing `AutoModelFor*` entry points. `from_pretrained` reads `config.json`, builds the matching family head, and returns the dispatched enum; callers stay family-agnostic.
+- **`fill_mask(text, top_k)` ergonomics**: pick the `[MASK]` (BERT-family) or `<mask>` (RoBERTa-family) token, run a single forward, and return the top-k vocabulary candidates with probabilities for the masked position. Tokenizer mask-token resolution is unified through `HfTokenizer`.
+- **Per-family head shapes**: each family ships its native MLM head structure unchanged from HF reference — BERT's `transform + tied decoder`, RoBERTa's flat tied decoder with bias, DistilBERT's `vocab_layer_norm + vocab_projector`, ALBERT's `embedding_size`-factored decoder, DeBERTa-v2's V3 non-legacy layout. No structural unification; the family-agnostic surface lives at the `MaskedLmHead<Cfg>` generic level above the per-family graph.
+- **Parity coverage**: five of six family MLM cells (BERT, RoBERTa, DistilBERT, XLM-RoBERTa, ALBERT) are bit-exact against HF Python on pinned checkpoints. The DeBERTa-v2 MLM gap is documented above; the wrapper compiles and runs against the available reference but the comparison surfaces the upstream RTD-vs-MLM mismatch rather than a flodl-hf bug.
+
 #### `fdl flodl-hf verify-export <dir>` — generic export verifier (auto-detect)
 
 A single Python verifier replaces the six per-family `verify-export-<family>` scripts. Reads `<dir>/config.json`, dispatches on `(model_type, architectures[0])` to the matching HF `AutoModelFor*`, then asserts (1) zero `missing_keys` / `unexpected_keys` on load and (2) bit-exact agreement on the head's primary forward output(s) for a fixed prompt.
@@ -76,6 +127,111 @@ A single Python verifier replaces the six per-family `verify-export-<family>` sc
 - The six per-family `verify-export-{bert,roberta,distilbert,xlm-roberta,albert,deberta-v2}` commands are now thin wrappers that call the generic script with `--hub-source` baked in — same zero-arg ergonomics, one Python script behind them. Removed: `flodl-hf/scripts/verify_export_<family>.py` (×6) and `flodl-hf/scripts/_export_verify.py`.
 
 The generic command extends coverage from base backbones to the full 30-cell head matrix (6 families × {base, seqcls, tokcls, qa, mlm}) — exactly the cases the Rust `_live` head-roundtrip tests already cover bit-exact at the safetensors layer. Run order: `fdl flodl-hf export --hub <repo> --out <dir>` (dev container), then `fdl flodl-hf verify-export <dir>` (hf-parity container).
+
+#### `fdl flodl-hf export` — staged HuggingFace-compatible export
+
+Re-emit any flodl-hf-supported model as an HF-compatible directory (`model.safetensors` + `config.json`) that loads back into HF Python's `AutoModelFor*.from_pretrained`. The companion to the verify-export entry above; together they form the round-trip gate that proves flodl-hf weight loaders, graph builders, and config writers all agree with the HF Python reference.
+
+- **Two source modes, mutually exclusive**:
+  - `--hub <repo>` — fetch from the HuggingFace Hub and re-emit. Auto-detects family from `model_type` (`bert`, `roberta`, `distilbert`, `xlm-roberta`, `albert`, `deberta-v2`).
+  - `--checkpoint <path>` — re-emit a local `.fdl` checkpoint. Reads architecture from the sidecar `<stem>.config.json` (or `--config <path>` to override).
+- **`--head <auto|base|seqcls|tokcls|qa|mlm>`** (Hub mode): force a specific head class instead of dispatching on the upstream `architectures[0]`. `auto` (default) reads the upstream architecture; `base` re-exports the bare backbone even when the upstream advertises a head — useful for treating a pretraining checkpoint as a feature-extraction encoder. The other four force the matching head wrapper.
+- **`--out <dir>`** (required): output directory. Writes `<out>/model.safetensors` + `<out>/config.json` in HF-canonical layout.
+- **`--force`**: overwrite existing files in `<out>` without prompting.
+- **`--preserve-source-config`** (checkpoint mode): also write the loaded source config verbatim to `<out>/config.source.json` alongside the canonical `config.json` — for research / replication provenance, since the canonical `to_json_str` normalises some fields away.
+- **Bit-exact round-trip on every supported family / head**: exported dir loads back into HF Python's `AutoModelFor*` with zero `missing_keys` / `unexpected_keys` and bit-identical forward outputs, validated by `fdl flodl-hf verify-matrix` across the 30-cell head matrix.
+- **Tokenizer round-trip**: when a `--hub` source ships a fast tokenizer, `tokenizer.json` is also persisted to `<out>` via [`HfTokenizer::save`](#hftokenizersave--persist-a-loaded-tokenizer-back-to-disk) so the staged dir is fully self-contained for HF Python's `AutoTokenizer.from_pretrained`.
+
+#### `fdl flodl-hf verify-matrix` — full head-matrix runner
+
+Quarterly-manual gate that runs `fdl flodl-hf export` then `verify-export` across the full 30-cell head matrix (6 families × `{base, seqcls, tokcls, qa, mlm}`), then prints a PASS/FAIL grid.
+
+- **Cell list comes from `flodl-hf/tests/fixtures/head_matrix.json`**: each entry pins a `{family, head, repo}` tuple. Adding a cell is a one-line JSON edit; the runner picks it up next invocation.
+- **Filter forwarding**: `fdl flodl-hf verify-matrix -- --families bert,albert --heads base,seqcls` runs the matching subset.
+- **Fail-soft**: each cell's PASS/FAIL is captured; the grid prints at the end. A red cell does not abort the run.
+- **Heavyweight**: downloads ~10+ GB of Hub weights on a cold cache. Documented as a pre-release gate, not a per-PR gate.
+
+#### Native-dtype safetensors round-trip + `Tensor::to_blob`
+
+`flodl-hf` safetensors I/O now preserves the checkpoint's native dtype on the way out, instead of always casting to f32. Combined with the load-side dtype preservation, this means a `bf16` or `f16` checkpoint round-trips bit-exact through `flodl_hf::safetensors_io::{load_safetensors_file_into_graph, save_safetensors_file_from_graph}`.
+
+- **`save_safetensors_from_graph` / `save_safetensors_file_from_graph`**: preserve `f32` / `f64` / `f16` / `bf16` end-to-end, written into the safetensors header's `dtype` field. Integer dtypes are still rejected at save (BERT-family and the other supported families only store floats).
+- **`load_safetensors_into_graph` / `load_safetensors_file_into_graph`**: now construct the destination tensor in the checkpoint's dtype rather than force-casting to f32. Existing f32 checkpoints (BERT-base etc.) round-trip identically; f16 / bf16 / f64 checkpoints now load at native precision.
+- **`flodl::Tensor::to_blob`** (new on `flodl`): copies a tensor's raw bytes in the current dtype's storage layout. The primitive that lets `safetensors_io` write any libtorch dtype straight into the safetensors payload without going through f32.
+- **DeBERTa-v2 dtype hardening**: the disentangled-attention module gained an explicit `attention_mask_dtype` argument so `c2p` / `p2c` bias additions and the masked-softmax stay in the model's native dtype, rather than getting silently up-cast.
+
+Surfaced by the round-trip gate: a save side that always wrote f32 made the export step lossy on f16 / bf16 checkpoints, and `verify-matrix` would have eventually flagged it as a numerics drift on those families.
+
+#### `HfTokenizer::save` — persist a loaded tokenizer back to disk
+
+`HfTokenizer` gained a `save(path)` method that writes the wrapped `tokenizers::Tokenizer` to a JSON file in the form HF Python's `AutoTokenizer.from_pretrained` reads back. Required for the export round-trip (`fdl flodl-hf export --hub` writes `tokenizer.json` alongside `model.safetensors` so the staged dir is self-contained). Standalone callers can use it to checkpoint tokenizer state at fine-tune save points.
+
+```rust
+let tok = HfTokenizer::from_pretrained("bert-base-uncased")?;
+tok.save("./checkpoint/tokenizer.json")?;
+```
+
+#### `fdl add` evolution: `--playground` / `--install` mode split
+
+`fdl add flodl-hf` from 0.5.2 dropped a sandbox playground under `./flodl-hf/`. It now exposes two modes (combinable) reflecting how a user actually wires an ecosystem crate into a project: try-it-out (sandbox) versus wire-it-in (root dependency).
+
+- **`--playground`** — original behaviour: scaffolds `./flodl-hf/` as a standalone cargo crate with a one-file `AutoModel` example, an `fdl.yml` with runnable commands, and a `flodl-hf:` entry in the root `fdl.yml` so `fdl flodl-hf <cmd>` routes into the playground from the project root. The user's own `Cargo.toml` is untouched.
+- **`--install`** — new: appends `flodl-hf = "=X.Y.Z"` to the root `Cargo.toml` `[dependencies]` (default features = `hub` + `tokenizer`). Wires the crate into the user's own code; nothing else mutated. Idempotent (already-present is a no-op). Version locked to the project's flodl version.
+- **Combinable**: `fdl add flodl-hf --playground --install` does both.
+- **No flag**: interactive `[Y/n]`-style prompt asking which mode(s). When stdin is non-tty (CI, piped input) the prompt errors loudly with the explicit-flag guidance instead of silently picking a default — per `feedback_loud_errors_over_silent.md`.
+- **Internals**: two new flodl-cli utility modules, `util::cargo_toml` and `util::fdl_yml`, do the file mutations. They preserve formatting and comments where possible, surface conflicts loudly (path-only or git-only flodl deps in the host project's `Cargo.toml` error with actionable guidance instead of guessing a version), and are reusable for future `fdl add <crate>` targets.
+
+#### `fdl run` argv forwarding: `--` separator + `append:` field
+
+`run:`-kind commands in `fdl.yml` now accept user args after an explicit `--` separator on the CLI, and can declare literal trailing tokens via a new `append:` field. The composed shell command is `[run:] [user args after --] [append:]`.
+
+- **`--` separator on the CLI**: `fdl test -- -p flodl-hf --test foo` splices `-p flodl-hf --test foo` into the run command. Path-kind sub-commands (those with sub-`fdl.yml`) keep forwarding every extra argv token; `run:`-kind commands forward only after `--`.
+- **Loud error on stray args**: `fdl test -p flodl-hf` (without the `--`) errors with a hint pointing at the right form, instead of silently dropping the args.
+- **`append:` field**: declares trailing tokens that always follow the user-supplied portion (typically the libtest `-- --nocapture --ignored` for cargo test). Example:
+  ```yaml
+  test:
+    run: cargo test
+    append: -- --nocapture
+  ```
+  `fdl test` runs `cargo test -- --nocapture`; `fdl test -- -p flodl-hf` runs `cargo test -p flodl-hf -- --nocapture`.
+- **Same forwarding rule for path-kind commands' `run:` entry-point** (e.g. cargo run --example): args after `--` go between the entry and any `append:` tokens. Visible in every `fdl flodl-hf example <name>` invocation that takes args.
+
+The change makes `fdl` a transparent forwarder for the underlying tool's flags rather than a wrapper that absorbs them — running `cargo test`-equivalent flows through `fdl` is now byte-identical to running `cargo test` directly, modulo Docker dispatch.
+
+#### flodl-cli polish: schema probing, bare-project help, parity subcommand layout
+
+Smaller user-facing fixes that smooth out the host-side `fdl` experience.
+
+- **Docker-aware schema probing**: `fdl <command> --help` invokes the command's schema-probe (`<entry> --fdl-schema`) inside the appropriate Docker service when the command declares `docker:` and the host shell isn't already inside a container. Previously, schema probes ran on the host and silently failed when the binary lived in the container — leaving `--help` either incomplete or erroring on a missing executable. Now `fdl` walks up to the nearest `docker-compose.yml` and runs `docker compose run --rm <svc> bash -c '<entry> --fdl-schema'` from there, matching the dispatch path for the actual run.
+- **Bare-project help fallthrough**: a path-kind sub-project (no top-level `entry:` but with `commands:` listed) used to error on `fdl <project>` with "no entry point defined". Now it prints help, mirroring the top-level `fdl` UX. Per `feedback_help_never_blocked.md`: `--help` must always render, validation lives on the exec path, scoped to the single thing invoked.
+- **`fdl flodl-hf parity` subcommand layout**: the per-checkpoint parity regenerator commands now live under `flodl-hf/parity/fdl.yml.example` (a sub-project) instead of being flat under `flodl-hf/fdl.yml.example`. `fdl flodl-hf parity bert`, `fdl flodl-hf parity albert`, etc., remain the call shape; the underlying organisation is just cleaner. New `parity_all.py` runs every checkpoint in sequence (handy for contributors regenerating after sha bumps).
+- **Doc-link sweep** (`b683ed0`): mass fix of stale doc links across `README.md`, `docs/ddp.md`, `docs/tutorials/13-data-loading.md`, plus a new `site/guide/index.html` landing page on flodl.dev.
+
+#### `fdl` daily update check (opt-in by default, multi-axis opt-out)
+
+`fdl` now probes crates.io once per day for newer versions of itself (`flodl-cli`) and, when run inside a Cargo project, the user-facing flodl crates the project depends on (`flodl`, `flodl-hf`). Outdated crates surface as one-line nudges at the end of the user's command — no extra latency on the work itself, no surprise network traffic, no blocking on a slow registry.
+
+- **Cache + throttle**: results are cached in `<config-dir>/flodl/config.json` (XDG on Linux/BSD, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows); the throttle window is 24 hours per machine.
+- **Non-blocking probe**: HTTP via `curl --max-time 2`, fired from a `Drop` guard at process exit so the user-visible command output runs first. Every failure mode (offline, slow network, registry hiccup) is silent.
+- **Opt-out hierarchy**:
+  - `FDL_NO_UPDATE_CHECK=1` env var (wins over all else).
+  - `update_check.enabled = false` in `<config-dir>/flodl/config.json`.
+  - Auto-disabled when `CI=true` (any standard CI runner), or when `/.dockerenv` is present (container filesystems are ephemeral, cache would never warm).
+- **Probe scope**: when run inside a Cargo project, reads `Cargo.lock` to identify which user-facing flodl crates are actually depended on. No probe for crates the user doesn't use.
+
+This is the same UX pattern `cargo` and `rustup` use — minimal, opt-out-able, ergonomic. Surfaced from `feedback_ux_polish_is_adoption_lever.md` as a small UX win that compounds as flodl ships more often.
+
+### Changed
+
+- **Repository moved to `github.com/flodl-labs/flodl`**. `Cargo.toml` `repository = ...` metadata, in-repo doc links, and CI/release scripts updated. Maintainer handle (`fab2s`) unchanged. Old GitHub URLs redirect transparently, but newly published crate metadata points at the new org.
+
+#### flodl-hf: `AutoConfig` and `AutoModelFor*` dispatch enums grew variants and are now `#[non_exhaustive]`
+
+The four pre-existing dispatch enums — `AutoConfig`, `AutoModelForSequenceClassification`, `AutoModelForTokenClassification`, `AutoModelForQuestionAnswering` — gained variants for the three new families (`XlmRoberta`, `Albert`, `DebertaV2`) added this release. The brand-new `AutoModelForMaskedLM` enum ships with the same shape. All five are now marked `#[non_exhaustive]` so future family additions (ModernBERT, LLaMA, ViT, …) do not require another bump on this axis.
+
+- **Documented usage is unaffected.** `AutoModelFor*::from_pretrained(...)?.predict(...)` and `AutoConfig::from_json_str(...)?.model_type()` do not pattern-match on the variant list, so the call-site shape stays identical.
+- **Exhaustive `match` arms in caller code break.** A match on `AutoConfig { Bert, Roberta, DistilBert }` written against 0.5.2 will fail to compile against 0.5.3 — both because the variant set grew and because `#[non_exhaustive]` requires a `_ => …` arm even when all known variants are covered. Adding a wildcard arm (or coverage for the new variants) fixes it.
+- **Pre-1.0 break, called out so adopters aren't surprised.** Strict cargo-semver would require a 0.6.0 bump. flodl-hf is on its second publish (first was 0.5.2 five days ago), the practical break radius is essentially "users who wrote exhaustive matches on a brand-new dispatch enum within a five-day window," and a 0.6.0 cycle for one shape of break would force the same bump on every future family addition. Shipping as 0.5.3 with `#[non_exhaustive]` installed once means subsequent family adds (ModernBERT, LLaMA, ViT, LoRA) are BC-clean by attribute, regardless of version policy.
 
 ### Deprecated
 
