@@ -221,6 +221,18 @@ Smaller user-facing fixes that smooth out the host-side `fdl` experience.
 
 This is the same UX pattern `cargo` and `rustup` use — minimal, opt-out-able, ergonomic. Surfaced from `feedback_ux_polish_is_adoption_lever.md` as a small UX win that compounds as flodl ships more often.
 
+#### flodl-hf: internal consolidation pass
+
+A round of structural refactors landed alongside the family expansion, with no user-facing API change. Listed for completeness so future archaeology has a single entry point; nothing here moves the public surface, so existing callers compile unchanged.
+
+- **`hub.rs` split into per-family submodules**: the ~1900 LOC monofile is now `hub::{bert, roberta, distilbert, albert, xlm_roberta, deberta_v2}` plus a thin top-level shim, with each family owning its own config-and-weights fetcher.
+- **6× `fetch_<family>_config_and_weights` wrappers collapsed into one generic** over the family config trait, removing the per-family copy-paste that had grown a clear seam.
+- **Pooler-detection logic consolidated into `safetensors_io`**: `keys_have_pooler` / `weights_have_pooler` now have one source of truth across the loaders, replacing the mirrored helpers that had drifted enough to surface a real bug on the 0.5.2 → 0.5.3 fix path.
+- **`HeadKind` enum + `From<&str>` impl** centralises head-suffix → kind dispatch (`"ForMaskedLM"` → `HeadKind::Mlm`, etc.) for `Auto*::from_pretrained`, the export path, and `verify-export`.
+- **`Auto*::from_pretrained` dispatch unified with `export::build_<family>_for_export`** so the load path and the export path share one set of family-x-head builders instead of two near-duplicates.
+- **`safetensors_io` unit tests** (dtype matrix + key-validation edge cases) join the existing `_live` integration tests.
+- **`parity_common` test helper module** lifted out of the boilerplate every `<family>_*_parity.rs` was duplicating: max-abs-diff, fixture parsing, shape probes.
+
 ### Changed
 
 - **Repository moved to `github.com/flodl-labs/flodl`**. `Cargo.toml` `repository = ...` metadata, in-repo doc links, and CI/release scripts updated. Maintainer handle (`fab2s`) unchanged. Old GitHub URLs redirect transparently, but newly published crate metadata points at the new org.

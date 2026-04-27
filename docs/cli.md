@@ -134,9 +134,9 @@ Config-file shape (auto-managed except `enabled`):
     "enabled": true,
     "last_check": 1714138800,
     "latest_known": {
-      "flodl-cli": "0.5.2",
-      "flodl": "0.5.2",
-      "flodl-hf": "0.5.2"
+      "flodl-cli": "0.5.3",
+      "flodl": "0.5.3",
+      "flodl-hf": "0.5.3"
     },
     "first_run_seen": true
   }
@@ -1226,31 +1226,48 @@ declares the sub-command, the child `fdl.yml` defines its tasks.
 fdl flodl-hf                          # list sub-commands
 fdl flodl-hf convert <repo_id>        # convert pytorch_model.bin -> model.safetensors
 
-# Runnable examples (thirteen demos across BERT / RoBERTa / DistilBERT)
+# Runnable examples (fourteen demos across the six BERT-family architectures)
 fdl flodl-hf example                  # list example names
 fdl flodl-hf example auto-classify    # family-agnostic via AutoModel
 fdl flodl-hf example bert-embed       # + bert-classify / bert-ner / bert-qa
 fdl flodl-hf example roberta-embed    # + roberta-classify / -ner / -qa
 fdl flodl-hf example distilbert-embed # + distilbert-classify / -ner / -qa
+fdl flodl-hf example distilbert-finetune  # fine-tune walkthrough (loss curve + export recipe)
 
-# Parity-fixture regeneration (contributors; twelve per-head commands)
-fdl flodl-hf parity bert              # bert-base-uncased backbone fixture
-fdl flodl-hf parity bert-seqcls       # per-head fixtures
-fdl flodl-hf parity bert-tokencls
-fdl flodl-hf parity bert-qa
-fdl flodl-hf parity roberta           # + seqcls / tokencls / qa
-fdl flodl-hf parity distilbert        # + seqcls / tokencls / qa
+# Round-trip export to the HF ecosystem (any supported family/head)
+fdl flodl-hf export --hub bert-base-uncased --out /tmp/bert-export
+fdl flodl-hf export --checkpoint ./my.fdl  --out /tmp/my-export
+fdl flodl-hf verify-export /tmp/bert-export             # auto-detects Hub source from stamped config
+fdl flodl-hf verify-export /tmp/my-export --no-hub-source
+
+# 30-cell pre-release gate (six families x base/seqcls/tokcls/qa/mlm)
+fdl flodl-hf verify-matrix
+fdl flodl-hf verify-matrix -- --families bert,albert --heads base,seqcls
+
+# Parity-fixture regeneration (contributors; 29 per-head commands plus `parity all`)
+fdl flodl-hf parity                       # list parity targets
+fdl flodl-hf parity all                   # run every fixture in sequence (PASS/FAIL grid)
+fdl flodl-hf parity bert                  # bert-base-uncased backbone fixture
+fdl flodl-hf parity bert-seqcls           # per-head fixtures
+fdl flodl-hf parity albert-mlm            # ALBERT family masked-LM fixture
+fdl flodl-hf parity deberta-v2-qa         # DeBERTa-v2 QA fixture
+# (29 in total: bert/roberta/distilbert/albert/xlm-roberta + seqcls/tokencls/qa/mlm
+#  per family, plus the bare-backbone targets; deberta-v2 has no -mlm fixture
+#  due to a documented MLM gap in flodl-hf/tests/deberta_v2_parity.rs)
 ```
 
-Parity regen runs in a dedicated `hf-parity` Docker service
-(`python:3.12-slim` + torch CPU wheel + `transformers`) declared in
-`docker-compose.yml`. `HF_HOME=/workspace/.hf-cache` keeps weights and
-tokenizers cached between runs (gitignored).
+`hub`, `checkpoint`, and `parity` modes all run in a dedicated
+`hf-parity` Docker service (`python:3.12-slim` + torch CPU wheel +
+`transformers`) declared in `docker-compose.yml`.
+`HF_HOME=/workspace/.hf-cache` keeps weights and tokenizers cached
+between runs (gitignored). The `verify-export` and `verify-matrix`
+runners route Python through the same service automatically.
 
 See the
 [HuggingFace Integration tutorial](tutorials/14-flodl-hf.md) for
 end-user usage of the crate itself (API walkthroughs, install
-profiles, `AutoModel` dispatch).
+profiles, `AutoModel` dispatch, fine-tune + export round-trip
+recipe, the 30-cell parity matrix).
 
 ### Interactive shells
 

@@ -6,11 +6,20 @@ PyTorch-verified numerical parity.
 
 ## Status
 
-BERT family complete: BERT, RoBERTa, DistilBERT with full task heads
-(embed, sequence classification, token classification, extractive QA).
-`AutoModel` routes automatically from `config.json`'s `model_type`. Every
-head has `_live` parity tests against the HuggingFace Python reference;
-observed `max_abs_diff` is under 1e-5 across the board.
+Six BERT-family architectures: BERT, RoBERTa, DistilBERT, ALBERT,
+XLM-RoBERTa, DeBERTa-v2 / DeBERTa-v3. Each ships full task heads
+(embed, sequence classification, token classification, extractive QA,
+masked language modeling). `AutoModel` routes automatically from
+`config.json`'s `model_type`. Every head has `_live` parity tests
+against the HuggingFace Python reference; observed `max_abs_diff` is
+under 1e-5 across the matrix (29 of 30 cells; DeBERTa-v2 MLM has a
+documented gap).
+
+Round-trip back to the HF ecosystem with `fdl flodl-hf export` and
+`fdl flodl-hf verify-export`: any flodl-hf-supported model exports as
+an HF-canonical `model.safetensors` + `config.json` + `tokenizer.json`
+that loads into HF Python's `AutoModelFor*.from_pretrained` with zero
+`missing_keys` / `unexpected_keys` and bit-exact forward outputs.
 
 ## Getting started
 
@@ -52,7 +61,7 @@ Edit the `Cargo.toml` entry directly to switch flavors:
 ### Full HuggingFace experience (default)
 
 ```toml
-flodl-hf = "=0.5.2"
+flodl-hf = "=0.5.3"
 ```
 
 Pulls: `safetensors` + `hf-hub` + `tokenizers`. Everything needed to
@@ -65,7 +74,7 @@ is not needed. Drops the `tokenizers` crate and its regex + unicode
 surface.
 
 ```toml
-flodl-hf = { version = "=0.5.2", default-features = false, features = ["hub"] }
+flodl-hf = { version = "=0.5.3", default-features = false, features = ["hub"] }
 ```
 
 ### Offline / minimal (safetensors-only)
@@ -75,7 +84,7 @@ checkpoints from local disk. Drops both hub downloads and tokenizers. No
 network, no async runtime, no TLS stack, no regex.
 
 ```toml
-flodl-hf = { version = "=0.5.2", default-features = false }
+flodl-hf = { version = "=0.5.3", default-features = false }
 ```
 
 ### Feature matrix
@@ -152,25 +161,36 @@ println!("{:?}", a.text);
 ```
 
 Runnable:
-`fdl flodl-hf example bert-embed` / `bert-classify` / `bert-ner` / `bert-qa`,
-plus `roberta-*` / `distilbert-*` / `auto-classify` for the same four
-task shapes across every family.
+`fdl flodl-hf example bert-embed` / `bert-classify` / `bert-ner` /
+`bert-qa`, plus `roberta-*` / `distilbert-*` / `auto-classify` for
+the same shapes across the BERT-family classics, and
+`distilbert-finetune` for the fine-tune walkthrough (loss curve, save
+to `.fdl` checkpoint, host-side `export` + `verify-export` recipe).
+ALBERT, XLM-RoBERTa, and DeBERTa-v2 are exercised through
+`auto-classify` and the `_live` integration tests.
 
 ## Roadmap
 
-- [x] Safetensors read/write for named tensor dicts
+- [x] Safetensors read/write for named tensor dicts (native dtype: `f32`/`f64`/`f16`/`bf16` round-trip bit-exact)
 - [x] `hf-hub` download + local cache wrappers
-- [x] `tokenizers` crate integration
+- [x] `tokenizers` crate integration (incl. `HfTokenizer::save` for round-trip)
 - [x] BERT (base-uncased parity with `transformers` library)
-- [x] BERT task heads: sequence / token classification + question answering
-- [x] RoBERTa family (base + three task heads, PyTorch parity)
-- [x] DistilBERT family (base + three task heads, PyTorch parity)
-- [x] `AutoModel` / `AutoConfig` dispatch across the three families
-- [x] `fdl add flodl-hf` scaffold for on-site discovery
+- [x] BERT task heads: sequence / token classification + question answering + masked-LM
+- [x] RoBERTa family (base + four task heads, PyTorch parity)
+- [x] DistilBERT family (base + four task heads, PyTorch parity)
+- [x] ALBERT family (base + four task heads, PyTorch parity)
+- [x] XLM-RoBERTa family (base + four task heads, PyTorch parity)
+- [x] DeBERTa-v2 / v3 family (base + seqcls/tokcls/qa parity; MLM gap documented)
+- [x] `AutoModel` / `AutoConfig` dispatch across all six families (`#[non_exhaustive]`)
+- [x] `Trainer::setup_head` + `HasGraph` (transparent 1-or-N-GPU fine-tuning)
+- [x] `compute_loss(enc, labels)` task-head loss wiring (mirrors HF Python's `model(..., labels=...).loss`)
+- [x] Round-trip export: `fdl flodl-hf export` (Hub or `.fdl` checkpoint) + `verify-export` (auto-detect family/head) + `verify-matrix` (30-cell quarterly gate)
+- [x] `fdl add flodl-hf` `--playground` / `--install` modes for on-site discovery and direct wiring
 - [ ] ModernBERT (RoPE, GeGLU, alternating local/global attention)
 - [ ] LLaMA (RoPE, GQA, SwiGLU, then the architecture)
 - [ ] LoRA adapters
 - [ ] ViT
+- [ ] DeBERTa-v2 ConvLayer (unblocks V2 xlarge MLM parity)
 
 ## License
 

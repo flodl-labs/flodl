@@ -30,14 +30,23 @@ For the historical record of shipped phases and individual changes, see
   first-arg routing, deep-merge, conflict detection, and
   `fdl config show`. See
   [docs/design/run-config.md](docs/design/run-config.md).
-- **HuggingFace integration** scaffolded as sibling crate `flodl-hf`:
-  BERT, RoBERTa, DistilBERT with three task heads each (sequence /
-  token classification, extractive QA), `AutoModel` dispatch from
-  `config.json`'s `model_type`, `HfTokenizer`, strict-load safetensors
-  with key-set validation, `from_pretrained` Hub integration, PyTorch
-  parity tests at `max_abs_diff <= 1e-5` on nine pinned checkpoints.
-  `fdl add flodl-hf` and `fdl init --with-hf` close the discovery gap
-  with a one-command scaffold.
+- **HuggingFace integration** sibling crate `flodl-hf`: six BERT-family
+  architectures (BERT, RoBERTa, DistilBERT, ALBERT, XLM-RoBERTa,
+  DeBERTa-v2 / v3) with four task heads each (sequence / token
+  classification, extractive QA, masked language modeling),
+  `AutoModel` dispatch from `config.json`'s `model_type`,
+  `HfTokenizer` with `save` round-trip, strict-load safetensors with
+  key-set validation and native-dtype preservation, `from_pretrained`
+  Hub integration, PyTorch parity tests at `max_abs_diff <= 1e-5` on
+  29 of 30 head cells (DeBERTa-v2 MLM gap documented in
+  `flodl-hf/tests/deberta_v2_parity.rs`). `Trainer::setup_head` +
+  `HasGraph` make fine-tuning transparent across CPU / single GPU /
+  multi-GPU, and `compute_loss(enc, labels)` mirrors HF Python's one-
+  call loss shape. Round-trip back to the HF ecosystem with
+  `fdl flodl-hf export` (Hub or local `.fdl` checkpoint) and
+  `fdl flodl-hf verify-export` (auto-detect family/head, loadability
+  + bit-exact forward parity). `fdl add flodl-hf` `--playground` /
+  `--install` modes plus `fdl init --with-hf` close the discovery gap.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 

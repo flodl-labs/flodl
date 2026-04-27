@@ -491,8 +491,10 @@ let text  = Shakespeare::parse(&corpus, /*seq_len=*/ 128)?;
 
 The [`flodl-hf`](https://crates.io/crates/flodl-hf) sibling crate loads
 real HuggingFace checkpoints directly into floDl, with no Python, no
-ONNX detour, and no conversion script. BERT, RoBERTa, and DistilBERT
-are wired end-to-end with PyTorch-verified numerical parity.
+ONNX detour, and no conversion script. Six BERT-family architectures
+(BERT, RoBERTa, DistilBERT, ALBERT, XLM-RoBERTa, DeBERTa-v2) are wired
+end-to-end with PyTorch-verified numerical parity across four task
+heads each.
 
 ```rust
 use flodl_hf::models::auto::AutoModelForSequenceClassification;
@@ -509,8 +511,8 @@ for (label, score) in &results[0] {
 
 `AutoModel` reads `config.json`, dispatches to the right family, and
 returns a typed handle. Swap the repo id for `bert-base-uncased`,
-`distilbert-base-uncased`, or any fine-tune on top of those, and the
-caller stays identical.
+`albert-base-v2`, `xlm-roberta-base`, `microsoft/deberta-v3-base`, or
+any fine-tune on top of those, and the caller stays identical.
 
 | Entry point | Task | Output |
 |---|---|---|
@@ -518,23 +520,34 @@ caller stays identical.
 | `AutoModelForSequenceClassification` | Whole-text labels | `Vec<Vec<(label, score)>>` |
 | `AutoModelForTokenClassification` | Per-token labels (NER) | `Vec<Vec<TokenPrediction>>` |
 | `AutoModelForQuestionAnswering` | Extractive answer span | `Answer { text, start, end, score }` |
+| `AutoModelForMaskedLM` | Fill-mask candidates | `Vec<(token, prob)>` (top-k) |
 
 Three feature profiles cover deployment shapes: full Hub + tokenizer
 (default), vision-only (Hub without the regex/unicode surface), and
 offline `safetensors`-only (no network, no async runtime, no TLS).
-Inside an existing flodl project, `fdl add flodl-hf` scaffolds a side
-crate with a runnable `AutoModel` example so you can verify a real
-checkpoint loads before wiring it into your main code.
+Inside an existing flodl project, `fdl add flodl-hf --playground`
+scaffolds a side crate with a runnable `AutoModel` example so you can
+verify a real checkpoint loads before wiring it into your main code;
+`fdl add flodl-hf --install` appends `flodl-hf = "=0.5.3"` to your
+root `Cargo.toml`.
 
 ```bash
-fdl add flodl-hf       # scaffolds ./flodl-hf/ with a working classifier
-cd flodl-hf
-fdl classify           # runs AutoModel on a real fine-tune
+fdl add flodl-hf --playground   # try it: ./flodl-hf/ sandbox crate
+fdl add flodl-hf --install      # wire it: pin to your root Cargo.toml
+fdl flodl-hf classify           # runs AutoModel on a real fine-tune
 ```
+
+Fine-tuning uses the same loop code on CPU, single GPU, or N GPUs:
+`Trainer::setup_head` distributes the head transparently when more
+devices are available, and `compute_loss(enc, labels)` mirrors HF
+Python's `model(..., labels=...).loss` one-call shape. Round-trip the
+trained head back out with `fdl flodl-hf export` then verify it loads
+into HF Python's `AutoModelFor*` with `fdl flodl-hf verify-export`.
 
 See the **[HuggingFace Integration Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md)**
 for the full feature matrix, per-family entry points, tokenizer usage,
-local-disk loading, and the `pytorch_model.bin` conversion path.
+local-disk loading, the fine-tune walkthrough, the export round-trip
+recipe, and the 30-cell parity matrix.
 
 ## PyTorch Parity
 
@@ -722,7 +735,7 @@ supports. If `nvidia-smi` works, floDl trains on it.
 | **Know Rust, new to DL** | [Tensors](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/01-tensors.md) then [Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/04-training.md) |
 | **Know PyTorch** | [Porting Guide](https://github.com/flodl-labs/flodl/blob/main/docs/porting.md) (or `/port` with AI) then [Graph Builder](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/05-graph-builder.md) |
 | **Scaling to multi-GPU** | [Multi-GPU Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/11-multi-gpu.md) then [DDP Builder](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/12-async-ddp.md) |
-| **Bringing a HuggingFace model** | [HuggingFace Integration](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md) — load BERT/RoBERTa/DistilBERT, run classification or QA in three lines |
+| **Bringing a HuggingFace model** | [HuggingFace Integration](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md): load BERT, RoBERTa, DistilBERT, ALBERT, XLM-R, or DeBERTa-v2; classify, NER, QA, or fill-mask; fine-tune and round-trip back to the HF ecosystem |
 | **Just show me code** | [`quickstart`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/quickstart/) or [`showcase`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/showcase/) |
 
 ### Tutorials
@@ -741,7 +754,7 @@ supports. If `nvidia-smi` works, floDl trains on it.
 11. **[Multi-GPU Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/11-multi-gpu.md)** — Trainer::setup, El Che, auto-balancing, DataLoader integration
 12. **[DDP Builder](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/12-async-ddp.md)** — thread-per-GPU, Local SGD, A/B testable backends
 13. **[Data Loading](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/13-data-loading.md)** — DataLoader, resident/streaming modes, VRAM-aware prefetch, DDP integration
-14. **[HuggingFace Integration](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md)** — load BERT/RoBERTa/DistilBERT checkpoints, AutoModel dispatch, sequence/token classification, extractive QA, PyTorch parity
+14. **[HuggingFace Integration](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md)** — load BERT, RoBERTa, DistilBERT, ALBERT, XLM-RoBERTa, DeBERTa-v2 checkpoints, AutoModel dispatch across four task heads (seqcls, NER, QA, MLM), fine-tune with `Trainer::setup_head`, round-trip export to the HF ecosystem, PyTorch parity
 
 ### Examples
 
