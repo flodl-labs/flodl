@@ -960,6 +960,8 @@ impl Graph {
             }
         }
         if has_traces {
+            g.validate_trace_namespace();
+            // Legacy: traces keyed by post-loop tag
             for tag_name in g.tag_names() {
                 if let Some(step_traces) = g.traces(&tag_name) {
                     for (step_idx, trace_var) in step_traces.iter().enumerate() {
@@ -972,6 +974,24 @@ impl Graph {
                             .entry((tag_name.clone(), step_idx))
                             .or_default()
                             .push(moved);
+                    }
+                }
+            }
+            // Named emits: traces keyed by LoopBody-published emit name
+            for node in &g.nodes {
+                if let Some(ref store) = node.named_trace_buf {
+                    for (emit_name, step_traces) in store.borrow().iter() {
+                        for (step_idx, trace_var) in step_traces.iter().enumerate() {
+                            let moved = if trace_var.data().device() != gather_device {
+                                trace_var.to_device(gather_device)?
+                            } else {
+                                trace_var.clone()
+                            };
+                            gathered_traces
+                                .entry((emit_name.clone(), step_idx))
+                                .or_default()
+                                .push(moved);
+                        }
                     }
                 }
             }
@@ -1048,7 +1068,9 @@ impl Graph {
 
         let (_n, devices, gather_device) = self.el_che_read_config()?;
         let has_tags = !self.tag_capture.is_empty();
-        let has_traces = self.nodes.iter().any(|nd| nd.trace_buf.is_some());
+        let has_traces = self.nodes.iter().any(|nd|
+            nd.trace_buf.is_some() || nd.named_trace_buf.is_some()
+        );
         let device_indices = Self::cuda_device_indices(&devices);
 
         let batch_counts: Vec<usize> = per_device_batches.iter()
@@ -1134,7 +1156,9 @@ impl Graph {
 
         let (_n, devices, gather_device) = self.el_che_read_config()?;
         let has_tags = !self.tag_capture.is_empty();
-        let has_traces = self.nodes.iter().any(|nd| nd.trace_buf.is_some());
+        let has_traces = self.nodes.iter().any(|nd|
+            nd.trace_buf.is_some() || nd.named_trace_buf.is_some()
+        );
         let device_indices = Self::cuda_device_indices(&devices);
 
         let batch_counts: Vec<usize> = per_device_batches.iter()
@@ -1289,6 +1313,10 @@ impl Graph {
     }
 
     /// Snapshot loop traces from the graph that ran forward (rank 0 = self).
+    /// Includes both legacy single-stream traces (keyed by post-loop tag) and
+    /// named per-iteration emits (keyed by emit name from
+    /// [`crate::nn::TraceEmit::publish`]). Validates the trace namespace once
+    /// per graph (cached) to catch collisions between the two key spaces.
     fn el_che_snapshot_traces(
         &self,
         rank: usize,
@@ -1299,10 +1327,20 @@ impl Graph {
             return result;
         }
         let collect_from = |g: &Graph| -> HashMap<String, Vec<Variable>> {
+            g.validate_trace_namespace();
             let mut r = HashMap::new();
             for tag_name in g.tag_names() {
                 if let Some(traces) = g.traces(&tag_name) {
                     r.insert(tag_name, traces);
+                }
+            }
+            for node in &g.nodes {
+                if let Some(ref store) = node.named_trace_buf {
+                    for (emit_name, vars) in store.borrow().iter() {
+                        if !vars.is_empty() {
+                            r.insert(emit_name.clone(), vars.clone());
+                        }
+                    }
                 }
             }
             r

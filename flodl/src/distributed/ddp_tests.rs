@@ -1202,3 +1202,123 @@
         cuda_synchronize(0);
         cuda_synchronize(1);
     }
+
+    /// LoopBody emitting two named per-iteration traces, gather-friendly.
+    /// Returns 2*x; emits "double" = 2*x and "quad" = 4*x.
+    struct EmittingDoublerLB;
+    impl crate::nn::Module for EmittingDoublerLB {
+        fn forward(&self, input: &Variable) -> crate::tensor::Result<Variable> {
+            crate::nn::forward_via_step(self, input)
+        }
+        fn as_loop_body(&self) -> Option<&dyn crate::nn::LoopBody> { Some(self) }
+    }
+    impl crate::nn::LoopBody for EmittingDoublerLB {
+        fn step(
+            &self,
+            input: &Variable,
+            _refs: &std::collections::HashMap<String, Variable>,
+            emit: &mut crate::nn::TraceEmit<'_>,
+        ) -> crate::tensor::Result<Variable> {
+            let two_x = input.add(input)?;
+            let four_x = two_x.add(&two_x)?;
+            emit.publish("double", two_x.clone());
+            emit.publish("quad", four_x);
+            Ok(two_x)
+        }
+    }
+
+    #[test]
+    fn test_el_che_loop_body_emits_gathered_across_replicas() {
+        // Verify multi-trace API works under DDP: each replica's emits land in
+        // its own loop's named_store, gather across ranks/batches concatenates
+        // per (emit_name, step_idx), final ctx.traces[name] is reachable from
+        // the loss closure with the right shape.
+        if !require_multi_gpu() {
+            return;
+        }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        use crate::graph::{FlowBuilder, LossContext};
+        use crate::nn::{Adam, Linear, mse_loss};
+        use crate::data::{DataLoader, DataSet};
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct TinyData;
+        impl DataSet for TinyData {
+            fn len(&self) -> usize { 32 }
+            fn get(&self, index: usize) -> crate::tensor::Result<Vec<Tensor>> {
+                let x = Tensor::from_f32(
+                    &[(index as f32) + 1.0; 2], &[2], Device::CPU,
+                )?;
+                let y = Tensor::from_f32(
+                    &[(index as f32) + 1.0; 2], &[2], Device::CPU,
+                )?;
+                Ok(vec![x, y])
+            }
+        }
+
+        // Linear before the loop gives the graph learnable parameters so the
+        // loss closure's backward can flow gradients (the test exercises gather,
+        // not optimization, but backward requires grad-bearing params).
+        let model = FlowBuilder::from(
+            Linear::on_device(2, 2, Device::CUDA(0)).unwrap(),
+        )
+        .loop_body(EmittingDoublerLB)
+        .for_n(3)
+        .build()
+        .unwrap();
+
+        Trainer::setup_with(
+            &model,
+            |dev| {
+                FlowBuilder::from(Linear::on_device(2, 2, dev)?)
+                    .loop_body(EmittingDoublerLB)
+                    .for_n(3)
+                    .build()
+            },
+            |p| Adam::new(p, 0.001),
+            DdpConfig::new().max_anchor(Some(2)),
+        )
+        .unwrap();
+
+        let loader = DataLoader::from_dataset(TinyData)
+            .batch_size(4)
+            .names(&["input", "target"])
+            .build()
+            .unwrap();
+
+        model.set_data_loader(loader, "input").unwrap();
+
+        // Loss closure inspects ctx.traces — both emit names must be present
+        // with non-empty Vec<Variable> on each invocation.
+        let saw_emits = Rc::new(Cell::new(false));
+        let saw_emits_w = saw_emits.clone();
+        model.set_loss_fn(move |ctx: &LossContext| {
+            let doubles = ctx.traces.get("double")
+                .expect("ctx.traces missing 'double'");
+            let quads = ctx.traces.get("quad")
+                .expect("ctx.traces missing 'quad'");
+            assert_eq!(doubles.len(), 3, "3 iterations expected");
+            assert_eq!(quads.len(), 3, "3 iterations expected");
+            saw_emits_w.set(true);
+            let target = &ctx.batch["target"];
+            let target_var = Variable::new(target.clone(), false);
+            mse_loss(ctx.output, &target_var)
+        });
+
+        let iter = model.epoch(0).activate();
+        let mut iterations = 0;
+        for batch in iter {
+            let b = batch.unwrap();
+            let _out = model.forward_batch(&b).unwrap();
+            model.step().unwrap();
+            iterations += 1;
+            if iterations >= 2 { break; }
+        }
+
+        assert!(saw_emits.get(), "loss closure must have run with traces visible");
+
+        cuda_synchronize(0);
+        cuda_synchronize(1);
+    }

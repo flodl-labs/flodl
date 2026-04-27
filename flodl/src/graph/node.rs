@@ -15,6 +15,12 @@ pub(crate) type NodeFn = Box<dyn Fn(&[Variable]) -> Result<Vec<Variable>>>;
 pub(crate) type RefForwardFn =
     Rc<dyn Fn(&Variable, &HashMap<String, Variable>) -> Result<Variable>>;
 
+/// Named per-iteration trace buffers, keyed by emit name.
+/// Populated by loop nodes whose body implements [`crate::nn::LoopBody`]
+/// and publishes via [`crate::nn::TraceEmit::publish`]. Distinct from
+/// the legacy single-stream [`Node::trace_buf`] (keyed by post-loop tag).
+pub(crate) type NamedTraceStore = Rc<RefCell<HashMap<String, Vec<Variable>>>>;
+
 pub(crate) struct Node {
     pub id: String,
     pub input_ports: Vec<String>,
@@ -25,6 +31,10 @@ pub(crate) struct Node {
     pub ref_forward: Option<RefForwardFn>,
     /// Trace buffer for loop nodes whose body implements Module::trace().
     pub trace_buf: Option<Rc<RefCell<Vec<Variable>>>>,
+    /// Named trace store for loop nodes whose body implements [`crate::nn::LoopBody`].
+    /// One Vec<Variable> per published name, length equal to count of iterations
+    /// where the body called [`crate::nn::TraceEmit::publish`] for that name.
+    pub named_trace_buf: Option<NamedTraceStore>,
     /// Shared port list for loop nodes — the loop's run closure reads this
     /// at execution time to extract refs. Updated by wire_using when
     /// .using() is chained after a loop.

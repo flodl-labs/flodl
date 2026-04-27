@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### `LoopBody` + `TraceEmit`: multi-output per-iteration traces from loop bodies
+
+Loop bodies can now publish multiple named auxiliary outputs per iteration without maintaining side-channel state. `Module::trace()` is unchanged and remains the convenience for single-output bodies.
+
+- **`flodl::LoopBody`** trait: opt-in extension on top of `Module`. Bodies implement `step(input, refs, emit)` and call `emit.publish("name", value)` per iteration; the runner harvests each step's emit map and appends entries into per-name vectors on the loop node. No `Rc<RefCell>` field on the body, no `reset()` hook for traces, no `trace()` getter.
+- **`flodl::TraceEmit`**: per-step emit channel handed in by the loop runner. `publish()` panics on duplicate names within a single step (per-step dedup, always-on). `TraceEmit::discard()` returns a no-op emitter for non-loop forward paths.
+- **`flodl::forward_via_step`**: one-line helper for bodies that have no standalone `forward()` semantics: `fn forward(&self, x) -> Result<Variable> { forward_via_step(self, x) }`. Combined with `fn as_loop_body(&self) -> Option<&dyn LoopBody> { Some(self) }` on the body's `Module` impl, this is the canonical "loop-only body" pattern.
+- **Read side unchanged**: emit-published names land in `Graph::traces(name)` and `LossContext::traces[name]` alongside legacy single-trace streams. `Graph::traces_named(name)` is available when you want to skip the legacy fallback.
+- **Sparse emits supported**: a step that doesn't publish a given name simply doesn't grow that name's vector. `traces["name"].len() <= n_iter`, equal to the count of iterations where the name was published.
+- **Collision detection**: trace namespace is validated once per graph (cached via `Cell<bool>`) on first observation, either via `Graph::traces`, `Graph::traces_named`, or `el_che_snapshot_traces` / `gather_tags_and_traces` on the El Che path. Panics on cross-loop emit-name reuse or emit-name vs post-loop-trace-tag collisions; tag and trace key spaces are otherwise separate (`LossContext::tags` vs `LossContext::traces`).
+- **Works under `Graph::distribute`**: each replica's body, built by the factory closure, owns its own `named_trace_buf`; the gather pipeline (`el_che_snapshot_traces`, `gather_detached_traces`, `el_che_set_gathered_traces`) walks named buffers alongside legacy ones and concatenates per `(name, step_idx)` across ranks and batches.
+
+Motivation: `Module::trace() -> Option<Variable>` is one stream per loop, requires four pieces of side-channel state on the body (RefCell field + side-effect write in `forward` + getter + `reset()` cleanup), and the natural `Rc<RefCell>` workaround for multiple streams breaks under DDP because `Graph::distribute` builds fresh bodies per replica while loss closures registered on the host capture only the host's buffer. `LoopBody::step` removes the side-channel pattern entirely and makes multi-stream a free side effect.
+
 #### `Trainer`: primary training entry point
 
 `Trainer` is the new default API for training in flodl. It forwards to the same DDP machinery as `Ddp::*` but reads as "just train" rather than "set up DDP" — the one-liner works transparently on 1 or N GPUs.

@@ -129,6 +129,11 @@ pub struct Graph {
     // Per-batch loss closure for El Che (set by set_loss_fn(), None = legacy gather path)
     #[allow(clippy::type_complexity)]
     pub(crate) loss_fn: RefCell<Option<Box<dyn Fn(&LossContext) -> Result<Variable>>>>,
+    // Cached flag: trace-namespace collision check has run successfully once.
+    // Set the first time trace observation is performed (single-GPU lookup or
+    // El Che gather). Validates that emit-published trace names from loop
+    // bodies don't collide with each other or with legacy post-loop tag names.
+    pub(crate) traces_validated: Cell<bool>,
     // Optional opaque metadata attached to the graph (typically a JSON
     // config from the source the graph was built from, e.g. an HF
     // `config.json`). When set, [`Graph::save_checkpoint`] emits it as
@@ -419,6 +424,7 @@ impl Graph {
             training_step: Cell::new(0),
             data_binding: RefCell::new(None),
             loss_fn: RefCell::new(None),
+            traces_validated: Cell::new(false),
             source_config: RefCell::new(None),
         });
 

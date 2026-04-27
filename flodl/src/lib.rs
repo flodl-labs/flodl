@@ -58,7 +58,7 @@ pub use tensor::{cuda_available, cuda_device_count, cuda_memory_info, cuda_memor
 pub use rng::Rng;
 pub use autograd::{Variable, no_grad, is_grad_enabled, NoGradGuard, max_pool2d, adaptive_avg_pool2d, grid_sample, scaled_dot_product_attention, embedding, embedding_bag};
 pub use nn::{
-    Module, NamedInputModule,
+    Module, NamedInputModule, LoopBody, TraceEmit, forward_via_step,
     Parameter, Buffer, Linear, Optimizer, Stateful,
     SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder,
     RMSprop, RMSpropBuilder, Adagrad, AdagradBuilder, RAdam, NAdam,

@@ -60,6 +60,7 @@ pub(super) fn wire_gate(
             module: Some(composite),
             ref_forward,
             trace_buf: None,
+            named_trace_buf: None,
             loop_ports: None,
         },
     );

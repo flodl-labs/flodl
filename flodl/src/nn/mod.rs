@@ -205,6 +205,12 @@ pub trait Module {
     /// receiving additional named inputs via graph `using()`.
     fn as_named_input(&self) -> Option<&dyn NamedInputModule> { None }
 
+    /// Upcast to [`LoopBody`] for loop bodies that publish named per-iteration traces.
+    /// Override in types that implement `LoopBody` to enable multi-output trace
+    /// publishing via [`TraceEmit::publish`]. Default returns `None`, in which
+    /// case the loop runner falls back to the legacy [`Module::trace`] path.
+    fn as_loop_body(&self) -> Option<&dyn LoopBody> { None }
+
     /// Upcast to [`Graph`] for hierarchical tree composition.
     /// Override in Graph to enable subgraph nesting with label-path addressing.
     fn as_graph(&self) -> Option<&Graph> { None }
@@ -255,6 +261,9 @@ impl Module for Box<dyn Module> {
     fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
         (**self).as_named_input()
     }
+    fn as_loop_body(&self) -> Option<&dyn LoopBody> {
+        (**self).as_loop_body()
+    }
     fn as_graph(&self) -> Option<&Graph> {
         (**self).as_graph()
     }
@@ -278,6 +287,112 @@ pub trait NamedInputModule: Module {
         input: &Variable,
         refs: &HashMap<String, Variable>,
     ) -> Result<Variable>;
+}
+
+/// Per-iteration emit channel handed to [`LoopBody::step`] by the loop runner.
+///
+/// Body code calls [`TraceEmit::publish`] to publish named auxiliary outputs
+/// (one per published name per iteration). The runner harvests the map after
+/// each step and appends each entry into the loop's per-name vector, surfaced
+/// downstream via [`crate::graph::Graph::traces`] and `LossContext::traces`.
+///
+/// Use [`TraceEmit::discard`] when calling `step` outside a loop runner
+/// (typically from a `Module::forward` shim that delegates to `step` for
+/// bodies that don't have a separate non-loop forward path).
+pub struct TraceEmit<'a> {
+    named: Option<&'a mut HashMap<String, Variable>>,
+}
+
+impl<'a> TraceEmit<'a> {
+    /// Construct an emitter that drops every publish call. Useful when calling
+    /// [`LoopBody::step`] from a non-loop context where traces are irrelevant.
+    /// Lifetime is generic so the result coerces into any caller's expected
+    /// `&mut TraceEmit<'_>` slot (mutable references are invariant in their
+    /// lifetime parameter, so a fixed `'static` would not coerce).
+    pub fn discard() -> TraceEmit<'a> {
+        TraceEmit { named: None }
+    }
+
+    pub(crate) fn new(named: &'a mut HashMap<String, Variable>) -> Self {
+        TraceEmit { named: Some(named) }
+    }
+
+    /// Publish a named per-iteration value. Panics if `name` was already
+    /// published in the same step (last-write-wins is not the contract;
+    /// duplicate publishes within one step are a body-author bug).
+    pub fn publish(&mut self, name: &str, v: Variable) {
+        if let Some(named) = self.named.as_deref_mut() {
+            if named.contains_key(name) {
+                panic!(
+                    "TraceEmit::publish: name {:?} already published this step",
+                    name
+                );
+            }
+            named.insert(name.to_string(), v);
+        }
+    }
+}
+
+/// Loop body trait for modules that publish multiple named per-iteration traces.
+///
+/// Implementing `LoopBody` is opt-in. Bodies that don't implement it stay on
+/// the legacy single-stream [`Module::trace`] path. Bodies that do implement
+/// it can publish any number of named values per iteration via the [`TraceEmit`]
+/// passed into [`step`](LoopBody::step), with no body-side `RefCell` state.
+///
+/// Refs are always passed (possibly empty), folding what would otherwise be a
+/// separate "with refs" trait variant. This mirrors how
+/// [`crate::graph::loop_node`] already handles ref-bearing bodies.
+///
+/// Bodies that have no meaningful standalone forward path can implement
+/// `Module::forward` as a one-line shim using [`forward_via_step`]:
+///
+/// ```ignore
+/// impl Module for ScanStep {
+///     fn forward(&self, x: &Variable) -> Result<Variable> {
+///         forward_via_step(self, x)
+///     }
+///     fn sub_modules(&self) -> Vec<Rc<dyn Module>> { /* ... */ vec![] }
+/// }
+/// impl LoopBody for ScanStep {
+///     fn step(
+///         &self,
+///         x: &Variable,
+///         _refs: &HashMap<String, Variable>,
+///         emit: &mut TraceEmit<'_>,
+///     ) -> Result<Variable> {
+///         let h = self.h_proj.forward(x)?;
+///         emit.publish("location", self.location_proj.forward(&h)?);
+///         emit.publish("content_logit", self.out_proj.forward(&h)?);
+///         Ok(h)
+///     }
+/// }
+/// impl Module for ScanStep {
+///     fn as_loop_body(&self) -> Option<&dyn LoopBody> { Some(self) }
+/// }
+/// ```
+pub trait LoopBody: Module {
+    /// Per-iteration step. Same contract as [`Module::forward`] but with
+    /// auxiliary refs (always present, possibly empty) and an emitter for
+    /// per-iteration named traces.
+    fn step(
+        &self,
+        input: &Variable,
+        refs: &HashMap<String, Variable>,
+        emit: &mut TraceEmit<'_>,
+    ) -> Result<Variable>;
+}
+
+/// Convenience helper for implementing `Module::forward` on a `LoopBody`
+/// that has no separate non-loop forward path. Allocates an empty refs map,
+/// calls `step` with a discarding emitter, and returns the result.
+pub fn forward_via_step<B: LoopBody + ?Sized>(
+    body: &B,
+    input: &Variable,
+) -> Result<Variable> {
+    let refs: HashMap<String, Variable> = HashMap::new();
+    let mut emit = TraceEmit::discard();
+    body.step(input, &refs, &mut emit)
 }
 
 /// Recursively walk a module tree, calling f on each module exactly once.
