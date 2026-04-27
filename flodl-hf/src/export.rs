@@ -123,6 +123,32 @@ enum HeadKind {
     Mlm,
 }
 
+/// 1:1 mapping from the Hub-mode head enum to the export-mode one.
+///
+/// The two enums carry identical variants on purpose: Hub-mode dispatch
+/// ([`crate::hub::HubExportHead`]) and export-mode dispatch
+/// ([`HeadKind`]) share the same five-way taxonomy. They live in
+/// separate modules because their parsers differ — `HubExportHead`
+/// accepts a permissive Hub auto-dispatch (unknown `For{Other}` → Base,
+/// matching HF Python's `AutoModel.from_pretrained` policy), while
+/// `classify_architecture` rejects unsupported `For{Other}` loudly.
+///
+/// This impl pins the variant correspondence in the type system: if
+/// either enum gains a variant the other lacks, the exhaustive match
+/// below stops compiling and the drift surfaces immediately.
+impl From<crate::hub::HubExportHead> for HeadKind {
+    fn from(h: crate::hub::HubExportHead) -> Self {
+        use crate::hub::HubExportHead as H;
+        match h {
+            H::Base => HeadKind::Base,
+            H::SeqCls => HeadKind::SeqCls,
+            H::TokCls => HeadKind::TokCls,
+            H::Qa => HeadKind::Qa,
+            H::Mlm => HeadKind::Mlm,
+        }
+    }
+}
+
 /// Suffix-match an HF class name against the supported task heads.
 ///
 /// Family-agnostic: every supported family follows the same naming
@@ -427,6 +453,16 @@ mod tests {
         let g_a = build_for_export(&distil, false, Device::CPU).unwrap();
         let g_b = build_for_export(&distil, true, Device::CPU).unwrap();
         assert_eq!(g_a.structural_hash(), g_b.structural_hash());
+    }
+
+    #[test]
+    fn hub_export_head_to_head_kind_round_trip() {
+        use crate::hub::HubExportHead;
+        assert_eq!(HeadKind::from(HubExportHead::Base), HeadKind::Base);
+        assert_eq!(HeadKind::from(HubExportHead::SeqCls), HeadKind::SeqCls);
+        assert_eq!(HeadKind::from(HubExportHead::TokCls), HeadKind::TokCls);
+        assert_eq!(HeadKind::from(HubExportHead::Qa), HeadKind::Qa);
+        assert_eq!(HeadKind::from(HubExportHead::Mlm), HeadKind::Mlm);
     }
 
     #[test]
