@@ -171,6 +171,41 @@ impl AutoConfig {
             AutoConfig::DebertaV2(c) => c.architectures.as_deref(),
         }
     }
+
+    /// HF Python class name for the bare backbone of this family
+    /// (e.g. `"BertModel"`, `"XLMRobertaModel"`). Used to normalise the
+    /// `architectures` field on the `source_config` stamped by base-only
+    /// loaders like [`AutoModel::from_pretrained`](crate::hub) — the
+    /// upstream Hub config typically advertises a head class
+    /// (`BertForPreTraining`, `RobertaForMaskedLM`), but this loader
+    /// builds the bare backbone and silently drops the head keys, so
+    /// the sidecar must reflect what was actually built.
+    pub fn base_class_name(&self) -> &'static str {
+        match self {
+            AutoConfig::Bert(_) => "BertModel",
+            AutoConfig::Roberta(_) => "RobertaModel",
+            AutoConfig::DistilBert(_) => "DistilBertModel",
+            AutoConfig::XlmRoberta(_) => "XLMRobertaModel",
+            AutoConfig::Albert(_) => "AlbertModel",
+            AutoConfig::DebertaV2(_) => "DebertaV2Model",
+        }
+    }
+
+    /// Replace the inner family config's `architectures` field with
+    /// `[arch_class]` and return the serialised `config.json` string.
+    /// Consuming variant of [`Self::to_json_str`] paired with
+    /// [`Self::base_class_name`] for base-only loaders that need to
+    /// stamp the source_config sidecar with the class actually built.
+    pub fn into_normalized_config_json(self, arch_class: &str) -> String {
+        match self {
+            AutoConfig::Bert(c) => c.with_architectures(arch_class).to_json_str(),
+            AutoConfig::Roberta(c) => c.with_architectures(arch_class).to_json_str(),
+            AutoConfig::DistilBert(c) => c.with_architectures(arch_class).to_json_str(),
+            AutoConfig::XlmRoberta(c) => c.with_architectures(arch_class).to_json_str(),
+            AutoConfig::Albert(c) => c.with_architectures(arch_class).to_json_str(),
+            AutoConfig::DebertaV2(c) => c.with_architectures(arch_class).to_json_str(),
+        }
+    }
 }
 
 /// One-liner Hub loader that dispatches to the matching family

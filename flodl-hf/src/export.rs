@@ -110,7 +110,7 @@ pub fn export_hf_dir(graph: &Graph, config_json: &str, out_dir: &Path) -> Result
 /// checkpoint was saved from a fine-tuned model rather than a base
 /// backbone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeadKind {
+pub(crate) enum HeadKind {
     /// Base backbone (`{Family}Model`) — no task-specific layers.
     Base,
     /// Sequence classification (`{Family}ForSequenceClassification`).
@@ -216,6 +216,24 @@ pub fn build_for_export(
         Some(name) => classify_architecture(name)?,
         None => HeadKind::Base,
     };
+    build_for_export_with_head(config, has_pooler, head, device)
+}
+
+/// Explicit-head variant of [`build_for_export`]. Skips the
+/// `architectures[0]` parse and dispatches the family + head match
+/// directly. Hub-side base loaders
+/// ([`AutoModel::from_pretrained`](crate::hub),
+/// [`AutoModel::from_pretrained_for_export`](crate::hub)) call this
+/// with [`HeadKind::Base`] so they don't trip
+/// [`classify_architecture`] on multi-head pretraining class names
+/// (`BertForPreTraining` etc.) that should silently fall through to
+/// the bare backbone.
+pub(crate) fn build_for_export_with_head(
+    config: &AutoConfig,
+    has_pooler: bool,
+    head: HeadKind,
+    device: Device,
+) -> Result<Graph> {
     match config {
         AutoConfig::Bert(c) => build_bert_for_export(c, has_pooler, head, device),
         AutoConfig::Roberta(c) => build_roberta_for_export(c, has_pooler, head, device),

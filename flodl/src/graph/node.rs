@@ -32,7 +32,7 @@ pub(crate) struct Node {
     /// Trace buffer for loop nodes whose body implements Module::trace().
     pub trace_buf: Option<Rc<RefCell<Vec<Variable>>>>,
     /// Named trace store for loop nodes whose body implements [`crate::nn::LoopBody`].
-    /// One Vec<Variable> per published name, length equal to count of iterations
+    /// One `Vec<Variable>` per published name, length equal to count of iterations
     /// where the body called [`crate::nn::TraceEmit::publish`] for that name.
     pub named_trace_buf: Option<NamedTraceStore>,
     /// Shared port list for loop nodes — the loop's run closure reads this

@@ -3,18 +3,21 @@
 //! Model-type dispatch: pull `config.json`, read `model_type`, then route
 //! to the matching family. The backbone path ([`AutoModel`]) returns a
 //! [`Graph`] whose shape is always `[batch, seq_len, hidden]` — BERT is
-//! routed through [`BertModel::on_device_without_pooler`] to keep that
+//! routed through [`BertModel::on_device_without_pooler`](crate::models::bert::BertModel::on_device_without_pooler) to keep that
 //! invariant uniform across families. The task-head paths return the
-//! corresponding [`AutoModelFor*`] enum, dispatching the tokenizer
-//! attach + weight load through each concrete family's loader.
+//! corresponding `AutoModelFor*` enum
+//! ([`AutoModelForSequenceClassification`] et al.), dispatching the
+//! tokenizer attach + weight load through each concrete family's
+//! loader.
 
 use hf_hub::api::sync::ApiBuilder;
 
 use flodl::{Device, Graph, Result, TensorError};
 
+use crate::export::{build_for_export_with_head, HeadKind};
 use crate::models::albert::{
     AlbertForMaskedLM, AlbertForQuestionAnswering, AlbertForSequenceClassification,
-    AlbertForTokenClassification, AlbertModel,
+    AlbertForTokenClassification,
 };
 use crate::models::auto::{
     AutoConfig, AutoModel, AutoModelForMaskedLM, AutoModelForQuestionAnswering,
@@ -22,23 +25,23 @@ use crate::models::auto::{
 };
 use crate::models::bert::{
     BertForMaskedLM, BertForQuestionAnswering, BertForSequenceClassification,
-    BertForTokenClassification, BertModel,
+    BertForTokenClassification,
 };
 use crate::models::deberta_v2::{
     DebertaV2ForMaskedLM, DebertaV2ForQuestionAnswering,
-    DebertaV2ForSequenceClassification, DebertaV2ForTokenClassification, DebertaV2Model,
+    DebertaV2ForSequenceClassification, DebertaV2ForTokenClassification,
 };
 use crate::models::distilbert::{
     DistilBertForMaskedLM, DistilBertForQuestionAnswering,
-    DistilBertForSequenceClassification, DistilBertForTokenClassification, DistilBertModel,
+    DistilBertForSequenceClassification, DistilBertForTokenClassification,
 };
 use crate::models::roberta::{
     RobertaForMaskedLM, RobertaForQuestionAnswering, RobertaForSequenceClassification,
-    RobertaForTokenClassification, RobertaModel,
+    RobertaForTokenClassification,
 };
 use crate::models::xlm_roberta::{
     XlmRobertaForMaskedLM, XlmRobertaForQuestionAnswering,
-    XlmRobertaForSequenceClassification, XlmRobertaForTokenClassification, XlmRobertaModel,
+    XlmRobertaForSequenceClassification, XlmRobertaForTokenClassification,
 };
 
 #[cfg(feature = "tokenizer")]
@@ -81,10 +84,10 @@ impl AutoModel {
     ///
     /// The returned [`Graph`] emits `last_hidden_state` of shape
     /// `[batch, seq_len, hidden]` across all three families — BERT is
-    /// routed through [`BertModel::on_device_without_pooler`] so its
+    /// routed through [`BertModel::on_device_without_pooler`](crate::models::bert::BertModel::on_device_without_pooler) so its
     /// output stays consistent with RoBERTa and DistilBERT. If the
     /// BERT pooler output is specifically required, call
-    /// [`BertModel::from_pretrained`] directly.
+    /// [`BertModel::from_pretrained`](crate::models::bert::BertModel) directly.
     ///
     /// `repo_id` examples:
     /// - `"bert-base-uncased"` (BERT)
@@ -101,42 +104,24 @@ impl AutoModel {
     /// Device-aware variant of [`from_pretrained`](Self::from_pretrained).
     pub fn from_pretrained_on_device(repo_id: &str, device: Device) -> Result<Graph> {
         let (config, weights) = fetch_auto_config_and_weights(repo_id)?;
-        // Capture the source config before consuming it in the match,
-        // and normalise `architectures` per family to the base class
-        // name actually being built (e.g. `bert-base-uncased` ships
+        // Force the no-pooler variant of pooler-bearing families so this
+        // loader's output stays uniform `[batch, seq_len, hidden]` across
+        // all six families (BERT's pooler would otherwise produce a
+        // `[batch, hidden]` shape that diverges from RoBERTa/DistilBERT).
+        // Pooler-less families ignore the flag.
+        let graph = build_for_export_with_head(
+            &config, /*has_pooler=*/ false, HeadKind::Base, device,
+        )?;
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        // Normalise `architectures` to the base class name actually
+        // being built (e.g. `bert-base-uncased` ships
         // `architectures: ["BertForPreTraining"]` but this loader
         // builds a bare `BertModel` with the head dropped). Without
         // normalisation, a subsequent `save_checkpoint` sidecar would
         // carry an arch name that `classify_architecture` rejects on
         // `--checkpoint` re-export.
-        let (graph, config_json) = match config {
-            AutoConfig::Bert(c) => (
-                BertModel::on_device_without_pooler(&c, device)?,
-                c.with_architectures("BertModel").to_json_str(),
-            ),
-            AutoConfig::Roberta(c) => (
-                RobertaModel::on_device_without_pooler(&c, device)?,
-                c.with_architectures("RobertaModel").to_json_str(),
-            ),
-            AutoConfig::DistilBert(c) => (
-                DistilBertModel::on_device(&c, device)?,
-                c.with_architectures("DistilBertModel").to_json_str(),
-            ),
-            AutoConfig::XlmRoberta(c) => (
-                XlmRobertaModel::on_device_without_pooler(&c, device)?,
-                c.with_architectures("XLMRobertaModel").to_json_str(),
-            ),
-            AutoConfig::Albert(c) => (
-                AlbertModel::on_device_without_pooler(&c, device)?,
-                c.with_architectures("AlbertModel").to_json_str(),
-            ),
-            AutoConfig::DebertaV2(c) => (
-                DebertaV2Model::on_device(&c, device)?,
-                c.with_architectures("DebertaV2Model").to_json_str(),
-            ),
-        };
-        load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config_json);
+        let arch = config.base_class_name();
+        graph.set_source_config(config.into_normalized_config_json(arch));
         Ok(graph)
     }
 
@@ -263,8 +248,10 @@ impl AutoModel {
         // validation in `load_safetensors_into_graph_with_rename_allow_unused`.
         let has_pooler = weights_have_pooler(&weights)?;
 
-        // Normalise `architectures` to the base class name on each
-        // family arm. The Hub's source config typically tags a head
+        let graph = build_for_export_with_head(&config, has_pooler, HeadKind::Base, device)?;
+        load_weights_with_logging(repo_id, &graph, &weights)?;
+        // Normalise `architectures` to the base class name actually
+        // being built. The Hub's source config typically tags a head
         // class (e.g. `bert-base-uncased` ships
         // `architectures: ["BertForPreTraining"]`) while this loader,
         // mirroring HF's `AutoModel.from_pretrained`, builds the base
@@ -274,50 +261,8 @@ impl AutoModel {
         // to the head class on `--checkpoint` re-export and produces
         // a graph whose structural hash no longer matches the saved
         // file (see `flodl-hf/tests/checkpoint_export_soak.rs`).
-        let (graph, config_json) = match config {
-            AutoConfig::Bert(c) => {
-                let g = if has_pooler {
-                    BertModel::on_device(&c, device)?
-                } else {
-                    BertModel::on_device_without_pooler(&c, device)?
-                };
-                (g, c.with_architectures("BertModel").to_json_str())
-            }
-            AutoConfig::Roberta(c) => {
-                let g = if has_pooler {
-                    RobertaModel::on_device(&c, device)?
-                } else {
-                    RobertaModel::on_device_without_pooler(&c, device)?
-                };
-                (g, c.with_architectures("RobertaModel").to_json_str())
-            }
-            AutoConfig::DistilBert(c) => {
-                let g = DistilBertModel::on_device(&c, device)?;
-                (g, c.with_architectures("DistilBertModel").to_json_str())
-            }
-            AutoConfig::XlmRoberta(c) => {
-                let g = if has_pooler {
-                    XlmRobertaModel::on_device(&c, device)?
-                } else {
-                    XlmRobertaModel::on_device_without_pooler(&c, device)?
-                };
-                (g, c.with_architectures("XLMRobertaModel").to_json_str())
-            }
-            AutoConfig::Albert(c) => {
-                let g = if has_pooler {
-                    AlbertModel::on_device(&c, device)?
-                } else {
-                    AlbertModel::on_device_without_pooler(&c, device)?
-                };
-                (g, c.with_architectures("AlbertModel").to_json_str())
-            }
-            AutoConfig::DebertaV2(c) => {
-                let g = DebertaV2Model::on_device(&c, device)?;
-                (g, c.with_architectures("DebertaV2Model").to_json_str())
-            }
-        };
-        load_weights_with_logging(repo_id, &graph, &weights)?;
-        graph.set_source_config(config_json);
+        let arch = config.base_class_name();
+        graph.set_source_config(config.into_normalized_config_json(arch));
         Ok(graph)
     }
 }
@@ -646,7 +591,8 @@ impl AutoModelForMaskedLM {
 impl HfTokenizer {
     /// Download `tokenizer.json` from a HuggingFace Hub repo and wrap it.
     ///
-    /// Uses the same `hf_hub` cache as [`BertModel::from_pretrained`], so
+    /// Uses the same `hf_hub` cache as
+    /// [`BertModel::from_pretrained`](crate::models::bert::BertModel), so
     /// a model already pulled from a given repo won't re-download the
     /// tokenizer either (and vice versa).
     pub fn from_pretrained(repo_id: &str) -> Result<Self> {

@@ -11,9 +11,9 @@
 //! reads the same as HF Python's `BertModel.from_pretrained(...)`.
 //!
 //! Per-family `from_pretrained` impls live in their own submodules
-//! ([`bert`], [`roberta`], [`distilbert`], [`xlm_roberta`], [`albert`],
-//! [`deberta_v2`]). The `Auto*` cross-family dispatch and the
-//! [`HubExportHead`] enum live in [`auto`]. The infrastructure shared
+//! (`bert`, `roberta`, `distilbert`, `xlm_roberta`, `albert`,
+//! `deberta_v2`). The `Auto*` cross-family dispatch and the
+//! [`HubExportHead`] enum live in `auto`. The infrastructure shared
 //! across all families (Hub fetch, pooler detection, weight load with
 //! logging, optional tokenizer attach) lives at the bottom of this
 //! file.
