@@ -127,6 +127,26 @@ commands:
     run: python scripts/parity_xlm_roberta.py
     docker: hf-parity
 
+  xlm-roberta-seqcls:
+    description: Regenerate tests/fixtures/xlm_roberta_seqcls_parity.safetensors (XLMRobertaForSequenceClassification)
+    run: python scripts/parity_xlm_roberta_seqcls.py
+    docker: hf-parity
+
+  xlm-roberta-tokencls:
+    description: Regenerate tests/fixtures/xlm_roberta_tokencls_parity.safetensors (XLMRobertaForTokenClassification)
+    run: python scripts/parity_xlm_roberta_tokencls.py
+    docker: hf-parity
+
+  xlm-roberta-qa:
+    description: Regenerate tests/fixtures/xlm_roberta_qa_parity.safetensors (XLMRobertaForQuestionAnswering)
+    run: python scripts/parity_xlm_roberta_qa.py
+    docker: hf-parity
+
+  xlm-roberta-mlm:
+    description: Regenerate tests/fixtures/xlm_roberta_mlm_parity.safetensors (XLMRobertaForMaskedLM)
+    run: python scripts/parity_xlm_roberta_mlm.py
+    docker: hf-parity
+
   deberta-v2:
     description: Regenerate tests/fixtures/deberta_v2_parity.safetensors against HuggingFace reference (microsoft/deberta-v3-base)
     run: python scripts/parity_deberta_v2.py
