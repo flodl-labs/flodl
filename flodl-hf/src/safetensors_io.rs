@@ -448,6 +448,52 @@ pub fn hf_canonical_save_key(hf_key: &str) -> String {
     hf_key.to_string()
 }
 
+/// Predicate: does `key` end with one of the pooler suffixes?
+///
+/// Matches both BERT-style `pooler.dense.{weight,bias}` (a wrapper
+/// around a `BertPooler { dense: Linear }`) and ALBERT-style flat
+/// `pooler.{weight,bias}` (HF's `AlbertModel.pooler` is a bare
+/// `nn.Linear`). Pooler-less families (DistilBERT, DeBERTa-v2) never
+/// match either shape, so the predicate is a safe no-op for them.
+///
+/// Normalises the `/` tag separator that flodl checkpoints use between
+/// qualified tag boundaries (e.g. `bert.pooler/dense.weight`) so the
+/// same predicate works for both raw safetensors keys and flodl's
+/// internal tag form.
+fn is_pooler_key(key: &str) -> bool {
+    let normalised = key.replace('/', ".");
+    normalised.ends_with("pooler.dense.weight")
+        || normalised.ends_with("pooler.dense.bias")
+        || normalised.ends_with("pooler.weight")
+        || normalised.ends_with("pooler.bias")
+}
+
+/// Inspect a safetensors blob and report whether it carries the pooler
+/// `Linear` weights for any of the pooler-bearing families (BERT,
+/// RoBERTa, XLM-R, ALBERT).
+///
+/// Used by every pooler-bearing family's `from_pretrained_on_device`
+/// (and `AutoModel::from_pretrained_for_export_on_device`) to pick
+/// `on_device` vs `on_device_without_pooler` based on what the
+/// checkpoint actually ships, rather than baking a per-family default
+/// that's always wrong for some Hub repos (e.g. `roberta-base` has no
+/// pooler; `bert-base-uncased` does).
+pub fn weights_have_pooler(weights: &[u8]) -> Result<bool> {
+    let st = SafeTensors::deserialize(weights)
+        .map_err(|e| TensorError::new(&format!("safetensors parse error: {e}")))?;
+    Ok(st.names().iter().any(|n| is_pooler_key(n)))
+}
+
+/// Detect pooler presence from a list of checkpoint keys (e.g. the
+/// output of [`flodl::checkpoint_keys`]). Mirrors [`weights_have_pooler`]
+/// for the checkpoint-keys input shape; the flodl checkpoint key form
+/// uses `/` as the tag-boundary separator and this helper normalises
+/// that internally so both safetensors-style dotted keys and tagged
+/// flodl keys are handled by the same predicate.
+pub fn keys_have_pooler(keys: &[String]) -> bool {
+    keys.iter().any(|k| is_pooler_key(k))
+}
+
 /// Read a safetensors file from disk and load it into `graph`.
 ///
 /// Thin wrapper around [`load_safetensors_into_graph`]. I/O errors are
@@ -717,6 +763,41 @@ mod tests {
 
     fn actual_map(entries: &[(&str, &[i64])]) -> HashMap<String, Vec<i64>> {
         entries.iter().map(|(k, s)| ((*k).to_string(), s.to_vec())).collect()
+    }
+
+    #[test]
+    fn keys_have_pooler_detects_slash_separator() {
+        let keys = vec![
+            "encoder/layer/0/attention/query/weight".to_string(),
+            "pooler/dense/weight".to_string(),
+            "pooler/dense/bias".to_string(),
+        ];
+        assert!(keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_detects_dot_separator() {
+        let keys = vec![
+            "encoder.layer.0.attention.query.weight".to_string(),
+            "pooler.dense.weight".to_string(),
+        ];
+        assert!(keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_returns_false_for_encoder_only() {
+        let keys = vec![
+            "encoder/layer/0/attention/query/weight".to_string(),
+            "encoder/layer/0/attention/query/bias".to_string(),
+        ];
+        assert!(!keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_does_not_match_substrings() {
+        // A key containing "pooler" mid-string must not false-positive.
+        let keys = vec!["encoder/some_pooler_thing/weight".to_string()];
+        assert!(!keys_have_pooler(&keys));
     }
 
     #[test]

@@ -27,7 +27,6 @@ use flodl::{Graph, Result, TensorError};
 use crate::safetensors_io::{
     bert_legacy_key_rename, load_safetensors_into_graph_with_rename_allow_unused,
 };
-use safetensors::SafeTensors;
 #[cfg(feature = "tokenizer")]
 use crate::tokenizer::HfTokenizer;
 
@@ -197,33 +196,6 @@ fn try_load_tokenizer(repo_id: &str) -> Option<HfTokenizer> {
             None
         }
     }
-}
-
-/// Inspect a safetensors blob and report whether it carries the pooler
-/// `Linear` weights for any of the pooler-bearing families (BERT,
-/// RoBERTa, XLM-R, ALBERT).
-///
-/// Matches both shapes: BERT-style `pooler.dense.{weight,bias}` (a
-/// `BertPooler { dense: Linear }` wrapper) and ALBERT-style flat
-/// `pooler.{weight,bias}` (HF's `AlbertModel.pooler` is a bare
-/// `nn.Linear`). Pooler-less families (DistilBERT, DeBERTa-v2) never
-/// match either shape, so the helper is a safe no-op for them.
-///
-/// Used by every pooler-bearing family's `from_pretrained_on_device`
-/// (and `AutoModel::from_pretrained_for_export_on_device`) to pick
-/// `on_device` vs `on_device_without_pooler` based on what the
-/// checkpoint actually ships, rather than baking a per-family default
-/// that's always wrong for some Hub repos (e.g. `roberta-base` has no
-/// pooler; `bert-base-uncased` does).
-fn weights_have_pooler(weights: &[u8]) -> Result<bool> {
-    let st = SafeTensors::deserialize(weights)
-        .map_err(|e| TensorError::new(&format!("safetensors parse error: {e}")))?;
-    Ok(st.names().iter().any(|n| {
-        n.ends_with("pooler.dense.weight")
-            || n.ends_with("pooler.dense.bias")
-            || n.ends_with("pooler.weight")
-            || n.ends_with("pooler.bias")
-    }))
 }
 
 /// Load safetensors into a graph, logging any discarded checkpoint keys

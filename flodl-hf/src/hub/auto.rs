@@ -44,10 +44,9 @@ use crate::models::xlm_roberta::{
 #[cfg(feature = "tokenizer")]
 use crate::tokenizer::HfTokenizer;
 
-use super::{
-    fetch_config_and_weights, fetch_config_str, load_weights_with_logging,
-    weights_have_pooler,
-};
+use crate::safetensors_io::weights_have_pooler;
+
+use super::{fetch_config_and_weights, fetch_config_str, load_weights_with_logging};
 #[cfg(feature = "tokenizer")]
 use super::try_load_tokenizer;
 

@@ -348,24 +348,6 @@ fn build_deberta_v2_for_export(
     }
 }
 
-/// Convenience: detect pooler presence from a list of checkpoint keys
-/// (e.g. the output of [`flodl::checkpoint_keys`]). Returns `true` when
-/// any key matches one of the family pooler suffixes
-/// (`pooler.dense.{weight,bias}` for BERT/RoBERTa/XLM-R,
-/// `pooler.{weight,bias}` for ALBERT). Mirrors the safetensors-side
-/// `weights_have_pooler` check while normalising the `/` tag separator
-/// flodl checkpoints use between qualified tag boundaries
-/// (e.g. `bert.pooler/dense.weight`).
-pub fn keys_have_pooler(keys: &[String]) -> bool {
-    keys.iter().any(|k| {
-        let normalised = k.replace('/', ".");
-        normalised.ends_with("pooler.dense.weight")
-            || normalised.ends_with("pooler.dense.bias")
-            || normalised.ends_with("pooler.weight")
-            || normalised.ends_with("pooler.bias")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,41 +410,6 @@ mod tests {
         assert!(nested.join("config.json").exists());
 
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn keys_have_pooler_detects_slash_separator() {
-        let keys = vec![
-            "encoder/layer/0/attention/query/weight".to_string(),
-            "pooler/dense/weight".to_string(),
-            "pooler/dense/bias".to_string(),
-        ];
-        assert!(keys_have_pooler(&keys));
-    }
-
-    #[test]
-    fn keys_have_pooler_detects_dot_separator() {
-        let keys = vec![
-            "encoder.layer.0.attention.query.weight".to_string(),
-            "pooler.dense.weight".to_string(),
-        ];
-        assert!(keys_have_pooler(&keys));
-    }
-
-    #[test]
-    fn keys_have_pooler_returns_false_for_encoder_only() {
-        let keys = vec![
-            "encoder/layer/0/attention/query/weight".to_string(),
-            "encoder/layer/0/attention/query/bias".to_string(),
-        ];
-        assert!(!keys_have_pooler(&keys));
-    }
-
-    #[test]
-    fn keys_have_pooler_does_not_match_substrings() {
-        // A key containing "pooler" mid-string must not false-positive.
-        let keys = vec!["encoder/some_pooler_thing/weight".to_string()];
-        assert!(!keys_have_pooler(&keys));
     }
 
     #[test]

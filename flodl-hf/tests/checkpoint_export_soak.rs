@@ -25,9 +25,10 @@
 use std::path::PathBuf;
 
 use flodl::{checkpoint_keys, Device, Graph};
-use flodl_hf::export::{build_for_export, export_hf_dir, keys_have_pooler};
+use flodl_hf::export::{build_for_export, export_hf_dir};
 use flodl_hf::models::auto::{AutoConfig, AutoModel};
 use flodl_hf::models::distilbert::DistilBertForSequenceClassification;
+use flodl_hf::safetensors_io::keys_have_pooler;
 
 fn unique_tmp_root(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(

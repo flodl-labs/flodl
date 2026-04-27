@@ -167,7 +167,7 @@ def pick_extra_kwargs(
     """
     if cls is not AutoModel:
         return {}, dispatch_for_cls_outputs(cls)
-    # Mirror `flodl_hf::export::keys_have_pooler`: suffix-match the four
+    # Mirror `flodl_hf::safetensors_io::keys_have_pooler`: suffix-match the four
     # family pooler key shapes so we catch BERT-family checkpoints that
     # carry the `<family>.` prefix (e.g. `bert.pooler.dense.weight` for
     # `bert-base-uncased`, where the source class is `BertForPreTraining`)

@@ -14,7 +14,9 @@ use crate::models::albert::{
     AlbertForSequenceClassification, AlbertForTokenClassification, AlbertModel,
 };
 
-use super::{fetch_config_and_weights, load_weights_with_logging, weights_have_pooler};
+use crate::safetensors_io::weights_have_pooler;
+
+use super::{fetch_config_and_weights, load_weights_with_logging};
 #[cfg(feature = "tokenizer")]
 use super::try_load_tokenizer;
 

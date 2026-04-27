@@ -41,9 +41,10 @@ use std::process::ExitCode;
 
 use flodl::{Device, Graph};
 use flodl_cli::{parse_or_schema, FdlArgs, FdlArgsTrait};
-use flodl_hf::export::{build_for_export, export_hf_dir, keys_have_pooler};
+use flodl_hf::export::{build_for_export, export_hf_dir};
 use flodl_hf::hub::HubExportHead;
 use flodl_hf::models::auto::{AutoConfig, AutoModel};
+use flodl_hf::safetensors_io::keys_have_pooler;
 
 /// Export a Hub repo or local flodl checkpoint as a HuggingFace-compatible directory (model.safetensors + config.json) using flodl's own writer. Auto-detects family (bert/roberta/distilbert/xlm-roberta/albert/deberta-v2).
 #[derive(FdlArgs, Debug)]
