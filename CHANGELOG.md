@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-04-28
+
 ### Added
 
 #### `LoopBody` + `TraceEmit`: multi-output per-iteration traces from loop bodies

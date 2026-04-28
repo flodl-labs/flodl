@@ -101,11 +101,12 @@ not a commitment; only moving one to In Progress is.
   DL package manager on top of cargo. Remaining slices: flodl-aware
   feature selection on `fdl add` (`fdl add hf --for bert|vit|offline`),
   argv forwarding on `fdl build` / `fdl clippy` (matching the `--`
-  separator + `append:` pattern that shipped on `fdl run` in 0.5.3),
-  and `model-info` / `doctor` commands. Earlier slices already in
-  Shipped: `fdl add flodl-hf` + `fdl init --with-hf`, the
-  `--playground` / `--install` mode split, `fdl run` argv forwarding,
-  Docker-aware schema probing, and bare-project help fallthrough.
+  separator + `append:` pattern that shipped on `run:`-kind commands
+  in 0.5.3), and `model-info` / `doctor` commands. Earlier slices
+  already in Shipped: `fdl add flodl-hf` + `fdl init --with-hf`, the
+  `--playground` / `--install` mode split, `run:`-kind argv
+  forwarding, Docker-aware schema probing, and bare-project help
+  fallthrough.
 - **JEPA exploration**: two-tower EMA target-encoder infrastructure,
   latent predictive training, via BYOL as the stepping stone. The
   infra (EMA updates, stop-gradient composition, latent probes) is
