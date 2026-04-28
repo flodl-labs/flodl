@@ -2,12 +2,14 @@
 
 Proc-macro derive crate for [`flodl-cli`](https://crates.io/crates/flodl-cli),
 the `fdl` command-line tool for the [floDl](https://flodl.dev) Rust deep
-learning framework.
+learning framework. See [flodl.dev](https://flodl.dev) and the
+[main README](https://github.com/flodl-labs/flodl#readme) for the full
+framework.
 
 This crate exposes a single derive, `#[derive(FdlArgs)]`, which turns a
 plain struct into an argv parser that plugs into `flodl-cli`'s runtime.
 It is re-exported by `flodl-cli` as `flodl_cli::FdlArgs`, so depending on
-`flodl-cli` is enough. You do not normally add this crate directly.
+`flodl-cli` is enough. **You do not install this crate directly.**
 
 ## What the derive produces
 

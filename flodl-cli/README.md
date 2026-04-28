@@ -1,10 +1,14 @@
 # flodl-cli
 
 `fdl` is the command-line tool for the [floDl](https://flodl.dev) Rust
-deep-learning framework. It drives first-time setup, libtorch management,
-project scaffolding, hardware diagnostics, shell completions, and the
-declarative project manifest (`fdl.yml`) used to dispatch training jobs,
-DDP runs, and tooling inside a flodl workspace.
+deep-learning framework. See [flodl.dev](https://flodl.dev) and the
+[main README](https://github.com/flodl-labs/flodl#readme) for the full
+framework.
+
+`fdl` drives first-time setup, libtorch management, project scaffolding,
+hardware diagnostics, shell completions, and the declarative project
+manifest (`fdl.yml`) used to dispatch training jobs, DDP runs, and
+tooling inside a flodl workspace.
 
 It is a pure-Rust binary with **zero native dependencies**. No libtorch, no
 Python, and no Rust toolchain required to install. The CLI stays useful
@@ -12,14 +16,16 @@ even before anything else is set up, which is the whole point.
 
 ```sh
 curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
-./fdl setup                    # detect hardware, download libtorch, set up Docker
-./fdl init my-model            # scaffold a flodl project with training template
-./fdl diagnose                 # hardware + compatibility report
+./fdl install                  # copy to ~/.local/bin/fdl (or `cargo install flodl-cli`)
+fdl libtorch download          # auto-detect GPU, install the right libtorch variant
+fdl diagnose                   # hardware + compatibility report
 ```
 
-See the
-[full CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md)
-for every command, flag, and the `fdl.yml` manifest format.
+That alone gives you a working libtorch installation usable from any
+Rust (tch-rs), C++, or Python project. The flodl framework
+([flodl.dev](https://flodl.dev)) builds on top with `fdl setup`,
+`fdl init`, and the `fdl.yml` manifest format covered in the
+[full CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md).
 
 ## Design principles
 

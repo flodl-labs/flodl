@@ -1,8 +1,10 @@
 # flodl-hf
 
-HuggingFace integration for [flodl](https://flodl.dev): safetensors I/O,
+HuggingFace integration for [floDl](https://flodl.dev): safetensors I/O,
 hub downloads, tokenizers, and pre-built transformer architectures with
-PyTorch-verified numerical parity.
+PyTorch-verified numerical parity. See [flodl.dev](https://flodl.dev)
+and the [main README](https://github.com/flodl-labs/flodl#readme) for
+the full framework.
 
 ## Status
 
@@ -22,6 +24,14 @@ that loads into HF Python's `AutoModelFor*.from_pretrained` with zero
 `missing_keys` / `unexpected_keys` and bit-exact forward outputs.
 
 ## Getting started
+
+If you do not already have `fdl` (the flodl CLI) on your machine, grab
+the pre-compiled binary first:
+
+```bash
+curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
+./fdl install     # copy to ~/.local/bin/fdl (or `cargo install flodl-cli`)
+```
 
 Inside an existing flodl project, two modes (combinable):
 

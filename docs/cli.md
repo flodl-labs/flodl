@@ -29,17 +29,25 @@ project root.
 
 ## Install
 
-```bash
-# Option 1: cargo install (requires Rust)
-cargo install flodl-cli
+The fastest path is the pre-compiled binary (no Rust toolchain
+required):
 
-# Option 2: download a pre-compiled binary (no Rust needed)
+```bash
 curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
+./fdl install                # copies to ~/.local/bin/fdl
 ```
 
 The `fdl` bootstrap script downloads the right pre-compiled binary from
-GitHub Releases on first use. It falls back to `cargo build` if no binary
-is available for your platform.
+GitHub Releases on first use, then `./fdl install` puts it on your PATH.
+It detects your shell and prints PATH instructions if `~/.local/bin`
+is not yet on your PATH. The bootstrap falls back to `cargo build`
+if no binary is available for your platform.
+
+If you have a Rust toolchain handy, the equivalent one-liner is:
+
+```bash
+cargo install flodl-cli
+```
 
 For developers working on flodl itself:
 
@@ -48,19 +56,19 @@ cargo build --release -p flodl-cli
 ./target/release/fdl --help
 ```
 
-### Make it global
+### Install flags and updates
 
 ```bash
-fdl install                  # copies to ~/.local/bin/fdl
+fdl install                  # copy to ~/.local/bin/fdl
 fdl install --dev            # symlink instead (developers: tracks local builds)
 fdl install --check          # compare installed vs latest GitHub release
 ```
 
-`fdl install` downloads the latest release from GitHub if a newer version
-is available. It detects your shell and prints PATH instructions if
-`~/.local/bin` is not yet on your PATH. Use `--dev` to symlink instead of
-copy, so `cargo build --release -p flodl-cli` instantly updates the
-global `fdl`.
+Use `--dev` to symlink instead of copy, so
+`cargo build --release -p flodl-cli` instantly updates the global
+`fdl`. `fdl install --check` compares the installed version with the
+latest GitHub release and is the primary way to update an existing
+install.
 
 ---
 
