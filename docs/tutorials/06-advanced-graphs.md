@@ -186,6 +186,89 @@ A loop body can override any combination:
 | `as_named_input()` | Named ref forwarding from `using()` |
 | `detach_state()` | Gradient chain breaking between training steps |
 
+### Per-iteration traces
+
+Loop bodies often need to publish auxiliary values per iteration: the
+running loss, an intermediate quality score, a confidence number, a
+halting probability. These are not the body's main output (which the
+runner already feeds to the next iteration) but observation signals
+for the loss closure or for downstream analysis.
+
+The canonical pattern is `LoopBody` + `TraceEmit`. The body implements
+`step(input, refs, emit)` and calls `emit.publish("name", value)` for
+each per-iteration output it wants to expose; the runner harvests
+each step's emit map and appends entries into per-name vectors on
+the loop node. Same API across single-GPU, multi-GPU, and the El Che
+DDP path.
+
+```rust
+use flodl::{LoopBody, TraceEmit, Variable, forward_via_step};
+
+struct RefinementBlock {
+    quality_head: Linear,
+    inner: Graph,
+}
+
+impl LoopBody for RefinementBlock {
+    fn step(&self, x: &Variable, _refs: &Refs, emit: &mut TraceEmit)
+        -> Result<Variable>
+    {
+        let refined = self.inner.forward(x)?;
+        let quality = self.quality_head.forward(&refined)?;
+        emit.publish("quality", quality.clone())?;
+        emit.publish("step_loss", refined.norm()?)?;
+        Ok(refined)
+    }
+}
+
+impl Module for RefinementBlock {
+    fn forward(&self, x: &Variable) -> Result<Variable> {
+        forward_via_step(self, x)
+    }
+    fn as_loop_body(&self) -> Option<&dyn LoopBody> { Some(self) }
+    fn parameters(&self) -> Vec<Parameter> {
+        // ... usual delegation
+    }
+}
+```
+
+Read the published traces back from the graph after a forward pass:
+
+```rust
+let _ = graph.forward(&x)?;
+
+let qualities = graph.traces("quality");   // Vec<Variable>, one per iteration
+let losses    = graph.traces("step_loss"); // Vec<Variable>, one per iteration
+
+// Inside a loss closure (LossContext), the same names appear under
+// `ctx.traces["quality"]` / `ctx.traces["step_loss"]`. Backward through
+// these is fully supported -- gradients flow through the per-iteration
+// outputs into the loop body's parameters.
+```
+
+Sparse emits are allowed: a step that does not call
+`emit.publish("name", ...)` simply does not grow that name's vector,
+so `traces["name"].len() <= n_iter`. `TraceEmit::publish` panics on
+duplicate names within a single step (per-step dedup, always-on);
+cross-loop name reuse and tag-vs-trace key collisions are validated
+once per graph the first time traces are observed.
+
+`forward_via_step` is the shorthand for "this body has no standalone
+forward semantics, run it via the loop runner". Pair it with
+`as_loop_body()` returning `Some(self)` and the body works
+identically inside `loop_body(...).for_n(n)` and outside (where the
+emitter is a no-op).
+
+#### Single-stream legacy: `Module::trace()`
+
+For loop bodies that publish exactly one per-iteration value and do
+not need DDP-safe state (single-GPU only), the older
+`Module::trace() -> Option<Variable>` shortcut still compiles. It
+returns the most recently produced trace, the runner appends it
+under the implicit name set by the loop's `tag(...)`. Reach for
+`LoopBody` + `TraceEmit` whenever you need more than one stream,
+sparse emits, or DDP support.
+
 ## Gate — soft routing
 
 `gate` implements mixture-of-experts style routing. A router module
