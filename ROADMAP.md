@@ -54,14 +54,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
 ## In progress
 
-- **JEPA exploration** `[started]`: two-tower EMA target-encoder
-  infrastructure, latent predictive training, via BYOL as the
-  stepping stone. The infra (EMA updates, stop-gradient composition,
-  latent probes) is reusable for I-JEPA / V-JEPA and any
-  FBRL-native objective that follows.
+*(empty)*
 
-(Length-1 by design. The next item pulls from Possibilities when this
-ships.)
+(Length-1 by design. The next item pulls from Possibilities when work
+on it begins.)
 
 ---
 
@@ -88,19 +84,33 @@ not a commitment; only moving one to In Progress is.
 - **Model parallelism**: tensor / pipeline parallelism for models that
   exceed single-GPU VRAM.
 - **Higher-order gradients**: differentiate through backward.
+- **2:4 semi-structured sparsity**: FFI through to
+  `at::sparse_semi_structured`, sparse training and inference on
+  Ampere+ Sparse Tensor Cores. Covers both the LTH-style
+  "train dense, prune, retrain sparse" path and the recent
+  train-from-scratch with periodic mask updates.
 - **flodl-hf next**: ModernBERT (RoPE, GeGLU, alternating local/global
   attention), LLaMA (RoPE, GQA, SwiGLU, then the architecture), LoRA
-  adapters, ViT. Then the fine-tuning loop on heterogeneous consumer
-  GPUs with ElChe, the original arc continuation. See
+  adapters, ViT. Then a flagship ElChe-driven fine-tuning benchmark on
+  heterogeneous consumer GPUs to validate the transparent fine-tune
+  plumbing end-to-end (`Trainer::setup_head` + `compute_loss` shipped
+  in 0.5.3 with the BERT family; see Shipped). See
   [docs/design/cloud-ddp.md](docs/design/cloud-ddp.md) for the
   downstream ElChe tie-in.
-- **flodl-manager CLI evolution**: extend `fdl add` with flodl-aware
-  feature selection (`fdl add hf --for bert|vit|offline`), argv
-  forwarding on `fdl build` / `fdl clippy` so feature matrices can be
-  exercised without falling back to raw `docker compose run`, and
-  `model-info` / `doctor` commands. Makes `fdl` a true DL package
-  manager on top of cargo. The first slice (`fdl add flodl-hf` +
-  `fdl init --with-hf`) shipped in 0.5.2.
+- **flodl-manager CLI evolution**: keep maturing `fdl` toward a true
+  DL package manager on top of cargo. Remaining slices: flodl-aware
+  feature selection on `fdl add` (`fdl add hf --for bert|vit|offline`),
+  argv forwarding on `fdl build` / `fdl clippy` (matching the `--`
+  separator + `append:` pattern that shipped on `fdl run` in 0.5.3),
+  and `model-info` / `doctor` commands. Earlier slices already in
+  Shipped: `fdl add flodl-hf` + `fdl init --with-hf`, the
+  `--playground` / `--install` mode split, `fdl run` argv forwarding,
+  Docker-aware schema probing, and bare-project help fallthrough.
+- **JEPA exploration**: two-tower EMA target-encoder infrastructure,
+  latent predictive training, via BYOL as the stepping stone. The
+  infra (EMA updates, stop-gradient composition, latent probes) is
+  reusable for I-JEPA / V-JEPA and any FBRL-native objective that
+  follows.
 
 ---
 

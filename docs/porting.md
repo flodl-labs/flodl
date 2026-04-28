@@ -204,6 +204,57 @@ for epoch in range(num_epochs):
         optimizer.step()
 ```
 
+flodl ports the manual loop almost line-for-line, and also offers a
+universal `Trainer` that can own the loop for you. Three tiers, same
+code on CPU / single GPU / multi-GPU.
+
+### Trainer::builder: framework-managed (universal)
+
+You provide a step closure (forward + loss); the framework runs the
+loop, backward, optimizer step, and gradient sync.
+
+```rust
+// Step closure: forward + loss, returns the loss Variable.
+fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
+    let input = Variable::new(batch[0].clone(), false);
+    let target = Variable::new(batch[1].to_dtype(DType::Int64)?, false);
+    cross_entropy_loss(&model.forward(&input)?, &target)
+}
+
+let handle = Trainer::builder(
+    |dev| build_model_on(dev),
+    |params| Adam::new(params, 0.001),
+    train_step,
+)
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(10)
+    .run()?;
+let state = handle.join()?;  // averaged params + buffers
+```
+
+### Trainer::setup: setup only, your loop
+
+`Trainer::setup` runs device replication + optimizer setup +
+training-mode toggle in one call; the loop stays yours.
+
+```rust
+let model = build_model()?;
+Trainer::setup(&model, |dev| build_model_on(dev), |p| Adam::new(p, 0.001))?;
+
+for epoch in 0..num_epochs {
+    for batch in loader.epoch(epoch) {
+        let batch = batch?;
+        let pred = model.forward(&batch[0].into())?;
+        let loss = cross_entropy_loss(&pred, &batch["label"].into())?;
+        loss.backward()?;
+        model.step()?;  // AllReduce + buffer sync + optimizer + zero_grad
+    }
+}
+```
+
+### Fully manual: closest port from PyTorch
+
 ```rust
 // flodl
 model.train();
@@ -221,45 +272,18 @@ for epoch in 0..num_epochs {
 
 ## Multi-GPU (DDP)
 
-If your PyTorch script uses `torch.nn.parallel.DistributedDataParallel`,
-`torch.nn.DataParallel`, `torchrun`, or `mp.spawn`, flodl gives you two
-entry points that unify data loading and training. Both auto-detect
-available CUDA devices and fall back to single-GPU/CPU when fewer than
-2 GPUs are present, so the same code runs everywhere.
+The `Trainer` tiers in [Training loop](#training-loop) above already cover
+the multi-GPU story: both `Trainer::builder` and `Trainer::setup`
+auto-detect available CUDA devices and fall back to single-GPU/CPU when
+fewer than 2 GPUs are present. The same code runs on CPU, single GPU,
+and multi-GPU with no process-group setup, no `torchrun`, no `mp.spawn`,
+and no `DistributedSampler`.
 
-### Graph DDP -- one-liner
-
-For Graph models, `Trainer::setup()` replaces the whole distributed-init
-ceremony. The training loop is identical for 1 or N GPUs:
-
-```rust
-let model = FlowBuilder::from(Linear::new(784, 256)?)
-    .through(ReLU::new())
-    .through(Linear::new(256, 10)?)
-    .build()?;
-
-// One call: detect GPUs, replicate, set optimizer, enable training mode
-Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
-
-model.set_data_loader(loader, "image");
-
-for epoch in 0..num_epochs {
-    for batch in model.epoch(epoch) {
-        let batch = batch?;
-        let pred = model.forward_batch(&batch)?;
-        let loss = cross_entropy_loss(&pred, &batch["label"].into())?;
-        loss.backward()?;
-        model.step()?;   // AllReduce + buffer sync + optimizer + zero_grad
-    }
-}
-```
-
-### DDP Builder -- any Module, A/B-testable
-
-For non-Graph modules or when you want to benchmark sync strategies:
+For DDP-specific knobs (sync policy, averaging backend),
+`Trainer::builder` exposes them on the builder chain:
 
 ```rust
-let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_step)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(10)

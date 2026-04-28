@@ -166,6 +166,33 @@ for (input_t, target_t) in &batches {
 }
 ```
 
+For framework-managed training (same code on CPU, single GPU, multi-GPU),
+the universal `Trainer` takes a step closure and owns the loop:
+
+```rust
+// One step: forward + loss, returns the loss Variable.
+fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
+    let input = Variable::new(batch[0].clone(), false);
+    let target = Variable::new(batch[1].clone(), false);
+    mse_loss(&model.forward(&input)?, &target)
+}
+
+Trainer::builder(
+    |dev| build_model_on(dev),
+    |params| Adam::new(params, 0.01),
+    train_step,
+)
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(num_epochs)
+    .run()?
+    .join()?;
+```
+
+`Trainer::setup` (own the loop, framework owns the setup) is the
+in-between tier. See [Tutorial 4: Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/04-training.md)
+for all three tiers.
+
 ## The Graph Builder
 
 floDl's fluent graph builder lets you describe complex architectures as
