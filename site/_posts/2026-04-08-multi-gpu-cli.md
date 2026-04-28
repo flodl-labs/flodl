@@ -98,7 +98,7 @@ together without the fast one waiting for the slow one.
 ```rust
 use flodl::distributed::*;
 
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(52)
     .num_epochs(50)
@@ -204,4 +204,4 @@ We ship what works. We're honest about what doesn't. We keep going.
 ---
 
 [Full DDP reference](/guide/ddp) | [Tutorial: DDP Builder](/guide/tutorials/12-async-ddp) |
-[CLI docs](/guide/cli) | [GitHub](https://github.com/fab2s/floDl)
+[CLI docs](/guide/cli) | [GitHub](https://github.com/flodl-labs/flodl)

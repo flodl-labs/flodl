@@ -14,6 +14,7 @@ include = [
     "src/**/*",
     "examples/*.rs",
     "tests/*.rs",
+    "tests/common/**/*",
     "tests/fixtures/**/*",
     "README.md",
     "LICENSE",
@@ -23,7 +24,7 @@ include = [
 [features]
 default = ["hub", "tokenizer"]
 cuda = ["flodl/cuda"]
-hub = ["hf-hub"]
+hub = ["hf-hub", "dep:flodl-cli"]
 tokenizer = ["tokenizers"]
 
 [dependencies]
@@ -32,6 +33,10 @@ safetensors = "0.4"
 serde_json = "1"
 hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"], optional = true }
 tokenizers = { version = "0.20", optional = true }
+# Optional, gated behind `hub`: lets the export_hf CLI binary use the
+# FdlArgs derive so its --help output matches what `fdl flodl-hf export
+# -h` renders. Pure-Rust dep; pulls no libtorch.
+flodl-cli = { version = "=0.5.2", path = "../flodl-cli", optional = true }
 
 [[example]]
 name = "bert_embed"
@@ -82,8 +87,16 @@ name = "distilbert_qa"
 required-features = ["hub", "tokenizer"]
 
 [[example]]
+name = "distilbert_finetune"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
 name = "auto_classify"
 required-features = ["hub", "tokenizer"]
+
+[[example]]
+name = "export_hf"
+required-features = ["hub"]
 
 [package.metadata.docs.rs]
 all-features = true

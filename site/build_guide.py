@@ -41,12 +41,12 @@ LINK_REWRITES = [
     (r"\(12-async-ddp\.md\)", "(/guide/async-ddp)"),
     (r"\(13-data-loading\.md\)", "(/guide/data-loading)"),
     (r"\(14-flodl-hf\.md\)", "(/guide/flodl-hf)"),
-    (r"\(\.\./design/graph-tree\.md\)", "(https://github.com/fab2s/floDl/blob/main/docs/design/graph-tree.md)"),
+    (r"\(\.\./design/graph-tree\.md\)", "(https://github.com/flodl-labs/flodl/blob/main/docs/design/graph-tree.md)"),
     (r"\(\.\./pytorch_migration\.md\)", "(/guide/migration)"),
     (r"\(\.\./ddp\.md\)", "(/guide/ddp-reference)"),
     (r"\(\.\./troubleshooting\.md\)", "(/guide/troubleshooting)"),
     # Relative links to examples (from tutorials)
-    (r"\(\.\./\.\./flodl/examples/([^)]+)\)", r"(https://github.com/fab2s/floDl/tree/main/flodl/examples/\1)"),
+    (r"\(\.\./\.\./flodl/examples/([^)]+)\)", r"(https://github.com/flodl-labs/flodl/tree/main/flodl/examples/\1)"),
     # From docs/ root level (troubleshooting.md, pytorch_migration.md)
     (r"\(ddp\.md\)", "(/guide/ddp-reference)"),
     (r"\(pytorch_migration\.md\)", "(/guide/migration)"),

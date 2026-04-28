@@ -43,7 +43,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use flodl::{Device, Graph, Result, Tensor, TensorError};
+use flodl::{DType, Device, Graph, Result, Tensor, TensorError};
 use safetensors::{tensor::TensorView, Dtype, SafeTensors};
 
 use crate::path::hf_key_from_flodl_key;
@@ -333,7 +333,7 @@ fn load_safetensors_core(
         let view = st.tensor(original)
             .map_err(|e| TensorError::new(&format!("safetensors tensor {original}: {e}")))?;
         let device = param.variable.data().device();
-        let src = tensor_view_to_f32_tensor(&view, device)?;
+        let src = tensor_view_to_tensor(&view, device)?;
         param.variable.set_data(src);
     }
 
@@ -348,21 +348,42 @@ fn load_safetensors_core(
         })?;
         let view = st.tensor(original)
             .map_err(|e| TensorError::new(&format!("safetensors tensor {original}: {e}")))?;
-        let src = tensor_view_to_f32_tensor(&view, buffer.device())?;
+        let src = tensor_view_to_tensor(&view, buffer.device())?;
         buffer.set(src);
     }
 
     Ok(unused)
 }
 
-/// Rewrite legacy TensorFlow-era BERT LayerNorm key suffixes to the
-/// modern HF form: `LayerNorm.gamma` → `LayerNorm.weight`,
-/// `LayerNorm.beta` → `LayerNorm.bias`.
+/// Rewrite legacy HF BERT-family checkpoint keys to the form flodl's
+/// MLM-head graphs expect.
 ///
-/// `bert-base-*` and other pre-2020 checkpoints on the Hub still ship
-/// with `gamma`/`beta`. HF Python's `BertModel.from_pretrained` applies
-/// the same remap at load time.
+/// 1. **LayerNorm gamma/beta** (TensorFlow-era): `LayerNorm.gamma` →
+///    `LayerNorm.weight`, `LayerNorm.beta` → `LayerNorm.bias`.
+///    `bert-base-*` and other pre-2020 checkpoints still ship with
+///    `gamma`/`beta`. HF Python's `BertModel.from_pretrained` applies
+///    the same remap at load time.
+///
+/// 2. **MLM decoder bias tying** (BERT / RoBERTa MLM):
+///    `cls.predictions.bias` → `cls.predictions.decoder.bias`,
+///    `lm_head.bias` → `lm_head.decoder.bias`. HF's `BertForMaskedLM`
+///    and `RobertaForMaskedLM` both tie their decoder's bias to a
+///    top-level `bias` Parameter via `self.decoder.bias = self.bias`.
+///    PyTorch's `state_dict` dedupes tied Parameters on save, so
+///    checkpoints ship only the top-level key. Our graphs store the
+///    bias directly on the decoder `Linear` (one of the entry points
+///    of weight tying via [`flodl::Linear::from_shared_weight`]), so
+///    we rename the checkpoint's key onto the decoder at load time.
 pub fn bert_legacy_key_rename(checkpoint_key: &str) -> String {
+    // MLM decoder-bias tying: exact-match renames. Exact rather than
+    // suffix so we don't accidentally eat `*.cls.predictions.bias`
+    // sub-keys in some future nested head.
+    if checkpoint_key == "cls.predictions.bias" {
+        return "cls.predictions.decoder.bias".to_string();
+    }
+    if checkpoint_key == "lm_head.bias" {
+        return "lm_head.decoder.bias".to_string();
+    }
     if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.gamma") {
         format!("{prefix}LayerNorm.weight")
     } else if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.beta") {
@@ -370,6 +391,107 @@ pub fn bert_legacy_key_rename(checkpoint_key: &str) -> String {
     } else {
         checkpoint_key.to_string()
     }
+}
+
+/// HF-canonical LayerNorm rename: rewrite legacy `LayerNorm.gamma` /
+/// `LayerNorm.beta` suffixes to the modern `LayerNorm.weight` /
+/// `LayerNorm.bias` form. Pure suffix rename, leaves every other key
+/// untouched. Used by the round-trip comparators in
+/// `tests/roundtrip_common/mod.rs` to canonicalise HF-reference
+/// safetensors against flodl exports — flodl always saves the modern
+/// names; older HF checkpoints (e.g. `bert-base-uncased`) ship the
+/// legacy names. Distinct from [`bert_legacy_key_rename`], which is
+/// the *load-side* HF-to-flodl rename and additionally maps the MLM
+/// decoder-bias tying alias (no longer needed by the comparator since
+/// [`hf_canonical_save_key`] makes flodl saves match HF canonical
+/// keys for that case).
+pub fn bert_legacy_layernorm_rename(checkpoint_key: &str) -> String {
+    if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.gamma") {
+        format!("{prefix}LayerNorm.weight")
+    } else if let Some(prefix) = checkpoint_key.strip_suffix("LayerNorm.beta") {
+        format!("{prefix}LayerNorm.bias")
+    } else {
+        checkpoint_key.to_string()
+    }
+}
+
+/// Inverse of [`bert_legacy_key_rename`] for the MLM decoder-bias tying
+/// case: rewrite flodl's internal `cls.predictions.decoder.bias` /
+/// `lm_head.decoder.bias` parameter name back to the canonical HF key
+/// (`cls.predictions.bias` / `lm_head.bias`) at save time.
+///
+/// Why save-side renames matter: HF Python's `BertForMaskedLM` /
+/// `RobertaForMaskedLM` declare `self.bias` as the storage parameter
+/// and then alias it via `self.decoder.bias = self.bias`. When HF's
+/// `from_pretrained` loads a state_dict that has only
+/// `cls.predictions.decoder.bias` (flodl's internal name), the
+/// owning `cls.predictions.bias` parameter ends up on the meta device
+/// and `tie_weights()` doesn't always materialise it on torch 2.x —
+/// forward then fails with "Tensor on device meta is not on the
+/// expected device cpu" inside the decoder's `addmm`. Emitting the
+/// canonical HF key makes the load route through the correct owning
+/// parameter and keeps the alias materialised.
+///
+/// Applied by [`save_safetensors_from_graph`] after [`crate::path::hf_key_from_flodl_key`]
+/// converts the flodl tag separator to dotted form. The
+/// `LayerNorm.gamma`/`beta` legacy names are NOT inverted on save —
+/// flodl emits the modern `weight`/`bias` form, which both HF Python
+/// and the Rust `_live` head-roundtrip comparator already canonicalise
+/// to.
+pub fn hf_canonical_save_key(hf_key: &str) -> String {
+    if hf_key == "cls.predictions.decoder.bias" {
+        return "cls.predictions.bias".to_string();
+    }
+    if hf_key == "lm_head.decoder.bias" {
+        return "lm_head.bias".to_string();
+    }
+    hf_key.to_string()
+}
+
+/// Predicate: does `key` end with one of the pooler suffixes?
+///
+/// Matches both BERT-style `pooler.dense.{weight,bias}` (a wrapper
+/// around a `BertPooler { dense: Linear }`) and ALBERT-style flat
+/// `pooler.{weight,bias}` (HF's `AlbertModel.pooler` is a bare
+/// `nn.Linear`). Pooler-less families (DistilBERT, DeBERTa-v2) never
+/// match either shape, so the predicate is a safe no-op for them.
+///
+/// Normalises the `/` tag separator that flodl checkpoints use between
+/// qualified tag boundaries (e.g. `bert.pooler/dense.weight`) so the
+/// same predicate works for both raw safetensors keys and flodl's
+/// internal tag form.
+fn is_pooler_key(key: &str) -> bool {
+    let normalised = key.replace('/', ".");
+    normalised.ends_with("pooler.dense.weight")
+        || normalised.ends_with("pooler.dense.bias")
+        || normalised.ends_with("pooler.weight")
+        || normalised.ends_with("pooler.bias")
+}
+
+/// Inspect a safetensors blob and report whether it carries the pooler
+/// `Linear` weights for any of the pooler-bearing families (BERT,
+/// RoBERTa, XLM-R, ALBERT).
+///
+/// Used by every pooler-bearing family's `from_pretrained_on_device`
+/// (and `AutoModel::from_pretrained_for_export_on_device`) to pick
+/// `on_device` vs `on_device_without_pooler` based on what the
+/// checkpoint actually ships, rather than baking a per-family default
+/// that's always wrong for some Hub repos (e.g. `roberta-base` has no
+/// pooler; `bert-base-uncased` does).
+pub fn weights_have_pooler(weights: &[u8]) -> Result<bool> {
+    let st = SafeTensors::deserialize(weights)
+        .map_err(|e| TensorError::new(&format!("safetensors parse error: {e}")))?;
+    Ok(st.names().iter().any(|n| is_pooler_key(n)))
+}
+
+/// Detect pooler presence from a list of checkpoint keys (e.g. the
+/// output of [`flodl::checkpoint_keys`]). Mirrors [`weights_have_pooler`]
+/// for the checkpoint-keys input shape; the flodl checkpoint key form
+/// uses `/` as the tag-boundary separator and this helper normalises
+/// that internally so both safetensors-style dotted keys and tagged
+/// flodl keys are handled by the same predicate.
+pub fn keys_have_pooler(keys: &[String]) -> bool {
+    keys.iter().any(|k| is_pooler_key(k))
 }
 
 /// Read a safetensors file from disk and load it into `graph`.
@@ -401,18 +523,123 @@ where
     load_safetensors_into_graph_with_rename(graph, &bytes, rename)
 }
 
-/// Materialise a safetensors `TensorView` as a CPU f32 `Tensor`, then
-/// move it to `target_device`. Host-side dtype conversion keeps this
-/// module independent of libtorch fp16/bf16 constructors.
-fn tensor_view_to_f32_tensor(view: &TensorView, target_device: Device) -> Result<Tensor> {
-    let shape: Vec<i64> = view.shape().iter().map(|&s| s as i64).collect();
-    let data = tensor_view_to_f32_vec(view)?;
-    let cpu = Tensor::from_f32(&data, &shape, Device::CPU)?;
-    if target_device == Device::CPU {
-        Ok(cpu)
-    } else {
-        cpu.to_device(target_device)
+// ── Saving ────────────────────────────────────────────────────────────────
+
+/// Serialise a graph's parameters and buffers as safetensors bytes.
+///
+/// Iterates [`Graph::named_parameters`] and [`Graph::named_buffers`],
+/// converts each flodl key (slash form, e.g. `bert.pooler.dense/weight`)
+/// to its HF-dotted equivalent via [`hf_key_from_flodl_key`], and writes
+/// every tensor as f32 — the storage dtype flodl uses internally.
+///
+/// Tied parameters (the same `Variable` reachable through multiple tags)
+/// are deduped upstream by `named_parameters`, so each weight ships
+/// once. If two distinct tensors collide on the same HF key after
+/// renaming, the function returns a loud error rather than silently
+/// dropping one — that condition signals a tag-naming conflict in the
+/// model, not a save-layer bug.
+///
+/// Output ordering is deterministic: keys serialise in HF-dotted
+/// alphabetical order so the resulting file diffs cleanly across runs.
+///
+/// The bytes produced are byte-for-byte loadable by HF Python's
+/// `safe_open(...).load_state_dict(...)` for any model whose `state_dict`
+/// matches the saved key set.
+pub fn save_safetensors_from_graph(graph: &Graph) -> Result<Vec<u8>> {
+    use std::collections::BTreeMap;
+
+    // BTreeMap orders keys for deterministic byte output; (dtype, shape, bytes)
+    // payload owns the data so the TensorView slices below stay valid.
+    let mut entries: BTreeMap<String, (Dtype, Vec<usize>, Vec<u8>)> = BTreeMap::new();
+
+    for (flodl_key, param) in graph.named_parameters() {
+        let hf_key = hf_canonical_save_key(&hf_key_from_flodl_key(&flodl_key));
+        let shape: Vec<usize> = param.variable.shape().iter().map(|&d| d as usize).collect();
+        let dtype = param.variable.data().dtype();
+        let bytes = param.variable.data().to_blob()?;
+        if entries.contains_key(&hf_key) {
+            return Err(TensorError::new(&format!(
+                "save_safetensors: HF key {hf_key:?} collision \
+                 — multiple distinct flodl tensors map to the same name; \
+                 fix the conflicting `tag(...)` in the graph",
+            )));
+        }
+        entries.insert(hf_key, (dtype_to_safetensors(dtype)?, shape, bytes));
     }
+
+    for (flodl_key, buffer) in graph.named_buffers() {
+        let hf_key = hf_canonical_save_key(&hf_key_from_flodl_key(&flodl_key));
+        let shape: Vec<usize> = buffer.shape().iter().map(|&d| d as usize).collect();
+        let dtype = buffer.get().dtype();
+        let bytes = buffer.get().to_blob()?;
+        if entries.contains_key(&hf_key) {
+            return Err(TensorError::new(&format!(
+                "save_safetensors: HF key {hf_key:?} collision \
+                 — buffer collides with a parameter or another buffer",
+            )));
+        }
+        entries.insert(hf_key, (dtype_to_safetensors(dtype)?, shape, bytes));
+    }
+
+    let views: HashMap<String, TensorView<'_>> = entries.iter()
+        .map(|(k, (dtype, shape, bytes))| {
+            let view = TensorView::new(*dtype, shape.clone(), bytes.as_slice())
+                .map_err(|e| TensorError::new(&format!(
+                    "safetensors view build for {k:?}: {e}",
+                )))?;
+            Ok::<(String, TensorView<'_>), TensorError>((k.clone(), view))
+        })
+        .collect::<std::result::Result<_, _>>()?;
+
+    safetensors::serialize(&views, &None)
+        .map_err(|e| TensorError::new(&format!("safetensors serialize: {e}")))
+}
+
+/// Map a flodl `DType` to the safetensors `Dtype` that uses the same
+/// in-memory bit layout. Integer dtypes are rejected — flodl's exporter
+/// only emits learnable parameter / buffer payloads, which are floats.
+fn dtype_to_safetensors(dtype: DType) -> Result<Dtype> {
+    match dtype {
+        DType::Float32 => Ok(Dtype::F32),
+        DType::Float64 => Ok(Dtype::F64),
+        DType::Float16 => Ok(Dtype::F16),
+        DType::BFloat16 => Ok(Dtype::BF16),
+        DType::Int32 | DType::Int64 => Err(TensorError::new(&format!(
+            "save_safetensors: integer dtype {dtype:?} not supported \
+             — only floating-point parameters / buffers can be serialised",
+        ))),
+    }
+}
+
+/// Serialise a graph and write the bytes to `path`. Thin file wrapper
+/// over [`save_safetensors_from_graph`]; I/O errors carry the path in
+/// the message for easier debugging.
+pub fn save_safetensors_file_from_graph(graph: &Graph, path: &Path) -> Result<()> {
+    let bytes = save_safetensors_from_graph(graph)?;
+    std::fs::write(path, &bytes).map_err(|e| {
+        TensorError::new(&format!("safetensors write {}: {e}", path.display()))
+    })
+}
+
+/// Materialise a safetensors `TensorView` as a `Tensor` on
+/// `target_device`, **preserving the source dtype**. Raw bytes are
+/// shuttled through libtorch's `from_blob` (which copies internally),
+/// so the resulting tensor has the same dtype as the safetensors file
+/// — F16 stays F16, BF16 stays BF16, F32 stays F32, F64 stays F64.
+fn tensor_view_to_tensor(view: &TensorView, target_device: Device) -> Result<Tensor> {
+    let shape: Vec<i64> = view.shape().iter().map(|&s| s as i64).collect();
+    let dtype = match view.dtype() {
+        Dtype::F32 => DType::Float32,
+        Dtype::F64 => DType::Float64,
+        Dtype::F16 => DType::Float16,
+        Dtype::BF16 => DType::BFloat16,
+        other => {
+            return Err(TensorError::new(&format!(
+                "unsupported safetensors dtype {other:?} — floats (F32/F64/BF16/F16) only",
+            )));
+        }
+    };
+    Tensor::from_blob(view.data(), &shape, dtype, target_device)
 }
 
 /// Decode a safetensors `TensorView`'s raw bytes as a flat `Vec<f32>`.
@@ -420,7 +647,12 @@ fn tensor_view_to_f32_tensor(view: &TensorView, target_device: Device) -> Result
 /// Rejects integer / bool dtypes — BERT-style checkpoints don't use them
 /// and silently accepting would mean casting integers to floats, which
 /// is almost never the user's intent.
-fn tensor_view_to_f32_vec(view: &TensorView) -> Result<Vec<f32>> {
+///
+/// Public so external callers (e.g. roundtrip tests, custom load
+/// pipelines) can decode safetensors values to f32 with the exact same
+/// dtype rules flodl uses on its load path. Equivalent on the f16 path
+/// to `f32::from(half::f16::from_bits(_))` without pulling in `half`.
+pub fn tensor_view_to_f32_vec(view: &TensorView) -> Result<Vec<f32>> {
     let bytes = view.data();
     match view.dtype() {
         Dtype::F32 => {
@@ -531,6 +763,147 @@ mod tests {
 
     fn actual_map(entries: &[(&str, &[i64])]) -> HashMap<String, Vec<i64>> {
         entries.iter().map(|(k, s)| ((*k).to_string(), s.to_vec())).collect()
+    }
+
+    #[test]
+    fn keys_have_pooler_detects_slash_separator() {
+        let keys = vec![
+            "encoder/layer/0/attention/query/weight".to_string(),
+            "pooler/dense/weight".to_string(),
+            "pooler/dense/bias".to_string(),
+        ];
+        assert!(keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_detects_dot_separator() {
+        let keys = vec![
+            "encoder.layer.0.attention.query.weight".to_string(),
+            "pooler.dense.weight".to_string(),
+        ];
+        assert!(keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_returns_false_for_encoder_only() {
+        let keys = vec![
+            "encoder/layer/0/attention/query/weight".to_string(),
+            "encoder/layer/0/attention/query/bias".to_string(),
+        ];
+        assert!(!keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn keys_have_pooler_does_not_match_substrings() {
+        // A key containing "pooler" mid-string must not false-positive.
+        let keys = vec!["encoder/some_pooler_thing/weight".to_string()];
+        assert!(!keys_have_pooler(&keys));
+    }
+
+    #[test]
+    fn weights_have_pooler_detects_bert_style() {
+        let bytes = serialize_entries(&[
+            ("bert.embeddings.word_embeddings.weight",
+                Dtype::F32, vec![2, 4], f32_le_bytes(&[0.0; 8])),
+            ("bert.pooler.dense.weight",
+                Dtype::F32, vec![4, 4], f32_le_bytes(&[0.0; 16])),
+            ("bert.pooler.dense.bias",
+                Dtype::F32, vec![4], f32_le_bytes(&[0.0; 4])),
+        ]);
+        assert!(weights_have_pooler(&bytes).unwrap());
+    }
+
+    #[test]
+    fn weights_have_pooler_detects_albert_style_flat() {
+        // ALBERT ships a flat `pooler.{weight,bias}` (bare nn.Linear,
+        // no `.dense` wrapper). The detector matches both shapes.
+        let bytes = serialize_entries(&[
+            ("albert.embeddings.word_embeddings.weight",
+                Dtype::F32, vec![2, 4], f32_le_bytes(&[0.0; 8])),
+            ("albert.pooler.weight",
+                Dtype::F32, vec![4, 4], f32_le_bytes(&[0.0; 16])),
+            ("albert.pooler.bias",
+                Dtype::F32, vec![4], f32_le_bytes(&[0.0; 4])),
+        ]);
+        assert!(weights_have_pooler(&bytes).unwrap());
+    }
+
+    #[test]
+    fn weights_have_pooler_returns_false_for_encoder_only() {
+        // RoBERTa-style: encoder weights only, no pooler. Mirrors
+        // `roberta-base` Hub repo which drops the pooler with the NSP
+        // objective.
+        let bytes = serialize_entries(&[
+            ("roberta.embeddings.word_embeddings.weight",
+                Dtype::F32, vec![2, 4], f32_le_bytes(&[0.0; 8])),
+            ("roberta.encoder.layer.0.attention.self.query.weight",
+                Dtype::F32, vec![4, 4], f32_le_bytes(&[0.0; 16])),
+        ]);
+        assert!(!weights_have_pooler(&bytes).unwrap());
+    }
+
+    #[test]
+    fn weights_have_pooler_errors_on_invalid_safetensors() {
+        // Garbage bytes must surface as a parse error rather than panic
+        // or return a meaningless boolean.
+        let err = weights_have_pooler(b"not a safetensors blob")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("safetensors parse error"), "got: {err}");
+    }
+
+    #[test]
+    fn bert_legacy_layernorm_rename_rewrites_gamma_and_beta() {
+        assert_eq!(
+            bert_legacy_layernorm_rename("bert.embeddings.LayerNorm.gamma"),
+            "bert.embeddings.LayerNorm.weight",
+        );
+        assert_eq!(
+            bert_legacy_layernorm_rename("bert.embeddings.LayerNorm.beta"),
+            "bert.embeddings.LayerNorm.bias",
+        );
+    }
+
+    #[test]
+    fn bert_legacy_layernorm_rename_passthrough_for_modern_keys() {
+        // Modern HF saves already use weight/bias — must not be mangled.
+        let key = "bert.embeddings.LayerNorm.weight";
+        assert_eq!(bert_legacy_layernorm_rename(key), key);
+    }
+
+    #[test]
+    fn bert_legacy_layernorm_rename_does_not_touch_mlm_alias() {
+        // Distinct from `bert_legacy_key_rename`: the LayerNorm-only
+        // helper leaves the MLM decoder-bias alias alone.
+        let k = "cls.predictions.bias";
+        assert_eq!(bert_legacy_layernorm_rename(k), k);
+    }
+
+    #[test]
+    fn hf_canonical_save_key_inverts_mlm_decoder_bias_alias() {
+        assert_eq!(
+            hf_canonical_save_key("cls.predictions.decoder.bias"),
+            "cls.predictions.bias",
+        );
+        assert_eq!(
+            hf_canonical_save_key("lm_head.decoder.bias"),
+            "lm_head.bias",
+        );
+    }
+
+    #[test]
+    fn hf_canonical_save_key_passthrough_for_unrelated_keys() {
+        // Only the two MLM tied-bias keys are rewritten — every other
+        // key passes through unchanged. LayerNorm modern names stay
+        // modern (legacy gamma/beta are not the inverse here; flodl
+        // saves modern names directly).
+        for k in [
+            "bert.embeddings.word_embeddings.weight",
+            "bert.embeddings.LayerNorm.weight",
+            "bert.encoder.layer.0.attention.self.query.bias",
+        ] {
+            assert_eq!(hf_canonical_save_key(k), k);
+        }
     }
 
     #[test]
@@ -824,13 +1197,14 @@ mod tests {
         }
     }
 
-    /// BF16 checkpoint → f32 graph. bf16 is exactly the top 16 bits of a
-    /// finite f32, so values representable as bf16 must roundtrip exactly
-    /// after the host-side widen. Guards the `from_bits((bits as u32) << 16)`
-    /// path against endianness / shift bugs.
+    /// BF16 checkpoint preserves dtype on load. bf16 is exactly the top
+    /// 16 bits of a finite f32, so values representable as bf16 round-
+    /// trip exactly through libtorch's f16/bf16 storage. Verifies both
+    /// dtype preservation and value correctness via to_f32_vec()'s
+    /// libtorch cast.
     #[test]
-    fn load_safetensors_bf16_casts_to_f32() {
-        use flodl::{FlowBuilder, Linear};
+    fn load_safetensors_bf16_preserves_dtype() {
+        use flodl::{DType, FlowBuilder, Linear};
 
         let dev = Device::CPU;
         let graph = FlowBuilder::new()
@@ -858,6 +1232,8 @@ mod tests {
 
         for (k, p) in graph.named_parameters() {
             let hf = hf_key_from_flodl_key(&k);
+            assert_eq!(p.variable.data().dtype(), DType::BFloat16,
+                "{hf}: dtype must be preserved as BF16 after load");
             let data = p.variable.data().to_f32_vec().unwrap();
             match hf.as_str() {
                 "m.weight" => assert_eq!(data, exact_w),
@@ -867,11 +1243,13 @@ mod tests {
         }
     }
 
-    /// F16 checkpoint → f32 graph. Tests both normal and subnormal paths
-    /// of the host-side converter, plus +/- zero.
+    /// F16 checkpoint preserves dtype on load. Tests +1, -1, +0.5, +0
+    /// — values representable bit-exactly in f16, so to_f32_vec()'s
+    /// libtorch f16→f32 cast is lossless and gives back the original
+    /// mathematical values.
     #[test]
-    fn load_safetensors_f16_casts_to_f32() {
-        use flodl::{FlowBuilder, Linear};
+    fn load_safetensors_f16_preserves_dtype() {
+        use flodl::{DType, FlowBuilder, Linear};
 
         let dev = Device::CPU;
         let graph = FlowBuilder::new()
@@ -900,12 +1278,85 @@ mod tests {
 
         for (k, p) in graph.named_parameters() {
             let hf = hf_key_from_flodl_key(&k);
+            assert_eq!(p.variable.data().dtype(), DType::Float16,
+                "{hf}: dtype must be preserved as F16 after load");
             let data = p.variable.data().to_f32_vec().unwrap();
             match hf.as_str() {
                 "m.weight" => assert_eq!(data, vec![1.0, -1.0, 0.5, 0.0]),
                 "m.bias"   => assert_eq!(data, vec![1.0, 1.0, 1.0, 1.0]),
                 other => panic!("unexpected {other}"),
             }
+        }
+    }
+
+    /// Full round-trip: F16 safetensors → load → save → bit-exact F16
+    /// safetensors. This is the contract the verify-export matrix runner
+    /// relies on for DeBERTa-v3 (pure F16 upstream).
+    #[test]
+    fn save_safetensors_f16_roundtrip_byte_exact() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(1, 4, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+
+        let f16_bits: [u16; 4] = [0x3C00, 0xBC00, 0x3800, 0x0000];
+        let bytes_w: Vec<u8> = f16_bits.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let bytes_b: Vec<u8> = (0..4).flat_map(|_| 0x3C00u16.to_le_bytes()).collect();
+
+        let src = serialize_entries(&[
+            ("m.weight", Dtype::F16, vec![4, 1], bytes_w.clone()),
+            ("m.bias",   Dtype::F16, vec![4],    bytes_b.clone()),
+        ]);
+        load_safetensors_into_graph(&graph, &src).unwrap();
+
+        let saved = save_safetensors_from_graph(&graph).unwrap();
+        let saved_st = SafeTensors::deserialize(&saved).unwrap();
+        for (k, expected_bytes) in [("m.weight", &bytes_w), ("m.bias", &bytes_b)] {
+            let v = saved_st.tensor(k).unwrap();
+            assert_eq!(v.dtype(), Dtype::F16, "{k}: must save back as F16");
+            assert_eq!(v.data(), expected_bytes.as_slice(),
+                "{k}: F16 bytes must be bit-exact through load+save");
+        }
+    }
+
+    /// Same contract as the F16 round-trip, but for BF16. BF16 is the
+    /// dtype of choice for many recent LLMs — we want to be sure
+    /// flodl preserves it without surprise downcasts.
+    #[test]
+    fn save_safetensors_bf16_roundtrip_byte_exact() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(2, 2, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+
+        // BF16 = top 16 bits of f32. These f32s have zero low bits → exact bf16.
+        let exact_w = [1.0_f32, 2.0, -0.5, 0.25];
+        let exact_b = [0.0_f32, -1.0];
+        let to_bf16_bytes = |data: &[f32]| -> Vec<u8> {
+            data.iter().flat_map(|f| ((f.to_bits() >> 16) as u16).to_le_bytes()).collect()
+        };
+        let bytes_w = to_bf16_bytes(&exact_w);
+        let bytes_b = to_bf16_bytes(&exact_b);
+
+        let src = serialize_entries(&[
+            ("m.weight", Dtype::BF16, vec![2, 2], bytes_w.clone()),
+            ("m.bias",   Dtype::BF16, vec![2],    bytes_b.clone()),
+        ]);
+        load_safetensors_into_graph(&graph, &src).unwrap();
+
+        let saved = save_safetensors_from_graph(&graph).unwrap();
+        let saved_st = SafeTensors::deserialize(&saved).unwrap();
+        for (k, expected_bytes) in [("m.weight", &bytes_w), ("m.bias", &bytes_b)] {
+            let v = saved_st.tensor(k).unwrap();
+            assert_eq!(v.dtype(), Dtype::BF16, "{k}: must save back as BF16");
+            assert_eq!(v.data(), expected_bytes.as_slice(),
+                "{k}: BF16 bytes must be bit-exact through load+save");
         }
     }
 
@@ -988,6 +1439,29 @@ mod tests {
         );
     }
 
+    /// MLM decoder-bias tying: HF's `BertForMaskedLM` and
+    /// `RobertaForMaskedLM` save a single top-level `bias` Parameter
+    /// that is tied to `decoder.bias`; our graph stores the bias on the
+    /// decoder `Linear` directly. The rename maps the checkpoint key
+    /// onto our graph key so MLM checkpoints load cleanly.
+    #[test]
+    fn bert_legacy_key_rename_retags_mlm_tied_bias() {
+        assert_eq!(
+            bert_legacy_key_rename("cls.predictions.bias"),
+            "cls.predictions.decoder.bias",
+        );
+        assert_eq!(
+            bert_legacy_key_rename("lm_head.bias"),
+            "lm_head.decoder.bias",
+        );
+        // Exact-match, not suffix — a hypothetical nested key
+        // `something.cls.predictions.bias` is untouched.
+        assert_eq!(
+            bert_legacy_key_rename("something.cls.predictions.bias"),
+            "something.cls.predictions.bias",
+        );
+    }
+
     /// If a checkpoint has BOTH `foo.LayerNorm.gamma` and
     /// `foo.LayerNorm.weight`, renaming collapses them onto the same
     /// canonical slot. The loader must surface this as a loud error
@@ -1057,5 +1531,208 @@ mod tests {
                 "expected HF-dotted key missing, got {keys:?}");
         // Sanity check: the parameter count matches Graph's own view.
         assert_eq!(expected.len(), graph.parameters().len());
+    }
+
+    /// Save → load roundtrip via the public API: build a tagged graph
+    /// with deterministic parameter values, save it as safetensors bytes,
+    /// load those bytes into a fresh graph with the same structure, and
+    /// assert every parameter is bit-exact f32 (lossless via the f32
+    /// storage dtype).
+    ///
+    /// This is the strongest invariant the save layer must hold —
+    /// "anything flodl loads, flodl can save and reload identically" —
+    /// and it's what the per-family `_roundtrip_*_live` tests rely on.
+    #[test]
+    fn save_safetensors_load_roundtrip() {
+        use flodl::{FlowBuilder, Linear, Module, Variable};
+
+        let dev = Device::CPU;
+        let in_dim = 3_i64;
+        let out_dim = 2_i64;
+
+        // Source graph with pinned weights.
+        let src = FlowBuilder::new()
+            .through(Linear::on_device(in_dim, out_dim, dev).unwrap())
+            .tag("my.linear")
+            .build().unwrap();
+        let src_weight: Vec<f32> = (0..(in_dim * out_dim) as usize)
+            .map(|i| 0.5 + i as f32 * 0.1).collect();
+        let src_bias: Vec<f32> = (0..out_dim as usize)
+            .map(|i| -1.0 + i as f32 * 0.25).collect();
+        for (k, p) in src.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let t = match hf.as_str() {
+                "my.linear.weight" => Tensor::from_f32(&src_weight, &[out_dim, in_dim], dev).unwrap(),
+                "my.linear.bias"   => Tensor::from_f32(&src_bias,   &[out_dim], dev).unwrap(),
+                other => panic!("unexpected key {other}"),
+            };
+            p.variable.set_data(t);
+        }
+
+        let bytes = save_safetensors_from_graph(&src).unwrap();
+
+        // Destination graph: fresh, same structure, load the saved bytes.
+        let dst = FlowBuilder::new()
+            .through(Linear::on_device(in_dim, out_dim, dev).unwrap())
+            .tag("my.linear")
+            .build().unwrap();
+        load_safetensors_into_graph(&dst, &bytes).unwrap();
+
+        let mut dw: Option<Vec<f32>> = None;
+        let mut db: Option<Vec<f32>> = None;
+        for (k, p) in dst.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let data = p.variable.data().to_f32_vec().unwrap();
+            match hf.as_str() {
+                "my.linear.weight" => dw = Some(data),
+                "my.linear.bias"   => db = Some(data),
+                other => panic!("unexpected key {other}"),
+            }
+        }
+        assert_eq!(dw.unwrap(), src_weight);
+        assert_eq!(db.unwrap(), src_bias);
+
+        let _keep_alive: Vec<Variable> =
+            dst.parameters().into_iter().map(|p| p.variable).collect();
+    }
+
+    /// Saved keys land in HF-dotted form (slash → dot on the last
+    /// segment) and the byte payload of each tensor matches the source's
+    /// little-endian f32 representation. Guards against the save path
+    /// drifting from `hf_key_from_flodl_key` and against endianness bugs
+    /// in the byte assembly.
+    #[test]
+    fn save_safetensors_uses_hf_dotted_keys_and_le_f32() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(2, 1, dev).unwrap())
+            .tag("encoder.layer.0.attention.output.dense")
+            .build().unwrap();
+        let w = vec![0.25_f32, -0.5];
+        let b = vec![1.0_f32];
+        for (k, p) in graph.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let t = match hf.as_str() {
+                "encoder.layer.0.attention.output.dense.weight"
+                    => Tensor::from_f32(&w, &[1, 2], dev).unwrap(),
+                "encoder.layer.0.attention.output.dense.bias"
+                    => Tensor::from_f32(&b, &[1], dev).unwrap(),
+                other => panic!("unexpected key {other}"),
+            };
+            p.variable.set_data(t);
+        }
+
+        let bytes = save_safetensors_from_graph(&graph).unwrap();
+        let st = SafeTensors::deserialize(&bytes).unwrap();
+
+        let names: HashSet<&str> = st.names().iter().map(|s| s.as_str()).collect();
+        assert!(names.contains("encoder.layer.0.attention.output.dense.weight"),
+            "expected HF-dotted key in output, got {names:?}");
+        assert!(names.contains("encoder.layer.0.attention.output.dense.bias"),
+            "expected HF-dotted key in output, got {names:?}");
+
+        let w_view = st.tensor("encoder.layer.0.attention.output.dense.weight").unwrap();
+        assert_eq!(w_view.dtype(), Dtype::F32);
+        assert_eq!(w_view.shape(), &[1_usize, 2]);
+        let w_back: Vec<f32> = w_view.data().chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(w_back, w);
+
+        let b_view = st.tensor("encoder.layer.0.attention.output.dense.bias").unwrap();
+        let b_back: Vec<f32> = b_view.data().chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(b_back, b);
+    }
+
+    /// Tied parameters — same `Variable` reachable under multiple tags —
+    /// are deduped by `named_parameters` upstream, so the saved file
+    /// contains the shared weight exactly once. Verifies the upstream
+    /// guarantee actually flows through to the byte output: a
+    /// hand-rolled tying via [`Linear::from_shared_weight`] yields one
+    /// weight key, not two.
+    #[test]
+    fn save_safetensors_dedups_shared_weights() {
+        use flodl::{FlowBuilder, Linear, Parameter};
+
+        let dev = Device::CPU;
+        let primary = Linear::on_device(2, 2, dev).unwrap();
+        let shared_weight = primary.weight.clone(); // Rc clone, same storage
+        let tied_bias = Parameter::new(
+            Tensor::from_f32(&[0.0_f32, 0.0], &[2], dev).unwrap(),
+            "bias",
+        );
+        let tied = Linear::from_shared_weight(shared_weight, Some(tied_bias));
+
+        let graph = FlowBuilder::new()
+            .through(primary).tag("primary")
+            .through(tied).tag("tied")
+            .build().unwrap();
+
+        let bytes = save_safetensors_from_graph(&graph).unwrap();
+        let st = SafeTensors::deserialize(&bytes).unwrap();
+        let names: HashSet<&str> = st.names().iter().map(|s| s.as_str()).collect();
+
+        // Shared weight ships once under whichever tag named_parameters
+        // visited first. Each Linear's own bias is a distinct Parameter,
+        // so both bias keys appear.
+        let weight_count = ["primary.weight", "tied.weight"].iter()
+            .filter(|k| names.contains(*k))
+            .count();
+        assert_eq!(
+            weight_count, 1,
+            "shared weight must ship exactly once, got {names:?}",
+        );
+        assert!(names.contains("primary.bias"), "primary bias missing in {names:?}");
+        assert!(names.contains("tied.bias"),    "tied bias missing in {names:?}");
+    }
+
+    /// File-path variant: same save → load roundtrip but through disk.
+    /// Exercises the file writer and the path-in-error-message behaviour
+    /// indirectly.
+    #[test]
+    fn save_safetensors_file_roundtrip() {
+        use flodl::{FlowBuilder, Linear};
+
+        let dev = Device::CPU;
+        let graph = FlowBuilder::new()
+            .through(Linear::on_device(2, 1, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+        let w = vec![0.1_f32, 0.2];
+        let b = vec![0.3_f32];
+        for (k, p) in graph.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let t = match hf.as_str() {
+                "m.weight" => Tensor::from_f32(&w, &[1, 2], dev).unwrap(),
+                "m.bias"   => Tensor::from_f32(&b, &[1],    dev).unwrap(),
+                other => panic!("unexpected {other}"),
+            };
+            p.variable.set_data(t);
+        }
+
+        let path = std::env::temp_dir()
+            .join(format!("flodl_hf_save_test_{}.safetensors", std::process::id()));
+        save_safetensors_file_from_graph(&graph, &path).unwrap();
+
+        // Load back into a fresh graph through the file API; assert match.
+        let fresh = FlowBuilder::new()
+            .through(Linear::on_device(2, 1, dev).unwrap())
+            .tag("m")
+            .build().unwrap();
+        load_safetensors_file_into_graph(&fresh, &path).unwrap();
+
+        let _ = std::fs::remove_file(&path);
+
+        for (k, p) in fresh.named_parameters() {
+            let hf = hf_key_from_flodl_key(&k);
+            let data = p.variable.data().to_f32_vec().unwrap();
+            match hf.as_str() {
+                "m.weight" => assert_eq!(data, w),
+                "m.bias"   => assert_eq!(data, b),
+                other => panic!("unexpected {other}"),
+            }
+        }
     }
 }

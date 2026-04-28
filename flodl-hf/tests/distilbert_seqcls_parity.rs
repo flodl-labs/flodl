@@ -1,8 +1,8 @@
 //! PyTorch parity for `DistilBertForSequenceClassification`.
 //!
 //! Loads the fixture from
-//! `flodl-hf/scripts/parity_distilbert_seqcls.py` (`fdl flodl-hf
-//! parity-distilbert-seqcls`) and compares flodl's logits against the
+//! `flodl-hf/scripts/parity_distilbert_seqcls.py` (`fdl flodl-hf parity
+//! distilbert-seqcls`) and compares flodl's logits against the
 //! HF Python reference. Fixture model:
 //! `lxyuan/distilbert-base-multilingual-cased-sentiments-student`
 //! (3-label sentiment).
@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use safetensors::{tensor::TensorView, SafeTensors};
+use safetensors::SafeTensors;
 
 use flodl::nn::Module;
 use flodl::{Device, Tensor, Variable};
@@ -21,17 +21,8 @@ use flodl_hf::models::distilbert::DistilBertForSequenceClassification;
 const FIXTURE: &str = "tests/fixtures/distilbert_seqcls_parity.safetensors";
 const LOGITS_TOL: f32 = 1e-5;
 
-fn parse_i64(v: &TensorView<'_>) -> Vec<i64> {
-    v.data().chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
-}
-fn parse_f32(v: &TensorView<'_>) -> Vec<f32> {
-    v.data().chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
-}
-fn shape_i64(v: &TensorView<'_>) -> Vec<i64> { v.shape().iter().map(|&d| d as i64).collect() }
-fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "shape mismatch: {} vs {}", a.len(), b.len());
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
-}
+mod parity_common;
+use parity_common::{max_abs_diff, parse_f32, parse_i64, shape_i64};
 
 #[test]
 #[ignore = "network + ~550MB cache write"]
@@ -39,7 +30,7 @@ fn distilbert_seqcls_parity_vs_pytorch_live() {
     let dev = Device::CPU;
 
     let bytes = std::fs::read(Path::new(FIXTURE))
-        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity-distilbert-seqcls` to regenerate)"));
+        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity distilbert-seqcls` to regenerate)"));
     let st = SafeTensors::deserialize(&bytes).expect("parse parity fixture");
 
     let ids = st.tensor("inputs.input_ids").unwrap();

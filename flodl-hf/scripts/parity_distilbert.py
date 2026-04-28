@@ -13,7 +13,7 @@ sequential `0..S`, computed internally both by HF Python and by the
 flodl graph, so they aren't stored either. The fixture therefore
 carries only `input_ids` + `attention_mask`.
 
-Run via `fdl flodl-hf parity-distilbert`.
+Run via `fdl flodl-hf parity distilbert`.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "distilbert_base_parity.safetensors"
 )
 
-PROMPT = "Fabrice writes Rust"
+PROMPT = "fab2s writes Rust"
 
 
 def main() -> None:

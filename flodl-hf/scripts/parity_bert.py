@@ -5,7 +5,7 @@ Runs HuggingFace `BertModel` on a pinned input and writes both the inputs
 and the reference outputs to
 `flodl-hf/tests/fixtures/bert_base_uncased_parity.safetensors`.
 
-Run via `fdl parity-bert` — the container has torch + transformers +
+Run via `fdl flodl-hf parity bert` — the container has torch + transformers +
 safetensors pre-installed. See `flodl-hf/scripts/Dockerfile.parity`.
 
 The resolved model SHA is written into the safetensors metadata so the

@@ -1,20 +1,24 @@
-//! `fdl add flodl-hf` -- scaffold a flodl-hf playground inside the current flodl project.
+//! `fdl add flodl-hf` -- two modes for wiring flodl-hf into a project.
 //!
-//! Drops `./flodl-hf/` as a standalone cargo crate: pinned `flodl` +
-//! `flodl-hf` deps, a one-file `AutoModel` example, `fdl.yml` with
-//! runnable commands, and a README documenting feature flavors and
-//! the convert workflow.
+//! - **playground**: drops `./flodl-hf/` as a standalone cargo crate
+//!   with a one-file `AutoModel` example, plus a `flodl-hf:` entry in
+//!   the root `fdl.yml` so `fdl flodl-hf <cmd>` routes into the
+//!   playground from the project root. Try-it-out path; the user's own
+//!   `Cargo.toml` is untouched.
+//! - **install**: appends `flodl-hf = "=X.Y.Z"` to root
+//!   `Cargo.toml` `[dependencies]` (default features). Wires the crate
+//!   into the user's own code; nothing else mutated.
 //!
-//! Scope contract: no mutation of the user's root `Cargo.toml` or
-//! `fdl.yml`. The playground is a side crate the user runs for
-//! discovery; wiring flodl-hf into their main code stays their call,
-//! documented in the generated README.
+//! Modes are combinable on the same invocation. Without flags, an
+//! interactive prompt asks; non-tty stdin errors loudly.
 //!
 //! Targets accepted: `flodl-hf` and its alias `hf`. Other targets
 //! surface a loud error listing the supported set.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::util::{cargo_toml as cargo_edit, fdl_yml as yml_edit, prompt};
 
 /// Scaffold templates baked into the binary at compile time. Live
 /// under `flodl-cli/src/scaffold/` so they travel inside the
@@ -28,28 +32,147 @@ const TEMPLATE_FDL_YML: &str = include_str!("scaffold/fdl.yml.example");
 const TEMPLATE_README: &str = include_str!("scaffold/README.md");
 const TEMPLATE_GITIGNORE: &str = include_str!("scaffold/.gitignore");
 
-pub fn run(target: Option<&str>) -> Result<(), String> {
+/// Description written into the root `fdl.yml` `flodl-hf:` entry.
+const FDL_YML_HF_DESCRIPTION: &str =
+    "HuggingFace integration (BERT, RoBERTa, DistilBERT, ...)";
+
+pub fn run(target: Option<&str>, playground: bool, install: bool) -> Result<(), String> {
     let target = target.ok_or(
-        "usage: fdl add <target>\n\nSupported targets:\n    flodl-hf    HuggingFace integration (pre-built BERT / RoBERTa / DistilBERT, Hub loader, tokenizer)",
+        "usage: fdl add <target> [--playground] [--install]\n\n\
+         Supported targets:\n    \
+         flodl-hf    HuggingFace integration (pre-built BERT / RoBERTa / DistilBERT, Hub loader, tokenizer)",
     )?;
+    match target {
+        "flodl-hf" | "hf" => {}
+        other => {
+            return Err(format!(
+                "unknown target: {other:?}\n\n\
+                 Supported targets:\n    \
+                 flodl-hf    HuggingFace integration\n\n\
+                 (More targets land as the flodl ecosystem grows.)",
+            ));
+        }
+    }
+
     let cwd = std::env::current_dir()
         .map_err(|e| format!("cannot read current directory: {e}"))?;
-    match target {
-        "flodl-hf" | "hf" => add_flodl_hf_at(&cwd),
-        other => Err(format!(
-            "unknown target: {other:?}\n\n\
-             Supported targets:\n    \
-             flodl-hf    HuggingFace integration\n\n\
-             (More targets land as the flodl ecosystem grows.)",
-        )),
+
+    // No flag: interactive prompt (or loud error on non-tty).
+    let (do_playground, do_install) = if !playground && !install {
+        resolve_interactive()?
+    } else {
+        (playground, install)
+    };
+
+    if do_install {
+        install_flodl_hf_at(&cwd)?;
+    }
+    if do_playground {
+        add_flodl_hf_at(&cwd)?;
+    }
+    Ok(())
+}
+
+/// Ask the user which mode(s) to run. Errors when no controlling
+/// terminal is available — in CI / scripted contexts the caller must
+/// pass `--playground` and/or `--install` explicitly.
+fn resolve_interactive() -> Result<(bool, bool), String> {
+    if !has_tty() {
+        return Err(
+            "fdl add flodl-hf needs an interactive terminal to prompt.\n\
+             Pass --playground (sandbox at ./flodl-hf/) or --install \
+             (add to Cargo.toml), or both."
+                .into(),
+        );
+    }
+
+    println!("Add flodl-hf to your project?");
+    println!();
+    let choice = prompt::ask_choice(
+        "Choose",
+        &[
+            "playground   sandbox at ./flodl-hf/ (try it without touching your project)",
+            "install      add flodl-hf to your root Cargo.toml as a dependency",
+            "both         playground + install (try it, and wire it in)",
+            "cancel",
+        ],
+        1,
+    );
+    println!();
+
+    match choice {
+        1 => Ok((true, false)),
+        2 => Ok((false, true)),
+        3 => Ok((true, true)),
+        _ => Err("cancelled.".into()),
     }
 }
 
-/// Scaffold `flodl-hf/` under `base`. Entry point for `fdl add flodl-hf`
-/// (with `base = cwd`) and `fdl init --with-hf` / interactive-mode
-/// follow-up (with `base = the freshly-scaffolded project dir`). The
-/// base dir must contain a `Cargo.toml` with a pinnable `flodl`
-/// dependency.
+/// Detect a usable controlling terminal. Mirrors `util::prompt::open_tty`'s
+/// platform paths so the error message arrives BEFORE the prompt is
+/// drawn (instead of silently falling back to the default choice).
+fn has_tty() -> bool {
+    #[cfg(unix)]
+    {
+        std::fs::File::open("/dev/tty").is_ok()
+    }
+    #[cfg(windows)]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .open("CONIN$")
+            .is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
+    }
+}
+
+/// Append `flodl-hf` to the root `Cargo.toml` `[dependencies]` table.
+/// Idempotent — already-present is a friendly no-op.
+pub fn install_flodl_hf_at(cwd: &Path) -> Result<(), String> {
+    let cargo_toml = cwd.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Err(format!(
+            "no Cargo.toml in {}.\n\n\
+             fdl add flodl-hf --install must run from a flodl project root.\n\
+             Start with `fdl init <name>` if you don't have one yet.",
+            cwd.display(),
+        ));
+    }
+
+    let flodl_version = detect_flodl_version(&cargo_toml)?;
+    let version_spec = format!("={flodl_version}");
+    let outcome = cargo_edit::add_dep(&cargo_toml, "flodl-hf", &version_spec)?;
+
+    match outcome {
+        cargo_edit::AddDepOutcome::AlreadyPresent => {
+            println!("flodl-hf is already declared in {}.", cargo_toml.display());
+            println!("Edit the entry directly to change version or features.");
+        }
+        cargo_edit::AddDepOutcome::Added => {
+            println!();
+            println!(
+                "Added flodl-hf = \"={flodl_version}\" to {} with default features (hub, tokenizer).",
+                cargo_toml.display(),
+            );
+            println!();
+            println!("Default features include the HuggingFace Hub loader and tokenizer.");
+            println!("To switch to offline / vision-only flavors, edit the entry manually:");
+            println!("  flodl-hf = {{ version = \"={flodl_version}\", default-features = false, features = [...] }}");
+            println!();
+            println!("Run `fdl build` (or `cargo build`) to pull and compile the new dependency.");
+        }
+    }
+    Ok(())
+}
+
+/// Scaffold `flodl-hf/` playground under `base` and link it into the
+/// root `fdl.yml`. Entry point for `fdl add flodl-hf --playground`
+/// (with `base = cwd`) and `fdl init --with-hf` follow-up (with
+/// `base = the freshly-scaffolded project dir`). The base dir must
+/// contain a `Cargo.toml` with a pinnable `flodl` dependency.
 pub fn add_flodl_hf_at(cwd: &Path) -> Result<(), String> {
     // Must be run from a flodl project root (Cargo.toml with flodl dep).
     let cargo_toml = cwd.join("Cargo.toml");
@@ -107,7 +230,26 @@ pub fn add_flodl_hf_at(cwd: &Path) -> Result<(), String> {
     )?;
     write_file(&dest.join(".gitignore"), TEMPLATE_GITIGNORE)?;
 
+    // Link `flodl-hf:` into root fdl.yml so `fdl flodl-hf <cmd>` works
+    // from project root. Idempotent — re-runs after a manual delete of
+    // the playground dir do the right thing.
+    link_into_root_fdl_yml(cwd)?;
+
     print_next_steps(&flodl_version, mode);
+    Ok(())
+}
+
+/// Append a `flodl-hf:` entry under `commands:` in the root fdl.yml
+/// (and fdl.yml.example when present) so `fdl flodl-hf` routes into
+/// `./flodl-hf/fdl.yml` via the convention-default Path command.
+fn link_into_root_fdl_yml(cwd: &Path) -> Result<(), String> {
+    for filename in ["fdl.yml", "fdl.yml.example"] {
+        let path = cwd.join(filename);
+        if !path.exists() {
+            continue;
+        }
+        yml_edit::add_command(&path, "flodl-hf", FDL_YML_HF_DESCRIPTION)?;
+    }
     Ok(())
 }
 
@@ -317,13 +459,14 @@ fn print_next_steps(version: &str, mode: ProjectMode) {
     );
     println!();
     println!("Next steps:");
-    println!("  cd flodl-hf");
-    println!("  fdl classify                 # run with the default RoBERTa sentiment checkpoint");
-    println!("  fdl classify -- bert-base-uncased   # or any other BERT-family repo id");
+    println!("  fdl flodl-hf classify                 # default RoBERTa sentiment checkpoint");
+    println!("  fdl flodl-hf classify -- bert-base-uncased   # any other BERT-family repo id");
+    println!();
+    println!("(Or `cd flodl-hf` and run `fdl classify` directly.)");
     println!();
     println!("See flodl-hf/README.md for feature flavors (offline / vision-only),");
     println!("`.bin` to safetensors conversion for older checkpoints, and how to wire");
-    println!("flodl-hf into your main crate when you're ready.");
+    println!("flodl-hf into your main crate when you're ready (`fdl add flodl-hf --install`).");
 }
 
 #[cfg(test)]
@@ -363,7 +506,7 @@ flodl = { workspace = true }
     fn parse_git_dep_errors() {
         let c = r#"
 [dependencies]
-flodl = { git = "https://github.com/fab2s/floDl" }
+flodl = { git = "https://github.com/flodl-labs/flodl" }
 "#;
         let err = parse_flodl_dep(c).unwrap_err();
         assert!(err.contains("git dependency"), "got: {err}");
@@ -446,5 +589,71 @@ commands:
             out.contains("docker: dev isn't a literal"),
             "description text preserved: {out}",
         );
+    }
+
+    /// Build a minimal flodl project tree under a unique temp dir for
+    /// integration tests. Returns the project root.
+    fn temp_project(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("fdl-add-test-{pid}-{n}-{tag}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nflodl = \"0.5.2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("fdl.yml"),
+            "description: test project\n\ncommands:\n  build:\n    run: cargo build\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn install_appends_dep_and_is_idempotent() {
+        let dir = temp_project("install-idem");
+        install_flodl_hf_at(&dir).unwrap();
+        let toml = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        assert!(toml.contains("flodl-hf = \"=0.5.2\""), "first install: {toml}");
+
+        // Re-run: no-op, file unchanged.
+        install_flodl_hf_at(&dir).unwrap();
+        let toml2 = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        assert_eq!(toml, toml2, "install is idempotent");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_errors_without_cargo_toml() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(9000);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("fdl-add-test-no-cargo-{pid}-{n}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let err = install_flodl_hf_at(&dir).unwrap_err();
+        assert!(err.contains("no Cargo.toml"), "got: {err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playground_links_root_fdl_yml() {
+        let dir = temp_project("playground-link");
+        add_flodl_hf_at(&dir).unwrap();
+        let yml = fs::read_to_string(dir.join("fdl.yml")).unwrap();
+        assert!(yml.contains("flodl-hf:"), "linked into root fdl.yml: {yml}");
+        // Existing `build:` entry preserved.
+        assert!(yml.contains("build:"));
+        // Playground crate also exists.
+        assert!(dir.join("flodl-hf/Cargo.toml").exists());
+        assert!(dir.join("flodl-hf/fdl.yml").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

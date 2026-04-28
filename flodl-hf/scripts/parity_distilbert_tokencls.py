@@ -4,7 +4,7 @@
 Fixture model: `dslim/distilbert-NER` (PER/ORG/LOC/MISC; 9-label BIO
 scheme including `O`).
 
-Run via `fdl flodl-hf parity-distilbert-tokencls`.
+Run via `fdl flodl-hf parity distilbert-tokencls`.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "distilbert_tokencls_parity.safetensors"
 )
 
-PROMPT = "Fabrice writes Rust code in Paris"
+PROMPT = "fab2s writes Rust code in Latent"
 
 
 def main() -> None:

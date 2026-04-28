@@ -12,15 +12,18 @@ commands:
     docker: dev
   test:
     description: Run all CPU tests
-    run: cargo test -- --nocapture
+    run: cargo test
+    append: -- --nocapture
     docker: dev
   test-release:
     description: Run tests in release mode
-    run: cargo test --release -- --nocapture
+    run: cargo test --release
+    append: -- --nocapture
     docker: dev
   test-live:
     description: Run live tests (network / external resources; `#[ignore]` + name ending in `_live`)
-    run: cargo test live -- --nocapture --ignored
+    run: cargo test live
+    append: -- --nocapture --ignored
     docker: dev
   check:
     description: Type check without building
@@ -50,7 +53,8 @@ commands:
     docker: cuda
   cuda-test:
     description: Run CUDA tests (parallel, excludes NCCL/Graph)
-    run: cargo test --features cuda -- --nocapture
+    run: cargo test --features cuda
+    append: -- --nocapture
     docker: cuda
   cuda-test-all:
     description: Full CUDA suite (parallel + NCCL isolated + serial)

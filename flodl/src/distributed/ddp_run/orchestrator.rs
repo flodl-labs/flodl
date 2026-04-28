@@ -28,14 +28,14 @@ use super::coordinator::Coordinator;
 /// triggers periodic parameter averaging based on [`ApplyPolicy`] and
 /// [`AverageBackend`]. Workers self-manage their epochs.
 ///
-/// Use [`Ddp::builder()`](crate::distributed::Ddp::builder) for the full configuration API.
+/// Use [`Trainer::builder()`](crate::distributed::Trainer::builder) for the full configuration API.
 ///
 /// # Quick start
 ///
 /// ```ignore
 /// use flodl::*;
 ///
-/// let handle = Ddp::builder(model_factory, optim_factory, train_fn)
+/// let handle = Trainer::builder(model_factory, optim_factory, train_fn)
 ///     .dataset(dataset)
 ///     .batch_size(32)
 ///     .num_epochs(10)
@@ -90,9 +90,9 @@ pub struct DdpHandle {
 impl DdpHandle {
     /// Detect GPUs, spawn worker threads and coordinator thread with default config.
     ///
-    /// Prefer [`Ddp::builder()`](crate::distributed::Ddp::builder) as the primary entry point.
+    /// Prefer [`Trainer::builder()`](crate::distributed::Trainer::builder) as the primary entry point.
     #[allow(clippy::too_many_arguments)]
-    #[deprecated(since = "0.3.0", note = "Use Ddp::builder() instead")]
+    #[deprecated(since = "0.3.0", note = "Use Trainer::builder() instead")]
     pub fn auto<F, M, G, O, T>(
         model_factory: F,
         optim_factory: G,
@@ -120,9 +120,9 @@ impl DdpHandle {
 
     /// Detect GPUs, spawn worker threads and coordinator thread.
     ///
-    /// Prefer [`Ddp::builder()`](crate::distributed::Ddp::builder) as the primary entry point.
+    /// Prefer [`Trainer::builder()`](crate::distributed::Trainer::builder) as the primary entry point.
     #[allow(clippy::too_many_arguments)]
-    #[deprecated(since = "0.3.0", note = "Use Ddp::builder() instead")]
+    #[deprecated(since = "0.3.0", note = "Use Trainer::builder() instead")]
     pub fn auto_with<F, M, G, O, T>(
         model_factory: F,
         optim_factory: G,
@@ -190,7 +190,7 @@ impl DdpHandle {
             );
         }
 
-        // Print device summary (same style as Ddp::setup)
+        // Print device summary (same style as Trainer::setup)
         Self::print_summary(&devices, &policy, &backend);
 
         // Step 1: Create temp model on device[0] to extract initial params
@@ -768,7 +768,7 @@ impl DdpHandle {
     /// in single-GPU training.
     ///
     /// ```ignore
-    /// let handle = Ddp::builder(factory, optim, train_fn)
+    /// let handle = Trainer::builder(factory, optim, train_fn)
     ///     .dataset(ds).batch_size(32).num_epochs(10)
     ///     .run()?;
     /// handle.setup_monitor(&mut monitor);
@@ -895,7 +895,7 @@ impl DdpHandle {
         Err(first_err.unwrap_or_else(|| TensorError::new("join: no trained state available")))
     }
 
-    /// Print device summary to stderr (same style as Ddp::setup).
+    /// Print device summary to stderr (same style as Trainer::setup).
     fn print_summary(devices: &[Device], policy: &ApplyPolicy, backend: &AverageBackend) {
         use crate::tensor::{cuda_device_name_idx, cuda_memory_info_idx};
         use crate::monitor::format_bytes;
@@ -1011,7 +1011,7 @@ impl DdpHandle {
 
 /// Builder for configuring and launching framework-managed DDP training.
 ///
-/// Created via [`Ddp::builder()`](crate::distributed::Ddp::builder). Required fields must be set before
+/// Created via [`Trainer::builder()`](crate::distributed::Trainer::builder). Required fields must be set before
 /// calling [`run`](Self::run); missing fields produce a clear panic message.
 ///
 /// # Example
@@ -1019,7 +1019,7 @@ impl DdpHandle {
 /// ```ignore
 /// use flodl::*;
 ///
-/// let handle = Ddp::builder(
+/// let handle = Trainer::builder(
 ///     |dev| model_factory(dev),
 ///     |params| Adam::new(params, 0.001),
 ///     |model, batch| { /* return loss Variable */ },
@@ -1279,9 +1279,9 @@ where
 impl DdpHandle {
     /// Create a builder for configuring framework-managed DDP training.
     ///
-    /// Prefer [`Ddp::builder()`](crate::distributed::Ddp::builder) as the primary entry point.
+    /// Prefer [`Trainer::builder()`](crate::distributed::Trainer::builder) as the primary entry point.
     /// This method exists for backward compatibility.
-    #[deprecated(since = "0.3.0", note = "Use Ddp::builder() instead")]
+    #[deprecated(since = "0.3.0", note = "Use Trainer::builder() instead")]
     pub fn builder<F, M, G, O, T>(
         model_factory: F,
         optim_factory: G,
@@ -1297,7 +1297,7 @@ impl DdpHandle {
         Self::new_builder(model_factory, optim_factory, train_fn)
     }
 
-    /// Internal builder constructor, called by [`Ddp::builder()`](crate::distributed::Ddp::builder).
+    /// Internal builder constructor, called by [`Trainer::builder()`](crate::distributed::Trainer::builder).
     pub(crate) fn new_builder<F, M, G, O, T>(
         model_factory: F,
         optim_factory: G,

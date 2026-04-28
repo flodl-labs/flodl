@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flodl::autograd::Variable;
-use flodl::distributed::{ApplyPolicy, AverageBackend, Ddp, DdpConfig};
+use flodl::distributed::{ApplyPolicy, AverageBackend, DdpConfig, Trainer};
 use flodl::monitor::{Monitor, Timeline};
 use flodl::nn::{Module, Optimizer, Parameter};
 use flodl::tensor::{Device, Result, Tensor, TensorError};
@@ -440,7 +440,7 @@ fn run_solo(
 // Sync mode (Graph-based DDP)
 // ---------------------------------------------------------------------------
 
-/// Sync mode: Ddp::setup_with() with Graph.
+/// Sync mode: Trainer::setup_with() with Graph.
 #[allow(clippy::too_many_arguments)]
 fn run_sync(
     model_def: &ModelDef,
@@ -463,7 +463,7 @@ fn run_sync(
     let opt_fn = model_def.optimizer;
     let lr = config.lr;
 
-    Ddp::setup_with(
+    Trainer::setup_with(
         graph,
         move |dev| -> Result<Box<dyn Module>> { build_fn(dev) },
         move |params: &[Parameter]| DynOptimizer(opt_fn(params, lr)),
@@ -618,7 +618,7 @@ fn run_sync(
 // Builder mode (thread-per-GPU DDP)
 // ---------------------------------------------------------------------------
 
-/// Builder mode: Ddp::builder() with thread-per-GPU.
+/// Builder mode: Trainer::builder() with thread-per-GPU.
 #[allow(clippy::borrowed_box, clippy::type_complexity, clippy::too_many_arguments)]
 fn run_builder(
     model_def: &ModelDef,
@@ -642,7 +642,7 @@ fn run_builder(
     let sched_factory = model_def.scheduler;
     let sched_epochs = config.epochs;
 
-    let mut builder = Ddp::builder(
+    let mut builder = Trainer::builder(
         build_fn,
         move |params: &[Parameter]| DynOptimizer(opt_fn(params, lr)),
         move |model: &Box<dyn Module>, batch: &[Tensor]| -> Result<Variable> {

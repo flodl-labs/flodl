@@ -35,7 +35,7 @@ Examples of unacceptable behavior:
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by opening a [private security advisory](https://github.com/fab2s/floDl/security/advisories/new)
+reported by opening a [private security advisory](https://github.com/flodl-labs/flodl/security/advisories/new)
 on GitHub. All complaints will be reviewed and investigated promptly and fairly.
 
 ## Attribution

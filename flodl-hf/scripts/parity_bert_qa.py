@@ -7,7 +7,7 @@ pair and writes inputs + start/end logits to
 
 Fixture model: `csarron/bert-base-uncased-squad-v1` (SQuAD v1, 2-wide head).
 
-Run via `fdl flodl-hf parity-bert-qa`.
+Run via `fdl flodl-hf parity bert-qa`.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "bert_qa_parity.safetensors"
 )
 
-QUESTION = "Where does Fabrice live?"
-CONTEXT = "Fabrice lives in Paris and writes Rust deep learning code."
+QUESTION = "Where does fab2s live?"
+CONTEXT = "fab2s lives in Latent and writes Rust deep learning code."
 
 
 def main() -> None:

@@ -29,17 +29,25 @@ project root.
 
 ## Install
 
-```bash
-# Option 1: cargo install (requires Rust)
-cargo install flodl-cli
+The fastest path is the pre-compiled binary (no Rust toolchain
+required):
 
-# Option 2: download a pre-compiled binary (no Rust needed)
+```bash
 curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
+./fdl install                # copies to ~/.local/bin/fdl
 ```
 
 The `fdl` bootstrap script downloads the right pre-compiled binary from
-GitHub Releases on first use. It falls back to `cargo build` if no binary
-is available for your platform.
+GitHub Releases on first use, then `./fdl install` puts it on your PATH.
+It detects your shell and prints PATH instructions if `~/.local/bin`
+is not yet on your PATH. The bootstrap falls back to `cargo build`
+if no binary is available for your platform.
+
+If you have a Rust toolchain handy, the equivalent one-liner is:
+
+```bash
+cargo install flodl-cli
+```
 
 For developers working on flodl itself:
 
@@ -48,19 +56,19 @@ cargo build --release -p flodl-cli
 ./target/release/fdl --help
 ```
 
-### Make it global
+### Install flags and updates
 
 ```bash
-fdl install                  # copies to ~/.local/bin/fdl
+fdl install                  # copy to ~/.local/bin/fdl
 fdl install --dev            # symlink instead (developers: tracks local builds)
 fdl install --check          # compare installed vs latest GitHub release
 ```
 
-`fdl install` downloads the latest release from GitHub if a newer version
-is available. It detects your shell and prints PATH instructions if
-`~/.local/bin` is not yet on your PATH. Use `--dev` to symlink instead of
-copy, so `cargo build --release -p flodl-cli` instantly updates the
-global `fdl`.
+Use `--dev` to symlink instead of copy, so
+`cargo build --release -p flodl-cli` instantly updates the global
+`fdl`. `fdl install --check` compares the installed version with the
+latest GitHub release and is the primary way to update an existing
+install.
 
 ---
 
@@ -100,6 +108,61 @@ Some flag names are **reserved** by the CLI and cannot be shadowed by
 derived argument structs (see [Declaring flags in Rust](#declaring-flags-in-rust)):
 `--help`, `--version`, `--quiet`, `--env`, and the shorts `-h`, `-V`,
 `-q`, `-v`, `-e`.
+
+---
+
+## Update checks
+
+`fdl` probes crates.io once per day for newer versions of itself
+(`flodl-cli`) and, when run inside a Cargo project, the user-facing
+flodl crates the project depends on (`flodl`, `flodl-hf`). Outdated
+crates are surfaced as one-line nudges at the end of the user's
+command, after their normal output, so they never block work.
+
+The first run prints a one-time disclosure pointing at the opt-outs;
+subsequent runs are silent unless an update is found.
+
+| Behavior              | Trigger                                                                   |
+|-----------------------|---------------------------------------------------------------------------|
+| Disabled this run     | `FDL_NO_UPDATE_CHECK=1` env var (wins over everything else)               |
+| Disabled in CI        | `CI=true` env var (auto-detected from any standard CI runner)             |
+| Disabled in container | `/.dockerenv` present (avoids ephemeral cache + redundant probes)         |
+| Disabled persistently | Set `update_check.enabled = false` in `<config-dir>/flodl/config.json`    |
+
+`<config-dir>` follows platform conventions:
+- Linux / BSD: `$XDG_CONFIG_HOME` if set, else `~/.config`
+- macOS: `~/Library/Application Support`
+- Windows: `%APPDATA%`
+
+Config-file shape (auto-managed except `enabled`):
+
+```json
+{
+  "update_check": {
+    "enabled": true,
+    "last_check": 1714138800,
+    "latest_known": {
+      "flodl-cli": "0.5.3",
+      "flodl": "0.5.3",
+      "flodl-hf": "0.5.3"
+    },
+    "first_run_seen": true
+  }
+}
+```
+
+The probe uses `curl --max-time 2` and silently skips on every failure
+mode — the user's command is never delayed past the timeout, and a
+broken or offline network just means today's check didn't update the
+cache. Pre-release versions are ignored; nudges only fire against the
+crate's `max_stable_version`.
+
+Updating from a nudge:
+
+```bash
+fdl install --check               # update fdl itself
+cargo update                      # update flodl/flodl-hf in your project
+```
 
 ---
 
@@ -704,9 +767,10 @@ fdl train --help
 
 Path-kind sub-commands with an `entry:` forward every extra argv token to
 the underlying binary, where the derived parser validates it. `run:`-kind
-commands (shown in the next section) are closed scripts and do not
-forward extra args; use shell-level `$VAR` inside the script if you need
-dynamic values.
+commands (shown in the next section) forward argv only after an explicit
+`--` separator -- `fdl test-live -- -p flodl-hf` splices `-p flodl-hf`
+into the script, while `fdl test-live -p flodl-hf` errors loudly. Stray
+args before `--` are rejected with a hint pointing at the right form.
 
 `#[derive(FdlArgs)]` is re-exported as `flodl_cli::FdlArgs`. See the
 [`flodl-cli-macros`
@@ -721,6 +785,9 @@ of three kinds, chosen by which fields are set:
 
 - **Run** -- `run:` is set. Executes the inline shell script, optionally
   wrapped in `docker compose run --rm <service>` when `docker:` is set.
+  An optional `append:` field declares literal trailing tokens
+  (typically the libtest `-- --nocapture --ignored` portion) that should
+  follow any user-supplied args.
 - **Path** -- `path:` is set (or, by convention, the entry is empty/null
   and a sibling directory named `<command>/` with its own `fdl.yml`
   exists). Loads the nested manifest and recurses.
@@ -735,11 +802,13 @@ description: flodl - Rust deep learning framework
 commands:
   test:
     description: Run all CPU tests
-    run: cargo test -- --nocapture
+    run: cargo test
+    append: -- --nocapture
     docker: dev
   cuda-test:
     description: Run CUDA tests (parallel)
-    run: cargo test --features cuda -- --nocapture
+    run: cargo test --features cuda
+    append: -- --nocapture
     docker: cuda
   shell:
     run: bash
@@ -748,16 +817,53 @@ commands:
 ```
 
 ```bash
-fdl test              # runs "test" in the "dev" docker service
-fdl cuda-test         # runs in the "cuda" service
-fdl shell             # opens an interactive shell
-fdl ddp-bench --list  # dispatches into the ddp-bench sub-command
+fdl test                              # runs "test" in the "dev" docker service
+fdl cuda-test                         # runs in the "cuda" service
+fdl test -- -p flodl-hf --test foo    # forwards `-p flodl-hf --test foo` to cargo
+fdl shell                             # opens an interactive shell
+fdl ddp-bench --list                  # dispatches into the ddp-bench sub-command
 ```
 
 When a `run:` command declares `docker: <service>`, `fdl` wraps it in
 `docker compose run --rm <service> bash -c "…"`. Without `docker:`, it
 runs on the host. `docker:` is only valid on `run:` commands --
 declaring it on a `path:` or preset entry is rejected at load time.
+
+#### Forwarding extra args with `--` and `append:`
+
+`run:`-kind commands accept user args after an explicit `--` separator
+on the CLI. The composed shell command is:
+
+```
+[run:]  +  [user args after --]  +  [append:]
+```
+
+Args before `--` are rejected loudly (with a hint showing the right
+form). Args after `--` are POSIX-quoted and spliced between the run
+line and the append suffix. So:
+
+```yaml
+test-live:
+  run: cargo test live
+  append: -- --nocapture --ignored
+  docker: dev
+```
+
+```bash
+fdl test-live                                       # cargo test live -- --nocapture --ignored
+fdl test-live -- -p flodl-hf                        # cargo test live -p flodl-hf -- --nocapture --ignored
+fdl test-live -- --test xlm_roberta_parity          # cargo test live --test xlm_roberta_parity -- --nocapture --ignored
+fdl test-live -p flodl-hf                           # error: use `fdl test-live -- -p flodl-hf`
+```
+
+`append:` is purely structural: it lets the script author reserve
+trailing tokens (libtest harness flags, fixed test-name filters, etc.)
+that should always follow any user-supplied args. There is no opt-in or
+opt-out flag; the user typing `--` *is* the explicit forwarding signal.
+Commands without an `append:` simply receive the user args at the tail.
+
+`append:` without `run:` is rejected at load time: it only forwards
+tokens for inline run-scripts.
 
 ### Declaring flags in Rust
 
@@ -1062,14 +1168,16 @@ checkpoints, etc.). The canonical pattern:
 - Test name ends in `_live`.
 - Test is annotated `#[ignore = "live: requires network"]` (or similar
   reason) so `fdl test` skips it by default.
-- `fdl test-live` delegates to
-  `cargo test live -- --nocapture --ignored`, which picks them up.
+- `fdl test-live` delegates to `cargo test live` with
+  `-- --nocapture --ignored` declared as `append:`, which picks them up.
+  Pass cargo flags after `--` to scope (e.g.
+  `fdl test-live -- -p flodl-hf --test xlm_roberta_parity`).
 
 flodl-hf uses this for its PyTorch parity tests
 (`bert_parity_vs_pytorch_live`, `bert_tokenizer_matches_parity_fixture_live`,
-and the RoBERTa / DistilBERT siblings), each asserting
-`max_abs_diff <= 1e-5` on logits or hidden state against a pinned HF
-Python reference. Weights cache under `.hf-cache/` via
+and the RoBERTa / DistilBERT / ALBERT / XLM-RoBERTa siblings), each
+asserting `max_abs_diff <= 1e-5` on logits or hidden state against a
+pinned HF Python reference. Weights cache under `.hf-cache/` via
 `HF_HOME=/workspace/.hf-cache` in the Docker service.
 
 Any project (not just flodl itself) can adopt the `_live` suffix +
@@ -1126,31 +1234,48 @@ declares the sub-command, the child `fdl.yml` defines its tasks.
 fdl flodl-hf                          # list sub-commands
 fdl flodl-hf convert <repo_id>        # convert pytorch_model.bin -> model.safetensors
 
-# Runnable examples (thirteen demos across BERT / RoBERTa / DistilBERT)
+# Runnable examples (fourteen demos across the six BERT-family architectures)
 fdl flodl-hf example                  # list example names
 fdl flodl-hf example auto-classify    # family-agnostic via AutoModel
 fdl flodl-hf example bert-embed       # + bert-classify / bert-ner / bert-qa
 fdl flodl-hf example roberta-embed    # + roberta-classify / -ner / -qa
 fdl flodl-hf example distilbert-embed # + distilbert-classify / -ner / -qa
+fdl flodl-hf example distilbert-finetune  # fine-tune walkthrough (loss curve + export recipe)
 
-# Parity-fixture regeneration (contributors; twelve per-head commands)
-fdl flodl-hf parity-bert              # bert-base-uncased backbone fixture
-fdl flodl-hf parity-bert-seqcls       # per-head fixtures
-fdl flodl-hf parity-bert-tokencls
-fdl flodl-hf parity-bert-qa
-fdl flodl-hf parity-roberta           # + seqcls / tokencls / qa
-fdl flodl-hf parity-distilbert        # + seqcls / tokencls / qa
+# Round-trip export to the HF ecosystem (any supported family/head)
+fdl flodl-hf export --hub bert-base-uncased --out /tmp/bert-export
+fdl flodl-hf export --checkpoint ./my.fdl  --out /tmp/my-export
+fdl flodl-hf verify-export /tmp/bert-export             # auto-detects Hub source from stamped config
+fdl flodl-hf verify-export /tmp/my-export --no-hub-source
+
+# 30-cell pre-release gate (six families x base/seqcls/tokcls/qa/mlm)
+fdl flodl-hf verify-matrix
+fdl flodl-hf verify-matrix -- --families bert,albert --heads base,seqcls
+
+# Parity-fixture regeneration (contributors; 29 per-head commands plus `parity all`)
+fdl flodl-hf parity                       # list parity targets
+fdl flodl-hf parity all                   # run every fixture in sequence (PASS/FAIL grid)
+fdl flodl-hf parity bert                  # bert-base-uncased backbone fixture
+fdl flodl-hf parity bert-seqcls           # per-head fixtures
+fdl flodl-hf parity albert-mlm            # ALBERT family masked-LM fixture
+fdl flodl-hf parity deberta-v2-qa         # DeBERTa-v2 QA fixture
+# (29 in total: bert/roberta/distilbert/albert/xlm-roberta + seqcls/tokencls/qa/mlm
+#  per family, plus the bare-backbone targets; deberta-v2 has no -mlm fixture
+#  due to a documented MLM gap in flodl-hf/tests/deberta_v2_parity.rs)
 ```
 
-Parity regen runs in a dedicated `hf-parity` Docker service
-(`python:3.12-slim` + torch CPU wheel + `transformers`) declared in
-`docker-compose.yml`. `HF_HOME=/workspace/.hf-cache` keeps weights and
-tokenizers cached between runs (gitignored).
+`hub`, `checkpoint`, and `parity` modes all run in a dedicated
+`hf-parity` Docker service (`python:3.12-slim` + torch CPU wheel +
+`transformers`) declared in `docker-compose.yml`.
+`HF_HOME=/workspace/.hf-cache` keeps weights and tokenizers cached
+between runs (gitignored). The `verify-export` and `verify-matrix`
+runners route Python through the same service automatically.
 
 See the
 [HuggingFace Integration tutorial](tutorials/14-flodl-hf.md) for
 end-user usage of the crate itself (API walkthroughs, install
-profiles, `AutoModel` dispatch).
+profiles, `AutoModel` dispatch, fine-tune + export round-trip
+recipe, the 30-cell parity matrix).
 
 ### Interactive shells
 

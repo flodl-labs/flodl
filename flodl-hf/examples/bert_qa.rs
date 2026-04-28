@@ -20,8 +20,8 @@ fn main() -> flodl::Result<()> {
 
     let pairs = &[
         (
-            "Where does Fabrice live?",
-            "Fabrice lives in Paris and writes Rust deep learning code.",
+            "Where does fab2s live?",
+            "fab2s lives in Latent and writes Rust deep learning code.",
         ),
         (
             "What does flodl wrap?",

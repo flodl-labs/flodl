@@ -24,7 +24,7 @@ fn main() -> flodl::Result<()> {
     )?;
 
     let sentences = &[
-        "Fabrice writes Rust code in Paris",
+        "fab2s writes Rust code in Latent",
         "Anthropic built Claude in San Francisco",
     ];
     let tagged = ner.predict(sentences)?;

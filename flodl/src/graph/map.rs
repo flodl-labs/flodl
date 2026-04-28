@@ -93,6 +93,7 @@ impl MapBuilder {
                 module: Some(composite),
                 ref_forward: None,
                 trace_buf: None,
+                named_trace_buf: None,
                 loop_ports: None,
             },
         );
@@ -137,6 +138,7 @@ fn wire_map(fb: &mut FlowBuilder, body: Box<dyn Module>, source: NodeRef, batche
             module: Some(composite),
             ref_forward: None,
             trace_buf: None,
+            named_trace_buf: None,
             loop_ports: None,
         },
     );

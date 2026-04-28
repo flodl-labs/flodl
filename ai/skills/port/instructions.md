@@ -45,6 +45,14 @@ If fdl is not available, read `flodl/src/lib.rs` and explore the source
 tree to understand what's available. Focus on `flodl/src/nn/` for modules
 and `flodl/src/graph/flow.rs` for the FlowBuilder.
 
+For the CLI surface (project setup, libtorch, fdl.yml dispatch, the
+`fdl flodl-hf` sub-commands, etc.), use `fdl --help` recursively:
+`fdl --help` lists top-level commands, `fdl <cmd> --help` drills into
+one, `fdl <cmd> <sub> --help` drills further. Help text is
+auto-generated from the source via `#[derive(FdlArgs)]`, so it reflects
+the user's installed version and is the most reliable source for the
+current CLI surface.
+
 ## Step 2: Read the Porting Guide
 
 Read the porting guide at `ai/skills/port/guide.md` for the complete
@@ -93,10 +101,10 @@ Before writing code, decide:
    training loop through flodl's DDP entry points instead of the manual
    `forward / backward / step` loop. flodl unifies data loading and
    training under DDP:
-   - **Graph model** -> `Ddp::setup(&model, &builder, |p| Adam::new(p, lr))?`.
+   - **Graph model** -> `Trainer::setup(&model, &builder, |p| Adam::new(p, lr))?`.
      Training loop becomes `for batch in model.epoch(e) { ...
      loss.backward()?; model.step()?; }`. Same loop runs on 1 or N GPUs.
-   - **Non-Graph Module** -> `Ddp::builder(model_factory, optim_factory,
+   - **Non-Graph Module** -> `Trainer::builder(model_factory, optim_factory,
      train_fn).dataset(...).batch_size(...).num_epochs(...).run()?`.
      Thread-per-GPU. `.policy(ApplyPolicy::Cadence)` and
      `.backend(AverageBackend::Nccl)` are swappable for A/B testing.

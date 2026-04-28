@@ -97,7 +97,7 @@ The three-kind model is the long-term stable surface. No further
 breaking changes to its shape are scheduled. If you had a 0.4.0
 `fdl.yml`, the upgrade is boring -- wrap your `scripts:` values in
 `run:` and move on. Step-by-step in
-[UPGRADE.md](https://github.com/fab2s/floDl/blob/main/UPGRADE.md).
+[UPGRADE.md](https://github.com/flodl-labs/flodl/blob/main/UPGRADE.md).
 
 Load-time validation tells you exactly which file, which key, and
 which rule failed. `docker:` on non-`run:` entries is rejected.
@@ -179,17 +179,17 @@ version bump.
 ## Where to go next
 
 - **Read the derive reference**:
-  [declaring flags in Rust](https://github.com/fab2s/floDl/blob/main/docs/cli.md#declaring-flags-in-rust)
+  [declaring flags in Rust](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md#declaring-flags-in-rust)
   covers the attribute surface with a worked example.
 - **Upgrade your 0.4.0 project**:
-  [UPGRADE.md](https://github.com/fab2s/floDl/blob/main/UPGRADE.md)
+  [UPGRADE.md](https://github.com/flodl-labs/flodl/blob/main/UPGRADE.md)
   is short. Breaking changes are `scripts:` to `commands:` and a
   handful of reserved flag names.
 - **Preview your config**: once upgraded, run
   `fdl config show` (and `fdl --env <name> config show` if you use
   overlays) to see what actually merges.
 - **Read the full CLI reference**:
-  [docs/cli.md](https://github.com/fab2s/floDl/blob/main/docs/cli.md)
+  [docs/cli.md](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md)
   covers all three contexts -- standalone, in-project, flodl source
   checkout.
 

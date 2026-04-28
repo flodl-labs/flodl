@@ -112,5 +112,5 @@ You won't go back.
 
 - **[Get Started]({{ '/guide/' | relative_url }})** — the guide, start to finish
 - **[Install `fdl`]({{ '/guide/cli' | relative_url }})** — one curl, zero Rust on your host
-- **[flodl on GitHub](https://github.com/fab2s/floDl)** — source, issues, contributions
+- **[flodl on GitHub](https://github.com/flodl-labs/flodl)** — source, issues, contributions
 - **[The DDP benchmark]({{ '/ddp-benchmark' | relative_url }})** — numbers behind the prose

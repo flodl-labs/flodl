@@ -1,0 +1,16 @@
+description: Export a Hub repo or local flodl checkpoint as a HuggingFace-compatible directory (model.safetensors + config.json) using flodl's own writer. Auto-detects family (bert/roberta/distilbert/xlm-roberta/albert/deberta-v2).
+
+# Argv forwards to the Rust example binary (entry: commands forward argv;
+# run: commands do not — see feedback_cli_docs_three_contexts).
+#
+# First invocation compiles the `export_hf` example into the dev
+# container's target cache; subsequent invocations are instant.
+#
+# `compile: true` opts the cargo entry into schema probing: fdl runs
+# `<entry> --fdl-schema` once on `-h`, caches the JSON, and renders
+# help from it on every subsequent invocation. Pays the compile cost
+# on first run; invariant after.
+
+docker: dev
+compile: true
+entry: cargo run --release --manifest-path /workspace/flodl-hf/Cargo.toml --example export_hf --features hub --

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/fab2s/floDl/main/docs/floDl.png" alt="floDl" width="640">
+  <img src="https://raw.githubusercontent.com/flodl-labs/flodl/main/docs/floDl.png" alt="floDl" width="640">
 </p>
 
 <h1 align="center">floDl</h1>
@@ -11,10 +11,10 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
 
 <p align="center">
   <a href="https://flodl.dev"><img src="https://img.shields.io/badge/web-flodl.dev-6c8cff" alt="Website"></a>
-  <a href="https://github.com/fab2s/floDl/actions"><img src="https://github.com/fab2s/floDl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/flodl-labs/flodl/actions"><img src="https://github.com/flodl-labs/flodl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/flodl"><img src="https://img.shields.io/crates/v/flodl.svg" alt="crates.io"></a>
   <a href="https://docs.rs/flodl"><img src="https://docs.rs/flodl/badge.svg" alt="docs.rs"></a>
-  <a href="https://github.com/fab2s/floDl/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="https://github.com/flodl-labs/flodl/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
 </p>
 
 <p align="center">
@@ -25,11 +25,12 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
   <a href="#graph-tree-hierarchical-composition">Graph Tree</a> &bull;
   <a href="#the-training-experience">Training</a> &bull;
   <a href="#multi-gpu-training">Multi-GPU</a> &bull;
+  <a href="#huggingface-integration">HuggingFace</a> &bull;
   <a href="#pytorch-parity">Parity</a> &bull;
   <a href="#performance">Benchmarks</a> &bull;
-  <a href="https://github.com/fab2s/floDl/blob/main/ROADMAP.md">Roadmap</a> &bull;
-  <a href="https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md">Migration Guide</a> &bull;
-  <a href="https://github.com/fab2s/floDl/blob/main/docs/tutorials/13-data-loading.md">Data Loading</a>
+  <a href="https://github.com/flodl-labs/flodl/blob/main/ROADMAP.md">Roadmap</a> &bull;
+  <a href="https://github.com/flodl-labs/flodl/blob/main/docs/pytorch_migration.md">Migration Guide</a> &bull;
+  <a href="https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/13-data-loading.md">Data Loading</a>
 </p>
 
 ---
@@ -88,10 +89,10 @@ optimizer.step()?;
 
 Same concepts, same names, same GPU kernels underneath. The `?` operator
 replaces silent failures with compile-time error handling. `Drop` replaces the
-garbage collector. The [full migration guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md) covers
+garbage collector. The [full migration guide](https://github.com/flodl-labs/flodl/blob/main/docs/pytorch_migration.md) covers
 every op, module, and pattern.
 
-> **New to Rust?** Read [Rust for PyTorch Users](https://github.com/fab2s/floDl/blob/main/docs/tutorials/00-rust-primer.md) — 10 patterns in 15 minutes.
+> **New to Rust?** Read [Rust for PyTorch Users](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/00-rust-primer.md) — 10 patterns in 15 minutes.
 
 ## Getting Started
 
@@ -165,6 +166,33 @@ for (input_t, target_t) in &batches {
 }
 ```
 
+For framework-managed training (same code on CPU, single GPU, multi-GPU),
+the universal `Trainer` takes a step closure and owns the loop:
+
+```rust
+// One step: forward + loss, returns the loss Variable.
+fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
+    let input = Variable::new(batch[0].clone(), false);
+    let target = Variable::new(batch[1].clone(), false);
+    mse_loss(&model.forward(&input)?, &target)
+}
+
+Trainer::builder(
+    |dev| build_model_on(dev),
+    |params| Adam::new(params, 0.01),
+    train_step,
+)
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(num_epochs)
+    .run()?
+    .join()?;
+```
+
+`Trainer::setup` (own the loop, framework owns the setup) is the
+in-between tier. See [Tutorial 4: Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/04-training.md)
+for all three tiers.
+
 ## The Graph Builder
 
 floDl's fluent graph builder lets you describe complex architectures as
@@ -212,8 +240,8 @@ state across calls, enabling recurrent architectures without special-casing.
 | `map(body).each()` / `.over(tag)` / `.slices(n)` | Element-wise, tagged, or sliced iteration |
 | `input(names)` | Auxiliary graph inputs for multi-input architectures |
 
-See the **[Graph Builder Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md)** and
-the [full showcase](https://github.com/fab2s/floDl/tree/main/flodl/examples/showcase/).
+See the **[Graph Builder Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/05-graph-builder.md)** and
+the [full showcase](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/showcase/).
 
 ## Graph Tree: Hierarchical Composition
 
@@ -308,7 +336,7 @@ validated independently before becoming a building block in a larger
 architecture. Checkpoints, metrics, and training phases compose just like
 the graphs themselves.
 
-See the full **[Graph Tree Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/10-graph-tree.md)**.
+See the full **[Graph Tree Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/10-graph-tree.md)**.
 
 ## The Training Experience
 
@@ -341,7 +369,7 @@ monitor.finish();
 
 <p align="center">
   <a href="https://flodl.dev/benchmark">
-    <img src="https://raw.githubusercontent.com/fab2s/floDl/main/docs/dashboard.gif" alt="floDl live training dashboard — click for interactive version" width="800">
+    <img src="https://raw.githubusercontent.com/flodl-labs/flodl/main/docs/dashboard.gif" alt="floDl live training dashboard — click for interactive version" width="800">
   </a>
 </p>
 <p align="center"><em><a href="https://flodl.dev/benchmark">Interactive benchmark dashboard</a> — real data from a 100-epoch training run</em></p>
@@ -397,12 +425,12 @@ g.svg_with_profile(Some("profile.svg"))?;          // timing heatmap
 g.plot_html("training.html", &["loss", "head"])?;  // interactive curves
 ```
 
-See the **[Training Monitor Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/09-monitor.md)** and
-the **[Observation example](https://github.com/fab2s/floDl/tree/main/flodl/examples/observation/)**.
+See the **[Training Monitor Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/09-monitor.md)** and
+the **[Observation example](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/observation/)**.
 
 ## Multi-GPU Training
 
-`Ddp::setup()` gives you transparent heterogeneous multi-GPU training with
+`Trainer::setup()` gives you transparent heterogeneous multi-GPU training with
 zero changes to your training loop. floDl detects your GPUs, picks the best
 strategy, and balances work automatically: the slowest GPU anchors the pace
 while faster ones run ahead intelligently.
@@ -411,7 +439,7 @@ while faster ones run ahead intelligently.
 
 ```rust
 // Detect GPUs, replicate model, set optimizer, enable training
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 
 // Training loop is IDENTICAL for 1 or N GPUs
 for batch in model.epoch(0) {
@@ -423,7 +451,7 @@ for batch in model.epoch(0) {
 **DDP Builder** -- thread-per-GPU, works with any `Module`:
 
 ```rust
-let state = Ddp::builder(model_factory, optim_factory, train_fn)
+let state = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(10)
@@ -438,21 +466,21 @@ let state = Ddp::builder(model_factory, optim_factory, train_fn)
 | **Works with** | `Graph` builder | Any `Module` |
 | **GPU model** | Scatter per batch | Thread per GPU (Local SGD) |
 | **Mixed GPUs** | El Che auto-enabled | `ApplyPolicy` x `AverageBackend` |
-| **Setup** | One line (`Ddp::setup`) | Builder pattern |
+| **Setup** | One line (`Trainer::setup`) | Builder pattern |
 | **Dashboard** | Integrated | Stderr logging |
 
 **A/B testing**: swap `AverageBackend::Nccl` for `AverageBackend::Cpu`
 with one line. If loss curves match, you have validated the cheaper
 backend for your workload.
 
-See the **[Multi-GPU Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md)**,
-**[DDP Builder Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md)**,
-**[Data Loading Tutorial](https://github.com/fab2s/floDl/blob/main/docs/tutorials/13-data-loading.md)**, and
-**[DDP Reference](https://github.com/fab2s/floDl/blob/main/docs/ddp.md)**.
+See the **[Multi-GPU Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/11-multi-gpu.md)**,
+**[DDP Builder Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/12-async-ddp.md)**,
+**[Data Loading Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/13-data-loading.md)**, and
+**[DDP Reference](https://github.com/flodl-labs/flodl/blob/main/docs/ddp.md)**.
 
 ### Validation suite — `ddp-bench`
 
-The repo ships with [`ddp-bench/`](https://github.com/fab2s/floDl/tree/main/ddp-bench),
+The repo ships with [`ddp-bench/`](https://github.com/flodl-labs/flodl/tree/main/ddp-bench),
 a workspace member that reproduces published training setups (Logistic /
 MLP / LeNet-5 / ResNet-20 / Char-RNN / GPT-nano / Conv-AE on MNIST,
 CIFAR-10, Shakespeare) to build scientifically valid solo baselines, then
@@ -486,6 +514,68 @@ let text  = Shakespeare::parse(&corpus, /*seq_len=*/ 128)?;
 
 `ddp-bench` downloads and caches the underlying files on first run.
 
+## HuggingFace Integration
+
+The [`flodl-hf`](https://crates.io/crates/flodl-hf) sibling crate loads
+real HuggingFace checkpoints directly into floDl, with no Python, no
+ONNX detour, and no conversion script. Six BERT-family architectures
+(BERT, RoBERTa, DistilBERT, ALBERT, XLM-RoBERTa, DeBERTa-v2) are wired
+end-to-end with PyTorch-verified numerical parity across four task
+heads each.
+
+```rust
+use flodl_hf::models::auto::AutoModelForSequenceClassification;
+
+let clf = AutoModelForSequenceClassification::from_pretrained(
+    "cardiffnlp/twitter-roberta-base-sentiment-latest",
+)?;
+
+let results = clf.predict(&["I love this framework"])?;
+for (label, score) in &results[0] {
+    println!("{} ({:.3})", label, score);
+}
+```
+
+`AutoModel` reads `config.json`, dispatches to the right family, and
+returns a typed handle. Swap the repo id for `bert-base-uncased`,
+`albert-base-v2`, `xlm-roberta-base`, `microsoft/deberta-v3-base`, or
+any fine-tune on top of those, and the caller stays identical.
+
+| Entry point | Task | Output |
+|---|---|---|
+| `AutoModel` | Backbone (hidden states) | `[batch, seq_len, hidden]` |
+| `AutoModelForSequenceClassification` | Whole-text labels | `Vec<Vec<(label, score)>>` |
+| `AutoModelForTokenClassification` | Per-token labels (NER) | `Vec<Vec<TokenPrediction>>` |
+| `AutoModelForQuestionAnswering` | Extractive answer span | `Answer { text, start, end, score }` |
+| `AutoModelForMaskedLM` | Fill-mask candidates | `Vec<(token, prob)>` (top-k) |
+
+Three feature profiles cover deployment shapes: full Hub + tokenizer
+(default), vision-only (Hub without the regex/unicode surface), and
+offline `safetensors`-only (no network, no async runtime, no TLS).
+Inside an existing flodl project, `fdl add flodl-hf --playground`
+scaffolds a side crate with a runnable `AutoModel` example so you can
+verify a real checkpoint loads before wiring it into your main code;
+`fdl add flodl-hf --install` appends `flodl-hf = "=0.5.3"` to your
+root `Cargo.toml`.
+
+```bash
+fdl add flodl-hf --playground   # try it: ./flodl-hf/ sandbox crate
+fdl add flodl-hf --install      # wire it: pin to your root Cargo.toml
+fdl flodl-hf classify           # runs AutoModel on a real fine-tune
+```
+
+Fine-tuning uses the same loop code on CPU, single GPU, or N GPUs:
+`Trainer::setup_head` distributes the head transparently when more
+devices are available, and `compute_loss(enc, labels)` mirrors HF
+Python's `model(..., labels=...).loss` one-call shape. Round-trip the
+trained head back out with `fdl flodl-hf export` then verify it loads
+into HF Python's `AutoModelFor*` with `fdl flodl-hf verify-export`.
+
+See the **[HuggingFace Integration Tutorial](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md)**
+for the full feature matrix, per-family entry points, tokenizer usage,
+local-disk loading, the fine-tune walkthrough, the export round-trip
+recipe, and the 30-cell parity matrix.
+
 ## PyTorch Parity
 
 floDl covers the modules, losses, and optimizers you actually use:
@@ -505,7 +595,7 @@ Fused Adam/AdamW on CUDA (single kernel for all parameters). Fused gradient
 clipping via foreach ops. Mixed precision with `AutocastGuard` + `GradScaler`.
 CUDA Graphs for replay-based training.
 
-The [full migration guide](https://github.com/fab2s/floDl/blob/main/docs/pytorch_migration.md) has side-by-side
+The [full migration guide](https://github.com/flodl-labs/flodl/blob/main/docs/pytorch_migration.md) has side-by-side
 code for every op, module, and pattern.
 
 ## Performance
@@ -533,7 +623,7 @@ CUDA kernels. The gap appears where framework overhead matters:
 dispatch-bound architectures (transformer -31%, mlp -29%), graph routing
 (residual_tower -24%), and recurrent loops (feedback_fixed -16%).
 
-**[Benchmark Report](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md)** |
+**[Benchmark Report](https://github.com/flodl-labs/flodl/blob/main/docs/benchmark.md)** |
 [Interactive dashboard](https://flodl.dev/benchmark)
 
 ### Multi-GPU (DDP)
@@ -555,7 +645,7 @@ than the fast GPU alone. 200 epochs is where ElChe's proportional
 scheduling has room to calibrate and shine -- shorter models (logistic
 through gpt-nano) confirm DDP convergence across architectures.
 
-**[DDP Benchmark Report](https://github.com/fab2s/floDl/blob/main/docs/ddp-benchmark.md)** --
+**[DDP Benchmark Report](https://github.com/flodl-labs/flodl/blob/main/docs/ddp-benchmark.md)** --
 full results for 8 models across 9 DDP modes
 
 ## Why Rust for Deep Learning?
@@ -636,8 +726,8 @@ codegen-units = 1
 
 | Component | What it does |
 |-----------|-------------|
-| `Ddp::setup` | One-liner: detect GPUs, distribute, set optimizer, train |
-| `Ddp::builder` | Thread-per-GPU with Local SGD, any Module |
+| `Trainer::setup` | One-liner: detect GPUs, distribute, set optimizer, train |
+| `Trainer::builder` | Thread-per-GPU with Local SGD, any Module |
 | `ApplyPolicy` | Sync / Cadence / Async (when to average) |
 | `AverageBackend` | Nccl / Cpu (how to average, A/B testable) |
 | `ElChe` | Heterogeneous GPU cadence strategy |
@@ -668,43 +758,45 @@ supports. If `nvidia-smi` works, floDl trains on it.
 
 | Background | Start here |
 |-----------|-----------|
-| **New to Rust** | [Rust for PyTorch Users](https://github.com/fab2s/floDl/blob/main/docs/tutorials/00-rust-primer.md) — 10 patterns in 15 minutes |
-| **Know Rust, new to DL** | [Tensors](https://github.com/fab2s/floDl/blob/main/docs/tutorials/01-tensors.md) then [Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/04-training.md) |
-| **Know PyTorch** | [Porting Guide](https://github.com/fab2s/floDl/blob/main/docs/porting.md) (or `/port` with AI) then [Graph Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md) |
-| **Scaling to multi-GPU** | [Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md) then [DDP Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md) |
-| **Just show me code** | [`quickstart`](https://github.com/fab2s/floDl/tree/main/flodl/examples/quickstart/) or [`showcase`](https://github.com/fab2s/floDl/tree/main/flodl/examples/showcase/) |
+| **New to Rust** | [Rust for PyTorch Users](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/00-rust-primer.md) — 10 patterns in 15 minutes |
+| **Know Rust, new to DL** | [Tensors](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/01-tensors.md) then [Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/04-training.md) |
+| **Know PyTorch** | [Porting Guide](https://github.com/flodl-labs/flodl/blob/main/docs/porting.md) (or `/port` with AI) then [Graph Builder](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/05-graph-builder.md) |
+| **Scaling to multi-GPU** | [Multi-GPU Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/11-multi-gpu.md) then [DDP Builder](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/12-async-ddp.md) |
+| **Bringing a HuggingFace model** | [HuggingFace Integration](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md): load BERT, RoBERTa, DistilBERT, ALBERT, XLM-R, or DeBERTa-v2; classify, NER, QA, or fill-mask; fine-tune and round-trip back to the HF ecosystem |
+| **Just show me code** | [`quickstart`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/quickstart/) or [`showcase`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/showcase/) |
 
 ### Tutorials
 
-0. **[Rust for PyTorch Users](https://github.com/fab2s/floDl/blob/main/docs/tutorials/00-rust-primer.md)** — 10 Rust patterns in 15 minutes
-1. **[Tensors](https://github.com/fab2s/floDl/blob/main/docs/tutorials/01-tensors.md)** — creation, ops, memory, CUDA
-2. **[Autograd](https://github.com/fab2s/floDl/blob/main/docs/tutorials/02-autograd.md)** — variables, gradients, backward
-3. **[Modules](https://github.com/fab2s/floDl/blob/main/docs/tutorials/03-modules.md)** — all layers, convolutions, RNNs, attention, normalization
-4. **[Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/04-training.md)** — losses, optimizers, mixed precision, full loop
-5. **[Graph Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/05-graph-builder.md)** — fluent API from simple to complex
-6. **[Advanced Graphs](https://github.com/fab2s/floDl/blob/main/docs/tutorials/06-advanced-graphs.md)** — forward refs, loops, gates, switches
-7. **[Visualization](https://github.com/fab2s/floDl/blob/main/docs/tutorials/07-visualization.md)** — DOT/SVG, profiling heatmaps
-8. **[Utilities](https://github.com/fab2s/floDl/blob/main/docs/tutorials/08-utilities.md)** — checkpoints, clipping, freezing, initialization, scheduling, verbosity-gated logging
-9. **[Training Monitor](https://github.com/fab2s/floDl/blob/main/docs/tutorials/09-monitor.md)** — ETA, resource tracking, live dashboard
-10. **[Graph Tree](https://github.com/fab2s/floDl/blob/main/docs/tutorials/10-graph-tree.md)** — hierarchical composition, freeze/thaw, subgraph checkpoints
-11. **[Multi-GPU Training](https://github.com/fab2s/floDl/blob/main/docs/tutorials/11-multi-gpu.md)** — Ddp::setup, El Che, auto-balancing, DataLoader integration
-12. **[DDP Builder](https://github.com/fab2s/floDl/blob/main/docs/tutorials/12-async-ddp.md)** — thread-per-GPU, Local SGD, A/B testable backends
-13. **[Data Loading](https://github.com/fab2s/floDl/blob/main/docs/tutorials/13-data-loading.md)** — DataLoader, resident/streaming modes, VRAM-aware prefetch, DDP integration
+0. **[Rust for PyTorch Users](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/00-rust-primer.md)** — 10 Rust patterns in 15 minutes
+1. **[Tensors](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/01-tensors.md)** — creation, ops, memory, CUDA
+2. **[Autograd](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/02-autograd.md)** — variables, gradients, backward
+3. **[Modules](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/03-modules.md)** — all layers, convolutions, RNNs, attention, normalization
+4. **[Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/04-training.md)** — losses, optimizers, mixed precision, full loop
+5. **[Graph Builder](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/05-graph-builder.md)** — fluent API from simple to complex
+6. **[Advanced Graphs](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/06-advanced-graphs.md)** — forward refs, loops, gates, switches
+7. **[Visualization](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/07-visualization.md)** — DOT/SVG, profiling heatmaps
+8. **[Utilities](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/08-utilities.md)** — checkpoints, clipping, freezing, initialization, scheduling, verbosity-gated logging
+9. **[Training Monitor](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/09-monitor.md)** — ETA, resource tracking, live dashboard
+10. **[Graph Tree](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/10-graph-tree.md)** — hierarchical composition, freeze/thaw, subgraph checkpoints
+11. **[Multi-GPU Training](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/11-multi-gpu.md)** — Trainer::setup, El Che, auto-balancing, DataLoader integration
+12. **[DDP Builder](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/12-async-ddp.md)** — thread-per-GPU, Local SGD, A/B testable backends
+13. **[Data Loading](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/13-data-loading.md)** — DataLoader, resident/streaming modes, VRAM-aware prefetch, DDP integration
+14. **[HuggingFace Integration](https://github.com/flodl-labs/flodl/blob/main/docs/tutorials/14-flodl-hf.md)** — load BERT, RoBERTa, DistilBERT, ALBERT, XLM-RoBERTa, DeBERTa-v2 checkpoints, AutoModel dispatch across four task heads (seqcls, NER, QA, MLM), fine-tune with `Trainer::setup_head`, round-trip export to the HF ecosystem, PyTorch parity
 
 ### Examples
 
-- [`quickstart`](https://github.com/fab2s/floDl/tree/main/flodl/examples/quickstart/) — build, train, and monitor a model with residual connections
-- [`sine_wave`](https://github.com/fab2s/floDl/tree/main/flodl/examples/sine_wave/) — sine regression with monitor, checkpoint round-trip
-- [`mixed_precision`](https://github.com/fab2s/floDl/tree/main/flodl/examples/mixed_precision/) — float16 training with `GradScaler`
-- [`transfer_learning`](https://github.com/fab2s/floDl/tree/main/flodl/examples/transfer_learning/) — checkpoint, partial load, freeze, fine-tune
-- [`schedulers`](https://github.com/fab2s/floDl/tree/main/flodl/examples/schedulers/) — warmup + cosine + plateau composition
-- [`observation`](https://github.com/fab2s/floDl/tree/main/flodl/examples/observation/) — collect, flush, trend queries, early stopping
-- [`showcase`](https://github.com/fab2s/floDl/tree/main/flodl/examples/showcase/) — every graph builder method in one graph
+- [`quickstart`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/quickstart/) — build, train, and monitor a model with residual connections
+- [`sine_wave`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/sine_wave/) — sine regression with monitor, checkpoint round-trip
+- [`mixed_precision`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/mixed_precision/) — float16 training with `GradScaler`
+- [`transfer_learning`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/transfer_learning/) — checkpoint, partial load, freeze, fine-tune
+- [`schedulers`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/schedulers/) — warmup + cosine + plateau composition
+- [`observation`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/observation/) — collect, flush, trend queries, early stopping
+- [`showcase`](https://github.com/flodl-labs/flodl/tree/main/flodl/examples/showcase/) — every graph builder method in one graph
 
 ### Porting from PyTorch
 
-- **[Porting Guide](https://github.com/fab2s/floDl/blob/main/docs/porting.md)** — module mapping, FlowBuilder patterns, training loop translation
-- **[AI-assisted porting](https://github.com/fab2s/floDl/tree/main/ai/skills/port/)** — point any AI coding assistant at the skill guide for automated translation. With Claude Code: `/port my_model.py`
+- **[Porting Guide](https://github.com/flodl-labs/flodl/blob/main/docs/porting.md)** — module mapping, FlowBuilder patterns, training loop translation
+- **[AI-assisted porting](https://github.com/flodl-labs/flodl/tree/main/ai/skills/port/)** — point any AI coding assistant at the skill guide for automated translation. With Claude Code: `/port my_model.py`
 - **`fdl api-ref`** — generate a structured API reference for your flodl version. Used by AI tools and useful on its own.
 
 ### Architecture
@@ -749,4 +841,4 @@ composition, and design philosophy carried forward; the memory fights didn't.
 
 ## License
 
-floDl is open-sourced software licensed under the [MIT license](https://github.com/fab2s/floDl/blob/main/LICENSE).
+floDl is open-sourced software licensed under the [MIT license](https://github.com/flodl-labs/flodl/blob/main/LICENSE).

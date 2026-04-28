@@ -657,11 +657,11 @@ nn.Identity()
 ```
 
 ```rust
-// flodl — zero-sized types (no allocation)
+// flodl — unit structs (no allocation, bare-name usage)
 ReLU
 Sigmoid
 Tanh
-GELU
+GELU                       // erf form (default) — GELU::tanh() for the tanh approximation
 SiLU
 Mish
 SELU
@@ -1549,10 +1549,10 @@ loader = DataLoader(dataset, sampler=sampler, batch_size=32)
 
 ```rust
 // floDl (Graph DDP): one line, no process groups, no launcher
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 
 // Or (DDP Builder): works with any Module
-let state = Ddp::builder(model_factory, optim_factory, train_fn)
+let state = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)
     .batch_size(32)
     .num_epochs(10)
@@ -1565,7 +1565,7 @@ let state = Ddp::builder(model_factory, optim_factory, train_fn)
 | PyTorch | floDl | Notes |
 |---------|-------|-------|
 | `dist.init_process_group("nccl")` | Automatic | NCCL init handled internally |
-| `DistributedDataParallel(model)` | `Ddp::setup()` or `Ddp::builder()` | Single process, multi-thread |
+| `DistributedDataParallel(model)` | `Trainer::setup()` or `Trainer::builder()` | Single process, multi-thread |
 | `DistributedSampler` | Automatic | DataLoader handles partitioning |
 | `torchrun --nproc_per_node=N` | Not needed | Single-process model |
 | `model.to(rank)` | `model_factory(device)` | Per-device model in closure |
@@ -1578,7 +1578,7 @@ let state = Ddp::builder(model_factory, optim_factory, train_fn)
 - **Single process**: no `torchrun`, no `MASTER_ADDR`/`MASTER_PORT`, no rank calculation. floDl detects GPUs and spawns threads internally.
 - **Heterogeneous GPUs**: PyTorch DDP requires equal batch sizes across ranks. floDl's El Che assigns proportional work based on measured throughput.
 - **A/B testing**: swap `AverageBackend::Nccl` for `AverageBackend::Cpu` with one line. PyTorch has no equivalent mechanism.
-- **Single-GPU fallback**: both `Ddp::setup()` and `Ddp::builder()` work identically on single GPU/CPU. No conditional code needed.
+- **Single-GPU fallback**: both `Trainer::setup()` and `Trainer::builder()` work identically on single GPU/CPU. No conditional code needed.
 
 See the [DDP Reference](ddp.md) for complete API documentation.
 

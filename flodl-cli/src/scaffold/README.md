@@ -1,20 +1,26 @@
 # flodl-hf playground
 
-This directory was scaffolded by `fdl add flodl-hf` inside a flodl project. It's a standalone cargo crate that depends on `flodl-hf` and shows the one-liner `AutoModel` API over BERT / RoBERTa / DistilBERT.
+This directory was scaffolded by `fdl add flodl-hf --playground` inside a flodl project. It's a standalone cargo crate that depends on `flodl-hf` and shows the one-liner `AutoModel` API over BERT / RoBERTa / DistilBERT.
 
 ## Getting started
 
+From your project root:
+
 ```bash
 fdl flodl-hf classify
-# or, bypassing the parent fdl.yml:
-cd flodl-hf && cargo run --release
+```
+
+Or directly inside the playground:
+
+```bash
+cd flodl-hf && fdl classify
 ```
 
 The playground takes an optional HuggingFace repo id as its first argument. With none, it loads `cardiffnlp/twitter-roberta-base-sentiment-latest`. Any fine-tuned BERT / RoBERTa / DistilBERT classification checkpoint works — try:
 
 ```bash
-cargo run --release -- nlptown/bert-base-multilingual-uncased-sentiment
-cargo run --release -- lxyuan/distilbert-base-multilingual-cased-sentiments-student
+fdl flodl-hf classify -- nlptown/bert-base-multilingual-uncased-sentiment
+fdl flodl-hf classify -- lxyuan/distilbert-base-multilingual-cased-sentiments-student
 ```
 
 ## Feature flavors
@@ -52,7 +58,7 @@ PY
 After conversion, `AutoModel::from_pretrained(repo_id)` picks up the local safetensors transparently via the `$HF_HOME/flodl-converted/<repo_id>/` cache. You only need to convert each checkpoint once.
 
 If you prefer the committed script from the flodl repo, grab
-[`convert_bin_to_safetensors.py`](https://github.com/fab2s/floDl/blob/main/flodl-hf/scripts/convert_bin_to_safetensors.py) and run it directly:
+[`convert_bin_to_safetensors.py`](https://github.com/flodl-labs/flodl/blob/main/flodl-hf/scripts/convert_bin_to_safetensors.py) and run it directly:
 
 ```bash
 pip install torch transformers safetensors
@@ -61,11 +67,13 @@ python convert_bin_to_safetensors.py nateraw/bert-base-uncased-emotion
 
 ## Wiring flodl-hf into your main code
 
-This scaffold is a side project for exploration. When you're ready to call flodl-hf from your actual training code, add the same dep to your main `Cargo.toml`:
+This scaffold is a side project for exploration. When you're ready to call flodl-hf from your actual training code, run:
 
-```toml
-flodl-hf = "=X.Y.Z"   # same version as the flodl you already have
+```bash
+fdl add flodl-hf --install
 ```
+
+This appends `flodl-hf = "=X.Y.Z"` to your root `Cargo.toml` `[dependencies]` (default features: `hub` + `tokenizer`).
 
 Example imports:
 

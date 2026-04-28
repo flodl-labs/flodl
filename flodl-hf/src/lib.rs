@@ -16,8 +16,11 @@
 //! - [`path`] — dotted-path builder for HF-compatible module naming.
 //! - [`task_heads`] — shared [`task_heads::Answer`] / [`task_heads::TokenPrediction`]
 //!   output types + internal helpers reused by every `*For*` task head.
+//! - [`export`] — write a HF-compatible directory (`model.safetensors` +
+//!   `config.json`) from a trained flodl graph.
 
 pub(crate) mod config_json;
+pub mod export;
 #[cfg(feature = "hub")]
 pub mod hub;
 pub mod models;

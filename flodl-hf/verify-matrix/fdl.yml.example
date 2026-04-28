@@ -1,0 +1,15 @@
+description: Run `fdl flodl-hf export` then `verify-export` across the head matrix (6 families x 5 heads = 30 cells). Fail-soft, prints a PASS/FAIL grid at end. Pulls the cell list from flodl-hf/tests/fixtures/head_matrix.json.
+
+# This entry runs ON THE HOST (no `docker:` line) so it can shell out
+# to other `fdl flodl-hf ...` commands per cell, each of which brings
+# up the right container itself (dev for export, hf-parity for convert
+# + verify-export). Avoids docker-in-docker.
+#
+# Argv passes through to the script (entry: commands forward argv).
+# Filters: --families bert,albert / --heads base,seqcls / --keep.
+#
+# This is the quarterly-manual gate — it downloads ~10+ GB across
+# 30 Hub repos. Run it before each release tag and after any
+# cross-family change to flodl-hf/src/export.rs or task heads.
+
+entry: ../scripts/verify_matrix.sh

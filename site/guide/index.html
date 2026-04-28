@@ -68,11 +68,51 @@ permalink: /guide/
     <h3>Training Monitor</h3>
     <p>ETA, resource tracking, live web dashboard, HTML export.</p>
   </a>
+  <a href="{{ '/guide/graph-tree' | relative_url }}" class="guide-card">
+    <span class="num">Tutorial 10</span>
+    <h3>Graph Tree</h3>
+    <p>Hierarchical composition, freeze/thaw subtrees, subgraph checkpoints, cross-boundary observation.</p>
+  </a>
+  <a href="{{ '/guide/multi-gpu' | relative_url }}" class="guide-card">
+    <span class="num">Tutorial 11</span>
+    <h3>Multi-GPU Training</h3>
+    <p>Trainer::setup, El Che cadence, auto-balancing, DataLoader integration.</p>
+  </a>
+  <a href="{{ '/guide/async-ddp' | relative_url }}" class="guide-card">
+    <span class="num">Tutorial 12</span>
+    <h3>DDP Builder</h3>
+    <p>Thread-per-GPU, Local SGD, A/B-testable backends and apply policies.</p>
+  </a>
+  <a href="{{ '/guide/data-loading' | relative_url }}" class="guide-card">
+    <span class="num">Tutorial 13</span>
+    <h3>Data Loading</h3>
+    <p>DataLoader, resident/streaming modes, VRAM-aware prefetch, DDP integration.</p>
+  </a>
+  <a href="{{ '/guide/flodl-hf' | relative_url }}" class="guide-card">
+    <span class="num">Tutorial 14</span>
+    <h3>HuggingFace Integration</h3>
+    <p>Load BERT, RoBERTa, DistilBERT, ALBERT, XLM-R, or DeBERTa-v2; classify, NER, QA, fill-mask; fine-tune and round-trip back to the HF ecosystem.</p>
+  </a>
 </div>
 
 <h2 style="font-size: 16px; border: none; padding: 0; margin-bottom: 16px;">Reference</h2>
 
 <div class="guide-grid">
+  <a href="{{ '/guide/ddp-reference' | relative_url }}" class="guide-card">
+    <span class="num">Reference</span>
+    <h3>DDP Reference</h3>
+    <p>Apply policies, average backends, configuration knobs, troubleshooting AllReduce timeouts.</p>
+  </a>
+  <a href="{{ '/guide/cli' | relative_url }}" class="guide-card">
+    <span class="num">Reference</span>
+    <h3>The floDl CLI</h3>
+    <p>fdl commands, environment overlays, fdl.yml schema, libtorch management.</p>
+  </a>
+  <a href="{{ '/guide/porting' | relative_url }}" class="guide-card">
+    <span class="num">Reference</span>
+    <h3>Porting from PyTorch</h3>
+    <p>Module mapping, FlowBuilder patterns, training loop translation. AI-assisted via /port.</p>
+  </a>
   <a href="{{ '/guide/migration' | relative_url }}" class="guide-card">
     <span class="num">Reference</span>
     <h3>PyTorch Migration</h3>

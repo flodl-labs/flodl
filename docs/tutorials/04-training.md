@@ -169,9 +169,92 @@ let params = model.parameters();
 let optimizer = Adam::new(&params, 0.001);
 ```
 
+## Trainer: write a step, get the loop
+
+flodl's `Trainer` is the universal training entry, working on any Module
+(Graph or otherwise), CPU, single GPU, or multi-GPU, all with the same
+code. You describe **one training step** as a closure (forward + loss);
+`Trainer::builder` owns the rest: the loop, the backward pass, the
+optimizer step, the gradient sync, and the device replication.
+
+```rust
+// Step closure: takes the replica's model and one batch, returns the
+// loss Variable. The framework calls backward + optimizer step + sync.
+fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variable> {
+    let input = Variable::new(batch[0].clone(), false);
+    let target = Variable::new(batch[1].to_dtype(DType::Int64)?, false);
+    let pred = model.forward(&input)?;
+    cross_entropy_loss(&pred, &target)
+}
+
+// Three closures: model factory (per-device build), optimizer factory,
+// step. Then run().
+let handle = Trainer::builder(
+    |dev| build_model_on(dev),
+    |params| Adam::new(params, 0.001),
+    train_step,
+)
+    .dataset(dataset)
+    .batch_size(32)
+    .num_epochs(10)
+    .run()?;
+
+let state = handle.join()?;  // averaged params + buffers, ready for inference
+```
+
+This is the highest-level entry: framework owns the loop, the data
+dispatch, the gradient sync (NCCL), and the optimizer. The
+[ddp-bench](https://github.com/flodl-labs/flodl/tree/main/ddp-bench) suite
+is the canonical reference for this pattern across MLP, LeNet, ResNet,
+GPT-nano, char-RNN, and conv-AE models, each wired through the same
+`train_step` closure.
+
+For policy choice (Sync / Cadence / Async), backend choice
+(NCCL / CPU averaging), and El Che heterogeneous-GPU cadence, see
+[Multi-GPU Training](11-multi-gpu.md) and the [DDP Reference](../ddp.md).
+
+## Decomposing Trainer: keep your loop, share the setup
+
+When you want explicit control of the training loop (multi-stage losses,
+per-step observation hooks, conditional backward, custom gradient
+clipping placement), `Trainer::setup` exposes the setup tier of the
+framework-managed mode without taking over the loop. It runs the same
+hardware detection, GPU replication, optimizer creation, and
+training-mode toggle as `Trainer::builder`; the loop is yours.
+
+```rust
+let model = build_model()?;
+
+// One call: pick best device, replicate across GPUs if available, set
+// per-replica optimizer, enable training mode. Auto-tuned El Che
+// cadence on heterogeneous multi-GPU.
+Trainer::setup(
+    &model,
+    |dev| build_model_on(dev),
+    |p| Adam::new(p, 0.001),
+)?;
+
+// Loop is yours. Same code on CPU, single GPU, multi-GPU.
+for (input_t, target_t) in &batches {
+    let input = Variable::new(input_t.clone(), false);
+    let target = Variable::new(target_t.clone(), false);
+    let loss = mse_loss(&model.forward(&input)?, &target)?;
+    loss.backward()?;
+    model.step()?;  // AllReduce + buffer sync + optimizer + zero_grad
+}
+```
+
+Task-head wrappers (e.g. `flodl-hf`'s `BertForSequenceClassification`)
+use the matching `Trainer::setup_head` entry. See
+[HuggingFace Integration](14-flodl-hf.md) for a fine-tune walkthrough.
+
 ## The Training Loop
 
-The standard pattern is: **forward -> loss -> zero_grad -> backward -> clip -> step**.
+When you can't or don't want to use `Trainer` (non-Graph custom code,
+single-device prototype, or you're learning the mechanics), the manual
+pattern is: **forward -> loss -> zero_grad -> backward -> clip -> step**.
+The same six steps run inside `Trainer::setup`'s `model.step()`; the
+`train_step` closure of `Trainer::builder` is the forward + loss portion.
 
 ```rust
 model.train();

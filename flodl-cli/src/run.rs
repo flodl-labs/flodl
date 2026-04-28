@@ -324,12 +324,165 @@ fn spawn_docker_shell(command: &str, project_root: &Path) -> ExitCode {
 
 // ── Run-kind execution ──────────────────────────────────────────────────
 
+/// POSIX-quote a single token so it round-trips through `sh -c` / `bash
+/// -c` as one argument. Empty strings become `''`; tokens containing
+/// only safe characters pass through unchanged; everything else is
+/// wrapped in single quotes with embedded `'` escaped as `'\''`.
+pub(crate) fn posix_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let safe = s.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '+' | '@' | ',')
+    });
+    if safe {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Split `s` on the first whitespace-bounded `--` token, returning the
+/// halves with that token removed. Trim each half. When no such token is
+/// found, the whole string is returned as the "before" half and the
+/// "after" half is empty.
+///
+/// Whitespace-bounded means the `--` must be a standalone token: a
+/// leading `--`, a trailing `--`, a sole `--`, or a ` -- ` between
+/// other tokens. A bare `--foo` (no separator) is not a match. Quoted
+/// content in `s` passes through verbatim — split scanning happens on
+/// the raw string, not its shell-tokenised form.
+fn split_append_dashdash(s: &str) -> (String, String) {
+    let s = s.trim();
+    if s == "--" {
+        return (String::new(), String::new());
+    }
+    if let Some(rest) = s.strip_prefix("-- ") {
+        return (String::new(), rest.trim().to_string());
+    }
+    if let Some(prefix) = s.strip_suffix(" --") {
+        return (prefix.trim().to_string(), String::new());
+    }
+    if let Some(idx) = s.find(" -- ") {
+        let before = &s[..idx];
+        let after = &s[idx + 4..];
+        return (before.trim().to_string(), after.trim().to_string());
+    }
+    (s.to_string(), String::new())
+}
+
+/// Split `args` on the first standalone `--` token, returning the
+/// halves with that token removed. Returns `(before, Some(after))` when
+/// a separator is present, `(args, None)` otherwise. The `None` case
+/// keeps callers from emitting a stray `--` when the user did not pass
+/// runner-side args.
+fn split_user_args_dashdash(args: &[String]) -> (&[String], Option<&[String]>) {
+    match args.iter().position(|a| a == "--") {
+        Some(idx) => (&args[..idx], Some(&args[idx + 1..])),
+        None => (args, None),
+    }
+}
+
+/// Compose the final shell command from `run` + `append` + `user_args`.
+///
+/// Layout: `run [append-pre] [user-pre] -- [append-post] [user-post]`,
+/// where `append-pre` / `append-post` are halves of the yml `append:`
+/// field split on its first standalone `--`, and `user-pre` /
+/// `user-post` are halves of the CLI tokens that followed fdl's own
+/// first `--`, split again on a second `--`. The `--` separator only
+/// emits when at least one of the post halves is non-empty (or the
+/// `append` half explicitly carries one — preserving the legacy
+/// `append: -- --nocapture` shape).
+///
+/// User args go after append on each side: `append` seeds defaults,
+/// and last-wins for cargo-style flags lets the user override without
+/// ceremony (e.g. `append: --no-ansi` + CLI `--ansi`).
+pub(crate) fn compose_run_command(
+    run: &str,
+    user_args: &[String],
+    append: Option<&str>,
+) -> String {
+    let suffix = append.map(str::trim).filter(|s| !s.is_empty());
+    let (append_pre, append_post, append_has_dashdash) = match suffix {
+        Some(s) => {
+            let (pre, post) = split_append_dashdash(s);
+            // Distinguish "append had a `--`" (legacy `-- --nocapture`
+            // with empty pre, non-empty post) from "append had no `--`"
+            // (post defaults empty). Without this we'd swallow the
+            // separator on legacy yml.
+            let has = s == "--"
+                || s.starts_with("-- ")
+                || s.ends_with(" --")
+                || s.contains(" -- ");
+            (pre, post, has)
+        }
+        None => (String::new(), String::new(), false),
+    };
+    let (user_pre, user_post_opt) = split_user_args_dashdash(user_args);
+
+    let mut out = String::from(run.trim());
+    if !append_pre.is_empty() {
+        out.push(' ');
+        out.push_str(&append_pre);
+    }
+    for a in user_pre {
+        out.push(' ');
+        out.push_str(&posix_quote(a));
+    }
+
+    let needs_separator = append_has_dashdash
+        || !append_post.is_empty()
+        || user_post_opt.is_some_and(|p| !p.is_empty());
+    if needs_separator {
+        out.push_str(" --");
+        if !append_post.is_empty() {
+            out.push(' ');
+            out.push_str(&append_post);
+        }
+        if let Some(post) = user_post_opt {
+            for a in post {
+                out.push(' ');
+                out.push_str(&posix_quote(a));
+            }
+        }
+    }
+    out
+}
+
 /// Run an inline `run:` script, optionally wrapped in Docker.
-pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> ExitCode {
+///
+/// `user_args` (from CLI tokens after `--`) are POSIX-quoted and spliced
+/// between `command` and `append`, so a script like `cargo test live`
+/// with `append: -- --nocapture --ignored` still receives its libtest
+/// flags after a user-supplied `-p flodl-hf`.
+pub fn exec_script(
+    command: &str,
+    append: Option<&str>,
+    user_args: &[String],
+    docker_service: Option<&str>,
+    cwd: &Path,
+) -> ExitCode {
+    let inner_cmd = compose_run_command(command, user_args, append);
+
     match docker_service {
         Some(service) if !inside_docker() => {
-            let docker_cmd =
-                format!("docker compose run --rm {service} bash -c \"{command}\"");
+            // Quote the whole composed command for the outer
+            // `bash -c` so user args containing shell metacharacters
+            // don't escape the inner shell.
+            let docker_cmd = format!(
+                "docker compose run --rm {service} bash -c {}",
+                posix_quote(&inner_cmd)
+            );
             spawn_docker_shell(&docker_cmd, cwd)
         }
         _ => {
@@ -340,7 +493,7 @@ pub fn exec_script(command: &str, docker_service: Option<&str>, cwd: &Path) -> E
             };
 
             match std::process::Command::new(shell)
-                .args([flag, command])
+                .args([flag, inner_cmd.as_str()])
                 .current_dir(cwd)
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
@@ -458,8 +611,16 @@ pub fn exec_command(
             eprintln!("fdl: [{service}] {inner}");
         }
 
-        // Run via docker compose from the project root (with libtorch env).
-        let docker_cmd = format!("docker compose run --rm {service} bash -c \"{inner}\"");
+        // Surface the container-side workspace root to the inner
+        // process so entry binaries can re-anchor argv path arguments
+        // independently of the per-task `cd <root>/<workdir>` we
+        // injected above. Mirrors the `HF_HOME` pattern: `fdl` owns
+        // the env, the binary just reads it. Without this, a user
+        // typing `flodl-hf/tests/.exports/bert` from the host repo
+        // root resolves against the wrong cwd inside the container.
+        let docker_cmd = format!(
+            "docker compose run --rm -e FDL_PROJECT_ROOT={container_root} {service} bash -c \"{inner}\"",
+        );
         spawn_docker_shell(&docker_cmd, project_root)
     } else {
         // Direct execution (inside container or no docker configured).
@@ -511,10 +672,16 @@ fn shell_join(args: &[String]) -> String {
 
 // ── Help output ─────────────────────────────────────────────────────────
 
-/// Print help for a `run:`-kind command. Shows the inline script that
-/// will execute and the Docker service (if any). `run:` commands do not
-/// forward argv, so there are no flags or positionals to document.
-pub fn print_run_help(name: &str, description: Option<&str>, run: &str, docker: Option<&str>) {
+/// Print help for a `run:`-kind command. Shows the inline script,
+/// any `append:` suffix, the Docker service (if any), and the `--`
+/// forwarding contract.
+pub fn print_run_help(
+    name: &str,
+    description: Option<&str>,
+    run: &str,
+    append: Option<&str>,
+    docker: Option<&str>,
+) {
     if let Some(desc) = description {
         eprintln!("{} {desc}", style::bold(name));
     } else {
@@ -522,17 +689,44 @@ pub fn print_run_help(name: &str, description: Option<&str>, run: &str, docker: 
     }
     eprintln!();
     eprintln!("{}:", style::yellow("Usage"));
-    eprintln!("    fdl {name}");
+    eprintln!("    fdl {name} [-- <args>... [-- <runner-args>...]]");
     eprintln!();
     eprintln!("{}:", style::yellow("Runs"));
+    let composed = match append.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(suffix) => {
+            let (pre, post) = split_append_dashdash(suffix);
+            // Show whichever halves the yml actually populated, with
+            // the user slots interleaved at the right side per the
+            // merge contract.
+            let left = if pre.is_empty() {
+                "[<args>]".to_string()
+            } else {
+                format!("{pre} [<args>]")
+            };
+            let right = if post.is_empty() {
+                "[<runner-args>]".to_string()
+            } else {
+                format!("{post} [<runner-args>]")
+            };
+            format!("{run} {left} -- {right}")
+        }
+        None => format!("{run} [<args>] [-- <runner-args>]"),
+    };
     if let Some(svc) = docker {
-        eprintln!("    {} {svc} -c {run:?}", style::dim("docker compose run --rm"));
+        eprintln!(
+            "    {} {svc} -c {composed:?}",
+            style::dim("docker compose run --rm")
+        );
     } else {
-        eprintln!("    {run}");
+        eprintln!("    {composed}");
     }
     eprintln!();
     eprintln!(
-        "{} run:-kind commands do not forward argv; the script runs as declared.",
+        "{} the first `--` separates fdl args from the run script; a second `--` splits cargo-side args from runner-side args.",
+        style::dim("Note:"),
+    );
+    eprintln!(
+        "{} `append:` is split on its own `--` and merged half-and-half; pass `--no-append` to drop it entirely.",
         style::dim("Note:"),
     );
 }
@@ -882,6 +1076,10 @@ pub fn print_project_help(
         "    {}  Disable ANSI color output",
         style::green(&format!("{:<18}", "--no-ansi"))
     );
+    eprintln!(
+        "    {}  Drop a run command's `append:` suffix",
+        style::green(&format!("{:<18}", "--no-append"))
+    );
 
     // Built-in commands.
     eprintln!();
@@ -1151,4 +1349,152 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn posix_quote_passes_safe_strings_through() {
+        assert_eq!(posix_quote("hello"), "hello");
+        assert_eq!(posix_quote("-p"), "-p");
+        assert_eq!(posix_quote("flodl-hf"), "flodl-hf");
+        assert_eq!(posix_quote("a/b.c"), "a/b.c");
+        assert_eq!(posix_quote("KEY=val"), "KEY=val");
+    }
+
+    #[test]
+    fn posix_quote_wraps_unsafe_strings() {
+        assert_eq!(posix_quote(""), "''");
+        assert_eq!(posix_quote("foo bar"), "'foo bar'");
+        assert_eq!(posix_quote("a$b"), "'a$b'");
+        assert_eq!(posix_quote("a\"b"), "'a\"b'");
+    }
+
+    #[test]
+    fn posix_quote_escapes_embedded_single_quotes() {
+        assert_eq!(posix_quote("it's"), "'it'\\''s'");
+        assert_eq!(posix_quote("'"), "''\\'''");
+    }
+
+    #[test]
+    fn compose_run_command_no_extras_passes_run_through() {
+        assert_eq!(compose_run_command("echo hello", &[], None), "echo hello");
+    }
+
+    #[test]
+    fn compose_run_command_inserts_user_args_between_run_and_append() {
+        let user = vec!["-p".to_string(), "flodl-hf".to_string()];
+        let out = compose_run_command("cargo test live", &user, Some("-- --nocapture --ignored"));
+        assert_eq!(out, "cargo test live -p flodl-hf -- --nocapture --ignored");
+    }
+
+    #[test]
+    fn compose_run_command_quotes_user_args_with_spaces() {
+        let user = vec!["--name".to_string(), "with space".to_string()];
+        let out = compose_run_command("cmd", &user, None);
+        assert_eq!(out, "cmd --name 'with space'");
+    }
+
+    #[test]
+    fn compose_run_command_omits_empty_append() {
+        let out = compose_run_command("cmd", &["arg".to_string()], Some(""));
+        assert_eq!(out, "cmd arg");
+        let out2 = compose_run_command("cmd", &["arg".to_string()], Some("   "));
+        assert_eq!(out2, "cmd arg");
+    }
+
+    #[test]
+    fn compose_run_command_user_double_dash_threads_runner_args() {
+        let user = vec![
+            "-p".to_string(),
+            "foo".to_string(),
+            "--".to_string(),
+            "--ignored".to_string(),
+        ];
+        let out = compose_run_command("cargo test", &user, Some("-- --nocapture"));
+        assert_eq!(out, "cargo test -p foo -- --nocapture --ignored");
+    }
+
+    #[test]
+    fn compose_run_command_user_double_dash_without_append() {
+        let user = vec![
+            "-p".to_string(),
+            "foo".to_string(),
+            "--".to_string(),
+            "--ignored".to_string(),
+        ];
+        let out = compose_run_command("cargo test", &user, None);
+        assert_eq!(out, "cargo test -p foo -- --ignored");
+    }
+
+    #[test]
+    fn compose_run_command_append_with_pre_and_post_halves() {
+        let out = compose_run_command("cmd", &[], Some("--foo -- --bar"));
+        assert_eq!(out, "cmd --foo -- --bar");
+    }
+
+    #[test]
+    fn compose_run_command_append_pre_only_no_separator() {
+        // append carries a default flag with no `--` token; user supplies
+        // an override. Defaults seed first, user wins via last-flag-wins.
+        let user = vec!["--ansi".to_string()];
+        let out = compose_run_command("cmd", &user, Some("--no-ansi"));
+        assert_eq!(out, "cmd --no-ansi --ansi");
+    }
+
+    #[test]
+    fn compose_run_command_user_only_double_dash_emits_separator() {
+        let user = vec!["--".to_string(), "--list".to_string()];
+        let out = compose_run_command("cargo test", &user, None);
+        assert_eq!(out, "cargo test -- --list");
+    }
+
+    #[test]
+    fn compose_run_command_append_full_split_with_user_both_sides() {
+        let user = vec![
+            "-p".to_string(),
+            "foo".to_string(),
+            "--".to_string(),
+            "--ignored".to_string(),
+        ];
+        let out = compose_run_command(
+            "cargo test",
+            &user,
+            Some("--release -- --nocapture"),
+        );
+        assert_eq!(
+            out,
+            "cargo test --release -p foo -- --nocapture --ignored"
+        );
+    }
+
+    #[test]
+    fn split_append_dashdash_handles_edges() {
+        assert_eq!(
+            split_append_dashdash("-- --nocapture"),
+            (String::new(), "--nocapture".to_string())
+        );
+        assert_eq!(
+            split_append_dashdash("--foo -- --bar"),
+            ("--foo".to_string(), "--bar".to_string())
+        );
+        assert_eq!(
+            split_append_dashdash("--foo --"),
+            ("--foo".to_string(), String::new())
+        );
+        assert_eq!(
+            split_append_dashdash("--"),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            split_append_dashdash("--foo"),
+            ("--foo".to_string(), String::new())
+        );
+        assert_eq!(
+            split_append_dashdash(""),
+            (String::new(), String::new())
+        );
+    }
 }

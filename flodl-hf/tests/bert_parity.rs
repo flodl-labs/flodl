@@ -1,7 +1,7 @@
 //! PyTorch parity for `BertModel::from_pretrained("bert-base-uncased")`.
 //!
 //! Loads a committed safetensors fixture built by
-//! `flodl-hf/scripts/parity_bert.py` (run via `fdl flodl-hf parity-bert`) and
+//! `flodl-hf/scripts/parity_bert.py` (run via `fdl flodl-hf parity bert`) and
 //! compares flodl's pooled output against the Python `BertModel` reference on
 //! the same pinned inputs.
 //!
@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use safetensors::{tensor::TensorView, SafeTensors};
+use safetensors::SafeTensors;
 
 use flodl::nn::Module;
 use flodl::{Device, Tensor, Variable};
@@ -33,31 +33,8 @@ const FIXTURE: &str = "tests/fixtures/bert_base_uncased_parity.safetensors";
 /// scheduling noise while still flagging a real regression in any layer.
 const POOLER_TOL: f32 = 1e-5;
 
-fn parse_i64(view: &TensorView<'_>) -> Vec<i64> {
-    view.data()
-        .chunks_exact(8)
-        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
-        .collect()
-}
-
-fn parse_f32(view: &TensorView<'_>) -> Vec<f32> {
-    view.data()
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-        .collect()
-}
-
-fn shape_i64(view: &TensorView<'_>) -> Vec<i64> {
-    view.shape().iter().map(|&d| d as i64).collect()
-}
-
-fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "shape mismatch: {} vs {}", a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0_f32, f32::max)
-}
+mod parity_common;
+use parity_common::{max_abs_diff, parse_f32, parse_i64, shape_i64};
 
 #[test]
 #[ignore = "network + ~440MB cache write"]
@@ -65,7 +42,7 @@ fn bert_parity_vs_pytorch_live() {
     let dev = Device::CPU;
 
     let fixture_bytes = std::fs::read(Path::new(FIXTURE))
-        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity-bert` to regenerate)"));
+        .unwrap_or_else(|e| panic!("reading {FIXTURE}: {e} (run `fdl flodl-hf parity bert` to regenerate)"));
     let st = SafeTensors::deserialize(&fixture_bytes)
         .expect("parse parity fixture");
 

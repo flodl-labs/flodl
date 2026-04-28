@@ -177,12 +177,12 @@ cold starts on spot instances.
 The entire suite runs in Docker. No local Rust or Python needed:
 
 > **Update (flodl 0.5.1):** `make bench*` became `fdl bench [<preset>]`.
-> See [docs/benchmark.md](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md#reproduce)
+> See [docs/benchmark.md](https://github.com/flodl-labs/flodl/blob/main/docs/benchmark.md#reproduce)
 > for the current invocations.
 
 ```bash
-git clone https://github.com/fab2s/floDl.git
-cd floDl
+git clone https://github.com/flodl-labs/flodl.git
+cd flodl
 
 # Quick single-round
 make bench
@@ -196,7 +196,7 @@ The merged report goes to `benchmarks/report.txt`. If you have a different
 GPU, run it and see — the absolute numbers will differ but the relative
 story should hold.
 
-The [full methodology](https://github.com/fab2s/floDl/blob/main/docs/benchmark.md)
+The [full methodology](https://github.com/flodl-labs/flodl/blob/main/docs/benchmark.md)
 documents the protocol, environment, statistical model, and all the
 optimizations in detail. Every number is reproducible. Every asymmetry is
 accounted for.
@@ -221,7 +221,7 @@ comes from the language, not the optimizer. And that's the number that matters.
 ---
 
 *flodl is open source:
-[GitHub](https://github.com/fab2s/floDl) |
+[GitHub](https://github.com/flodl-labs/flodl) |
 [crates.io](https://crates.io/crates/flodl) |
 [docs](https://docs.rs/flodl) |
 [benchmark](https://flodl.dev/benchmark)*

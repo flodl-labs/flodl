@@ -85,9 +85,19 @@ impl Variable {
         Ok(Variable::wrap(result))
     }
 
-    /// GELU activation (Gaussian Error Linear Unit).
+    /// GELU activation (Gaussian Error Linear Unit, erf form):
+    /// `0.5 * x * (1 + erf(x / sqrt(2)))`.
     pub fn gelu(&self) -> Result<Variable> {
         let result = self.data().gelu()?;
+        Ok(Variable::wrap(result))
+    }
+
+    /// Tanh-approximation GELU. Matches HuggingFace `hidden_act="gelu_new"`
+    /// and PyTorch `F.gelu(x, approximate="tanh")`. Used by ALBERT, GPT-2,
+    /// and any HF checkpoint that ships `hidden_act` in {`gelu_new`,
+    /// `gelu_pytorch_tanh`}.
+    pub fn gelu_tanh(&self) -> Result<Variable> {
+        let result = self.data().gelu_tanh()?;
         Ok(Variable::wrap(result))
     }
 

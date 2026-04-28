@@ -58,15 +58,15 @@ pub use tensor::{cuda_available, cuda_device_count, cuda_memory_info, cuda_memor
 pub use rng::Rng;
 pub use autograd::{Variable, no_grad, is_grad_enabled, NoGradGuard, max_pool2d, adaptive_avg_pool2d, grid_sample, scaled_dot_product_attention, embedding, embedding_bag};
 pub use nn::{
-    Module, NamedInputModule,
+    Module, NamedInputModule, LoopBody, TraceEmit, forward_via_step,
     Parameter, Buffer, Linear, Optimizer, Stateful,
     SGD, SGDBuilder, Adam, AdamBuilder, AdamW, AdamWBuilder,
     RMSprop, RMSpropBuilder, Adagrad, AdagradBuilder, RAdam, NAdam,
     save_checkpoint, load_checkpoint, save_checkpoint_file, load_checkpoint_file,
-    migrate_checkpoint, migrate_checkpoint_file, checkpoint_version,
+    migrate_checkpoint, migrate_checkpoint_file, checkpoint_version, checkpoint_keys,
     LoadReport, MigrateReport,
     GradScaler, cast_parameters, AutocastGuard, autocast, is_autocast_enabled,
-    Identity, ReLU, Sigmoid, Tanh, GELU, SiLU,
+    Identity, ReLU, Sigmoid, Tanh, GELU, GeluApprox, SiLU,
     LeakyReLU, ELU, Softplus, Mish,
     SELU, Hardswish, Hardsigmoid, PReLU,
     Softmax, LogSoftmax, Flatten,
@@ -91,7 +91,7 @@ pub use nn::{
 };
 pub use distributed::{
     CudaEvent, CudaEventFlags, CudaStream, StreamGuard,
-    NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, ElChe,
+    NcclComms, NcclRankComm, NcclUniqueId, ReduceOp, Ddp, DdpConfig, HasGraph, Trainer, ElChe,
     ApplyPolicy, DdpHandle, DdpBuilder, DdpRunConfig, AverageBackend, TrainedState, EpochMetrics, record_scalar, drain_scalars, GpuWorker,
 };
 pub use graph::{

@@ -483,10 +483,21 @@ impl Tensor {
         Ok(Tensor::from_raw(handle))
     }
 
-    /// GELU activation (native libtorch).
+    /// GELU activation (native libtorch, erf form):
+    /// `0.5 * x * (1 + erf(x / sqrt(2)))`.
     pub fn gelu(&self) -> Result<Tensor> {
         let mut handle: FlodlTensor = ptr::null_mut();
         let err = unsafe { ffi::flodl_gelu(self.handle, &mut handle) };
+        check_err(err)?;
+        Ok(Tensor::from_raw(handle))
+    }
+
+    /// Tanh-approximation GELU (native libtorch). Matches HuggingFace
+    /// `hidden_act="gelu_new"` and PyTorch `F.gelu(x, approximate="tanh")`:
+    /// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
+    pub fn gelu_tanh(&self) -> Result<Tensor> {
+        let mut handle: FlodlTensor = ptr::null_mut();
+        let err = unsafe { ffi::flodl_gelu_tanh(self.handle, &mut handle) };
         check_err(err)?;
         Ok(Tensor::from_raw(handle))
     }
@@ -1281,6 +1292,16 @@ mod tests {
         // gelu/silu just check they don't crash and return right shape
         assert_eq!(t.gelu().unwrap().shape(), vec![3]);
         assert_eq!(t.silu().unwrap().shape(), vec![3]);
+
+        // gelu_tanh: same shape, and the two forms should produce close
+        // but not identical values — bitwise equality would mean the FFI
+        // dispatched to the wrong libtorch entry point.
+        let g_erf  = t.gelu().unwrap().to_f32_vec().unwrap();
+        let g_tanh = t.gelu_tanh().unwrap().to_f32_vec().unwrap();
+        assert_eq!(g_tanh.len(), 3);
+        let close: bool = g_erf.iter().zip(&g_tanh).all(|(a, b)| (a - b).abs() < 1e-2);
+        let exact: bool = g_erf.iter().zip(&g_tanh).all(|(a, b)| (a - b).abs() < 1e-7);
+        assert!(close && !exact, "erf vs tanh GELU: erf={g_erf:?}, tanh={g_tanh:?}");
     }
 
     #[test]

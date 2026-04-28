@@ -214,7 +214,7 @@ fn refresh_one(entry: &CacheEntry) -> Result<(), String> {
         .entry
         .as_deref()
         .ok_or_else(|| format!("no `entry:` declared in {}/fdl.yml", entry.cmd_dir.display()))?;
-    let schema = schema_cache::probe(entry_cmd, &entry.cmd_dir)?;
+    let schema = schema_cache::probe(entry_cmd, &entry.cmd_dir, config.docker.as_deref())?;
     schema_cache::write_cache(&entry.cache_path, &schema)
 }
 

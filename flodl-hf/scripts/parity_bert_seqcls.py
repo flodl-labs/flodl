@@ -6,12 +6,12 @@ and writes both the tokenised inputs and the reference logits to
 `flodl-hf/tests/fixtures/bert_seqcls_parity.safetensors`.
 
 Fixture model: `nateraw/bert-base-uncased-emotion` (6 emotion classes).
-Ships only `pytorch_model.bin`, so `fdl flodl-hf parity-bert-seqcls`
+Ships only `pytorch_model.bin`, so `fdl flodl-hf parity bert-seqcls`
 first runs `fdl flodl-hf convert <repo>` to produce a safetensors copy
 in the flodl-converted cache — `BertForSequenceClassification::from_pretrained`
 then picks that up transparently.
 
-Run via `fdl flodl-hf parity-bert-seqcls`.
+Run via `fdl flodl-hf parity bert-seqcls`.
 """
 
 from __future__ import annotations

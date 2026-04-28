@@ -239,7 +239,7 @@ When used with `Graph::set_data_loader()`, the loader automatically
 upgrades to distributed mode:
 
 ```rust
-Ddp::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
+Trainer::setup(&model, &builder, |p| Adam::new(p, 0.001))?;
 
 let loader = DataLoader::from_batch_dataset(dataset)
     .batch_size(32)
@@ -268,7 +268,7 @@ In distributed mode:
 For the DDP Builder, pass the dataset directly:
 
 ```rust
-let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
+let ddp = Trainer::builder(model_factory, optim_factory, train_fn)
     .dataset(dataset)    // Arc<dyn BatchDataSet>
     .batch_size(32)
     .num_epochs(10)
@@ -309,4 +309,4 @@ let ddp = Ddp::builder(model_factory, optim_factory, train_fn)
 ---
 
 Previous: [DDP Builder](12-async-ddp.md) |
-Next: [DDP Reference](../ddp.md)
+Next: [Tutorial 14: HuggingFace Integration](14-flodl-hf.md)

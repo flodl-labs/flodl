@@ -8,7 +8,8 @@
 
 use flodl_cli::{
     add, api_ref, builtins, cli_error, completions, config, context, diagnose, dispatch, init,
-    libtorch, overlay, parse_or_schema_from, run, schema, schema_cache, setup, skill, style, util,
+    libtorch, overlay, parse_or_schema_from, run, schema, schema_cache, setup, skill, style,
+    update_check, util,
 };
 
 use builtins::{
@@ -28,6 +29,14 @@ use context::Context;
 // ---------------------------------------------------------------------------
 
 fn main() -> ExitCode {
+    // RAII guard fires the daily crates.io update check from Drop, so
+    // it runs after the user's command output regardless of which
+    // match arm computes the ExitCode (and on early `return`s too).
+    // The check is silent on every failure mode and respects
+    // `FDL_NO_UPDATE_CHECK=1`, `CI=true`, in-container detection, and
+    // the `update_check.enabled` config field.
+    let _update_check_guard = update_check::Guard::new();
+
     let raw_args: Vec<String> = env::args().collect();
 
     // Extract global color flags before anything else — subsequent help
@@ -74,6 +83,11 @@ fn main() -> ExitCode {
             env::set_var("FLODL_VERBOSITY", v.to_string());
         }
     }
+
+    // Extract `--no-append`, the escape hatch that suppresses any
+    // `append:` suffix declared by a run-kind command. Scoped to this
+    // invocation only — nested `fdl` calls re-evaluate their own flags.
+    let (args, no_append) = extract_no_append(&args);
 
     // Environment selection: `--env X` > `FDL_ENV=X` > first-arg convention.
     // Explicit selectors must resolve to an existing overlay; first-arg
@@ -136,7 +150,7 @@ fn main() -> ExitCode {
         }
         "add" => {
             let cli: AddArgs = parse_sub("fdl add", &args[1..]);
-            match add::run(cli.target.as_deref()) {
+            match add::run(cli.target.as_deref(), cli.playground, cli.install) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     cli_error!("{e}");
@@ -177,7 +191,7 @@ fn main() -> ExitCode {
             println!("flodl-cli {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        other => dispatch_config(other, &args, active_env.as_deref()),
+        other => dispatch_config(other, &args, active_env.as_deref(), no_append),
     }
 }
 
@@ -1103,7 +1117,7 @@ fn print_path_hint(bin_dir: &std::path::Path) -> ExitCode {
 fn fetch_latest_github_tag() -> Option<String> {
     use std::process::{Command, Stdio};
     let output = Command::new("curl")
-        .args(["-sI", "https://github.com/fab2s/floDl/releases/latest"])
+        .args(["-sI", "https://github.com/flodl-labs/flodl/releases/latest"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -1155,7 +1169,7 @@ fn download_release_binary(tag: &str, home: &std::path::Path) -> Result<std::pat
 
     let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
     let artifact = format!("flodl-cli-{os}-{arch}{ext}");
-    let url = format!("https://github.com/fab2s/floDl/releases/download/{tag}/{artifact}");
+    let url = format!("https://github.com/flodl-labs/flodl/releases/download/{tag}/{artifact}");
 
     let tmp = home.join(".flodl").join("tmp");
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create temp dir: {e}"))?;
@@ -1191,7 +1205,12 @@ fn load_project_config(
 /// The graph walk itself lives in [`dispatch::walk_commands`] and is
 /// pure — this wrapper performs the actual IO (process spawning, stdout
 /// writes, exit code mapping) based on the returned [`WalkOutcome`].
-fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
+fn dispatch_config(
+    cmd: &str,
+    args: &[String],
+    env: Option<&str>,
+    no_append: bool,
+) -> ExitCode {
     let cwd = env::current_dir().unwrap_or_default();
     let (project, project_root) = match load_project_config(&cwd, env) {
         Some(pair) => pair,
@@ -1209,9 +1228,20 @@ fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
     match outcome {
         WalkOutcome::RunScript {
             command,
+            append,
+            user_args,
             docker,
             cwd,
-        } => run::exec_script(&command, docker.as_deref(), &cwd),
+        } => {
+            let effective_append = if no_append { None } else { append.as_deref() };
+            run::exec_script(
+                &command,
+                effective_append,
+                &user_args,
+                docker.as_deref(),
+                &cwd,
+            )
+        }
         WalkOutcome::ExecCommand {
             config,
             preset,
@@ -1239,9 +1269,16 @@ fn dispatch_config(cmd: &str, args: &[String], env: Option<&str>) -> ExitCode {
             name,
             description,
             run,
+            append,
             docker,
         } => {
-            run::print_run_help(&name, description.as_deref(), &run, docker.as_deref());
+            run::print_run_help(
+                &name,
+                description.as_deref(),
+                &run,
+                append.as_deref(),
+                docker.as_deref(),
+            );
             ExitCode::SUCCESS
         }
         WalkOutcome::UnknownCommand { name } => {
@@ -1361,7 +1398,7 @@ fn cmd_refresh_schema(
     };
 
     eprintln!("Probing `{entry} --fdl-schema`...");
-    let schema = match schema_cache::probe(entry, cmd_dir) {
+    let schema = match schema_cache::probe(entry, cmd_dir, cmd_config.docker.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             cli_error!("{e}");
@@ -1409,6 +1446,7 @@ fn print_usage() {
     println!("    -vv                Debug output (per-batch timing, loop internals)");
     println!("    -vvv               Trace output (maximum detail)");
     println!("    -q, --quiet        Suppress all non-error output");
+    println!("    --no-append        Drop a run command's `append:` suffix (cargo / runner defaults)");
     println!();
     println!("COMMANDS:");
     println!("    setup              Interactive guided setup");
@@ -1470,6 +1508,41 @@ fn extract_verbosity(args: &[String]) -> (Vec<String>, Option<u8>) {
     }
 
     (filtered, level)
+}
+
+/// Strip `--no-append` from `args`, returning a bool that is true
+/// when the flag was present anywhere in the input. Scan-anywhere,
+/// consistent with `-v`, `--env`, and the ANSI flags. The flag only
+/// affects run-kind commands (it suppresses their `append:` suffix);
+/// on commands with no append entry it is a silent no-op.
+///
+/// Stops scanning at the first standalone `--`, so a literal
+/// `--no-append` passed *after* the user's `--` is forwarded to the
+/// inner script untouched (an escape hatch for run-scripts whose own
+/// proxy flags happen to collide).
+fn extract_no_append(args: &[String]) -> (Vec<String>, bool) {
+    let mut found = false;
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut past_dashdash = false;
+
+    for arg in args {
+        if past_dashdash {
+            filtered.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            past_dashdash = true;
+            filtered.push(arg.clone());
+            continue;
+        }
+        if arg == "--no-append" {
+            found = true;
+            continue;
+        }
+        filtered.push(arg.clone());
+    }
+
+    (filtered, found)
 }
 
 /// Strip `--ansi` / `--no-ansi` from `args`, returning a
@@ -1770,5 +1843,31 @@ mod tests {
     fn extract_ansi_flags_both_set_errors() {
         let err = extract_ansi_flags(&args(&["fdl", "--ansi", "--no-ansi"])).unwrap_err();
         assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_no_append_absent_returns_false() {
+        let (out, found) = extract_no_append(&args(&["fdl", "test"]));
+        assert_eq!(out, args(&["fdl", "test"]));
+        assert!(!found);
+    }
+
+    #[test]
+    fn extract_no_append_strips_flag_from_anywhere_before_dashdash() {
+        let (out, found) =
+            extract_no_append(&args(&["fdl", "test", "--no-append", "--", "-p", "x"]));
+        assert_eq!(out, args(&["fdl", "test", "--", "-p", "x"]));
+        assert!(found);
+    }
+
+    #[test]
+    fn extract_no_append_preserves_flag_after_dashdash() {
+        // Past the first `--` the token is bound for the inner script,
+        // so don't swallow it — escape hatch for run-scripts whose own
+        // proxy flags collide.
+        let (out, found) =
+            extract_no_append(&args(&["fdl", "test", "--", "--no-append"]));
+        assert_eq!(out, args(&["fdl", "test", "--", "--no-append"]));
+        assert!(!found);
     }
 }

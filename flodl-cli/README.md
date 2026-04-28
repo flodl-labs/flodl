@@ -1,10 +1,14 @@
 # flodl-cli
 
 `fdl` is the command-line tool for the [floDl](https://flodl.dev) Rust
-deep-learning framework. It drives first-time setup, libtorch management,
-project scaffolding, hardware diagnostics, shell completions, and the
-declarative project manifest (`fdl.yml`) used to dispatch training jobs,
-DDP runs, and tooling inside a flodl workspace.
+deep-learning framework. See [flodl.dev](https://flodl.dev) and the
+[main README](https://github.com/flodl-labs/flodl#readme) for the full
+framework.
+
+`fdl` drives first-time setup, libtorch management, project scaffolding,
+hardware diagnostics, shell completions, and the declarative project
+manifest (`fdl.yml`) used to dispatch training jobs, DDP runs, and
+tooling inside a flodl workspace.
 
 It is a pure-Rust binary with **zero native dependencies**. No libtorch, no
 Python, and no Rust toolchain required to install. The CLI stays useful
@@ -12,14 +16,16 @@ even before anything else is set up, which is the whole point.
 
 ```sh
 curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
-./fdl setup                    # detect hardware, download libtorch, set up Docker
-./fdl init my-model            # scaffold a flodl project with training template
-./fdl diagnose                 # hardware + compatibility report
+./fdl install                  # copy to ~/.local/bin/fdl (or `cargo install flodl-cli`)
+fdl libtorch download          # auto-detect GPU, install the right libtorch variant
+fdl diagnose                   # hardware + compatibility report
 ```
 
-See the
-[full CLI reference](https://github.com/fab2s/floDl/blob/main/docs/cli.md)
-for every command, flag, and the `fdl.yml` manifest format.
+That alone gives you a working libtorch installation usable from any
+Rust (tch-rs), C++, or Python project. The flodl framework
+([flodl.dev](https://flodl.dev)) builds on top with `fdl setup`,
+`fdl init`, and the `fdl.yml` manifest format covered in the
+[full CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md).
 
 ## Design principles
 
@@ -79,8 +85,8 @@ equally to the flodl source checkout and to anything you scaffolded with
   cache that powers project-aware help and completion. The derive lives
   in the [`flodl-cli-macros`](https://crates.io/crates/flodl-cli-macros)
   crate (re-exported here) -- see its
-  [README](https://github.com/fab2s/floDl/blob/main/flodl-cli-macros/README.md)
-  or the [CLI reference](https://github.com/fab2s/floDl/blob/main/docs/cli.md#declaring-flags-in-rust)
+  [README](https://github.com/flodl-labs/flodl/blob/main/flodl-cli-macros/README.md)
+  or the [CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md#declaring-flags-in-rust)
   for the full attribute surface and a worked example.
 
 ### In the flodl source checkout specifically
@@ -166,7 +172,7 @@ curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
 
 Binaries are published for Linux x86_64/aarch64, macOS arm64, and Windows
 x86_64 on every
-[GitHub Release](https://github.com/fab2s/floDl/releases).
+[GitHub Release](https://github.com/flodl-labs/flodl/releases).
 
 ## Command tour
 
@@ -224,11 +230,11 @@ Override with `--cpu` or `--cuda <version>`.
 
 ## Links
 
-- [Full CLI reference](https://github.com/fab2s/floDl/blob/main/docs/cli.md) - every command, every flag, with examples
+- [Full CLI reference](https://github.com/flodl-labs/flodl/blob/main/docs/cli.md) - every command, every flag, with examples
 - [floDl framework](https://flodl.dev) - the Rust deep learning framework `fdl` was built for
-- [GitHub Releases](https://github.com/fab2s/floDl/releases) - pre-compiled binaries
-- [GitHub repository](https://github.com/fab2s/floDl)
+- [GitHub Releases](https://github.com/flodl-labs/flodl/releases) - pre-compiled binaries
+- [GitHub repository](https://github.com/flodl-labs/flodl)
 
 ## License
 
-floDl is open-sourced software licensed under the [MIT license](https://github.com/fab2s/floDl/blob/main/LICENSE).
+floDl is open-sourced software licensed under the [MIT license](https://github.com/flodl-labs/flodl/blob/main/LICENSE).

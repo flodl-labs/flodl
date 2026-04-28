@@ -24,8 +24,8 @@
 
 use std::collections::HashMap;
 
-use flodl::nn::{Dropout, Embedding, LayerNorm, Linear, Module, NamedInputModule, Parameter};
-use flodl::{DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, Variable};
+use flodl::nn::{Dropout, Embedding, GELU, GeluApprox, LayerNorm, Linear, Module, NamedInputModule, Parameter};
+use flodl::{DType, Device, FlowBuilder, Graph, Result, Tensor, TensorError, TensorOptions, Variable};
 
 use crate::models::transformer_layer::{LayerNaming, TransformerLayer, TransformerLayerConfig};
 use crate::path::{prefix_params, HfPath};
@@ -68,6 +68,11 @@ pub struct BertConfig {
     pub layer_norm_eps: f64,
     pub hidden_dropout_prob: f64,
     pub attention_probs_dropout_prob: f64,
+    /// FFN activation form (parsed from HF `hidden_act`). Default
+    /// `GeluApprox::Exact` (erf form) matches `bert-base-uncased`. Loud
+    /// error from [`Self::from_json_str`] on unrecognised activation
+    /// names.
+    pub hidden_act: GeluApprox,
     /// Number of output labels for classification-style task heads. `None`
     /// on base `BertModel` configs; `Some(N)` when the checkpoint was fine-
     /// tuned as `BertForSequenceClassification`, `BertForTokenClassification`,
@@ -79,6 +84,13 @@ pub struct BertConfig {
     /// shipped with an `id2label` / `label2id` mapping. Ordered by integer
     /// id so `vec[k]` reads like HF Python's `config.id2label[k]`.
     pub id2label: Option<Vec<String>>,
+    /// HF Python class name list (e.g. `["BertForSequenceClassification"]`).
+    /// `None` for configs that omit the field; otherwise the verbatim list
+    /// from the source `config.json`. Read by
+    /// [`crate::export::build_for_export`] to dispatch a checkpoint to the
+    /// matching task-head builder, and round-tripped by
+    /// [`Self::to_json_str`] so HF Python re-dispatches to the same class.
+    pub architectures: Option<Vec<String>>,
 }
 
 impl BertConfig {
@@ -96,8 +108,10 @@ impl BertConfig {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.1,
             attention_probs_dropout_prob: 0.1,
+            hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 
@@ -117,18 +131,19 @@ impl BertConfig {
     /// Required integer fields return a clear error if missing; dropout and
     /// layer-norm-eps fall back to the BERT defaults.
     ///
-    /// `hidden_act` is not checked: BERT's default (`gelu`) is hardcoded in
-    /// the feed-forward block. A config shipping a non-GELU activation will
-    /// silently be run with GELU — acceptable for now since every
-    /// BERT-family checkpoint on the Hub uses GELU.
+    /// `hidden_act` is parsed and dispatched: `"gelu"` → erf form,
+    /// `"gelu_new"` / `"gelu_pytorch_tanh"` → tanh approximation. Other
+    /// values error loudly.
     pub fn from_json_str(s: &str) -> Result<Self> {
         use crate::config_json::{
-            optional_f64, optional_i64_or_none, parse_id2label, parse_num_labels, required_i64,
+            optional_f64, optional_hidden_act, optional_i64_or_none, parse_architectures,
+            parse_id2label, parse_num_labels, required_i64,
         };
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| TensorError::new(&format!("config.json parse error: {e}")))?;
         let id2label = parse_id2label(&v)?;
         let num_labels = parse_num_labels(&v, id2label.as_deref());
+        let architectures = parse_architectures(&v);
         Ok(BertConfig {
             vocab_size:              required_i64(&v, "vocab_size")?,
             hidden_size:             required_i64(&v, "hidden_size")?,
@@ -141,9 +156,71 @@ impl BertConfig {
             layer_norm_eps:               optional_f64(&v, "layer_norm_eps", 1e-12),
             hidden_dropout_prob:          optional_f64(&v, "hidden_dropout_prob", 0.1),
             attention_probs_dropout_prob: optional_f64(&v, "attention_probs_dropout_prob", 0.1),
+            hidden_act: optional_hidden_act(&v, "hidden_act", "gelu")?,
             num_labels,
             id2label,
+            architectures,
         })
+    }
+
+    /// Replace the `architectures` field with `[arch_class]` and return
+    /// `self`. Used by every `from_pretrained*` to pin the source-config
+    /// sidecar to the class actually built, so a subsequent
+    /// `save_checkpoint` → `--checkpoint` re-export round-trips through
+    /// `classify_architecture` (private to `crate::export`) regardless of what the
+    /// upstream Hub config advertised (e.g. `bert-base-uncased` ships
+    /// `architectures: ["BertForPreTraining"]` but a user loading via
+    /// `BertForMaskedLM::from_pretrained` is building an MLM head and the
+    /// sidecar should reflect that).
+    pub fn with_architectures(mut self, arch_class: &str) -> Self {
+        self.architectures = Some(vec![arch_class.to_string()]);
+        self
+    }
+
+    /// Serialize to a HuggingFace-style `config.json` string.
+    ///
+    /// Inverse of [`Self::from_json_str`]: the emitted JSON round-trips
+    /// back to an equal `BertConfig` on every shape-affecting field.
+    /// Includes `model_type: "bert"` + `architectures: ["BertModel"]` so
+    /// HF `AutoConfig` / `AutoModel` can dispatch without extra hints.
+    ///
+    /// Intended for the `fdl flodl-hf export` path — pair with
+    /// [`safetensors_io::save_safetensors_file_from_graph`](crate::safetensors_io::save_safetensors_file_from_graph)
+    /// to produce a directory HF Python can load directly.
+    pub fn to_json_str(&self) -> String {
+        use crate::config_json::{emit_architectures, emit_hidden_act, emit_id2label};
+        let mut m = serde_json::Map::new();
+        m.insert("model_type".into(), "bert".into());
+        m.insert(
+            "architectures".into(),
+            emit_architectures(self.architectures.as_deref(), "BertModel"),
+        );
+        m.insert("vocab_size".into(), self.vocab_size.into());
+        m.insert("hidden_size".into(), self.hidden_size.into());
+        m.insert("num_hidden_layers".into(), self.num_hidden_layers.into());
+        m.insert("num_attention_heads".into(), self.num_attention_heads.into());
+        m.insert("intermediate_size".into(), self.intermediate_size.into());
+        m.insert(
+            "max_position_embeddings".into(),
+            self.max_position_embeddings.into(),
+        );
+        m.insert("type_vocab_size".into(), self.type_vocab_size.into());
+        if let Some(pad) = self.pad_token_id {
+            m.insert("pad_token_id".into(), pad.into());
+        }
+        m.insert("layer_norm_eps".into(), self.layer_norm_eps.into());
+        m.insert("hidden_dropout_prob".into(), self.hidden_dropout_prob.into());
+        m.insert(
+            "attention_probs_dropout_prob".into(),
+            self.attention_probs_dropout_prob.into(),
+        );
+        m.insert("hidden_act".into(), emit_hidden_act(self.hidden_act).into());
+        emit_id2label(&mut m, self.id2label.as_deref());
+        if let Some(n) = self.num_labels {
+            m.insert("num_labels".into(), n.into());
+        }
+        serde_json::to_string_pretty(&serde_json::Value::Object(m))
+            .expect("serde_json::Map serialization is infallible")
     }
 }
 
@@ -188,6 +265,22 @@ impl BertEmbeddings {
             )?,
             dropout: Dropout::new(config.hidden_dropout_prob),
         })
+    }
+
+    /// Clone the word-embedding weight `Parameter` for weight tying.
+    ///
+    /// The returned `Parameter` shares its underlying `Variable` (and the
+    /// C++ tensor) with the embedding table by `Rc`. Feed it to
+    /// [`Linear::from_shared_weight`] when building an MLM / LM output
+    /// head — gradients from both paths accumulate on the same leaf, and
+    /// `Graph::named_parameters()` deduplicates by pointer identity, so
+    /// the tied weight surfaces once under
+    /// `bert.embeddings.word_embeddings.weight` (the first-visited tag).
+    ///
+    /// Call this **before** moving the embeddings into the backbone's
+    /// `FlowBuilder`, since `.through(...)` consumes ownership.
+    pub fn word_embeddings_weight(&self) -> Parameter {
+        self.word_embeddings.weight.clone()
     }
 }
 
@@ -273,6 +366,55 @@ impl Module for BertPooler {
     }
 }
 
+// ── BertPredictionHeadTransform ──────────────────────────────────────────
+
+/// The two-layer MLP that sits between the encoder output and the MLM
+/// decoder: `Linear(hidden, hidden) → GELU → LayerNorm`. Shapes are
+/// preserved end-to-end (`[B, S, H] → [B, S, H]`).
+///
+/// Parameter keys (post-`prefix_params` and node tag):
+/// - `cls.predictions.transform.dense.{weight,bias}`
+/// - `cls.predictions.transform.LayerNorm.{weight,bias}`
+///
+/// Matches HF Python's `BertPredictionHeadTransform`. Used exclusively
+/// by [`BertForMaskedLM`]; kept as its own composite Module so the tied
+/// decoder stays a clean single-node `.through()` afterwards.
+pub struct BertPredictionHeadTransform {
+    dense: Linear,
+    activation: GELU,
+    layer_norm: LayerNorm,
+}
+
+impl BertPredictionHeadTransform {
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        Ok(BertPredictionHeadTransform {
+            dense: Linear::on_device(config.hidden_size, config.hidden_size, device)?,
+            activation: GELU::with_approximate(config.hidden_act),
+            layer_norm: LayerNorm::on_device_with_eps(
+                config.hidden_size,
+                config.layer_norm_eps,
+                device,
+            )?,
+        })
+    }
+}
+
+impl Module for BertPredictionHeadTransform {
+    fn name(&self) -> &str { "bert_prediction_head_transform" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        let x = self.dense.forward(input)?;
+        let x = self.activation.forward(&x)?;
+        self.layer_norm.forward(&x)
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut out = prefix_params("dense",     self.dense.parameters());
+        out.extend(   prefix_params("LayerNorm", self.layer_norm.parameters()));
+        out
+    }
+}
+
 // ── BertModel ────────────────────────────────────────────────────────────
 
 /// Translate a [`BertConfig`] into the subset [`TransformerLayer`]
@@ -285,6 +427,7 @@ fn bert_layer_config(config: &BertConfig) -> TransformerLayerConfig {
         hidden_dropout_prob:          config.hidden_dropout_prob,
         attention_probs_dropout_prob: config.attention_probs_dropout_prob,
         layer_norm_eps:               config.layer_norm_eps,
+        hidden_act:                   config.hidden_act,
     }
 }
 
@@ -373,8 +516,32 @@ impl BertModel {
 
 // ── Task heads ───────────────────────────────────────────────────────────
 
-use crate::task_heads::{check_num_labels, default_labels, extract_best_span, logits_to_sorted_labels};
+use crate::task_heads::{
+    check_num_labels, ClassificationHead, EncoderInputs, MaskedLmHead, QaHead, TaggingHead,
+};
 pub use crate::task_heads::{Answer, TokenPrediction};
+
+/// BERT graphs take four `forward_multi` inputs — `input_ids`,
+/// `position_ids`, `token_type_ids`, and an extended attention mask —
+/// in that order. The backbone flow is built with
+/// `.input(&["position_ids", "token_type_ids", "attention_mask"])` so
+/// `input_ids` flows in via `.through(embeddings)` as the first arg.
+#[cfg(feature = "tokenizer")]
+impl EncoderInputs for BertConfig {
+    const FAMILY_NAME: &'static str = "Bert";
+    const MASK_TOKEN: &'static str = "[MASK]";
+
+    fn encoder_inputs(enc: &crate::tokenizer::EncodedBatch) -> Result<Vec<Variable>> {
+        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
+        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
+        Ok(vec![
+            enc.input_ids.clone(),
+            enc.position_ids.clone(),
+            enc.token_type_ids.clone(),
+            mask,
+        ])
+    }
+}
 
 /// BERT with a sequence-classification head on top of the pooled
 /// `[CLS]` output: `pooler_output → Dropout → Linear(hidden, num_labels)`.
@@ -389,14 +556,14 @@ pub use crate::task_heads::{Answer, TokenPrediction};
 /// requires `fdl flodl-hf convert` first for `.bin`-only repos),
 /// `nlptown/bert-base-multilingual-uncased-sentiment` (5-star rating),
 /// `unitary/toxic-bert` (6-label toxicity).
-pub struct BertForSequenceClassification {
-    graph: Graph,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+///
+/// Type alias over the generic [`ClassificationHead`]; `predict`,
+/// `classify`, `forward_encoded`, `compute_loss`, `labels`, `graph`,
+/// `config`, and `with_tokenizer` are inherited from there. Only the
+/// BERT-specific `on_device` constructor lives below.
+pub type BertForSequenceClassification = ClassificationHead<BertConfig>;
 
-impl BertForSequenceClassification {
+impl ClassificationHead<BertConfig> {
     /// Build the full graph (backbone + classifier head) on `device`
     /// without loading any weights. `num_labels` determines the head's
     /// output dimension; `id2label` falls back to `["LABEL_0", ...]`.
@@ -411,16 +578,7 @@ impl BertForSequenceClassification {
             .through(Linear::on_device(config.hidden_size, num_labels, device)?)
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     /// Resolve `num_labels` from config if present; error otherwise.
@@ -433,65 +591,6 @@ impl BertForSequenceClassification {
                  (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    /// Borrow the underlying [`Graph`] for direct inspection, inference
-    /// via `forward_multi`, or custom training loops.
-    pub fn graph(&self) -> &Graph { &self.graph }
-
-    /// Label names indexed by class id. `labels()[k]` is the name of
-    /// class `k` — either from the checkpoint's `id2label` or the
-    /// `LABEL_k` fallback.
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    /// Attach a tokenizer so [`predict`](Self::predict) can encode raw
-    /// text. `from_pretrained` does this automatically.
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Classify a pre-tokenised batch. Returns one label distribution per
-    /// input, sorted by descending probability.
-    #[cfg(feature = "tokenizer")]
-    pub fn classify(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<(String, f32)>>> {
-        let logits = self.forward_from_encoded(enc)?;
-        logits_to_sorted_labels(&logits, &self.id2label)
-    }
-
-    /// One-shot text → label distribution. Encodes with the attached
-    /// tokenizer, runs the graph in eval mode, softmaxes the logits, and
-    /// returns per-input label distributions sorted desc.
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<(String, f32)>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForSequenceClassification::predict requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.classify(&enc)
-    }
-
-    #[cfg(feature = "tokenizer")]
-    fn forward_from_encoded(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Variable> {
-        self.graph.eval();
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])
     }
 }
 
@@ -506,14 +605,13 @@ impl BertForSequenceClassification {
 /// Matches HF Python's `BertForTokenClassification`. Pre-trained
 /// checkpoints: `dslim/bert-base-NER`,
 /// `dbmdz/bert-large-cased-finetuned-conll03-english`, etc.
-pub struct BertForTokenClassification {
-    graph: Graph,
-    id2label: Vec<String>,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`TaggingHead`]; all per-token
+/// machinery (`tag`, `predict`, `forward_encoded`, `compute_loss`,
+/// `labels`, `graph`, `config`, `with_tokenizer`) is inherited. Only
+/// the BERT-specific `on_device` constructor lives below.
+pub type BertForTokenClassification = TaggingHead<BertConfig>;
 
-impl BertForTokenClassification {
+impl TaggingHead<BertConfig> {
     /// Build the full graph (backbone without pooler + classifier head).
     pub fn on_device(
         config: &BertConfig,
@@ -526,16 +624,7 @@ impl BertForTokenClassification {
             .through(Linear::on_device(config.hidden_size, num_labels, device)?)
             .tag("classifier")
             .build()?;
-        let id2label = config
-            .id2label
-            .clone()
-            .unwrap_or_else(|| default_labels(num_labels));
-        Ok(Self {
-            graph,
-            id2label,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config, num_labels, config.id2label.clone()))
     }
 
     pub(crate) fn num_labels_from_config(config: &BertConfig) -> Result<i64> {
@@ -545,93 +634,6 @@ impl BertForTokenClassification {
                  (nor `id2label`); cannot infer head size",
             )
         })
-    }
-
-    pub fn graph(&self) -> &Graph { &self.graph }
-    pub fn labels(&self) -> &[String] { &self.id2label }
-
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
-
-    /// Tag every token in a pre-tokenised batch. Output shape matches
-    /// `enc.input_ids`: `result[b][s]` is the top-1 prediction for batch
-    /// entry `b`, position `s`.
-    ///
-    /// `TokenPrediction::attends` mirrors the input attention mask so
-    /// callers can drop `[PAD]` entries without re-tokenising.
-    #[cfg(feature = "tokenizer")]
-    pub fn tag(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForTokenClassification::tag requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        let logits = self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])?;
-        // logits: [B, S, num_labels]
-        let probs = logits.softmax(-1)?;
-        let shape = probs.shape();
-        assert_eq!(shape.len(), 3, "expected [B, S, num_labels], got {shape:?}");
-        let batch = shape[0] as usize;
-        let seq = shape[1] as usize;
-        let n = shape[2] as usize;
-        let flat = probs.data().to_f32_vec()?;
-        let input_ids: Vec<i64> = enc.input_ids.data().to_i64_vec()?;
-        let attn_ids: Vec<i64> = enc.attention_mask.data().to_i64_vec()?;
-
-        let mut out = Vec::with_capacity(batch);
-        for b in 0..batch {
-            let mut row = Vec::with_capacity(seq);
-            for s in 0..seq {
-                let base = (b * seq + s) * n;
-                let (best_k, &best_p) = flat[base..base + n]
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .expect("n > 0 checked by check_num_labels");
-                let id = input_ids[b * seq + s] as u32;
-                let token = tok
-                    .inner()
-                    .id_to_token(id)
-                    .unwrap_or_else(|| format!("<unk_id={id}>"));
-                row.push(TokenPrediction {
-                    token,
-                    label: self.id2label[best_k].clone(),
-                    score: best_p,
-                    attends: attn_ids[b * seq + s] != 0,
-                });
-            }
-            out.push(row);
-        }
-        Ok(out)
-    }
-
-    /// One-shot text → per-token tags. Encodes with the attached
-    /// tokenizer and calls [`tag`](Self::tag).
-    #[cfg(feature = "tokenizer")]
-    pub fn predict(&self, texts: &[&str]) -> Result<Vec<Vec<TokenPrediction>>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForTokenClassification::predict requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode(texts)?;
-        self.tag(&enc)
     }
 }
 
@@ -645,13 +647,13 @@ impl BertForTokenClassification {
 /// Matches HF Python's `BertForQuestionAnswering`. Pre-trained
 /// checkpoints: `csarron/bert-base-uncased-squad-v1`,
 /// `bert-large-uncased-whole-word-masking-finetuned-squad`, etc.
-pub struct BertForQuestionAnswering {
-    graph: Graph,
-    #[cfg(feature = "tokenizer")]
-    tokenizer: Option<crate::tokenizer::HfTokenizer>,
-}
+/// Type alias over the generic [`QaHead`]; span-extraction logic
+/// (`answer`, `answer_batch`, `extract`, `forward_encoded`,
+/// `compute_loss`, `graph`, `config`, `with_tokenizer`) is inherited.
+/// Only the BERT-specific `on_device` constructor lives below.
+pub type BertForQuestionAnswering = QaHead<BertConfig>;
 
-impl BertForQuestionAnswering {
+impl QaHead<BertConfig> {
     /// Build the full graph (backbone without pooler + QA output head).
     pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
         // QA is a fixed-width head: 2 outputs (start, end), independent
@@ -660,73 +662,93 @@ impl BertForQuestionAnswering {
             .through(Linear::on_device(config.hidden_size, 2, device)?)
             .tag("qa_outputs")
             .build()?;
-        Ok(Self {
-            graph,
-            #[cfg(feature = "tokenizer")]
-            tokenizer: None,
-        })
+        Ok(Self::from_graph(graph, config))
     }
+}
 
-    pub fn graph(&self) -> &Graph { &self.graph }
+/// BERT with a masked-language-modelling head: prediction-head
+/// transform (`Linear → GELU → LayerNorm`) followed by a decoder
+/// `Linear(hidden, vocab_size)` whose weight is **tied** to
+/// `bert.embeddings.word_embeddings.weight`.
+///
+/// Primary use case: **continued pretraining / domain adaptation** on
+/// private corpora. Callers feed masked `input_ids` (with `[MASK]`
+/// tokens at chosen positions) and labels shaped `[batch, seq_len]`
+/// where the loss-relevant positions carry the original token id and
+/// everything else is `-100`. See [`crate::task_heads::masked_lm_loss`].
+///
+/// Parameter keys emitted by the graph (post-dedup):
+/// - `cls.predictions.transform.dense.{weight,bias}`
+/// - `cls.predictions.transform.LayerNorm.{weight,bias}`
+/// - `cls.predictions.decoder.bias`  (`[vocab_size]`, fresh)
+///
+/// `cls.predictions.decoder.weight` is **absent** from the state_dict —
+/// the decoder borrows `bert.embeddings.word_embeddings.weight` via
+/// [`Linear::from_shared_weight`], and `Graph::named_parameters()`
+/// dedupes shared parameters by pointer identity. This matches HF's
+/// runtime `tie_weights()` semantics (one tensor, two uses, one
+/// optimizer update) while avoiding HF Python's historical quirk of
+/// saving both keys redundantly. Safetensors loaders built against
+/// this head should accept the HF "both keys present" layout too,
+/// silently ignoring `decoder.weight` when the config carries
+/// `tie_word_embeddings=true`.
+///
+/// Matches HF Python's
+/// [`BertForMaskedLM`](https://huggingface.co/docs/transformers/model_doc/bert#transformers.BertForMaskedLM).
+/// Pre-trained checkpoints ship with `bert-base-uncased` et al. out of
+/// the box; for inference fill-mask demos, reach for
+/// `bert-base-uncased` or `bert-base-cased`.
+/// Type alias over the generic [`MaskedLmHead`]; `fill_mask`,
+/// `forward_encoded`, `compute_loss`, `graph`, `config`, and
+/// `with_tokenizer` are inherited. Only the BERT-specific `on_device`
+/// constructor lives below.
+pub type BertForMaskedLM = MaskedLmHead<BertConfig>;
 
-    #[cfg(feature = "tokenizer")]
-    pub fn with_tokenizer(mut self, tok: crate::tokenizer::HfTokenizer) -> Self {
-        self.tokenizer = Some(tok);
-        self
-    }
+impl MaskedLmHead<BertConfig> {
+    /// Build the full graph: backbone (without pooler) + transform +
+    /// tied decoder. Initializes all weights fresh; use
+    /// [`from_pretrained`](crate::models::bert::BertForMaskedLM::from_pretrained)
+    /// to load a checkpoint.
+    pub fn on_device(config: &BertConfig, device: Device) -> Result<Self> {
+        // Build embeddings first, grab the tied weight before ownership
+        // moves into the flow's `.through(...)`.
+        let embeddings = BertEmbeddings::on_device(config, device)?;
+        let tied_weight = embeddings.word_embeddings_weight();
 
-    /// Answer one `(question, context)` pair. Returns the highest-scoring
-    /// span over the context tokens.
-    #[cfg(feature = "tokenizer")]
-    pub fn answer(&self, question: &str, context: &str) -> Result<Answer> {
-        let mut out = self.answer_batch(&[(question, context)])?;
-        Ok(out.pop().expect("answer_batch returns one per input"))
-    }
+        let mut fb = FlowBuilder::new()
+            .input(&["position_ids", "token_type_ids", "attention_mask"])
+            .through(embeddings)
+            .tag("bert.embeddings")
+            .using(&["position_ids", "token_type_ids"]);
 
-    /// Batched variant of [`answer`](Self::answer).
-    #[cfg(feature = "tokenizer")]
-    pub fn answer_batch(&self, pairs: &[(&str, &str)]) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForQuestionAnswering::answer requires a tokenizer; \
-                 use from_pretrained or .with_tokenizer(...) first",
-            )
-        })?;
-        let enc = tok.encode_pairs(pairs)?;
-        self.extract(&enc)
-    }
+        let layer_root = HfPath::new("bert").sub("encoder").sub("layer");
+        let layer_cfg = bert_layer_config(config);
+        for i in 0..config.num_hidden_layers {
+            let tag = layer_root.sub(i).to_string();
+            fb = fb
+                .through(TransformerLayer::on_device(&layer_cfg, LayerNaming::BERT, device)?)
+                .tag(&tag)
+                .using(&["attention_mask"]);
+        }
 
-    /// Run the graph on a pre-tokenised `(question, context)` batch and
-    /// extract best spans. The tokenizer's `sequence_ids` mark the
-    /// context region (== 1); scoring is restricted to that region.
-    ///
-    /// Uses `sequence_ids` (the tokenizer-level segment tag: `0` =
-    /// question, `1` = context, `-1` = special/pad) rather than
-    /// `token_type_ids` so the same code works across BERT-family
-    /// models with different token-type conventions (RoBERTa, for
-    /// instance, keeps all `token_type_ids` at zero). `-1` already
-    /// excludes padding, so no separate attention-mask check is needed.
-    #[cfg(feature = "tokenizer")]
-    pub fn extract(
-        &self,
-        enc: &crate::tokenizer::EncodedBatch,
-    ) -> Result<Vec<Answer>> {
-        let tok = self.tokenizer.as_ref().ok_or_else(|| {
-            TensorError::new(
-                "BertForQuestionAnswering::extract requires a tokenizer; \
-                 attach one via .with_tokenizer(...) or from_pretrained",
-            )
-        })?;
-        self.graph.eval();
-        let mask_f32 = enc.attention_mask.data().to_dtype(DType::Float32)?;
-        let mask = Variable::new(build_extended_attention_mask(&mask_f32)?, false);
-        let logits = self.graph.forward_multi(&[
-            enc.input_ids.clone(),
-            enc.position_ids.clone(),
-            enc.token_type_ids.clone(),
-            mask,
-        ])?;
-        extract_best_span(&logits, enc, tok)
+        // MLM prediction head: transform stack → tied decoder.
+        // The decoder borrows `tied_weight` (shared Rc); its bias is a
+        // fresh `[vocab_size]` Parameter initialised to zero (HF default).
+        let decoder_bias = Parameter::new(
+            Tensor::zeros(
+                &[config.vocab_size],
+                TensorOptions { dtype: DType::Float32, device },
+            )?,
+            "bias",
+        );
+        let graph = fb
+            .through(BertPredictionHeadTransform::on_device(config, device)?)
+            .tag("cls.predictions.transform")
+            .through(Linear::from_shared_weight(tied_weight, Some(decoder_bias)))
+            .tag("cls.predictions.decoder")
+            .build()?;
+
+        Ok(Self::from_graph(graph, config))
     }
 }
 
@@ -734,7 +756,7 @@ impl BertForQuestionAnswering {
 mod tests {
     use super::*;
     use crate::safetensors_io::expected_from_graph;
-    use flodl::TensorOptions;
+    use flodl::{HasGraph, TensorOptions};
 
     /// The 16 parameter keys every encoder layer exposes, template-formatted
     /// for a given layer index.
@@ -883,8 +905,10 @@ mod tests {
             layer_norm_eps: 1e-12,
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
+            hidden_act: GeluApprox::Exact,
             num_labels: None,
             id2label: None,
+            architectures: None,
         }
     }
 
@@ -1064,6 +1088,58 @@ mod tests {
         assert!((c.layer_norm_eps               - 1e-12).abs() < 1e-18);
         assert!((c.hidden_dropout_prob          - 0.1).abs() < 1e-9);
         assert!((c.attention_probs_dropout_prob - 0.1).abs() < 1e-9);
+    }
+
+    /// Round-trip: preset -> to_json_str -> from_json_str recovers the
+    /// same config. Guards against fields the writer forgets to emit
+    /// (any required_i64 that's missing in the emitted JSON errors
+    /// during parse) and against silent default drift.
+    #[test]
+    fn bert_config_to_json_str_round_trip() {
+        let preset = BertConfig::bert_base_uncased();
+        let s = preset.to_json_str();
+        let recovered = BertConfig::from_json_str(&s).unwrap();
+        // Round-trip is idempotent: emitting the recovered config
+        // produces identical JSON.
+        assert_eq!(preset.to_json_str(), recovered.to_json_str());
+        // HF dispatch keys present so AutoConfig loads it.
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v.get("model_type").and_then(|x| x.as_str()), Some("bert"));
+        assert_eq!(
+            v.get("architectures")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()),
+            Some(vec!["BertModel"]),
+        );
+    }
+
+    /// Task-head config survives round-trip: id2label + num_labels +
+    /// non-None pad_token_id all land in the emitted JSON and re-parse.
+    #[test]
+    fn bert_config_to_json_str_preserves_task_head_metadata() {
+        let mut preset = BertConfig::bert_base_uncased();
+        preset.num_labels = Some(3);
+        preset.id2label = Some(vec![
+            "POS".to_string(),
+            "NEG".to_string(),
+            "NEU".to_string(),
+        ]);
+        let s = preset.to_json_str();
+        let r = BertConfig::from_json_str(&s).unwrap();
+        assert_eq!(r.num_labels, Some(3));
+        assert_eq!(
+            r.id2label.as_deref(),
+            Some(&[
+                "POS".to_string(),
+                "NEG".to_string(),
+                "NEU".to_string(),
+            ][..])
+        );
+        // label2id was emitted alongside id2label (HF convention).
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let lab2 = v.get("label2id").and_then(|x| x.as_object()).unwrap();
+        assert_eq!(lab2.get("POS").and_then(|x| x.as_i64()), Some(0));
+        assert_eq!(lab2.get("NEU").and_then(|x| x.as_i64()), Some(2));
     }
 
     /// Smoke test: construct a tiny BERT on CPU, run forward_multi with
@@ -1313,5 +1389,361 @@ mod tests {
         let dev = Device::CPU;
         assert!(BertForSequenceClassification::on_device(&config, 0, dev).is_err());
         assert!(BertForTokenClassification::on_device(&config, 0, dev).is_err());
+    }
+
+    /// `HasGraph` should return a reference to the same underlying graph
+    /// the head owns (pointer equality). This is the contract
+    /// `Trainer::setup_head` relies on for rank-0 param matching.
+    #[test]
+    fn has_graph_returns_inner_graph_by_reference() {
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let seq   = BertForSequenceClassification::on_device(&config, 3, dev).unwrap();
+        let token = BertForTokenClassification::on_device(&config, 5, dev).unwrap();
+        let qa    = BertForQuestionAnswering::on_device(&config, dev).unwrap();
+        assert!(std::ptr::eq(seq.graph(),   <BertForSequenceClassification as HasGraph>::graph(&seq)));
+        assert!(std::ptr::eq(token.graph(), <BertForTokenClassification as HasGraph>::graph(&token)));
+        assert!(std::ptr::eq(qa.graph(),    <BertForQuestionAnswering as HasGraph>::graph(&qa)));
+    }
+
+    /// End-to-end `Trainer::setup_head` on CPU: build a head, wire
+    /// optimizer via `setup_head`, run a full forward → loss → backward
+    /// → step cycle, confirm no error and the loss is finite.
+    ///
+    /// Validates the single-device branch of `setup_head`'s distribute
+    /// call (no replicas created, optimizer + training-mode wired on
+    /// rank 0). When `usable_cuda_devices()` reports 2+ GPUs the
+    /// distribute path instead creates CUDA replicas, and a full
+    /// distributed forward driving every rank is required before
+    /// `step()`; flodl's own DDP test suite covers that end-to-end, so
+    /// here we exit early rather than duplicate that coverage.
+    #[test]
+    fn setup_head_drives_cpu_training_step() {
+        use flodl::{usable_cuda_devices, Adam, Trainer};
+        use crate::task_heads::sequence_classification_loss;
+
+        if usable_cuda_devices().len() >= 2 {
+            return;
+        }
+
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let head = BertForSequenceClassification::on_device(&config, 3, dev).unwrap();
+
+        let cfg_for_factory = config.clone();
+        Trainer::setup_head(
+            &head,
+            move |dev| BertForSequenceClassification::on_device(&cfg_for_factory, 3, dev),
+            |p| Adam::new(p, 1e-3),
+        ).unwrap();
+
+        let batch = 2;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[1, 2, 3, 4, 5, 6, 7, 0], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let pos = Variable::new(
+            Tensor::from_i64(&[0, 1, 2, 3, 0, 1, 2, 3], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let tt = Variable::new(Tensor::from_i64(&[0; 8], &[batch, seq], dev).unwrap(), false);
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let logits = head.graph().forward_multi(&[ids, pos, tt, mask]).unwrap();
+        assert_eq!(logits.shape(), vec![batch, 3]);
+
+        let labels = Variable::new(Tensor::from_i64(&[0, 1], &[batch], dev).unwrap(), false);
+        let loss = sequence_classification_loss(&logits, &labels).unwrap();
+        loss.backward().unwrap();
+        head.graph().step().unwrap();
+
+        let loss_val = loss.item().unwrap();
+        assert!(loss_val.is_finite(), "loss must be finite, got {loss_val}");
+    }
+
+    // ── BertForMaskedLM ──────────────────────────────────────────────
+
+    /// `BertForMaskedLM` weight-ties its decoder to the word-embedding
+    /// table, and its state_dict should reflect that: a single
+    /// `bert.embeddings.word_embeddings.weight` key with shape
+    /// `[vocab_size, hidden]`, **no** `cls.predictions.decoder.weight`
+    /// key, plus the transform and fresh-bias keys.
+    #[test]
+    fn masked_lm_parameter_keys_match_hf_tied_layout() {
+        let config = BertConfig::bert_base_uncased();
+        let head = BertForMaskedLM::on_device(&config, Device::CPU).unwrap();
+        let expected = expected_from_graph(head.graph());
+        let keys: Vec<&str> = expected.iter().map(|p| p.key.as_str()).collect();
+
+        // Tying contract: exactly one copy of the vocab-sized weight,
+        // routed under the embeddings tag (first visit wins).
+        assert!(
+            keys.contains(&"bert.embeddings.word_embeddings.weight"),
+            "tied weight must surface under embeddings tag: {keys:?}",
+        );
+        assert!(
+            !keys.contains(&"cls.predictions.decoder.weight"),
+            "decoder.weight must be absent (tied, dedup kept embeddings entry)",
+        );
+
+        // Pooler must not appear — MLM uses no_pooler backbone.
+        assert!(
+            !keys.iter().any(|k| k.starts_with("bert.pooler.")),
+            "MLM must not carry pooler params",
+        );
+
+        // Transform + fresh decoder bias.
+        let mut head_keys: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|k| k.starts_with("cls."))
+            .collect();
+        head_keys.sort();
+        assert_eq!(
+            head_keys,
+            vec![
+                "cls.predictions.decoder.bias",
+                "cls.predictions.transform.LayerNorm.bias",
+                "cls.predictions.transform.LayerNorm.weight",
+                "cls.predictions.transform.dense.bias",
+                "cls.predictions.transform.dense.weight",
+            ],
+        );
+
+        let by_key: std::collections::HashMap<&str, &[i64]> = expected
+            .iter().map(|p| (p.key.as_str(), p.shape.as_slice())).collect();
+        let v = config.vocab_size;
+        let h = config.hidden_size;
+        assert_eq!(by_key["bert.embeddings.word_embeddings.weight"], &[v, h]);
+        assert_eq!(by_key["cls.predictions.transform.dense.weight"], &[h, h]);
+        assert_eq!(by_key["cls.predictions.transform.dense.bias"],   &[h]);
+        assert_eq!(by_key["cls.predictions.transform.LayerNorm.weight"], &[h]);
+        assert_eq!(by_key["cls.predictions.transform.LayerNorm.bias"],   &[h]);
+        assert_eq!(by_key["cls.predictions.decoder.bias"],           &[v]);
+    }
+
+    /// The tied decoder's underlying `Variable` must share its `Rc`
+    /// with the embedding table's — otherwise gradient accumulation
+    /// would silently split across two independent tensors and the
+    /// `named_parameters()` dedup would have been a coincidence.
+    /// Structural check: exactly one `[vocab_size, hidden]`-shaped
+    /// Parameter in the graph. An untied decoder would double it.
+    ///
+    /// Uses `bert-base-uncased` config (not `tiny_bert_config`) so the
+    /// shape test is unambiguous — in the tiny preset
+    /// `intermediate_size == vocab_size` collides with the FFN weight
+    /// shape.
+    #[test]
+    fn masked_lm_decoder_shares_embedding_rc() {
+        let config = BertConfig::bert_base_uncased();
+        let head = BertForMaskedLM::on_device(&config, Device::CPU).unwrap();
+
+        let named = head.graph().named_parameters();
+        let embed_w = named
+            .iter()
+            .find(|(k, _)| k == "bert.embeddings/word_embeddings.weight")
+            .map(|(_, p)| p.clone())
+            .expect("embeddings word_embeddings.weight must be present");
+        assert_eq!(
+            embed_w.variable.shape(),
+            vec![config.vocab_size, config.hidden_size],
+        );
+
+        let vocab_shaped_count = named
+            .iter()
+            .filter(|(_, p)| p.variable.shape() == vec![config.vocab_size, config.hidden_size])
+            .count();
+        assert_eq!(
+            vocab_shaped_count, 1,
+            "exactly one [V, H]-shaped Parameter expected under tying",
+        );
+    }
+
+    /// Smoke: MLM head emits `[batch, seq, vocab_size]` logits.
+    #[test]
+    fn masked_lm_forward_shape_smoke() {
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let head = BertForMaskedLM::on_device(&config, dev).unwrap();
+        head.graph().eval();
+
+        let batch = 2;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[1, 2, 3, 4, 5, 6, 7, 0], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let pos = Variable::new(
+            Tensor::from_i64(&[0, 1, 2, 3, 0, 1, 2, 3], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let tt = Variable::new(Tensor::from_i64(&[0; 8], &[batch, seq], dev).unwrap(), false);
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let out = head.graph().forward_multi(&[ids, pos, tt, mask]).unwrap();
+        assert_eq!(out.shape(), vec![batch, seq, config.vocab_size]);
+    }
+
+    /// `HasGraph` impl points to the MLM head's inner graph by
+    /// reference, matching the contract the other heads satisfy.
+    #[test]
+    fn masked_lm_has_graph_returns_inner_graph_by_reference() {
+        let config = tiny_bert_config();
+        let head = BertForMaskedLM::on_device(&config, Device::CPU).unwrap();
+        assert!(std::ptr::eq(head.graph(), <BertForMaskedLM as HasGraph>::graph(&head)));
+    }
+
+    /// Backward through the tied decoder must produce a gradient on
+    /// the shared embedding weight — if tying were broken, the
+    /// decoder path's gradient would land on a different (phantom)
+    /// tensor and the embedding weight would see only its own
+    /// position-lookup contribution.
+    #[test]
+    fn masked_lm_backward_accumulates_on_tied_weight() {
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let head = BertForMaskedLM::on_device(&config, dev).unwrap();
+        head.graph().train();
+
+        let batch = 1;
+        let seq = 4;
+        let ids = Variable::new(
+            Tensor::from_i64(&[1, 2, 3, 4], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let pos = Variable::new(
+            Tensor::from_i64(&[0, 1, 2, 3], &[batch, seq], dev).unwrap(),
+            false,
+        );
+        let tt = Variable::new(Tensor::from_i64(&[0; 4], &[batch, seq], dev).unwrap(), false);
+        let mask_flat = Tensor::ones(&[batch, seq], TensorOptions {
+            dtype: DType::Float32, device: dev,
+        }).unwrap();
+        let mask = Variable::new(build_extended_attention_mask(&mask_flat).unwrap(), false);
+
+        let logits = head.graph().forward_multi(&[ids, pos, tt, mask]).unwrap();
+        let loss = logits.sum().unwrap();
+        loss.backward().unwrap();
+
+        let named = head.graph().named_parameters();
+        let embed_w = named
+            .iter()
+            .find(|(k, _)| k == "bert.embeddings/word_embeddings.weight")
+            .map(|(_, p)| p.clone())
+            .expect("tied weight must be present");
+        assert!(
+            embed_w.variable.grad().is_some(),
+            "tied embedding/decoder weight must receive gradient",
+        );
+    }
+
+    /// HF checkpoints save `cls.predictions.decoder.weight` alongside
+    /// `bert.embeddings.word_embeddings.weight` even though the two
+    /// are the same tied tensor. flodl-hf emits only the first
+    /// (dedup by pointer identity in `named_parameters()`), so the
+    /// loader must *tolerate* the redundant decoder key rather than
+    /// error on it.
+    ///
+    /// This is a CPU-only synthetic-safetensors test — no network,
+    /// no real checkpoint needed. The existing
+    /// `bert_mlm_parity.rs` live test exercises the same path
+    /// end-to-end but is `#[ignore]` + `_live` (network-gated), so
+    /// this unit test closes the coverage gap for default runs.
+    ///
+    /// Covers two assertions:
+    /// 1. `load_safetensors_into_graph_with_rename_allow_unused`
+    ///    accepts a blob carrying the redundant key and reports it
+    ///    back in the `unused` list.
+    /// 2. `load_safetensors_into_graph_with_rename` (strict) rejects
+    ///    the same blob — confirming the tolerance is opt-in, not
+    ///    accidental.
+    #[test]
+    fn mlm_loader_tolerates_redundant_tied_decoder_key() {
+        use std::collections::HashMap as StdHashMap;
+
+        use safetensors::{tensor::TensorView, Dtype};
+
+        use crate::safetensors_io::{
+            expected_from_graph, load_safetensors_into_graph_with_rename,
+            load_safetensors_into_graph_with_rename_allow_unused,
+        };
+
+        let config = tiny_bert_config();
+        let dev = Device::CPU;
+        let head = BertForMaskedLM::on_device(&config, dev).unwrap();
+
+        // Drive the checkpoint's key set from the graph itself. Each
+        // expected key gets a zero-filled payload of the right shape;
+        // the loader only validates shapes, not values.
+        let expected = expected_from_graph(head.graph());
+        let mut entries: Vec<(String, Dtype, Vec<usize>, Vec<u8>)> = Vec::new();
+        let mut embed_weight_shape: Vec<usize> = Vec::new();
+        for p in &expected {
+            let shape_usize: Vec<usize> = p.shape.iter().map(|&d| d as usize).collect();
+            let numel: usize = shape_usize.iter().product();
+            let payload = vec![0u8; numel * 4]; // f32 zeros
+            if p.key == "bert.embeddings.word_embeddings.weight" {
+                embed_weight_shape = shape_usize.clone();
+            }
+            entries.push((p.key.clone(), Dtype::F32, shape_usize, payload));
+        }
+        assert!(
+            !embed_weight_shape.is_empty(),
+            "bert.embeddings.word_embeddings.weight must be an expected key",
+        );
+
+        // The load-bearing addition: a redundant `cls.predictions.decoder.weight`
+        // with the same shape as the tied word-embedding weight, as HF
+        // checkpoints typically ship it.
+        let decoder_numel: usize = embed_weight_shape.iter().product();
+        entries.push((
+            "cls.predictions.decoder.weight".to_string(),
+            Dtype::F32,
+            embed_weight_shape,
+            vec![0u8; decoder_numel * 4],
+        ));
+
+        // Serialize into an in-memory safetensors blob.
+        let views: StdHashMap<String, TensorView<'_>> = entries
+            .iter()
+            .map(|(n, d, s, b)| {
+                (n.clone(), TensorView::new(*d, s.clone(), b).unwrap())
+            })
+            .collect();
+        let bytes = safetensors::serialize(&views, &None).unwrap();
+
+        // 1. `allow_unused` variant: accepts the redundant key and
+        //    returns it in the `unused` list.
+        let unused = load_safetensors_into_graph_with_rename_allow_unused(
+            head.graph(),
+            &bytes,
+            |k| k.to_string(),
+        )
+        .expect("allow_unused loader must accept redundant tied decoder key");
+        assert!(
+            unused.iter().any(|k| k == "cls.predictions.decoder.weight"),
+            "redundant decoder key must be reported in `unused`; got: {unused:?}",
+        );
+
+        // 2. Strict variant: same blob must fail, confirming the
+        //    tolerance is opt-in.
+        let strict_err = load_safetensors_into_graph_with_rename(
+            head.graph(),
+            &bytes,
+            |k| k.to_string(),
+        )
+        .expect_err("strict loader must reject the redundant decoder key");
+        let msg = strict_err.to_string();
+        assert!(
+            msg.contains("cls.predictions.decoder.weight"),
+            "strict-loader error must name the offending key; got: {msg}",
+        );
     }
 }

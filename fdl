@@ -14,7 +14,7 @@
 
 set -e
 
-REPO="fab2s/floDl"
+REPO="flodl-labs/flodl"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 CLI="$DIR/target/release/fdl"
 

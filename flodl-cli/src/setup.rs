@@ -285,7 +285,22 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
             if prompt::ask_yn("  Set up Docker build environment?", true) {
                 "docker"
             } else {
-                "none"
+                // User declined Docker but has no Rust either. Show the
+                // Rust install pointers and offer one chance to flip back
+                // to Docker before settling on a "none" build mode.
+                println!();
+                println!("  No worries. To build flodl natively you need Rust on the host:");
+                println!();
+                println!("    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh");
+                println!();
+                println!("  More: https://www.rust-lang.org/tools/install");
+                println!("  Then re-run `fdl setup` and the native path will be picked up.");
+                println!();
+                if prompt::ask_yn("  Or use Docker after all?", false) {
+                    "docker"
+                } else {
+                    "none"
+                }
             }
         }
     } else {
@@ -377,6 +392,19 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                 println!("    cargo test");
             }
         }
+    }
+
+    // No-build-environment fallback: only reachable from the
+    // docker-only-no-cargo branch where the user declined Docker
+    // twice. The Rust install pointers were already printed during
+    // Step 3; the summary just re-anchors the next move so the
+    // user doesn't drop into the trailing "Other commands" block
+    // without context.
+    if build_mode == "none" {
+        println!();
+        println!("  No build environment configured.");
+        println!("  Install Rust (link above) for native builds, or re-run `fdl setup`");
+        println!("  and pick Docker. libtorch is already in place either way.");
     }
 
     println!();

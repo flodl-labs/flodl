@@ -613,6 +613,20 @@ mod tests {
         }
 
         x.zero_grad();
+        let y_tanh = x.gelu_tanh().unwrap().sum().unwrap();
+        y_tanh.backward().unwrap();
+        let grad_tanh = x.grad().unwrap().to_f32_vec().unwrap();
+        for i in 0..3 {
+            let mut xp = x_data.clone();
+            let mut xm = x_data.clone();
+            xp[i] += eps as f32;
+            xm[i] -= eps as f32;
+            let fp: f64 = from_f32(&xp, &[3]).gelu_tanh().unwrap().sum().unwrap().item().unwrap();
+            let fm: f64 = from_f32(&xm, &[3]).gelu_tanh().unwrap().sum().unwrap().item().unwrap();
+            assert!((grad_tanh[i] as f64 - (fp - fm) / (2.0 * eps)).abs() < 0.01);
+        }
+
+        x.zero_grad();
         let y2 = x.silu().unwrap().sum().unwrap();
         y2.backward().unwrap();
         let grad2 = x.grad().unwrap().to_f32_vec().unwrap();

@@ -30,14 +30,23 @@ For the historical record of shipped phases and individual changes, see
   first-arg routing, deep-merge, conflict detection, and
   `fdl config show`. See
   [docs/design/run-config.md](docs/design/run-config.md).
-- **HuggingFace integration** scaffolded as sibling crate `flodl-hf`:
-  BERT, RoBERTa, DistilBERT with three task heads each (sequence /
-  token classification, extractive QA), `AutoModel` dispatch from
-  `config.json`'s `model_type`, `HfTokenizer`, strict-load safetensors
-  with key-set validation, `from_pretrained` Hub integration, PyTorch
-  parity tests at `max_abs_diff <= 1e-5` on nine pinned checkpoints.
-  `fdl add flodl-hf` and `fdl init --with-hf` close the discovery gap
-  with a one-command scaffold.
+- **HuggingFace integration** sibling crate `flodl-hf`: six BERT-family
+  architectures (BERT, RoBERTa, DistilBERT, ALBERT, XLM-RoBERTa,
+  DeBERTa-v2 / v3) with four task heads each (sequence / token
+  classification, extractive QA, masked language modeling),
+  `AutoModel` dispatch from `config.json`'s `model_type`,
+  `HfTokenizer` with `save` round-trip, strict-load safetensors with
+  key-set validation and native-dtype preservation, `from_pretrained`
+  Hub integration, PyTorch parity tests at `max_abs_diff <= 1e-5` on
+  29 of 30 head cells (DeBERTa-v2 MLM gap documented in
+  `flodl-hf/tests/deberta_v2_parity.rs`). `Trainer::setup_head` +
+  `HasGraph` make fine-tuning transparent across CPU / single GPU /
+  multi-GPU, and `compute_loss(enc, labels)` mirrors HF Python's one-
+  call loss shape. Round-trip back to the HF ecosystem with
+  `fdl flodl-hf export` (Hub or local `.fdl` checkpoint) and
+  `fdl flodl-hf verify-export` (auto-detect family/head, loadability
+  + bit-exact forward parity). `fdl add flodl-hf` `--playground` /
+  `--install` modes plus `fdl init --with-hf` close the discovery gap.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
@@ -45,8 +54,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the full per-version detail.
 
 ## In progress
 
-(empty: choosing the next pull from Possibilities. Length-1 by
-design.)
+*(empty)*
+
+(Length-1 by design. The next item pulls from Possibilities when work
+on it begins.)
 
 ---
 
@@ -64,9 +75,6 @@ not a commitment; only moving one to In Progress is.
   small) for the attention family, ViT, UNet for multi-scale skip
   connections, MoE as a routing pressure test, PPO for the RL data
   loop.
-- **JEPA exploration**, with BYOL or MoCo as a stepping stone. The
-  EMA target encoder + two-tower training infra needed for I-JEPA /
-  V-JEPA is also what BYOL needs, so it's a natural progression.
 - **Zero-dispatch training**: full train-step CUDA Graph capture
   (forward + backward + optimizer as one replay) plus double-buffered
   static I/O tensors. Resident and streaming DataLoader modes already
@@ -76,19 +84,33 @@ not a commitment; only moving one to In Progress is.
 - **Model parallelism**: tensor / pipeline parallelism for models that
   exceed single-GPU VRAM.
 - **Higher-order gradients**: differentiate through backward.
+- **2:4 semi-structured sparsity**: FFI through to
+  `at::sparse_semi_structured`, sparse training and inference on
+  Ampere+ Sparse Tensor Cores. Covers both the LTH-style
+  "train dense, prune, retrain sparse" path and the recent
+  train-from-scratch with periodic mask updates.
 - **flodl-hf next**: ModernBERT (RoPE, GeGLU, alternating local/global
   attention), LLaMA (RoPE, GQA, SwiGLU, then the architecture), LoRA
-  adapters, ViT. Then the fine-tuning loop on heterogeneous consumer
-  GPUs with ElChe, the original arc continuation. See
+  adapters, ViT. Then a flagship ElChe-driven fine-tuning benchmark on
+  heterogeneous consumer GPUs to validate the transparent fine-tune
+  plumbing end-to-end (`Trainer::setup_head` + `compute_loss` shipped
+  in 0.5.3 with the BERT family; see Shipped). See
   [docs/design/cloud-ddp.md](docs/design/cloud-ddp.md) for the
   downstream ElChe tie-in.
-- **flodl-manager CLI evolution**: extend `fdl add` with flodl-aware
-  feature selection (`fdl add hf --for bert|vit|offline`), argv
-  forwarding on `fdl build` / `fdl clippy` so feature matrices can be
-  exercised without falling back to raw `docker compose run`, and
-  `model-info` / `doctor` commands. Makes `fdl` a true DL package
-  manager on top of cargo. The first slice (`fdl add flodl-hf` +
-  `fdl init --with-hf`) shipped in 0.5.2.
+- **flodl-manager CLI evolution**: keep maturing `fdl` toward a true
+  DL package manager on top of cargo. Remaining slices: flodl-aware
+  feature selection on `fdl add` (`fdl add hf --for bert|vit|offline`),
+  argv forwarding on `fdl build` / `fdl clippy` (matching the `--`
+  separator + `append:` pattern that shipped on `fdl run` in 0.5.3),
+  and `model-info` / `doctor` commands. Earlier slices already in
+  Shipped: `fdl add flodl-hf` + `fdl init --with-hf`, the
+  `--playground` / `--install` mode split, `fdl run` argv forwarding,
+  Docker-aware schema probing, and bare-project help fallthrough.
+- **JEPA exploration**: two-tower EMA target-encoder infrastructure,
+  latent predictive training, via BYOL as the stepping stone. The
+  infra (EMA updates, stop-gradient composition, latent probes) is
+  reusable for I-JEPA / V-JEPA and any FBRL-native objective that
+  follows.
 
 ---
 

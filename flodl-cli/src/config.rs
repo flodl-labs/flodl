@@ -60,6 +60,16 @@ pub struct CommandConfig {
     /// Drives help rendering, validation, and completions.
     #[serde(default)]
     pub schema: Option<Schema>,
+    /// Opt-in flag for cargo-entry schema probing. Cargo entries are
+    /// auto-skipped from probing because `cargo run --fdl-schema` triggers
+    /// a full compile (unacceptable latency for `-h`). Setting `compile:
+    /// true` declares "I'm fine with the first-run compile cost — probe
+    /// my binary for its real schema." Subsequent invocations use the
+    /// mtime-keyed cache and pay no compile cost. Absent or `false` keeps
+    /// the default skip behavior, so the inline yml schema (if any)
+    /// stays the source of truth.
+    #[serde(default)]
+    pub compile: Option<bool>,
 }
 
 // ── Unified command specification ───────────────────────────────────────
@@ -81,6 +91,15 @@ pub struct CommandSpec {
     pub description: Option<String>,
     /// Inline shell command. Mutex with `path`.
     pub run: Option<String>,
+    /// Default trailing tokens for a `run:` command. Split on its own
+    /// first `--` into pre/post halves; user args after fdl's first
+    /// `--` are split similarly, then everything merges as
+    /// `[append-pre] [user-pre] -- [append-post] [user-post]`. Append
+    /// seeds defaults; user args last-win on each side. The legacy
+    /// `append: -- --nocapture` shape (empty pre, libtest tokens post)
+    /// keeps working as a degenerate case. Drop entirely with the
+    /// global `--no-append` flag.
+    pub append: Option<String>,
     /// Pointer to a child directory containing its own `fdl.yml`. Absolute
     /// or relative to the declaring config's directory. Mutex with `run`.
     /// `None` + no other fields = "use the convention path
@@ -119,6 +138,13 @@ impl CommandSpec {
             return Err(
                 "command declares `docker:` without `run:`; \
                  `docker:` only wraps inline run-scripts"
+                    .to_string(),
+            );
+        }
+        if self.append.is_some() && self.run.is_none() {
+            return Err(
+                "command declares `append:` without `run:`; \
+                 `append:` only forwards trailing tokens for inline run-scripts"
                     .to_string(),
             );
         }
@@ -174,6 +200,8 @@ impl<'de> Deserialize<'de> for CommandSpec {
             #[serde(default)]
             run: Option<String>,
             #[serde(default)]
+            append: Option<String>,
+            #[serde(default)]
             path: Option<String>,
             #[serde(default)]
             docker: Option<String>,
@@ -196,6 +224,7 @@ impl<'de> Deserialize<'de> for CommandSpec {
         Ok(Self {
             description: inner.description,
             run: inner.run,
+            append: inner.append,
             path: inner.path,
             docker: inner.docker,
             ddp: inner.ddp,
@@ -689,15 +718,21 @@ pub fn load_command_with_env(dir: &Path, env: Option<&str>) -> Result<CommandCon
         }
     } else if let Some(entry) = cfg.entry.as_deref() {
         // Auto-probe non-cargo entries when the cache is stale or missing.
-        // Cargo entries are deliberately skipped — `cargo run --fdl-schema`
-        // triggers a full compile which is unacceptable latency for `-h`.
+        // Cargo entries are skipped by default — `cargo run --fdl-schema`
+        // triggers a full compile which is unacceptable latency for `-h`
+        // — unless the yml explicitly opts in via `compile: true`.
         // Scripts and pre-built binaries are expected to handle the flag
         // cheaply (emit JSON and exit), so probing them on demand is safe.
         // Probe failures are swallowed: an entry that doesn't implement
         // `--fdl-schema` simply falls through to the inline schema (or no
         // schema) — help still renders.
-        if !crate::schema_cache::is_cargo_entry(entry) {
-            if let Ok(probed) = crate::schema_cache::probe(entry, dir) {
+        let opts_into_compile = cfg.compile.unwrap_or(false);
+        let should_probe =
+            !crate::schema_cache::is_cargo_entry(entry) || opts_into_compile;
+        if should_probe {
+            if let Ok(probed) =
+                crate::schema_cache::probe(entry, dir, cfg.docker.as_deref())
+            {
                 // Best-effort cache write: if the dir is read-only, the
                 // schema still applies to this invocation, we just re-probe
                 // next time. Non-fatal.
@@ -1780,6 +1815,57 @@ mod tests {
         );
         let cached = crate::schema_cache::cache_path(&cmd_dir, "cargo-cmd");
         assert!(!cached.exists(), "no cache should be written for cargo entries");
+    }
+
+    #[test]
+    fn load_command_compile_true_overrides_cargo_skip() {
+        // `compile: true` opts a cargo-entry command in to schema probing.
+        // The probe still fails on `cargo run` here (no real binary to
+        // produce JSON), but the load path must reach `probe()` rather
+        // than short-circuiting on the cargo-skip heuristic. We assert
+        // by observing that probing was attempted: when the skip kicks
+        // in, the test for `is_cargo_entry` returns early; with the
+        // override, control flows into probe() which fails silently.
+        // Lacking a way to spy on the probe call itself, we rely on the
+        // sibling test (`load_command_auto_probe_failure_falls_through_silently`)
+        // to demonstrate the silent-fail path, and assert here that
+        // `compile: false` still skips. See the explicit-opt-out test
+        // below.
+        let tmp = TempDir::new();
+        let cmd_dir = tmp.0.join("cargo-compile-true");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::write(
+            cmd_dir.join("fdl.yml"),
+            "entry: cargo run --\ncompile: true\n",
+        )
+        .unwrap();
+
+        // Load must succeed; schema stays None because the bogus cargo
+        // entry can't actually emit JSON, but the probe path was
+        // exercised (no panic, no early-skip).
+        let cfg = load_command(&cmd_dir).expect("load ok");
+        assert_eq!(cfg.compile, Some(true), "compile field round-trips");
+        assert!(cfg.schema.is_none());
+    }
+
+    #[test]
+    fn load_command_compile_false_keeps_cargo_skip() {
+        // Explicit `compile: false` is the same as absent — cargo skip
+        // stays in place.
+        let tmp = TempDir::new();
+        let cmd_dir = tmp.0.join("cargo-compile-false");
+        std::fs::create_dir_all(&cmd_dir).unwrap();
+        std::fs::write(
+            cmd_dir.join("fdl.yml"),
+            "entry: cargo run --\ncompile: false\n",
+        )
+        .unwrap();
+
+        let cfg = load_command(&cmd_dir).expect("load ok");
+        assert_eq!(cfg.compile, Some(false));
+        assert!(cfg.schema.is_none(), "cargo skip honored when compile: false");
+        let cached = crate::schema_cache::cache_path(&cmd_dir, "cargo-compile-false");
+        assert!(!cached.exists());
     }
 
     #[test]

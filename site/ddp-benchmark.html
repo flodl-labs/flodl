@@ -37,9 +37,9 @@ description: "8 models, 8 DDP modes, 70 runs. Every mode converges. Heterogeneou
   <div style="max-width: 720px; margin: 1.5rem auto;">
     <p style="color: var(--dim); font-size: 15px; line-height: 1.8;">
       This is the FlowBuilder Graph version &mdash; the same ResNet-20 architecture
-      expressed as a computation graph. One <code>Ddp::setup()</code> call turns it into
+      expressed as a computation graph. One <code>Trainer::setup()</code> call turns it into
       multi-GPU training. The non-graph ResNet-20 (manual <code>Module</code> impl)
-      produces identical results through <code>Ddp::builder()</code>, confirming that
+      produces identical results through <code>Trainer::builder()</code>, confirming that
       both DDP entry points converge correctly.
     </p>
   </div>
@@ -112,7 +112,7 @@ description: "8 models, 8 DDP modes, 70 runs. Every mode converges. Heterogeneou
       </tbody>
     </table>
     <p class="bench-note">
-      <code>Ddp::builder()</code> path. No Graph required &mdash; any <code>Module</code> works.
+      <code>Trainer::builder()</code> path. No Graph required &mdash; any <code>Module</code> works.
     </p>
   </div>
 </section>
@@ -269,7 +269,7 @@ fdl ddp-bench report              # generate markdown report
     <p style="color: var(--dim); font-size: 14px; margin-top: 1.5rem; text-align: center;">
       The full detailed report with per-epoch trajectories, idle analysis,
       and El Che calibration data is available in
-      <a href="https://github.com/fab2s/flodl/blob/main/docs/ddp-benchmark.md">docs/ddp-benchmark.md</a>.
+      <a href="https://github.com/flodl-labs/flodl/blob/main/docs/ddp-benchmark.md">docs/ddp-benchmark.md</a>.
     </p>
   </div>
 </section>

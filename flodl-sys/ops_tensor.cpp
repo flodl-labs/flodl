@@ -335,6 +335,20 @@ extern "C" char* flodl_gelu(FlodlTensor t, FlodlTensor* result) {
     }
 }
 
+// Tanh-approximation GELU — matches HuggingFace `hidden_act="gelu_new"`
+// (and PyTorch's `F.gelu(x, approximate="tanh")`):
+//   0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// The plain `flodl_gelu` above is the erf form; both share `Variable::gelu_*`
+// surfaces in flodl/src/autograd/ops.rs.
+extern "C" char* flodl_gelu_tanh(FlodlTensor t, FlodlTensor* result) {
+    try {
+        *result = wrap(torch::gelu(unwrap(t), "tanh"));
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    }
+}
+
 extern "C" char* flodl_silu(FlodlTensor t, FlodlTensor* result) {
     try {
         *result = wrap(torch::silu(unwrap(t)));

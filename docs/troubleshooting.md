@@ -19,7 +19,7 @@ fdl cuda-build   # CUDA
 
 **Fix (host):** Use the download script to install libtorch and set up paths:
 ```bash
-curl -sL https://raw.githubusercontent.com/fab2s/floDl/main/download-libtorch.sh | sh
+curl -sL https://raw.githubusercontent.com/flodl-labs/flodl/main/download-libtorch.sh | sh
 ```
 This downloads libtorch to `~/.local/lib/libtorch` and prints the exports to
 add to your shell profile. Or set the variables manually:
@@ -36,7 +36,7 @@ Cargo can't resolve the flodl dependency.
 **Fix:** Check your `Cargo.toml`. If using a git dependency:
 ```toml
 [dependencies]
-flodl = { git = "https://github.com/fab2s/floDl.git" }
+flodl = { git = "https://github.com/flodl-labs/flodl.git" }
 ```
 
 Make sure you have network access inside the container. If behind a proxy,
@@ -392,4 +392,4 @@ Common quick fixes:
 - **Tutorials:** Start with [Rust for PyTorch Users](tutorials/00-rust-primer.md)
 - **Multi-GPU:** [DDP Reference](ddp.md) and [Multi-GPU Tutorial](tutorials/11-multi-gpu.md)
 - **Migration guide:** [PyTorch -> floDl](pytorch_migration.md)
-- **Issues:** [github.com/fab2s/floDl/issues](https://github.com/fab2s/floDl/issues)
+- **Issues:** [github.com/flodl-labs/flodl/issues](https://github.com/flodl-labs/flodl/issues)

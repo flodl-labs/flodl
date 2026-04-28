@@ -5,7 +5,7 @@ Fixture model:
 `lxyuan/distilbert-base-multilingual-cased-sentiments-student`
 (3-label sentiment: positive / neutral / negative).
 
-Run via `fdl flodl-hf parity-distilbert-seqcls`.
+Run via `fdl flodl-hf parity distilbert-seqcls`.
 """
 
 from __future__ import annotations

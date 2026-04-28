@@ -5,7 +5,7 @@
         ThresholdHalt, LearnedHalt,
     };
     use crate::autograd::Variable;
-    use crate::nn::{Linear, NamedInputModule, ReLU, Sigmoid, mse_loss, Optimizer, SGD};
+    use crate::nn::{Linear, LoopBody, NamedInputModule, ReLU, Sigmoid, TraceEmit, forward_via_step, mse_loss, Optimizer, SGD};
     use crate::tensor::Tensor;
     use std::collections::HashMap;
 
@@ -1684,6 +1684,173 @@
         assert!(graph.traces("any").is_none());
     }
 
+    // --- LoopBody / TraceEmit tests ---
+
+    /// LoopBody that publishes two named per-iteration traces.
+    /// Returns 2*x as the next state, emits "double" = 2*x and "quad" = 4*x.
+    struct EmittingDoubler;
+    impl Module for EmittingDoubler {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            forward_via_step(self, input)
+        }
+        fn as_loop_body(&self) -> Option<&dyn LoopBody> { Some(self) }
+    }
+    impl LoopBody for EmittingDoubler {
+        fn step(
+            &self,
+            input: &Variable,
+            _refs: &HashMap<String, Variable>,
+            emit: &mut TraceEmit<'_>,
+        ) -> Result<Variable> {
+            let two_x = input.add(input)?;
+            let four_x = two_x.add(&two_x)?;
+            emit.publish("double", two_x.clone());
+            emit.publish("quad", four_x);
+            Ok(two_x)
+        }
+    }
+
+    /// LoopBody that emits "always" each iter and "odd_only" on iters 0, 2.
+    /// Used to verify sparse emits — vec length matches publish count, not n_iter.
+    struct SparseEmitter {
+        step_count: RefCell<usize>,
+    }
+    impl SparseEmitter {
+        fn new() -> Self { SparseEmitter { step_count: RefCell::new(0) } }
+    }
+    impl Module for SparseEmitter {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            forward_via_step(self, input)
+        }
+        fn as_loop_body(&self) -> Option<&dyn LoopBody> { Some(self) }
+        fn reset(&self) { *self.step_count.borrow_mut() = 0; }
+    }
+    impl LoopBody for SparseEmitter {
+        fn step(
+            &self,
+            input: &Variable,
+            _refs: &HashMap<String, Variable>,
+            emit: &mut TraceEmit<'_>,
+        ) -> Result<Variable> {
+            let i = *self.step_count.borrow();
+            *self.step_count.borrow_mut() += 1;
+            let out = input.add(input)?;
+            emit.publish("always", out.clone());
+            if i % 2 == 0 {
+                emit.publish("even_only", out.clone());
+            }
+            Ok(out)
+        }
+    }
+
+    /// LoopBody that publishes the same name twice per step — must panic.
+    struct DupEmitter;
+    impl Module for DupEmitter {
+        fn forward(&self, input: &Variable) -> Result<Variable> {
+            forward_via_step(self, input)
+        }
+        fn as_loop_body(&self) -> Option<&dyn LoopBody> { Some(self) }
+    }
+    impl LoopBody for DupEmitter {
+        fn step(
+            &self,
+            input: &Variable,
+            _refs: &HashMap<String, Variable>,
+            emit: &mut TraceEmit<'_>,
+        ) -> Result<Variable> {
+            let two_x = input.add(input)?;
+            emit.publish("dup", two_x.clone());
+            emit.publish("dup", two_x.clone());
+            Ok(two_x)
+        }
+    }
+
+    #[test]
+    fn test_loop_body_emits_two_named_traces() {
+        // Loop(EmittingDoubler) × 3: x=[1,2] → 2x=[2,4] → 4x=[4,8] → 8x=[8,16]
+        // Each iter emits "double" = 2*current and "quad" = 4*current.
+        let graph = FlowBuilder::from(Identity)
+            .loop_body(EmittingDoubler)
+            .for_n(3)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0, 2.0], &[1, 2]), false);
+        let y = graph.forward(&x).unwrap();
+        let data = y.data().to_f32_vec().unwrap();
+        assert!((data[0] - 8.0).abs() < 1e-5, "final 8x = [8,16], got {}", data[0]);
+
+        let doubles = graph.traces("double").expect("double stream");
+        assert_eq!(doubles.len(), 3, "3 iterations = 3 emits of 'double'");
+
+        let quads = graph.traces("quad").expect("quad stream");
+        assert_eq!(quads.len(), 3, "3 iterations = 3 emits of 'quad'");
+
+        // double[i] = 2 * input_i, where input_0 = [1,2], input_1 = [2,4], input_2 = [4,8]
+        let d0 = doubles[0].data().to_f32_vec().unwrap();
+        assert!((d0[0] - 2.0).abs() < 1e-5);
+        let q0 = quads[0].data().to_f32_vec().unwrap();
+        assert!((q0[0] - 4.0).abs() < 1e-5);
+
+        let d2 = doubles[2].data().to_f32_vec().unwrap();
+        assert!((d2[0] - 8.0).abs() < 1e-5);
+        let q2 = quads[2].data().to_f32_vec().unwrap();
+        assert!((q2[0] - 16.0).abs() < 1e-5);
+
+        // traces_named (named-only lookup) returns the same data
+        assert_eq!(graph.traces_named("double").unwrap().len(), 3);
+        assert_eq!(graph.traces_named("quad").unwrap().len(), 3);
+        assert!(graph.traces_named("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_loop_body_emit_cleared_each_forward() {
+        let graph = FlowBuilder::from(Identity)
+            .loop_body(EmittingDoubler)
+            .for_n(2)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0], &[1, 1]), false);
+        graph.forward(&x).unwrap();
+        assert_eq!(graph.traces("double").unwrap().len(), 2);
+
+        // Second forward should clear and re-populate — not append
+        graph.forward(&x).unwrap();
+        assert_eq!(graph.traces("double").unwrap().len(), 2);
+        assert_eq!(graph.traces("quad").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_loop_body_emit_sparse() {
+        // 4 iters: "always" emits all 4 times, "even_only" emits on i=0,2 (2 times)
+        let graph = FlowBuilder::from(Identity)
+            .loop_body(SparseEmitter::new())
+            .for_n(4)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0], &[1, 1]), false);
+        graph.forward(&x).unwrap();
+
+        assert_eq!(graph.traces("always").unwrap().len(), 4);
+        assert_eq!(graph.traces("even_only").unwrap().len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "already published this step")]
+    fn test_loop_body_emit_dup_panics() {
+        let graph = FlowBuilder::from(Identity)
+            .loop_body(DupEmitter)
+            .for_n(1)
+            .build()
+            .unwrap();
+
+        let x = Variable::new(from_f32(&[1.0], &[1, 1]), false);
+        // Must panic on the second emit.publish("dup", ...) within the same step.
+        let _ = graph.forward(&x);
+    }
+
     // --- Router tests ---
 
     #[test]
@@ -2038,6 +2205,100 @@
     }
 
     #[test]
+    fn test_save_checkpoint_emits_sidecar_when_source_config_set() {
+        use crate::graph::graph::sidecar_config_path;
+
+        let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
+            .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
+            .build()
+            .unwrap();
+
+        let payload = r#"{"model_type":"bert","hidden_size":768}"#;
+        g.set_source_config(payload.to_string());
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sidecar_emit.fdl");
+        let path_str = path.to_str().unwrap();
+
+        g.save_checkpoint(path_str).unwrap();
+
+        let sidecar = sidecar_config_path(path_str);
+        let written = std::fs::read_to_string(&sidecar).unwrap();
+        assert_eq!(written, payload);
+
+        std::fs::remove_file(path_str).ok();
+        std::fs::remove_file(sidecar).ok();
+    }
+
+    #[test]
+    fn test_save_checkpoint_no_sidecar_when_source_config_unset() {
+        use crate::graph::graph::sidecar_config_path;
+
+        let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
+            .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
+            .build()
+            .unwrap();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sidecar_none.fdl");
+        let path_str = path.to_str().unwrap();
+        let sidecar = sidecar_config_path(path_str);
+
+        // Pre-clean any leftover sidecar from a previous test run so the
+        // assertion "no sidecar written" is meaningful.
+        std::fs::remove_file(&sidecar).ok();
+
+        g.save_checkpoint(path_str).unwrap();
+        assert!(!sidecar.exists(), "sidecar must not be written when source_config is unset");
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
+    fn test_sidecar_path_strips_fdl_and_gz() {
+        use crate::graph::graph::sidecar_config_path;
+
+        assert_eq!(
+            sidecar_config_path("/tmp/model.fdl"),
+            std::path::PathBuf::from("/tmp/model.config.json"),
+        );
+        assert_eq!(
+            sidecar_config_path("/tmp/model.fdl.gz"),
+            std::path::PathBuf::from("/tmp/model.config.json"),
+        );
+        assert_eq!(
+            sidecar_config_path("relative/v3.fdl"),
+            std::path::PathBuf::from("relative/v3.config.json"),
+        );
+    }
+
+    #[test]
+    fn test_clear_source_config_disables_sidecar() {
+        use crate::graph::graph::sidecar_config_path;
+
+        let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
+            .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
+            .build()
+            .unwrap();
+
+        g.set_source_config("payload".to_string());
+        assert_eq!(g.source_config().as_deref(), Some("payload"));
+        g.clear_source_config();
+        assert_eq!(g.source_config(), None);
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_sidecar_cleared.fdl");
+        let path_str = path.to_str().unwrap();
+        let sidecar = sidecar_config_path(path_str);
+        std::fs::remove_file(&sidecar).ok();
+
+        g.save_checkpoint(path_str).unwrap();
+        assert!(!sidecar.exists(), "cleared source_config must not emit sidecar");
+
+        std::fs::remove_file(path_str).ok();
+    }
+
+    #[test]
     fn test_graph_checkpoint_gz() {
         let g = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
             .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
@@ -2319,7 +2580,7 @@
     // Graph::set_scheduler -- regression guard
     // -----------------------------------------------------------------------
     //
-    // Original bug (2026-04-13): sync mode (Ddp::setup_with + graph.step())
+    // Original bug (2026-04-13): sync mode (Trainer::setup_with + graph.step())
     // had no scheduler plumbing, so the optimizer LR stayed constant for the
     // entire run regardless of what scheduler the user attached. These tests
     // assert that set_scheduler drives the optimizer LR through step(), that

@@ -12,6 +12,9 @@ RUN pip install --no-cache-dir \
  && pip install --no-cache-dir \
         "transformers~=4.46" \
         "safetensors~=0.4" \
-        "huggingface-hub~=0.26"
+        "huggingface-hub~=0.26" \
+        "sentencepiece~=0.2" \
+        "protobuf~=5.28" \
+        "datasets~=3.0"
 
 WORKDIR /workspace/flodl-hf

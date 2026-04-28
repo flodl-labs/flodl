@@ -7,7 +7,7 @@ writes inputs + per-token reference logits to
 
 Fixture model: `dslim/bert-base-NER` (9-class CoNLL-2003 NER).
 
-Run via `fdl flodl-hf parity-bert-tokencls`.
+Run via `fdl flodl-hf parity bert-tokencls`.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "bert_tokencls_parity.safetensors"
 )
 
-PROMPT = "Fabrice lives in Paris"
+PROMPT = "fab2s lives in Latent"
 
 
 def main() -> None:

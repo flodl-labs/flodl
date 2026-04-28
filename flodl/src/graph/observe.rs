@@ -274,27 +274,45 @@ impl Graph {
     }
 
     /// Get per-iteration trace outputs from loop nodes.
-    /// Returns the trace buffer for the loop node associated with the given tag.
-    /// The tag should be set on a node after the loop (the loop output flows to it).
-    /// Returns None if no loop node with a trace buffer is found.
-    pub fn traces(&self, tag: &str) -> Option<Vec<Variable>> {
-        // Look for loop nodes by checking trace_buf
-        // If a tag is given, find the node it references and walk back to find the loop
-        if let Some(&(ni, _)) = self.tag_names.get(tag) {
-            // Check if this node has a trace_buf
-            if let Some(ref buf) = self.nodes[ni].trace_buf {
-                let traces = buf.borrow().clone();
-                if !traces.is_empty() {
-                    return Some(traces);
-                }
+    ///
+    /// `name` may identify either:
+    /// - a post-loop tag (legacy [`crate::nn::Module::trace`] path), or
+    /// - an emit name published by a [`crate::nn::LoopBody`] body via
+    ///   [`crate::nn::TraceEmit::publish`].
+    ///
+    /// On the first call, validates that emit names don't collide with
+    /// post-loop tags or with each other across loops, panicking with a clear
+    /// message on collision (cached after first successful validation).
+    ///
+    /// Returns `None` if no matching trace buffer is found.
+    pub fn traces(&self, name: &str) -> Option<Vec<Variable>> {
+        self.validate_trace_namespace();
+
+        // 1) Legacy path: post-loop tag with trace_buf
+        if let Some(&(ni, _)) = self.tag_names.get(name)
+            && let Some(ref buf) = self.nodes[ni].trace_buf
+        {
+            let traces = buf.borrow().clone();
+            if !traces.is_empty() {
+                return Some(traces);
             }
         }
-        // Search all nodes for a matching tag in the node id
+
+        // 2) Named-emit path: any loop's named_trace_buf carrying this name
+        for node in &self.nodes {
+            if let Some(ref store) = node.named_trace_buf
+                && let Some(traces) = store.borrow().get(name)
+                && !traces.is_empty()
+            {
+                return Some(traces.clone());
+            }
+        }
+
+        // 3) Legacy fallback: first loop with non-empty trace_buf
         for node in &self.nodes {
             if let Some(ref buf) = node.trace_buf {
                 let traces = buf.borrow().clone();
                 if !traces.is_empty() && node.id.contains("loop") {
-                    // If no tag match, return first loop with traces
                     return Some(traces);
                 }
             }
@@ -315,13 +333,90 @@ impl Graph {
         None
     }
 
+    /// Get a single named-emit trace stream from any loop node in this graph.
+    ///
+    /// Equivalent to [`Self::traces`] but restricted to emit-published names
+    /// from [`crate::nn::LoopBody::step`] (no legacy tag fallback).
+    pub fn traces_named(&self, name: &str) -> Option<Vec<Variable>> {
+        self.validate_trace_namespace();
+        for node in &self.nodes {
+            if let Some(ref store) = node.named_trace_buf
+                && let Some(traces) = store.borrow().get(name)
+                && !traces.is_empty()
+            {
+                return Some(traces.clone());
+            }
+        }
+        None
+    }
+
+    /// Validate the trace namespace exactly once per graph: panics if any
+    /// emit-published name collides with a legacy post-loop tag or with
+    /// another loop's emit name. Cheap on cached path (single Cell load).
+    pub(crate) fn validate_trace_namespace(&self) {
+        use std::collections::{HashMap as Hm, HashSet as Hs};
+        if self.traces_validated.get() {
+            return;
+        }
+
+        // Legacy: tags whose tagged node has a trace_buf
+        let mut legacy_names: Hs<String> = Hs::new();
+        for (name, &(ni, _)) in &self.tag_names {
+            if self.nodes[ni].trace_buf.is_some() {
+                legacy_names.insert(name.clone());
+            }
+        }
+
+        // Named emits: walk every loop node's named_trace_buf
+        let mut seen: Hm<String, String> = Hm::new(); // emit name -> first node id
+        for node in &self.nodes {
+            if let Some(ref store) = node.named_trace_buf {
+                let store_b = store.borrow();
+                for emit_name in store_b.keys() {
+                    if legacy_names.contains(emit_name) {
+                        panic!(
+                            "trace namespace collision: emit name {:?} from loop {:?} \
+                             conflicts with a legacy post-loop trace tag of the same name",
+                            emit_name, node.id
+                        );
+                    }
+                    if let Some(prev) = seen.get(emit_name)
+                        && prev != &node.id
+                    {
+                        panic!(
+                            "trace namespace collision: emit name {:?} published by \
+                             both loop {:?} and loop {:?}",
+                            emit_name, prev, node.id
+                        );
+                    }
+                    seen.insert(emit_name.clone(), node.id.clone());
+                }
+            }
+        }
+
+        self.traces_validated.set(true);
+    }
+
     /// Replace trace buffer contents for the given tag.
     ///
     /// Used by El Che gathering to set catted traces from all devices/batches.
-    pub(crate) fn set_traces(&self, tag: &str, traces: Vec<Variable>) {
-        if let Some(&(ni, _)) = self.tag_names.get(tag) {
-            if let Some(ref buf) = self.nodes[ni].trace_buf {
-                *buf.borrow_mut() = traces;
+    /// Routes to the legacy `trace_buf` when `name` matches a post-loop tag,
+    /// otherwise writes into the first loop's `named_trace_buf` whose store
+    /// already carries `name` (i.e. the loop that produced it on this rank).
+    pub(crate) fn set_traces(&self, name: &str, traces: Vec<Variable>) {
+        if let Some(&(ni, _)) = self.tag_names.get(name)
+            && let Some(ref buf) = self.nodes[ni].trace_buf
+        {
+            *buf.borrow_mut() = traces;
+            return;
+        }
+        for node in &self.nodes {
+            if let Some(ref store) = node.named_trace_buf {
+                let mut store_mut = store.borrow_mut();
+                if store_mut.contains_key(name) {
+                    store_mut.insert(name.to_string(), traces);
+                    return;
+                }
             }
         }
     }

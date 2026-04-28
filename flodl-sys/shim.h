@@ -75,6 +75,7 @@ char* flodl_tanh_op(FlodlTensor t, FlodlTensor* result);
 char* flodl_softmax(FlodlTensor t, int dim, FlodlTensor* result);
 char* flodl_log_softmax(FlodlTensor t, int dim, FlodlTensor* result);
 char* flodl_gelu(FlodlTensor t, FlodlTensor* result);
+char* flodl_gelu_tanh(FlodlTensor t, FlodlTensor* result);
 char* flodl_silu(FlodlTensor t, FlodlTensor* result);
 char* flodl_leaky_relu(FlodlTensor t, double negative_slope, FlodlTensor* result);
 char* flodl_elu(FlodlTensor t, double alpha, FlodlTensor* result);

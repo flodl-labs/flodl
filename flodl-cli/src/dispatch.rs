@@ -88,6 +88,16 @@ pub fn classify_path_step(
         };
     }
 
+    // Bare project invocation with no entry but available sub-commands:
+    // mirror the top-level `fdl` UX and print help instead of erroring on
+    // a missing entry point. Only kicks in when tail is empty — any extra
+    // tokens still flow through to the existing exec/error path.
+    if tail.is_empty() && child_cfg.entry.is_none() && !child_cfg.commands.is_empty() {
+        return PathOutcome::ShowHelp {
+            child: Box::new(child_cfg),
+        };
+    }
+
     PathOutcome::Exec {
         child: Box::new(child_cfg),
         child_dir,
@@ -100,9 +110,14 @@ pub fn classify_path_step(
 /// every impure action (spawning, printing, exit code); the walker just
 /// returns the terminal state.
 pub enum WalkOutcome {
-    /// Top-level or nested `Run` — caller runs the inline script.
+    /// Top-level or nested `Run` — caller runs the inline script,
+    /// composing `command` + `user_args` (POSIX-quoted) + `append`.
+    /// `user_args` carries everything the caller typed after `--` on
+    /// the CLI (or the empty slice when `--` was absent).
     RunScript {
         command: String,
+        append: Option<String>,
+        user_args: Vec<String>,
         docker: Option<String>,
         cwd: PathBuf,
     },
@@ -137,6 +152,7 @@ pub enum WalkOutcome {
         name: String,
         description: Option<String>,
         run: String,
+        append: Option<String>,
         docker: Option<String>,
     },
     /// The top-level or descended-into name doesn't exist in the current
@@ -174,6 +190,10 @@ pub fn walk_commands(
     let mut enclosing: Option<CommandConfig> = None;
     let mut current_dir: PathBuf = project_root.to_path_buf();
     let mut name: String = cmd_name.to_string();
+    // `qualified` tracks the space-separated path the user typed
+    // (`flodl-hf export`) so help renderers can show the correct
+    // invocation. `name` is always the leaf used for command-map lookup.
+    let mut qualified: String = cmd_name.to_string();
     let mut current_tail: Vec<String> = tail.to_vec();
 
     loop {
@@ -194,14 +214,37 @@ pub fn walk_commands(
                     .expect("Run kind guarantees `run` is set");
                 if current_tail.iter().any(|a| a == "--help" || a == "-h") {
                     return WalkOutcome::PrintRunHelp {
-                        name,
+                        name: qualified,
                         description: spec.description,
                         run: command,
+                        append: spec.append,
                         docker: spec.docker,
                     };
                 }
+                // Split tail on the first `--`: anything before is
+                // unexpected (no fdl-side flags exist for run-kind), and
+                // anything after is forwarded to the script. Loud
+                // rejection of stray args mirrors the loud-errors-over-
+                // silent rule.
+                let (before, after) = match current_tail.iter().position(|a| a == "--") {
+                    Some(idx) => {
+                        let after = current_tail[idx + 1..].to_vec();
+                        let before = current_tail[..idx].to_vec();
+                        (before, after)
+                    }
+                    None => (current_tail.clone(), Vec::new()),
+                };
+                if !before.is_empty() {
+                    return WalkOutcome::Error(format!(
+                        "command `{name}` does not accept extra args; \
+                         use `fdl {name} -- {}` to forward them to the script",
+                        before.join(" ")
+                    ));
+                }
                 return WalkOutcome::RunScript {
                     command,
+                    append: spec.append,
+                    user_args: after,
                     docker: spec.docker,
                     cwd: current_dir,
                 };
@@ -217,6 +260,8 @@ pub fn walk_commands(
                         commands = child.commands.clone();
                         enclosing = Some(*child);
                         current_dir = new_dir;
+                        qualified.push(' ');
+                        qualified.push_str(&new_name);
                         name = new_name;
                         // classify_path_step returned Descend because
                         // current_tail[0] named a nested command; consume
@@ -228,14 +273,14 @@ pub fn walk_commands(
                     PathOutcome::ShowHelp { child } => {
                         return WalkOutcome::PrintCommandHelp {
                             config: child,
-                            name,
+                            name: qualified,
                         };
                     }
                     PathOutcome::RefreshSchema { child, child_dir } => {
                         return WalkOutcome::RefreshSchema {
                             config: child,
                             cmd_dir: child_dir,
-                            cmd_name: name,
+                            cmd_name: qualified,
                         };
                     }
                     PathOutcome::Exec { child, child_dir } => {
@@ -410,6 +455,36 @@ mod tests {
     }
 
     #[test]
+    fn classify_bare_no_entry_with_subcommands_shows_help() {
+        // Bare `fdl <project>` on a project that defines `commands:` but
+        // no top-level `entry:` should print help, not error with
+        // "no entry point defined". Mirrors the top-level `fdl` UX.
+        let tmp = TempDir::new();
+        mkcmd(
+            tmp.path(),
+            "sub",
+            "commands:\n  foo:\n    run: echo foo\n",
+        );
+        let spec = path_spec();
+        let tail: Vec<String> = vec![];
+        let out = classify_path_step(&spec, "sub", tmp.path(), &tail, None);
+        assert!(matches!(out, PathOutcome::ShowHelp { .. }));
+    }
+
+    #[test]
+    fn classify_no_entry_no_subcommands_still_falls_through() {
+        // No entry, no sub-commands: keep the existing exec path so the
+        // downstream "no entry point defined" error fires for genuinely
+        // misconfigured projects.
+        let tmp = TempDir::new();
+        mkcmd(tmp.path(), "sub", "description: empty\n");
+        let spec = path_spec();
+        let tail: Vec<String> = vec![];
+        let out = classify_path_step(&spec, "sub", tmp.path(), &tail, None);
+        assert!(matches!(out, PathOutcome::Exec { .. }));
+    }
+
+    #[test]
     fn classify_load_failed_when_no_child_fdl_yml() {
         let tmp = TempDir::new();
         let spec = path_spec();
@@ -466,8 +541,16 @@ mod tests {
         let commands = top_commands("commands:\n  greet:\n    run: echo hello\n");
         let out = walk_commands("greet", &[], &commands, tmp.path(), None);
         match out {
-            WalkOutcome::RunScript { command, docker, cwd } => {
+            WalkOutcome::RunScript {
+                command,
+                append,
+                user_args,
+                docker,
+                cwd,
+            } => {
                 assert_eq!(command, "echo hello");
+                assert!(append.is_none());
+                assert!(user_args.is_empty());
                 assert!(docker.is_none());
                 assert_eq!(cwd, tmp.path());
             }
@@ -503,15 +586,70 @@ mod tests {
                 name,
                 description,
                 run,
+                append,
                 docker,
             } => {
                 assert_eq!(name, "test");
                 assert_eq!(description.as_deref(), Some("Run all CPU tests"));
                 assert_eq!(run, "cargo test");
+                assert!(append.is_none());
                 assert_eq!(docker.as_deref(), Some("dev"));
             }
             _ => panic!("expected PrintRunHelp"),
         }
+    }
+
+    #[test]
+    fn walk_run_forwards_args_after_double_dash() {
+        let tmp = TempDir::new();
+        let commands = top_commands(
+            "commands:\n  test:\n    run: cargo test live\n    append: -- --nocapture --ignored\n",
+        );
+        let tail = args(&["--", "-p", "flodl-hf"]);
+        let out = walk_commands("test", &tail, &commands, tmp.path(), None);
+        match out {
+            WalkOutcome::RunScript {
+                command,
+                append,
+                user_args,
+                ..
+            } => {
+                assert_eq!(command, "cargo test live");
+                assert_eq!(append.as_deref(), Some("-- --nocapture --ignored"));
+                assert_eq!(user_args, vec!["-p".to_string(), "flodl-hf".to_string()]);
+            }
+            _ => panic!("expected RunScript"),
+        }
+    }
+
+    #[test]
+    fn walk_run_rejects_stray_args_before_double_dash() {
+        let tmp = TempDir::new();
+        let commands = top_commands("commands:\n  test:\n    run: cargo test\n");
+        let tail = args(&["-p", "flodl-hf"]);
+        let out = walk_commands("test", &tail, &commands, tmp.path(), None);
+        match out {
+            WalkOutcome::Error(msg) => {
+                assert!(
+                    msg.contains("does not accept extra args")
+                        && msg.contains("fdl test -- -p flodl-hf"),
+                    "got: {msg}"
+                );
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn walk_run_rejects_stray_args_even_with_double_dash_after() {
+        let tmp = TempDir::new();
+        let commands = top_commands("commands:\n  test:\n    run: cargo test\n");
+        // Stray `-p flodl-hf` BEFORE `--` is rejected even though `--`
+        // appears later. The rule is structural: the tail must be empty
+        // up to `--`.
+        let tail = args(&["-p", "flodl-hf", "--", "extra"]);
+        let out = walk_commands("test", &tail, &commands, tmp.path(), None);
+        assert!(matches!(out, WalkOutcome::Error(_)));
     }
 
     #[test]

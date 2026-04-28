@@ -11,7 +11,7 @@ canonical English NER fine-tune in the RoBERTa family. Larger than
 so it's the right reference for head-level parity even though most
 users will prefer a smaller checkpoint at inference time.
 
-Run via `fdl flodl-hf parity-roberta-tokencls`.
+Run via `fdl flodl-hf parity roberta-tokencls`.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ FIXTURE_PATH = (
     / "tests" / "fixtures" / "roberta_tokencls_parity.safetensors"
 )
 
-PROMPT = "Fabrice writes Rust code in Paris"
+PROMPT = "fab2s writes Rust code in Latent"
 
 
 def sequence_ids_tensor(enc) -> torch.Tensor:

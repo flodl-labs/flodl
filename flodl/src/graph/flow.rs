@@ -677,6 +677,7 @@ impl FlowBuilder {
                 module: Some(rc),
                 ref_forward,
                 trace_buf: None,
+                named_trace_buf: None,
                 loop_ports: None,
             },
         );
@@ -785,6 +786,7 @@ impl FlowBuilder {
                 module: None,
                 ref_forward: None,
                 trace_buf: None,
+                named_trace_buf: None,
                 loop_ports: None,
             },
         );
@@ -813,6 +815,7 @@ impl FlowBuilder {
                 module: None,
                 ref_forward: None,
                 trace_buf: None,
+                named_trace_buf: None,
                 loop_ports: None,
             },
         );
@@ -835,6 +838,7 @@ impl FlowBuilder {
                 module: None,
                 ref_forward: None,
                 trace_buf: None,
+                named_trace_buf: None,
                 loop_ports: None,
             },
         );
@@ -875,6 +879,7 @@ impl FlowBuilder {
                 module: None,
                 ref_forward: None,
                 trace_buf: None,
+                named_trace_buf: None,
                 loop_ports: None,
             },
         );

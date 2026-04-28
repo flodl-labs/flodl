@@ -1,0 +1,17 @@
+description: Verify a flodl export by loading it through HF Python's AutoModelFor* and forwarding bit-exact vs the Hub source. Auto-detects family + head from <dir>/config.json (model_type + architectures[0]).
+
+# Argv passes through to the Python script (entry: commands forward argv;
+# run: commands do not — see feedback_cli_docs_three_contexts).
+#
+# Pipeline shape:
+#   fdl flodl-hf export       --hub <repo>  --out <dir>   # dev container
+#   fdl flodl-hf verify-export <dir>                       # hf-parity container
+#
+# Hub source recovery order (verify_export.py):
+#   1. --hub-source <repo> override (positional flag passthrough)
+#   2. config.json `flodl_source_repo` field (stamped by `export --hub`)
+#   3. config.json `_name_or_path` (rare; HF strips it on most repos)
+#   4. loud error pointing at --hub-source
+
+docker: hf-parity
+entry: python /workspace/flodl-hf/scripts/verify_export.py

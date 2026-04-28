@@ -41,7 +41,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use flodl::nn::{Dropout, GELU, LayerNorm, Linear, Module, NamedInputModule, Parameter};
+use flodl::nn::{Dropout, GELU, GeluApprox, LayerNorm, Linear, Module, NamedInputModule, Parameter};
 use flodl::{scaled_dot_product_attention, Device, Result, Variable};
 #[cfg(test)]
 use flodl::{DType, Tensor, TensorOptions};
@@ -93,6 +93,28 @@ impl LayerNaming {
         ffn_down:        "ffn.lin2",
         ffn_layer_norm:  "output_layer_norm",
     };
+
+    /// ALBERT encoder-layer key suffixes. Differs from [`Self::BERT`]
+    /// in two regular ways: the attention sub-module is flat (no
+    /// `attention.self` / `attention.output` split — HF inlines both
+    /// into `attention`), and the feed-forward uses `ffn` / `ffn_output`
+    /// instead of `intermediate.dense` / `output.dense`.
+    ///
+    /// Full state_dict keys for one ALBERT inner layer start with the
+    /// graph tag `albert.encoder.albert_layer_groups.{G}.albert_layers.{L}`
+    /// (almost always `G=0`, `L=0`: every public ALBERT checkpoint
+    /// uses `num_hidden_groups=1` and `inner_group_num=1`, sharing one
+    /// transformer block across all `num_hidden_layers` applications).
+    pub const ALBERT: Self = Self {
+        query:           "attention.query",
+        key:             "attention.key",
+        value:           "attention.value",
+        attn_output:     "attention.dense",
+        attn_layer_norm: "attention.LayerNorm",
+        ffn_up:          "ffn",
+        ffn_down:        "ffn_output",
+        ffn_layer_norm:  "full_layer_layer_norm",
+    };
 }
 
 /// Hyperparameters consumed by [`TransformerLayer::on_device`]. Bundles
@@ -119,6 +141,15 @@ pub struct TransformerLayerConfig {
     pub attention_probs_dropout_prob: f64,
     /// LayerNorm epsilon.
     pub layer_norm_eps: f64,
+    /// FFN activation form. Each family parses this from its config —
+    /// `hidden_act` for BERT/RoBERTa/ALBERT/XLM-R/DeBERTa-v2,
+    /// `activation` for DistilBERT — via the crate-internal
+    /// `optional_hidden_act` JSON helper.
+    /// Default [`GeluApprox::Exact`] (erf form) matches the canonical
+    /// `bert-base-uncased` / `roberta-base` / `distilbert-base-uncased`
+    /// checkpoints. ALBERT both v1 and v2 ship `"gelu_new"` and need
+    /// [`GeluApprox::Tanh`].
+    pub hidden_act: GeluApprox,
 }
 
 /// One transformer encoder layer — self-attention → residual → LN →
@@ -179,7 +210,7 @@ impl TransformerLayer {
             head_dim,
 
             ffn_up:           Linear::on_device(config.hidden_size, config.intermediate_size, device)?,
-            activation:       GELU::new(),
+            activation:       GELU::with_approximate(config.hidden_act),
             ffn_down:         Linear::on_device(config.intermediate_size, config.hidden_size, device)?,
             ffn_layer_norm:   LayerNorm::on_device_with_eps(
                 config.hidden_size, config.layer_norm_eps, device,
@@ -286,6 +317,7 @@ mod tests {
             hidden_dropout_prob: 0.0,
             attention_probs_dropout_prob: 0.0,
             layer_norm_eps: 1e-12,
+            hidden_act: GeluApprox::Exact,
         }
     }
 

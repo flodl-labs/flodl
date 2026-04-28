@@ -1,21 +1,21 @@
-//! Distributed Data Parallel (DDP) for transparent multi-GPU training.
+//! Training entry points for flodl.
 //!
-//! `Ddp` is the single entry point for all multi-GPU training modes:
+//! The primary entry point is [`Trainer`]. It works transparently on 1 or
+//! N GPUs - single-device training has zero DDP overhead. Reach for
+//! [`Trainer`] by default; drop to [`Ddp`] only when you need explicit
+//! multi-GPU control.
 //!
-//! **Setup mode** ([`Ddp::setup()`]): Distributes a Graph across GPUs. You write
-//! the training loop. Works transparently with 1 or N GPUs.
+//! **Default** ([`Trainer::setup()`], [`Trainer::builder()`]): user-owned or
+//! framework-owned training loop, transparent single/multi-GPU. Same API in
+//! both cases.
 //!
-//! **Builder mode** ([`Ddp::builder()`]): Framework-managed training. Provide
-//! factories and a train function, the framework handles threads, data pipeline,
-//! epochs, and parameter averaging. Returns a [`DdpHandle`] to join.
-//!
-//! **Manual mode** ([`Ddp::wrap()`]): Low-level explicit control over gradient
-//! sync and parameter broadcast for complex patterns (GAN, RL, progressive).
+//! **Explicit multi-GPU** ([`Ddp::wrap()`]): manual control over gradient
+//! sync and parameter broadcast for advanced patterns (GAN, RL, progressive).
 //!
 //! # Setup mode (user owns the loop)
 //!
 //! ```ignore
-//! Ddp::setup(&model, |dev| build_model(dev), |p| Adam::new(p, 0.001))?;
+//! Trainer::setup(&model, |dev| build_model(dev), |p| Adam::new(p, 0.001))?;
 //!
 //! // Training loop is identical for 1 or N GPUs:
 //! for (x, y) in &train_loader {
@@ -29,7 +29,7 @@
 //! # Builder mode (framework owns the loop)
 //!
 //! ```ignore
-//! let handle = Ddp::builder(model_factory, optim_factory, train_fn)
+//! let handle = Trainer::builder(model_factory, optim_factory, train_fn)
 //!     .dataset(dataset)
 //!     .batch_size(32)
 //!     .num_epochs(10)
@@ -38,7 +38,7 @@
 //! let state = handle.join()?;
 //! ```
 //!
-//! # Manual mode
+//! # Manual DDP
 //!
 //! ```ignore
 //! let ddp = Ddp::wrap(&[&model0, &model1], &devices)?;
@@ -541,28 +541,14 @@ impl Ddp {
         &self.devices
     }
 
-    // --- One-liner DDP setup (operates on Graph) ---
+    // --- Deprecated aliases: use Trainer:: as the primary entry point ---
 
-    /// One-call setup: auto-detect GPUs, distribute the model, set the
-    /// optimizer, and enable training mode.
+    /// Deprecated: use [`Trainer::setup()`] instead.
     ///
-    /// - **Multi-GPU** (2+ usable CUDA devices): replicates via
-    ///   [`Graph::distribute`], creates per-replica optimizers, enables training.
-    /// - **Single-GPU / CPU**: sets optimizer and training mode only (no DDP
-    ///   overhead).
-    ///
-    /// Always prints a diagnostic summary to stderr showing detected hardware.
-    ///
-    /// ```ignore
-    /// Ddp::setup(&model, |dev| build_model(dev), |p| Adam::new(p, 0.001))?;
-    ///
-    /// // Training loop is identical for 1 or N GPUs:
-    /// for batch in model.epoch(epoch).activate() {
-    ///     let out = model.forward_batch(&batch?)?;
-    ///     loss.backward()?;
-    ///     model.step()?;
-    /// }
-    /// ```
+    /// [`Trainer`] is now the primary training entry point and carries the
+    /// same behavior for 1 or N GPUs. [`Ddp`] remains for explicit
+    /// multi-GPU control via [`Ddp::wrap`].
+    #[deprecated(note = "use Trainer::setup() - same behavior. Ddp::setup will be removed in a future release.")]
     pub fn setup<F, M, G, O>(
         model: &Graph,
         builder: F,
@@ -574,28 +560,11 @@ impl Ddp {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
-        Self::print_device_summary();
-        model.distribute(builder)?;
-        model.set_optimizer(optimizer);
-        model.set_training(true);
-
-        // Auto-enable El Che for heterogeneous GPU setups
-        if Self::is_heterogeneous() {
-            model.configure_el_che(&DdpConfig::new());
-        }
-
-        Ok(())
+        Trainer::setup(model, builder, optimizer)
     }
 
-    /// One-call setup with explicit configuration.
-    ///
-    /// Like [`setup()`](Self::setup) but accepts a [`DdpConfig`] for
-    /// controlling El Che cadence, speed hints, and overhead targets.
-    ///
-    /// ```ignore
-    /// Ddp::setup_with(&model, builder, optimizer,
-    ///     DdpConfig::new().speed_hint(1, 2.3))?;
-    /// ```
+    /// Deprecated: use [`Trainer::setup_with()`] instead.
+    #[deprecated(note = "use Trainer::setup_with() - same behavior. Ddp::setup_with will be removed in a future release.")]
     pub fn setup_with<F, M, G, O>(
         model: &Graph,
         builder: F,
@@ -608,22 +577,11 @@ impl Ddp {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
-        Self::print_device_summary();
-        model.distribute(builder)?;
-        model.set_optimizer(optimizer);
-        model.set_training(true);
-        model.configure_el_che(&config);
-        // Pass timeline to distributed state for event injection in step().
-        if let Some(tl) = config.timeline {
-            if let Some(ref mut state) = *model.distributed.borrow_mut() {
-                state.timeline = Some(tl);
-            }
-        }
-        Ok(())
+        Trainer::setup_with(model, builder, optimizer, config)
     }
 
-    /// Deprecated: renamed to [`setup()`](Self::setup).
-    #[deprecated(since = "0.3.0", note = "Renamed to Ddp::setup()")]
+    /// Deprecated: renamed to [`Trainer::setup()`].
+    #[deprecated(since = "0.3.0", note = "Renamed to Trainer::setup()")]
     pub fn auto<F, M, G, O>(
         model: &Graph,
         builder: F,
@@ -635,11 +593,11 @@ impl Ddp {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
-        Self::setup(model, builder, optimizer)
+        Trainer::setup(model, builder, optimizer)
     }
 
-    /// Deprecated: renamed to [`setup_with()`](Self::setup_with).
-    #[deprecated(since = "0.3.0", note = "Renamed to Ddp::setup_with()")]
+    /// Deprecated: renamed to [`Trainer::setup_with()`].
+    #[deprecated(since = "0.3.0", note = "Renamed to Trainer::setup_with()")]
     pub fn auto_with<F, M, G, O>(
         model: &Graph,
         builder: F,
@@ -652,46 +610,19 @@ impl Ddp {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
-        Self::setup_with(model, builder, optimizer, config)
+        Trainer::setup_with(model, builder, optimizer, config)
     }
 
     // -------------------------------------------------------------------
-    // Builder mode: framework-managed training
+    // Deprecated builder entry: use Trainer::builder instead
     // -------------------------------------------------------------------
 
-    /// Create a builder for framework-managed multi-GPU training.
+    /// Deprecated: use [`Trainer::builder()`] instead.
     ///
-    /// The framework owns the training loop, data pipeline, and epoch management.
-    /// Each GPU gets its own model replica and optimizer. A coordinator triggers
-    /// periodic parameter averaging based on the configured `ApplyPolicy` and
-    /// `AverageBackend`.
-    ///
-    /// Returns a [`DdpBuilder`] for fluent configuration. Call `.run()` to
-    /// spawn training threads, then `.join()` on the returned [`DdpHandle`]
-    /// to block until completion.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use flodl::*;
-    ///
-    /// let handle = Ddp::builder(
-    ///     |dev| model_factory(dev),
-    ///     |params| Adam::new(params, 0.001),
-    ///     |model, batch| { /* forward + loss */ },
-    /// )
-    /// .dataset(dataset)
-    /// .batch_size(32)
-    /// .num_epochs(10)
-    /// .policy(ApplyPolicy::Cadence)
-    /// .backend(AverageBackend::Nccl)
-    /// .run()?;
-    ///
-    /// let state = handle.join()?;
-    /// ```
-    ///
-    /// With fewer than 2 CUDA devices, training runs on the main thread
-    /// with no coordination. The API is identical in both cases.
+    /// [`Trainer`] is the primary training entry point and works
+    /// transparently for single-GPU and multi-GPU. This alias is retained
+    /// for backwards compatibility and will be removed in a future release.
+    #[deprecated(note = "use Trainer::builder() - same behavior. Ddp::builder will be removed in a future release.")]
     pub fn builder<F, M, G, O, T>(
         model_factory: F,
         optim_factory: G,
@@ -704,7 +635,7 @@ impl Ddp {
         O: Optimizer + 'static,
         T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
     {
-        DdpHandle::new_builder(model_factory, optim_factory, train_fn)
+        Trainer::builder(model_factory, optim_factory, train_fn)
     }
 
     /// Detect whether the current CUDA setup has different GPU models.
@@ -768,16 +699,330 @@ impl Ddp {
 }
 
 // ---------------------------------------------------------------------------
+// Trainer: primary training entry point
+// ---------------------------------------------------------------------------
+
+/// Primary entry point for training in flodl.
+///
+/// `Trainer` is the default API for training a model, whether you have one
+/// GPU, many GPUs, or no GPU at all. The training loop is identical in all
+/// cases: [`Trainer::setup`] (or [`Trainer::builder`]) configures the model,
+/// detects the hardware, and enables distributed training automatically when
+/// multiple CUDA devices are available. On a single GPU or CPU it's a no-op
+/// wrapper with zero DDP overhead.
+///
+/// For explicit multi-GPU control (manual gradient sync, custom replica
+/// wrapping) use [`Ddp`] directly. [`Ddp::wrap`] remains the entry point for
+/// advanced patterns (GAN, RL, progressive).
+///
+/// # Setup mode (user owns the loop)
+///
+/// ```ignore
+/// Trainer::setup(&model, |dev| build_model(dev), |p| Adam::new(p, 0.001))?;
+///
+/// for (x, y) in &train_loader {
+///     let out = model.forward(&x)?;
+///     let loss = cross_entropy_loss(&out, &y)?;
+///     loss.backward()?;
+///     model.step()?;
+/// }
+/// ```
+///
+/// # Builder mode (framework owns the loop)
+///
+/// ```ignore
+/// let handle = Trainer::builder(model_factory, optim_factory, train_fn)
+///     .dataset(dataset)
+///     .batch_size(32)
+///     .num_epochs(10)
+///     .run()?;
+///
+/// let state = handle.join()?;
+/// ```
+pub struct Trainer;
+
+impl Trainer {
+    /// One-call setup: auto-detect GPUs, distribute the model, set the
+    /// optimizer, and enable training mode.
+    ///
+    /// - **Multi-GPU** (2+ usable CUDA devices): replicates via
+    ///   [`Graph::distribute`], creates per-replica optimizers, enables training.
+    /// - **Single-GPU / CPU**: sets optimizer and training mode only (no DDP
+    ///   overhead).
+    ///
+    /// Always prints a diagnostic summary to stderr showing detected hardware.
+    ///
+    /// ```ignore
+    /// Trainer::setup(&model, |dev| build_model(dev), |p| Adam::new(p, 0.001))?;
+    ///
+    /// for batch in model.epoch(epoch).activate() {
+    ///     let out = model.forward_batch(&batch?)?;
+    ///     loss.backward()?;
+    ///     model.step()?;
+    /// }
+    /// ```
+    pub fn setup<F, M, G, O>(
+        model: &Graph,
+        builder: F,
+        optimizer: G,
+    ) -> Result<()>
+    where
+        F: Fn(Device) -> Result<M>,
+        M: Module + 'static,
+        G: Fn(&[Parameter]) -> O,
+        O: Optimizer + 'static,
+    {
+        Ddp::print_device_summary();
+        model.distribute(builder)?;
+        model.set_optimizer(optimizer);
+        model.set_training(true);
+
+        // Auto-enable El Che for heterogeneous GPU setups
+        if Ddp::is_heterogeneous() {
+            model.configure_el_che(&DdpConfig::new());
+        }
+
+        Ok(())
+    }
+
+    /// One-call setup with explicit configuration.
+    ///
+    /// Like [`setup()`](Self::setup) but accepts a [`DdpConfig`] for
+    /// controlling El Che cadence, speed hints, and overhead targets.
+    ///
+    /// ```ignore
+    /// Trainer::setup_with(&model, builder, optimizer,
+    ///     DdpConfig::new().speed_hint(1, 2.3))?;
+    /// ```
+    pub fn setup_with<F, M, G, O>(
+        model: &Graph,
+        builder: F,
+        optimizer: G,
+        config: DdpConfig,
+    ) -> Result<()>
+    where
+        F: Fn(Device) -> Result<M>,
+        M: Module + 'static,
+        G: Fn(&[Parameter]) -> O,
+        O: Optimizer + 'static,
+    {
+        Ddp::print_device_summary();
+        model.distribute(builder)?;
+        model.set_optimizer(optimizer);
+        model.set_training(true);
+        model.configure_el_che(&config);
+        // Pass timeline to distributed state for event injection in step().
+        if let Some(tl) = config.timeline {
+            if let Some(ref mut state) = *model.distributed.borrow_mut() {
+                state.timeline = Some(tl);
+            }
+        }
+        Ok(())
+    }
+
+    /// Create a builder for framework-managed training.
+    ///
+    /// The framework owns the training loop, data pipeline, and epoch
+    /// management. On multi-GPU hardware, each device gets its own model
+    /// replica and optimizer, and a coordinator triggers periodic
+    /// parameter averaging based on the configured [`ApplyPolicy`] and
+    /// [`AverageBackend`]. On a single GPU, training runs on the main
+    /// thread with no coordination - the API is identical in both cases.
+    ///
+    /// Returns a [`DdpBuilder`] for fluent configuration. Call `.run()` to
+    /// spawn training, then `.join()` on the returned [`DdpHandle`] to
+    /// block until completion.
+    ///
+    /// [`ApplyPolicy`]: crate::distributed::ApplyPolicy
+    /// [`AverageBackend`]: crate::distributed::AverageBackend
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use flodl::*;
+    ///
+    /// let handle = Trainer::builder(
+    ///     |dev| model_factory(dev),
+    ///     |params| Adam::new(params, 0.001),
+    ///     |model, batch| { /* forward + loss */ },
+    /// )
+    /// .dataset(dataset)
+    /// .batch_size(32)
+    /// .num_epochs(10)
+    /// .policy(ApplyPolicy::Cadence)
+    /// .backend(AverageBackend::Nccl)
+    /// .run()?;
+    ///
+    /// let state = handle.join()?;
+    /// ```
+    pub fn builder<F, M, G, O, T>(
+        model_factory: F,
+        optim_factory: G,
+        train_fn: T,
+    ) -> DdpBuilder<F, M, G, O, T>
+    where
+        F: Fn(Device) -> Result<M> + Send + Sync + 'static,
+        M: Module + 'static,
+        G: Fn(&[Parameter]) -> O + Send + Sync + 'static,
+        O: Optimizer + 'static,
+        T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
+    {
+        DdpHandle::new_builder(model_factory, optim_factory, train_fn)
+    }
+
+    /// One-call setup for a task-head wrapper (e.g. `flodl-hf`'s
+    /// `BertForSequenceClassification`). The wrapper must implement
+    /// [`HasGraph`] so `Trainer` can reach the underlying [`Graph`].
+    ///
+    /// Semantics match [`Trainer::setup`] exactly; the only difference is
+    /// that `head_factory` builds a fresh wrapper (not a bare `Graph`) on
+    /// each replica device. Useful when the training-loop code holds onto
+    /// the wrapper's richer surface (`compute_loss`, `predict`, attached
+    /// tokenizer) but still wants transparent 1-or-N-GPU DDP.
+    ///
+    /// ```ignore
+    /// let head = DistilBertForSequenceClassification::from_pretrained(repo)?;
+    /// let config = head.config().clone();
+    /// let num_labels = head.labels().len() as i64;
+    ///
+    /// Trainer::setup_head(
+    ///     &head,
+    ///     move |dev| DistilBertForSequenceClassification::on_device(&config, num_labels, dev),
+    ///     |p| Adam::new(p, 5e-5),
+    /// )?;
+    ///
+    /// for (enc, labels) in &batches {
+    ///     let loss = head.compute_loss(&enc, &labels)?;
+    ///     loss.backward()?;
+    ///     head.graph().step()?;
+    /// }
+    /// ```
+    pub fn setup_head<H, F, G, O>(
+        head: &H,
+        head_factory: F,
+        optimizer: G,
+    ) -> Result<()>
+    where
+        H: HasGraph,
+        F: Fn(Device) -> Result<H> + 'static,
+        H: 'static,
+        G: Fn(&[Parameter]) -> O,
+        O: Optimizer + 'static,
+    {
+        Ddp::print_device_summary();
+        let graph = head.graph();
+        graph.distribute(move |dev| head_factory(dev).map(|h| HeadReplica { head: h }))?;
+        graph.set_optimizer(optimizer);
+        graph.set_training(true);
+
+        if Ddp::is_heterogeneous() {
+            graph.configure_el_che(&DdpConfig::new());
+        }
+
+        Ok(())
+    }
+
+    /// Task-head variant of [`Trainer::setup_with`]. Same behaviour as
+    /// [`Trainer::setup_head`] but takes an explicit [`DdpConfig`].
+    pub fn setup_head_with<H, F, G, O>(
+        head: &H,
+        head_factory: F,
+        optimizer: G,
+        config: DdpConfig,
+    ) -> Result<()>
+    where
+        H: HasGraph,
+        F: Fn(Device) -> Result<H> + 'static,
+        H: 'static,
+        G: Fn(&[Parameter]) -> O,
+        O: Optimizer + 'static,
+    {
+        Ddp::print_device_summary();
+        let graph = head.graph();
+        graph.distribute(move |dev| head_factory(dev).map(|h| HeadReplica { head: h }))?;
+        graph.set_optimizer(optimizer);
+        graph.set_training(true);
+        graph.configure_el_che(&config);
+        if let Some(tl) = config.timeline {
+            if let Some(ref mut state) = *graph.distributed.borrow_mut() {
+                state.timeline = Some(tl);
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HasGraph trait: lets wrapper types plug into Trainer::setup_head
+// ---------------------------------------------------------------------------
+
+/// A wrapper type that exposes an inner [`Graph`].
+///
+/// Implement on any wrapper around a `Graph` that should participate in
+/// [`Trainer::setup_head`] or other graph-aware DDP machinery. The
+/// reference returned must outlive `&self` and point at the same graph
+/// used for the wrapper's forward / loss calls.
+///
+/// [`Graph`] implements this trivially (returns `self`) so bare-graph
+/// callers can pass a `&Graph` wherever `&impl HasGraph` is accepted.
+///
+/// ```ignore
+/// impl HasGraph for BertForSequenceClassification {
+///     fn graph(&self) -> &Graph { &self.graph }
+/// }
+/// ```
+pub trait HasGraph {
+    /// Borrow the inner training graph.
+    fn graph(&self) -> &Graph;
+}
+
+impl HasGraph for Graph {
+    fn graph(&self) -> &Graph { self }
+}
+
+/// Internal Module adapter used by [`Trainer::setup_head`] to feed a
+/// `HasGraph` replica through [`Graph::distribute`].
+///
+/// `distribute` boxes each replica as `Box<dyn Module>`. Task-head
+/// wrappers don't implement `Module` directly (their true forward is
+/// multi-input via [`Graph::forward_multi`], which doesn't fit the
+/// single-Variable `Module::forward` signature). `HeadReplica` delegates
+/// every Module method through to the inner graph and overrides
+/// [`Module::as_graph`] so DDP's multi-input replica paths downcast
+/// cleanly rather than hitting the single-input fallback.
+struct HeadReplica<H: HasGraph + 'static> {
+    head: H,
+}
+
+impl<H: HasGraph + 'static> Module for HeadReplica<H> {
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        // Single-input fallback. Task-head DDP paths reach
+        // forward_multi via `as_graph()` below, so this is only
+        // exercised on single-input replica paths (e.g. the scatter
+        // forward in `forward_distributed_scatter`). For multi-input
+        // heads that path is never triggered because the user calls
+        // the head's own `compute_loss` / `forward_encoded`, which
+        // route through `Graph::forward_multi` directly.
+        self.head.graph().forward(input)
+    }
+    fn parameters(&self) -> Vec<Parameter> { self.head.graph().parameters() }
+    fn buffers(&self) -> Vec<Buffer> { self.head.graph().buffers() }
+    fn name(&self) -> &str { "head_replica" }
+    fn set_training(&self, training: bool) { self.head.graph().set_training(training); }
+    fn as_graph(&self) -> Option<&Graph> { Some(self.head.graph()) }
+}
+
+// ---------------------------------------------------------------------------
 // DDP configuration
 // ---------------------------------------------------------------------------
 
-/// Configuration for [`Ddp::setup_with()`].
+/// Configuration for [`Trainer::setup_with()`].
 ///
 /// Controls El Che cadence behavior for heterogeneous multi-GPU training.
 /// Use [`DdpConfig::new()`] for defaults or build with method chaining.
 ///
 /// ```ignore
-/// Ddp::setup_with(&model, builder, optimizer,
+/// Trainer::setup_with(&model, builder, optimizer,
 ///     DdpConfig::new()
 ///         .speed_hint(1, 2.3)     // rank 1 is slow, 2.3x ratio
 ///         .overhead_target(0.08)  // tune to 8% overhead
