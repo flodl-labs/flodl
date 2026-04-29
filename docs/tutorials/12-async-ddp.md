@@ -273,17 +273,18 @@ convergence bug from v0.3.0 has been fixed. See the
 | Async | Nccl | **Best overall (recommended)** | Best | Best with clipping |
 | Cadence | Nccl | Strong second, predictable sync | Good | Good |
 | Sync | Nccl | Strict sync baseline | Baseline | Good |
-| Async | Cpu | **Known bug** -- do not use | -- | Broken |
-| Cadence | Cpu | **Known bug** -- do not use | -- | Broken |
-| Sync | Cpu | **Known bug** -- do not use | -- | Broken |
+| Async | Cpu | Non-blocking GPUs, fault-tolerant | Good | Good |
+| Cadence | Cpu | Non-blocking for heterogeneous clusters | Good | Good |
+| Sync | Cpu | Strict sync without GPU barrier | Baseline | Good |
 
 Start with **Async + Nccl** (El Che). It's the best overall config in
 practice: fast GPUs overshoot between averaging, creating parameter
 diversity that benefits convergence. A/B test against **Cadence + Nccl**
 (strong second, more predictable sync) or **Sync + Nccl** (strict
-baseline). The **CPU backend** has a known convergence bug and should not
-be used for training. See the [DDP reference](/guide/ddp-reference) for details.
-The fix is under active investigation.
+baseline). Swap in **`AverageBackend::Cpu`** when you want non-blocking
+GPUs (snapshot / CPU-average / distribute round-trip) or when NCCL is
+unavailable. See the [DDP reference](/guide/ddp-reference) for the
+backend trade-off in detail.
 
 ## Safety guards
 
