@@ -101,6 +101,10 @@ pub struct Coordinator {
     epoch_buffer: HashMap<usize, Vec<MetricsMsg>>,
     /// CUDA device index per rank (for EpochMetrics GPU data).
     device_indices: Vec<u8>,
+    /// Optional host-side per-epoch callback. Called on this thread once per
+    /// epoch with the aggregated metrics, before pushing to `epoch_metrics_tx`.
+    /// Errors are logged; training continues.
+    metrics_fn: Option<super::MetricsFn>,
 
     // Global epoch management
     /// Total number of epochs to train.
@@ -197,6 +201,7 @@ pub struct CoordinatorBuilder {
     max_overshoot: Option<usize>,
     /// Absolute ceiling on max_overshoot (safety valve). Default: 15.
     overshoot_ceiling: usize,
+    metrics_fn: Option<super::MetricsFn>,
 }
 
 impl CoordinatorBuilder {
@@ -265,6 +270,15 @@ impl CoordinatorBuilder {
     /// Set the channel for forwarding aggregated epoch metrics to the main thread.
     pub fn epoch_metrics_tx(mut self, tx: mpsc::Sender<super::EpochMetrics>) -> Self {
         self.epoch_metrics_tx = Some(tx);
+        self
+    }
+
+    /// Set the host-side per-epoch metrics callback.
+    ///
+    /// Called on the coordinator thread once per epoch, before pushing to the
+    /// `epoch_metrics_tx` queue. Errors are logged to stderr; training continues.
+    pub fn metrics_fn(mut self, f: super::MetricsFn) -> Self {
+        self.metrics_fn = Some(f);
         self
     }
 
@@ -364,6 +378,7 @@ impl CoordinatorBuilder {
             last_step_count: vec![0; self.world_size],
             nccl_sync_step: vec![0; self.world_size],
             nccl_ack: vec![true; self.world_size],
+            metrics_fn: self.metrics_fn,
         }
     }
 }
@@ -407,6 +422,7 @@ impl Coordinator {
             timeline: None,
             max_overshoot: None,
             overshoot_ceiling: 15,
+            metrics_fn: None,
         }
     }
 
@@ -951,8 +967,13 @@ impl Coordinator {
         complete.sort_unstable();
         for epoch in complete {
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
+                let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                if let Some(f) = &self.metrics_fn {
+                    if let Err(e) = f(&metrics) {
+                        eprintln!("  ddp: metrics_fn returned error (epoch {epoch}): {e}");
+                    }
+                }
                 if let Some(tx) = &self.epoch_metrics_tx {
-                    let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
                     let _ = tx.send(metrics);
                 }
                 self.on_epoch_aggregated(epoch);
@@ -982,9 +1003,14 @@ impl Coordinator {
             self.chunk_pools.remove(&epoch);
 
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
+                let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                metrics.epoch_ms = epoch_ms;
+                if let Some(f) = &self.metrics_fn {
+                    if let Err(e) = f(&metrics) {
+                        eprintln!("  ddp: metrics_fn returned error (epoch {epoch}): {e}");
+                    }
+                }
                 if let Some(tx) = &self.epoch_metrics_tx {
-                    let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
-                    metrics.epoch_ms = epoch_ms;
                     let _ = tx.send(metrics);
                 }
                 crate::verbose!(

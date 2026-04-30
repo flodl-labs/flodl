@@ -141,6 +141,30 @@ pub type CheckpointFn<M> = Arc<dyn Fn(u64, &M) -> Result<()> + Send + Sync>;
 /// is typically negligible.
 pub type EpochFn<M> = Arc<dyn Fn(usize, &mut GpuWorker<M>) + Send + Sync>;
 
+/// Host-side per-epoch metrics callback type: `(metrics) -> Result<()>`.
+///
+/// Called once per epoch with the aggregated [`EpochMetrics`]: on the
+/// coordinator thread for multi-GPU, on the main thread for the single-GPU
+/// fallback. Use this to log progress, update a monitor dashboard, or
+/// capture per-rank fields without dropping out of the chained
+/// `Trainer::builder(...).run()?.join()?` shape into an explicit polling loop.
+///
+/// The metric is also pushed to the [`DdpHandle::next_metrics`] queue, so
+/// callers can register `metrics_fn` *and* keep polling — both surfaces
+/// receive the same `EpochMetrics`.
+///
+/// Errors returned from the callback are logged to stderr; training continues.
+/// Surfacing the error to [`DdpHandle::join`] (early-stop semantics) is a
+/// future enhancement.
+///
+/// **Single-GPU semantic:** `run_single` is synchronous — it runs all epochs
+/// to completion before returning the [`DdpHandle`]. The callback fires
+/// per-epoch as training progresses, identically to multi-GPU; explicit
+/// pollers via [`DdpHandle::next_metrics`] receive all queued metrics
+/// back-to-back after `run()` returns. A single GPU has nothing to be
+/// async with, so this is the natural shape, not a limitation.
+pub type MetricsFn = Arc<dyn Fn(&EpochMetrics) -> Result<()> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // Deprecated aliases (backward compatibility)
 // ---------------------------------------------------------------------------
@@ -183,11 +207,13 @@ pub struct TrainedState {
 
 /// Aggregated epoch metrics from all DDP workers.
 ///
-/// Available via [`DdpHandle::poll_metrics()`] and [`DdpHandle::next_metrics()`].
+/// Available via [`DdpHandle::poll_metrics()`], [`DdpHandle::next_metrics()`],
+/// and the host-side [`crate::distributed::DdpBuilder::metrics_fn`] callback.
 /// The coordinator aggregates per-rank [`MetricsMsg`] into this structure once
-/// all ranks have reported for the same epoch.
+/// all ranks have reported for the same epoch; the same `EpochMetrics` reaches
+/// the callback (if registered) and the polling queue, so both surfaces compose.
 ///
-/// # Example
+/// # Example: explicit polling
 ///
 /// ```ignore
 /// let handle = Trainer::builder(...).run()?;
@@ -197,6 +223,19 @@ pub struct TrainedState {
 ///     }
 /// }
 /// let state = handle.join()?;
+/// ```
+///
+/// # Example: chained `.run()?.join()?` with `metrics_fn`
+///
+/// ```ignore
+/// Trainer::builder(model_factory, optim_factory, train_step)
+///     .dataset(dataset).batch_size(32).num_epochs(N)
+///     .metrics_fn(move |m| {
+///         println!("epoch {}: loss={:.4}", m.epoch, m.avg_loss);
+///         Ok(())
+///     })
+///     .run()?
+///     .join()?;
 /// ```
 #[derive(Clone, Debug)]
 pub struct EpochMetrics {

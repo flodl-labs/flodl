@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+#### `Trainer::builder().metrics_fn(...)`: host-side per-epoch callback
+
+The chained `Trainer::builder(...).run()?.join()?` shape was sold as the canonical "just train" form, but anything beyond final-weights-only (per-epoch logging, monitor updates, per-rank metric capture) forced users into a manual `let handle = run()?; while let Some(m) = handle.next_metrics() {...}; handle.join()?` polling loop. `metrics_fn` closes that gap.
+
+- **`flodl::MetricsFn`** type alias: `Arc<dyn Fn(&EpochMetrics) -> Result<()> + Send + Sync>`. Mirrors the shape of `CheckpointFn` for consistency.
+- **`DdpBuilder::metrics_fn(f)`** registers a host-side callback fired once per epoch with the aggregated `EpochMetrics`, after all ranks have reported. Errors are logged to stderr; training continues.
+- **Composes with `next_metrics()`**: the same `EpochMetrics` reaches the callback (if registered) *and* the polling queue, so users can register `metrics_fn` and keep polling. No deprecation, no fork in docs.
+- **Transparent 1-or-N GPU**: fires identically on the multi-GPU path (coordinator thread, per-epoch as ranks aggregate) and the single-GPU fallback path (main thread, per-epoch as training progresses). `run_single` previously dropped its `MetricsMsg` traffic; it now drains it, builds a single-rank `EpochMetrics`, fires `metrics_fn`, and pushes to the same queue `next_metrics()` reads. Single-GPU `next_metrics()` previously returned `None` immediately — that pre-existing transparency gap is closed.
+- **Single-GPU is synchronous by design**: `run_single` runs to completion before returning the `DdpHandle`, so explicit pollers see all queued metrics back-to-back rather than blocking per-epoch. A single GPU has nothing to be async with; that's the natural shape, not a limitation.
+- **Future enhancement**: surfacing callback errors to `DdpHandle::join()` for early-stop semantics is not in this release; the contract is observation-only.
+
+Motivation: the bench harness, dashboards, and any non-trivial training loop want host-side per-epoch hooks. The chained "managed pattern" should look like the one-liner from the docs *and* be observable; without `metrics_fn` those two were mutually exclusive.
+
 ## [0.5.3] - 2026-04-28
 
 ### Added

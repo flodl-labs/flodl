@@ -144,7 +144,7 @@ impl DdpHandle {
         Self::launch(
             model_factory, optim_factory, train_fn,
             dataset, batch_size, num_epochs,
-            policy, backend, config, None, None, None,
+            policy, backend, config, None, None, None, None,
         )
     }
 
@@ -162,6 +162,7 @@ impl DdpHandle {
         config: DdpRunConfig,
         checkpoint_fn: Option<CheckpointFn<M>>,
         epoch_fn: Option<EpochFn<M>>,
+        metrics_fn: Option<super::MetricsFn>,
         scheduler_fn: Option<Box<dyn Fn(usize) -> Arc<dyn crate::nn::Scheduler> + Send + Sync>>,
     ) -> Result<Self>
     where
@@ -175,7 +176,7 @@ impl DdpHandle {
 
         let devices = crate::tensor::usable_cuda_devices();
 
-        // Single-GPU fallback: run on main thread, no coordinator
+        // Single-GPU fallback: run on main thread, no coordinator.
         if devices.len() < 2 {
             let dev = devices.first().copied().unwrap_or(Device::CPU);
             let scheduler = scheduler_fn.map(|f| f(1));
@@ -185,6 +186,7 @@ impl DdpHandle {
                 checkpoint_fn.as_ref().cloned(),
                 config.checkpoint_every,
                 epoch_fn,
+                metrics_fn,
                 config.max_grad_norm,
                 scheduler,
             );
@@ -323,6 +325,9 @@ impl DdpHandle {
                 .batch_size(coord_batch_size)
                 .timeline(coord_timeline.clone())
                 .max_overshoot(config.max_overshoot);
+                if let Some(mf) = metrics_fn {
+                    builder = builder.metrics_fn(mf);
+                }
                 if let Some(dt) = div_threshold {
                     builder = builder.divergence_threshold(dt);
                 }
@@ -596,7 +601,10 @@ impl DdpHandle {
     /// Single-GPU fallback: run training on the main thread.
     ///
     /// No coordinator, no worker threads, no parameter averaging.
-    /// Same training loop as multi-GPU workers.
+    /// Same training loop as multi-GPU workers. Synchronous: returns the
+    /// `DdpHandle` only after all epochs complete, with the per-epoch
+    /// `EpochMetrics` already queued for [`DdpHandle::next_metrics`] and
+    /// the optional `metrics_fn` already fired for each epoch.
     #[allow(clippy::too_many_arguments)]
     fn run_single<F, M, G, O, T>(
         model_factory: &F,
@@ -609,6 +617,7 @@ impl DdpHandle {
         checkpoint_fn: Option<CheckpointFn<M>>,
         checkpoint_every: Option<usize>,
         epoch_fn: Option<EpochFn<M>>,
+        metrics_fn: Option<super::MetricsFn>,
         max_grad_norm: Option<f64>,
         scheduler: Option<Arc<dyn crate::nn::Scheduler>>,
     ) -> Result<Self>
@@ -662,9 +671,12 @@ impl DdpHandle {
             policy: ApplyPolicy::Sync, // single-GPU fallback: no divergence measurement
         };
 
-        // Channels (unused in single-GPU mode, but needed by GpuWorker)
-        let ((timing_tx, metrics_tx, param_tx, final_param_tx, control_rx), _channels) =
-            GpuWorker::<M>::channels();
+        // Keep the worker channels: `run_epoch_plan` calls `worker.report_epoch`
+        // which sends a `MetricsMsg` on metrics_tx. Draining metrics_rx per
+        // epoch lets us aggregate into `EpochMetrics`, fire `metrics_fn`, and
+        // push to the handle's metrics queue — same surface as multi-GPU.
+        let (worker_endpoints, worker_channels) = GpuWorker::<M>::channels();
+        let (timing_tx, metrics_tx, param_tx, final_param_tx, control_rx) = worker_endpoints;
 
         let mut worker = GpuWorker::new(
             &config,
@@ -685,6 +697,14 @@ impl DdpHandle {
             worker.set_scheduler(sched);
         }
 
+        // Epoch-metrics channel for the returned DdpHandle, mirroring multi-GPU.
+        let (epoch_metrics_tx, epoch_metrics_rx) = std::sync::mpsc::channel::<super::EpochMetrics>();
+        let device_index: u8 = match device {
+            Device::CUDA(idx) => idx,
+            _ => 0,
+        };
+        let device_indices = vec![device_index];
+
         // Train directly on this thread (no coordinator, local epoch management)
         for epoch in 0..num_epochs {
             // Set current_epoch before epoch_fn so
@@ -699,6 +719,26 @@ impl DdpHandle {
                 partition_size: total_samples,
             };
             worker.run_epoch_plan(&plan, train_fn)?;
+
+            // Drain MetricsMsg(s) emitted by report_epoch this iteration.
+            // Single-GPU is non-progressive, so exactly one msg per epoch
+            // (or zero if num_batches == 0; report_epoch always sends).
+            let mut msgs: Vec<super::MetricsMsg> = Vec::new();
+            while let Ok(m) = worker_channels.metrics_rx.try_recv() {
+                msgs.push(m);
+            }
+            if !msgs.is_empty() {
+                let metrics = super::coordinator::aggregate_epoch_metrics(
+                    epoch, &msgs, &device_indices,
+                );
+                if let Some(f) = &metrics_fn {
+                    if let Err(e) = f(&metrics) {
+                        eprintln!("  ddp: metrics_fn returned error (epoch {epoch}): {e}");
+                    }
+                }
+                let _ = epoch_metrics_tx.send(metrics);
+            }
+
             // Single-GPU checkpoint: version = epoch number (monotonic)
             if let (Some(every), Some(f)) = (checkpoint_every, &checkpoint_fn) {
                 if every > 0 && (epoch + 1) % every == 0 {
@@ -708,6 +748,8 @@ impl DdpHandle {
                 }
             }
         }
+        // Drop the sender so next_metrics() returns None after the queue drains.
+        drop(epoch_metrics_tx);
 
         // Capture final state before dropping the worker
         let snap = worker.snapshot_params();
@@ -727,7 +769,7 @@ impl DdpHandle {
             shutdown: Arc::new(AtomicBool::new(true)),
             nccl_abort_handles: Vec::new(),
             final_state: Some(final_state),
-            metrics_rx: None,
+            metrics_rx: Some(epoch_metrics_rx),
             architecture_svg,
             graph_label,
             graph_hash,
@@ -793,9 +835,11 @@ impl DdpHandle {
 
     /// Non-blocking: drain all available aggregated epoch metrics.
     ///
-    /// Returns an empty Vec if no metrics have been recorded (either no
-    /// [`record_scalar()`](super::record_scalar) calls in `train_fn`,
-    /// or single-GPU mode where the coordinator is absent).
+    /// Returns an empty `Vec` when nothing is currently queued. In multi-GPU
+    /// mode, metrics arrive per epoch as the coordinator aggregates ranks.
+    /// In single-GPU mode, `run_single` is synchronous, so by the time
+    /// callers can poll, all per-epoch metrics are already in the queue
+    /// (and `metrics_fn`, if registered, has already fired for each).
     pub fn poll_metrics(&self) -> Vec<super::EpochMetrics> {
         match &self.metrics_rx {
             Some(rx) => {
@@ -811,8 +855,11 @@ impl DdpHandle {
 
     /// Blocking: wait for the next epoch's aggregated metrics.
     ///
-    /// Returns `None` when training ends (coordinator drops the sender).
-    /// In single-GPU mode, always returns `None` immediately.
+    /// Returns `None` when training ends (sender dropped). In multi-GPU
+    /// mode this blocks per epoch as the coordinator aggregates ranks; in
+    /// the single-GPU fallback the queue is fully populated by the time
+    /// `run()` returns, so calls return queued metrics non-blocking, then
+    /// `None`.
     pub fn next_metrics(&self) -> Option<super::EpochMetrics> {
         self.metrics_rx.as_ref().and_then(|rx| rx.recv().ok())
     }
@@ -1053,6 +1100,7 @@ where
     config: DdpRunConfig,
     checkpoint_fn: Option<CheckpointFn<M>>,
     epoch_fn: Option<EpochFn<M>>,
+    metrics_fn: Option<super::MetricsFn>,
     /// Factory receives `world_size`, returns the scheduler.
     scheduler_fn: Option<Box<dyn Fn(usize) -> Arc<dyn crate::nn::Scheduler> + Send + Sync>>,
     _phantom: PhantomData<(M, O)>,
@@ -1246,6 +1294,40 @@ where
         self
     }
 
+    /// Set a host-side per-epoch metrics callback.
+    ///
+    /// Called once per epoch with the aggregated [`super::EpochMetrics`]:
+    /// on the coordinator thread for multi-GPU, on the main thread for the
+    /// single-GPU fallback. Errors are logged to stderr; training continues.
+    /// The same metric is also pushed to the [`DdpHandle::next_metrics`]
+    /// queue, so this composes with explicit polling rather than replacing it.
+    ///
+    /// Use this to keep the chained `Trainer::builder(...).run()?.join()?`
+    /// shape observable without a manual polling loop:
+    ///
+    /// ```ignore
+    /// Trainer::builder(model_factory, optim_factory, train_step)
+    ///     .dataset(dataset).batch_size(32).num_epochs(N)
+    ///     .metrics_fn(move |m| {
+    ///         println!("epoch {}: loss={:.4}", m.epoch, m.avg_loss);
+    ///         Ok(())
+    ///     })
+    ///     .run()?
+    ///     .join()?;
+    /// ```
+    ///
+    /// Works identically on 1-or-N GPUs: the single-GPU fallback path is
+    /// synchronous, so `next_metrics()` returns all queued metrics
+    /// back-to-back after `run()` returns; the callback itself fires
+    /// per-epoch as training progresses, the same as multi-GPU.
+    pub fn metrics_fn<E>(mut self, f: E) -> Self
+    where
+        E: Fn(&super::EpochMetrics) -> Result<()> + Send + Sync + 'static,
+    {
+        self.metrics_fn = Some(Arc::new(f));
+        self
+    }
+
     /// Launch training. Non-blocking: spawns threads and returns immediately.
     ///
     /// Call [`DdpHandle::join`] to block until training completes and retrieve
@@ -1271,6 +1353,7 @@ where
             self.config,
             self.checkpoint_fn,
             self.epoch_fn,
+            self.metrics_fn,
             self.scheduler_fn,
         )
     }
@@ -1322,6 +1405,7 @@ impl DdpHandle {
             config: DdpRunConfig::new(),
             checkpoint_fn: None,
             epoch_fn: None,
+            metrics_fn: None,
             scheduler_fn: None,
             _phantom: PhantomData,
         }

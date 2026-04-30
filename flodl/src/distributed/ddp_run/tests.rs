@@ -845,6 +845,193 @@ fn test_coordinator_drain_metrics() {
     assert_eq!(metrics[0].epoch, 1);
 }
 
+/// metrics_fn fires once per epoch, after all ranks report.
+/// Both metrics_fn and the next_metrics queue receive the same EpochMetrics.
+#[test]
+fn test_coordinator_metrics_fn_fires_per_epoch() {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    let (timing_tx, timing_rx) = mpsc::channel();
+    let (metrics_tx, metrics_rx) = mpsc::channel();
+    let (param_tx, param_rx) = mpsc::channel();
+    let _ = (timing_tx, param_tx);
+
+    let mut control_txs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..2 {
+        let (tx, _rx) = mpsc::channel();
+        control_txs.push(tx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    let captured: Arc<Mutex<Vec<super::EpochMetrics>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_cb = Arc::clone(&captured);
+    let metrics_fn: super::MetricsFn = Arc::new(move |m: &super::EpochMetrics| {
+        captured_cb.lock().unwrap().push(m.clone());
+        Ok(())
+    });
+
+    let (queue_tx, queue_rx) = mpsc::channel();
+
+    let el_che = ElChe::new(2, 10);
+    let mut coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Sync, AverageBackend::Nccl,
+        2, 10000, el_che,
+    )
+    .epoch_metrics_tx(queue_tx)
+    .metrics_fn(metrics_fn)
+    .num_epochs(2)
+    .build();
+
+    // Both ranks report epoch 0 -> aggregator fires.
+    metrics_tx.send(MetricsMsg {
+        rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 60, epoch_ms: 1000.0,
+        samples_processed: 1920,
+        scalars: [("loss".to_string(), (3.0, 3_usize))].into(),
+    }).unwrap();
+    metrics_tx.send(MetricsMsg {
+        rank: 1, epoch: 0, avg_loss: 0.7, batches_processed: 40, epoch_ms: 1200.0,
+        samples_processed: 1280,
+        scalars: [("loss".to_string(), (4.0, 2_usize))].into(),
+    }).unwrap();
+
+    coord.drain_metrics();
+
+    let cap = captured.lock().unwrap();
+    assert_eq!(cap.len(), 1, "metrics_fn should fire exactly once for epoch 0");
+    assert_eq!(cap[0].epoch, 0);
+    // Batch-weighted: (0.5*60 + 0.7*40) / 100 = 0.58
+    assert!((cap[0].avg_loss - 0.58).abs() < 1e-9);
+    assert_eq!(cap[0].per_rank.len(), 2);
+
+    // Same metric also reached the next_metrics queue.
+    let queued = queue_rx.try_recv().expect("queue should have received the metric");
+    assert_eq!(queued.epoch, 0);
+    assert!((queued.avg_loss - 0.58).abs() < 1e-9);
+}
+
+/// Single-GPU fallback (run_single via Trainer::builder when no CUDA is
+/// available, or when only one device is present): metrics_fn fires
+/// per-epoch and next_metrics() drains the queued metrics afterwards.
+/// This is the contract test for transparent 1-or-N GPU observability.
+#[test]
+fn test_run_single_metrics_fn_and_next_metrics() {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use crate::distributed::Trainer;
+
+    // Skip if CUDA is available with >= 2 devices: this test targets the
+    // single-GPU fallback code path. Single CUDA still hits run_single, so
+    // either pure-CPU or single-CUDA environments exercise the same path.
+    if crate::tensor::usable_cuda_devices().len() >= 2 {
+        return;
+    }
+
+    let dataset: Arc<dyn crate::data::BatchDataSet> = Arc::new(TestDataset { n: 16 });
+
+    let captured: Arc<Mutex<Vec<EpochMetrics>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_cb = Arc::clone(&captured);
+
+    let handle = Trainer::builder(
+        |d| Linear::on_device(4, 2, d),
+        |params| crate::nn::SGD::new(params, 0.01, 0.0),
+        mse_train,
+    )
+    .dataset(dataset)
+    .batch_size(4)
+    .num_epochs(3)
+    .metrics_fn(move |m| {
+        captured_cb.lock().unwrap().push(m.clone());
+        Ok(())
+    })
+    .run()
+    .unwrap();
+
+    // metrics_fn fired per epoch as run_single progressed.
+    let cap = captured.lock().unwrap();
+    assert_eq!(cap.len(), 3, "metrics_fn should fire 3 times for 3 epochs");
+    for (i, m) in cap.iter().enumerate() {
+        assert_eq!(m.epoch, i);
+        assert_eq!(m.per_rank.len(), 1, "single-GPU = single rank");
+        assert!((m.per_rank_batch_share[0] - 1.0).abs() < 1e-9,
+            "single rank gets 100% of batches");
+    }
+    drop(cap);
+
+    // next_metrics() drains the queued metrics back-to-back, then None.
+    let mut polled = Vec::new();
+    while let Some(m) = handle.next_metrics() {
+        polled.push(m);
+    }
+    assert_eq!(polled.len(), 3, "all 3 epochs should be queued");
+    for (i, m) in polled.iter().enumerate() {
+        assert_eq!(m.epoch, i);
+    }
+
+    let _ = handle.join().unwrap();
+}
+
+/// metrics_fn errors are logged but do not stop training: subsequent epochs
+/// still aggregate and the callback fires again.
+#[test]
+fn test_coordinator_metrics_fn_error_continues_training() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_timing_tx, timing_rx) = mpsc::channel();
+    let (metrics_tx, metrics_rx) = mpsc::channel();
+    let (_param_tx, param_rx) = mpsc::channel();
+
+    let mut control_txs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..2 {
+        let (tx, _rx) = mpsc::channel();
+        control_txs.push(tx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_cb = Arc::clone(&calls);
+    let metrics_fn: super::MetricsFn = Arc::new(move |_m: &super::EpochMetrics| {
+        calls_cb.fetch_add(1, Ordering::Relaxed);
+        Err(crate::tensor::TensorError::new("simulated callback failure"))
+    });
+
+    let el_che = ElChe::new(2, 10);
+    let mut coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs,
+        control_txs,
+        ApplyPolicy::Sync, AverageBackend::Nccl,
+        2, 10000, el_che,
+    )
+    .metrics_fn(metrics_fn)
+    .num_epochs(3)
+    .build();
+
+    // Fire two epochs; both should invoke the callback despite the error.
+    for epoch in [0_usize, 1_usize] {
+        metrics_tx.send(MetricsMsg {
+            rank: 0, epoch, avg_loss: 0.5, batches_processed: 50, epoch_ms: 1000.0,
+            samples_processed: 1600, scalars: HashMap::new(),
+        }).unwrap();
+        metrics_tx.send(MetricsMsg {
+            rank: 1, epoch, avg_loss: 0.5, batches_processed: 50, epoch_ms: 1000.0,
+            samples_processed: 1600, scalars: HashMap::new(),
+        }).unwrap();
+        coord.drain_metrics();
+    }
+
+    assert_eq!(calls.load(Ordering::Relaxed), 2,
+        "metrics_fn should fire on every epoch even when it returns Err");
+}
+
 #[test]
 fn test_coordinator_compute_partition_sizes() {
     let h = make_coord_harness(2, ApplyPolicy::Cadence, AverageBackend::Nccl);
