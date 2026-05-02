@@ -670,8 +670,15 @@
         let mut c = ElChe::new(2, 10)
             .with_overhead_target(0.10);
 
-        // Both devices equal speed, anchor=10.
-        let bc = c.batch_counts().to_vec(); c.report_timing(&[1000.0, 1000.0], &bc, 500.0);
+        // Auto-tune is gated to Phase::Stable+ to prevent warmup over-reaction.
+        // Prime with five low-overhead reports of equal-speed timings to reach
+        // Stable, then issue the high-overhead trigger.
+        for _ in 0..5 {
+            let bc = c.batch_counts().to_vec();
+            c.report_timing(&[1000.0, 1000.0], &bc, 5.0);
+        }
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[1000.0, 1000.0], &bc, 500.0);
 
         // overhead = 500/1000 = 0.50, target = 0.10
         // scale = 0.50/0.10 = 5.0 => new anchor = ceil(10 * 5) = 50
@@ -686,8 +693,14 @@
         let mut c = ElChe::new(2, 10)
             .with_overhead_target(0.10);
 
-        // Fast=500ms, slow=1000ms (equal initial counts), sync=400ms.
-        let bc = c.batch_counts().to_vec(); c.report_timing(&[500.0, 1000.0], &bc, 400.0);
+        // Prime to Stable phase. Pass fixed bc=[10,10] each call so the
+        // synthetic wall_ms keeps a stable per-batch ratio across reports
+        // (in production wall_ms would scale with n; in the test it does
+        // not, so we keep n fixed instead).
+        for _ in 0..5 {
+            c.report_timing(&[500.0, 1000.0], &[10, 10], 5.0);
+        }
+        c.report_timing(&[500.0, 1000.0], &[10, 10], 400.0);
 
         // overhead = 400/1000 = 0.40, target = 0.10, scale = 4.0
         // new anchor = ceil(10 * 4) = 40
@@ -703,8 +716,14 @@
             .with_overhead_target(0.01)
             .with_max_anchor(30);
 
+        // Prime to Stable phase before triggering auto-tune.
+        for _ in 0..5 {
+            let bc = c.batch_counts().to_vec();
+            c.report_timing(&[100.0, 100.0], &bc, 0.5);
+        }
         // Extreme overhead: sync dominates.
-        let bc = c.batch_counts().to_vec(); c.report_timing(&[100.0, 100.0], &bc, 500.0);
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[100.0, 100.0], &bc, 500.0);
 
         // Would want anchor=500 but capped at 30.
         assert_eq!(c.anchor(), 30);
@@ -965,12 +984,148 @@
         assert_eq!(c.batches(0), 10);
         assert_eq!(c.batches(1), 20);
 
-        // After timing: rank 0 is actually 2x faster (500ms for 10 vs 2000ms for 20)
-        let bc = c.batch_counts().to_vec(); c.report_timing(&[500.0, 2000.0], &bc, 10.0);
+        // Election can change the anchor only once the balancer enters
+        // `Phase::Stable` (≥5 calibrations) — by design, no single noisy
+        // reading can flip the initial pick. Feed corrective timings (rank
+        // 0 is actually 2x faster) for six reports so the 6th sees Stable
+        // on entry and re-elects on the trust window. bc passed verbatim
+        // each call so the synthetic per-batch arithmetic stays stable.
+        for _ in 0..6 {
+            c.report_timing(&[500.0, 2000.0], &[10, 20], 10.0);
+        }
 
         // Self-corrected: rank 1 is slow (anchor), rank 0 gets more
         assert_eq!(c.batches(1), c.anchor());
         assert!(c.batches(0) > c.batches(1), "fast device should get more batches");
+    }
+
+    // -- PR 1: Phase machine + tie-band anchor election -----------------------
+
+    use crate::distributed::Phase;
+
+    #[test]
+    fn test_phase_starts_at_probe() {
+        let c = ElChe::new(3, 10);
+        assert_eq!(c.phase(), Phase::Probe);
+        assert_eq!(c.anchor_rank(), None);
+    }
+
+    #[test]
+    fn test_phase_advances_on_first_calibration() {
+        let mut c = ElChe::new(3, 10).with_overhead_target(0.50);
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[100.0, 380.0, 395.0], &bc, 10.0);
+        assert_eq!(c.phase(), Phase::Warmup);
+        assert!(c.anchor_rank().is_some());
+    }
+
+    #[test]
+    fn test_phase_warmup_to_stable_at_5() {
+        let mut c = ElChe::new(2, 10).with_overhead_target(0.50);
+        for _ in 0..5 {
+            let bc = c.batch_counts().to_vec();
+            c.report_timing(&[500.0, 1000.0], &bc, 10.0);
+        }
+        assert_eq!(c.phase(), Phase::Stable);
+    }
+
+    #[test]
+    fn test_phase_stable_to_mature_at_20() {
+        let mut c = ElChe::new(2, 10).with_overhead_target(0.50);
+        for _ in 0..20 {
+            let bc = c.batch_counts().to_vec();
+            c.report_timing(&[500.0, 1000.0], &bc, 10.0);
+        }
+        assert_eq!(c.phase(), Phase::Mature);
+    }
+
+    #[test]
+    fn test_anchor_stable_under_tied_slow_ranks() {
+        // The 3-GPU bug case: rank 0 fast (100ms), ranks 1 and 2 within 5%
+        // of each other (380 vs 395). Old argmax flapped between 1 and 2 each
+        // cycle; tie-band + sticky should pin one and keep it.
+        let mut c = ElChe::new(3, 10).with_overhead_target(0.50);
+
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[100.0, 380.0, 395.0], &bc, 10.0);
+        let first = c.anchor_rank().expect("anchor elected");
+
+        // Subsequent cycles with the slowest swapping inside the tie band.
+        for (a, b) in &[(390.0, 380.0), (385.0, 388.0), (392.0, 386.0)] {
+            let bc = c.batch_counts().to_vec();
+            c.report_timing(&[100.0, *a, *b], &bc, 10.0);
+            assert_eq!(
+                c.anchor_rank(), Some(first),
+                "anchor must stay sticky across tied slow-rank fluctuations",
+            );
+        }
+    }
+
+    #[test]
+    fn test_anchor_switches_when_clear_winner_emerges() {
+        // Outside the cohort band (>15% margin), anchor must follow the real slow.
+        let mut c = ElChe::new(3, 10).with_overhead_target(0.50);
+
+        c.report_timing(&[100.0, 400.0, 200.0], &[10, 10, 10], 10.0);
+        assert_eq!(c.anchor_rank(), Some(1));
+
+        // Rank 2 becomes clearly slower. Anchor swaps are gated to Stable
+        // (≥5 calibrations) so only the 6th call onward sees the new
+        // election. Push five corrective reports for the trust window to
+        // dominate, then assert. bc fixed to keep ms_per_batch stable.
+        for _ in 0..5 {
+            c.report_timing(&[100.0, 200.0, 600.0], &[10, 10, 10], 10.0);
+        }
+        assert_eq!(c.anchor_rank(), Some(2), "real slowdown must be tracked");
+    }
+
+    #[test]
+    fn test_relax_anchor_up_grows_anchor() {
+        let mut c = ElChe::new(2, 10).with_overhead_target(0.50);
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[500.0, 1000.0], &bc, 5.0);
+        let before = c.anchor();
+        c.relax_anchor_up();
+        assert_eq!(c.anchor(), before + 1, "anchor should grow by 1 on relax");
+    }
+
+    #[test]
+    fn test_relax_anchor_up_capped_by_max_batch_diff() {
+        // Ratio 1:3 means at anchor=N, batch_counts=[N, 3N], diff=2N.
+        // With max_batch_diff=20, anchor caps at 10 (yielding [10, 30]).
+        let mut c = ElChe::new(2, 10)
+            .with_overhead_target(0.50)
+            .with_max_batch_diff(20);
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[300.0, 900.0], &bc, 5.0); // 1:3 speed ratio
+        // Already at anchor=10, [10,30], diff=20. Next relax would project
+        // anchor=11 → [11, 33], diff=22 > 20 → refuse.
+        let before = c.anchor();
+        c.relax_anchor_up();
+        assert_eq!(c.anchor(), before, "relax must refuse when projected diff exceeds cap");
+    }
+
+    #[test]
+    fn test_relax_anchor_up_capped_by_max_anchor() {
+        let mut c = ElChe::new(2, 10)
+            .with_overhead_target(0.50)
+            .with_max_anchor(11);
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[500.0, 1000.0], &bc, 5.0);
+        c.relax_anchor_up();
+        assert_eq!(c.anchor(), 11);
+        c.relax_anchor_up();
+        assert_eq!(c.anchor(), 11, "relax must respect max_anchor");
+    }
+
+    #[test]
+    fn test_anchor_election_lowest_rank_tiebreak() {
+        // No prior anchor (Probe phase first call): with all ranks tied, the
+        // deterministic tiebreak picks the lowest-indexed candidate.
+        let mut c = ElChe::new(3, 10).with_overhead_target(0.50);
+        let bc = c.batch_counts().to_vec();
+        c.report_timing(&[100.0, 100.0, 100.0], &bc, 10.0);
+        assert_eq!(c.anchor_rank(), Some(0));
     }
 
     // -- DdpConfig tests ------------------------------------------------------

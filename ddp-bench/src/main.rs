@@ -80,6 +80,33 @@ struct Cli {
     #[option(default = "runs/report.md")]
     report: Option<String>,
 
+    /// GPU selection: comma-separated physical indices ("0,1", "1,2") or "all".
+    /// Sets CUDA_VISIBLE_DEVICES before libtorch init; selected GPUs are
+    /// renumbered 0..N for the rest of the run (so `solo-N` picks among the
+    /// survivors, not the original physical indices).
+    #[option(default = "all")]
+    gpus: Option<String>,
+
+    /// Static per-rank partition ratios, e.g. "0.55,0.225,0.225".
+    /// Values must sum to ~1.0 and the count must match the visible GPU count.
+    ///
+    /// Currently honored in nccl-sync and cpu-sync modes only (the framework's
+    /// progressive dispatch path used by Cadence/Async modes does not consult
+    /// these). Solo modes ignore this flag.
+    #[option]
+    partition_ratios: Option<String>,
+
+    /// Enable ElChe anchor relax-up on stable convergence (default: disabled).
+    ///
+    /// When set, each `Stable` convergence verdict grows the ElChe anchor
+    /// toward `max_anchor` to reduce sync frequency. Opt in to measure the
+    /// relax-up regime explicitly. Default keeps the anchor under
+    /// overhead-based auto-tune alone, matching pre-relax-up behavior.
+    ///
+    /// Honored in Cadence/Async modes only; ignored by Sync and solo modes.
+    #[option]
+    elche_relax_up: bool,
+
     /// Show available models and modes, then exit.
     #[option]
     list: bool,
@@ -92,8 +119,81 @@ fn main() {
     }
 }
 
+/// Parse `--partition-ratios "0.55,0.225,0.225"` into a Vec<f64>.
+///
+/// Sum-to-1 and length-vs-world-size validation lives in the framework
+/// (the orchestrator checks before dispatch); we only enforce that the
+/// string is non-empty, comma-separated, and parses as floats.
+fn parse_partition_ratios(spec: &str) -> flodl::tensor::Result<Vec<f64>> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(flodl::tensor::TensorError::new(
+            "invalid --partition-ratios: empty value",
+        ));
+    }
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    let mut out = Vec::with_capacity(parts.len());
+    for s in &parts {
+        if s.is_empty() {
+            return Err(flodl::tensor::TensorError::new(&format!(
+                "invalid --partition-ratios value '{spec}': empty entry in list",
+            )));
+        }
+        let v: f64 = s.parse().map_err(|_| flodl::tensor::TensorError::new(&format!(
+            "invalid --partition-ratios entry '{s}' (expected float)",
+        )))?;
+        if !v.is_finite() || v < 0.0 {
+            return Err(flodl::tensor::TensorError::new(&format!(
+                "invalid --partition-ratios entry '{s}' (must be non-negative finite)",
+            )));
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Resolve `--gpus` to a `CUDA_VISIBLE_DEVICES` value and set it before
+/// libtorch sees any device. `"all"` is a no-op (lets the host env or
+/// physical hardware decide).
+fn apply_gpu_selection(spec: &str) -> flodl::tensor::Result<()> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec == "all" {
+        return Ok(());
+    }
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    if parts.iter().any(|s| s.is_empty()) {
+        return Err(flodl::tensor::TensorError::new(&format!(
+            "invalid --gpus value '{spec}': empty index in list",
+        )));
+    }
+    for s in &parts {
+        s.parse::<u32>().map_err(|_| flodl::tensor::TensorError::new(&format!(
+            "invalid --gpus index '{s}' (expected non-negative integer)",
+        )))?;
+    }
+    let canonical = parts.join(",");
+    eprintln!("ddp-bench: --gpus {spec} -> CUDA_VISIBLE_DEVICES={canonical}");
+    // SAFETY: we are still in `main`, no threads spawned, no libtorch
+    // touched yet. Setting CUDA_VISIBLE_DEVICES from a single-threaded
+    // context before any FFI call into libtorch is safe.
+    unsafe { std::env::set_var("CUDA_VISIBLE_DEVICES", &canonical); }
+    Ok(())
+}
+
 fn run() -> flodl::tensor::Result<()> {
     let cli: Cli = parse_or_schema();
+
+    // GPU selection MUST be applied before any libtorch / CUDA init
+    // (cuda_device_count() at line ~260 is the first such call). Once
+    // libtorch latches onto a device list, CUDA_VISIBLE_DEVICES is ignored.
+    if let Some(spec) = cli.gpus.as_deref() {
+        apply_gpu_selection(spec)?;
+    }
+
+    let partition_ratios = match cli.partition_ratios.as_deref() {
+        None => None,
+        Some(spec) => Some(parse_partition_ratios(spec)?),
+    };
 
     // Map parsed fields to the variable names the rest of this function
     // already uses. Thin bridge keeps the business logic bit-for-bit
@@ -288,6 +388,14 @@ fn run() -> flodl::tensor::Result<()> {
                 eprintln!("  skipping {} (requires 2+ GPUs, have {})", mode, gpu_count);
                 continue;
             }
+            // Skip solo-N when GPU index N is out of range (e.g. solo-2
+            // on a 2-GPU rig). Renumbering via --gpus also folds in here.
+            if let DdpMode::Solo(idx) = mode
+                && *idx >= gpu_count
+            {
+                eprintln!("  skipping {} (GPU index {} not available, have {})", mode, idx, gpu_count);
+                continue;
+            }
 
             let run_epochs = epochs.unwrap_or(defaults.epochs);
 
@@ -312,6 +420,8 @@ fn run() -> flodl::tensor::Result<()> {
                 output_dir: output.clone(),
                 data_dir: data_dir.clone(),
                 monitor_port,
+                partition_ratios: partition_ratios.clone(),
+                elche_relax_up: cli.elche_relax_up,
             };
 
             match harness::run_combo(model_def, mode, &run_config) {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flodl::autograd::Variable;
-use flodl::distributed::{ApplyPolicy, AverageBackend, DdpConfig, Trainer};
+use flodl::distributed::{ApplyPolicy, AverageBackend, Trainer};
 use flodl::monitor::{Monitor, Timeline};
 use flodl::nn::{Module, Optimizer, Parameter};
 use flodl::tensor::{Device, Result, Tensor, TensorError};
@@ -78,17 +78,19 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
     };
 
     let preload_tag = if mode.requires_multi_gpu() { "cpu" } else { "gpu-preload" };
+    let baseline_tag = if model_def.needs_baseline_eval { " [paper-baseline]" } else { "" };
     if real_data {
         eprintln!(
-            "\n=== {} / {} ({} epochs, {} samples, {} batches x {}{}) ===",
+            "\n=== {} / {} ({} epochs, {} samples, {} batches x {}{}){} ===",
             model_def.name, mode_str, config.epochs, dataset.len(), actual_batches,
-            config.batch_size, lr_note,
+            config.batch_size, lr_note, baseline_tag,
         );
         eprintln!("  data: {} samples, mode={preload_tag} ({load_ms}ms)", dataset.len());
     } else {
         eprintln!(
-            "\n=== {} / {} ({} epochs, {} batches x {}{}) ===",
+            "\n=== {} / {} ({} epochs, {} batches x {}{}){} ===",
             model_def.name, mode_str, config.epochs, actual_batches, config.batch_size, lr_note,
+            baseline_tag,
         );
         eprintln!("  data: pool={pool_size}, virtual={virtual_len}, mode={preload_tag} ({load_ms}ms)");
     }
@@ -107,7 +109,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
 
     let start = Instant::now();
     let result = match mode {
-        DdpMode::Solo(gpu_idx) => run_solo(
+        DdpMode::Solo(gpu_idx) => run_baseline_solo(
             model_def,
             *gpu_idx,
             dataset,
@@ -118,11 +120,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
             &timeline,
             &mut monitor,
         ),
-        DdpMode::Sync => run_sync(
-            model_def, dataset, test_dataset, config, actual_batches, real_data,
-            &timeline, &mut monitor,
-        ),
-        DdpMode::Builder { policy, backend } => run_builder(
+        DdpMode::Builder { policy, backend } => run_unified(
             model_def,
             *policy,
             *backend,
@@ -269,9 +267,19 @@ fn slice_batch(gpu_data: &[Tensor], start: usize, end: usize, device: Device) ->
 // Solo GPU
 // ---------------------------------------------------------------------------
 
-/// Solo GPU: no DDP, standard training loop.
+/// Solo GPU run for paper-baseline reproduction.
+///
+/// Used for models whose published baseline reports per-epoch loss + accuracy
+/// curves (set `ModelDef::needs_baseline_eval = true`). Runs eval on the test
+/// set after every training epoch and emits `train=` / `eval_time=` columns
+/// in the log so the report can subtract eval cost from solo's wall time
+/// when computing DDP speedup.
+///
+/// All Solo runs currently route here. A follow-up commit will move
+/// non-baseline Solo to the unified `Trainer::builder` path with
+/// final-only eval, matching the multi-GPU shape.
 #[allow(clippy::too_many_arguments)]
-fn run_solo(
+fn run_baseline_solo(
     model_def: &ModelDef,
     gpu_idx: usize,
     dataset: Arc<dyn flodl::data::BatchDataSet>,
@@ -317,6 +325,13 @@ fn run_solo(
             eprintln!("  eval: {tn} test samples");
         }
 
+        // Track training-only and eval-only wall time so the report can
+        // strip eval cost from the speedup denominator. DDP modes pay only
+        // a single final eval; folding solo's per-epoch eval into the
+        // comparison would silently inflate DDP's speedup.
+        let mut total_train_ms = 0.0_f64;
+        let mut total_eval_ms = 0.0_f64;
+
         for epoch in 0..config.epochs {
             timeline.event(flodl::monitor::EventKind::EpochStart { epoch });
             let epoch_start = Instant::now();
@@ -348,7 +363,8 @@ fn run_solo(
                 global_batch += 1;
             }
 
-            let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
+            let train_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
+            total_train_ms += train_ms;
             final_loss = if batch_count > 0 { total_loss / batch_count as f64 } else { 0.0 };
             timeline.event(flodl::monitor::EventKind::EpochEnd {
                 epoch,
@@ -362,6 +378,7 @@ fn run_solo(
             // Use held-out test data when present, otherwise fall back to training data.
             if let Some(eval_fn) = model_def.eval_fn {
                 model.eval();
+                let eval_start = Instant::now();
                 let eval_data = test_gpu_data.as_deref().unwrap_or(&gpu_data);
                 let eval_n = eval_data[0].shape()[0] as usize;
                 let avg = flodl::autograd::no_grad(|| -> Result<f64> {
@@ -377,23 +394,37 @@ fn run_solo(
                     }
                     Ok(if eval_samples > 0 { total_metric / eval_samples as f64 } else { 0.0 })
                 })?;
+                let eval_ms = eval_start.elapsed().as_secs_f64() * 1000.0;
+                total_eval_ms += eval_ms;
                 model.train();
                 let mut line = format!("epoch {epoch}: loss={final_loss:.6}, eval={avg:.4}");
                 line.push_str(&format_scalars(&scalars));
-                line.push_str(&format!(", time={:.1}s", epoch_ms / 1000.0));
+                line.push_str(&format!(
+                    ", train={:.1}s, eval_time={:.1}s",
+                    train_ms / 1000.0, eval_ms / 1000.0,
+                ));
                 eprintln!("    {line}");
                 log_lines.push(line);
             } else {
                 let mut line = format!("epoch {epoch}: loss={final_loss:.6}");
                 line.push_str(&format_scalars(&scalars));
-                line.push_str(&format!(", time={:.1}s", epoch_ms / 1000.0));
+                line.push_str(&format!(", train={:.1}s", train_ms / 1000.0));
                 eprintln!("    {line}");
                 log_lines.push(line);
             }
 
             monitor.log(epoch, epoch_start.elapsed(), &[("loss", final_loss)]);
-            epoch_times.push(epoch_ms);
+            epoch_times.push(train_ms);
         }
+
+        // Summary line consumed by `analyze::parse_training_log`: lets the
+        // speedup table compare DDP wall-time against solo's training-only
+        // wall-time rather than total (which would include eval cost solo
+        // pays per-epoch but DDP only pays once at the end).
+        log_lines.push(format!(
+            "# train_only: {:.1}s (eval: {:.1}s)",
+            total_train_ms / 1000.0, total_eval_ms / 1000.0,
+        ));
     } else {
         // Synthetic pool mode: preload small pool, recycle batches.
         let gpu_pool = preload_gpu_batches(dataset.as_ref(), device, config.batch_size)?;
@@ -437,190 +468,16 @@ fn run_solo(
 }
 
 // ---------------------------------------------------------------------------
-// Sync mode (Graph-based DDP)
+// Unified DDP path (sync, cadence, async; nccl + cpu backends)
 // ---------------------------------------------------------------------------
 
-/// Sync mode: Trainer::setup_with() with Graph.
-#[allow(clippy::too_many_arguments)]
-fn run_sync(
-    model_def: &ModelDef,
-    dataset: Arc<dyn flodl::data::BatchDataSet>,
-    test_dataset: Option<Arc<dyn flodl::data::BatchDataSet>>,
-    config: &RunConfig,
-    batches_per_epoch: usize,
-    real_data: bool,
-    timeline: &Arc<Timeline>,
-    monitor: &mut Monitor,
-) -> Result<(f64, Vec<f64>, Vec<String>)> {
-    let device = Device::CUDA(0);
-    let model = (model_def.build)(device)?;
-
-    let graph = model
-        .as_graph()
-        .ok_or_else(|| TensorError::new("sync mode requires a Graph-based model"))?;
-
-    let build_fn = model_def.build;
-    let opt_fn = model_def.optimizer;
-    let lr = config.lr;
-
-    Trainer::setup_with(
-        graph,
-        move |dev| -> Result<Box<dyn Module>> { build_fn(dev) },
-        move |params: &[Parameter]| DynOptimizer(opt_fn(params, lr)),
-        DdpConfig::new().timeline(Arc::clone(timeline)),
-    )?;
-
-    // Attach the model's LR scheduler so sync mode anneals like solo/builder.
-    // Without this, the Graph trains at constant LR for the whole run.
-    let solo_batches = if real_data {
-        dataset.len() / config.batch_size
-    } else {
-        batches_per_epoch
-    };
-    if let Some(sf) = model_def.scheduler {
-        let total_steps = solo_batches * config.epochs;
-        let world = graph.world_size();
-        let sched: Box<dyn flodl::nn::Scheduler> = sf(config.lr, total_steps, world);
-        graph.set_scheduler(Arc::from(sched));
-    }
-
-    monitor.watch(graph);
-
-    let mut epoch_times = Vec::with_capacity(config.epochs);
-    let mut final_loss = 0.0;
-    let mut log_lines: Vec<String> = Vec::new();
-
-    if real_data {
-        let gpu_data = preload_full_dataset(dataset.as_ref(), device)?;
-        let n = gpu_data[0].shape()[0] as usize;
-        let bs = config.batch_size;
-
-        for epoch in 0..config.epochs {
-            timeline.event(flodl::monitor::EventKind::EpochStart { epoch });
-            let epoch_start = Instant::now();
-            let mut total_loss = 0.0;
-            let mut batch_count = 0;
-
-            for batch_start in (0..n).step_by(bs) {
-                let end = (batch_start + bs).min(n);
-                if end - batch_start < bs { break; }
-                let batch = slice_batch(&gpu_data, batch_start, end, device)?;
-                let batch = if let Some(aug) = model_def.augment_fn {
-                    aug(&batch)?
-                } else {
-                    batch
-                };
-
-                let loss = (model_def.train_fn)(graph, &batch)?;
-                let loss_val = loss.item()?;
-
-                loss.backward()?;
-                graph.step()?;
-
-                total_loss += loss_val;
-                batch_count += 1;
-            }
-
-            let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
-            final_loss = if batch_count > 0 { total_loss / batch_count as f64 } else { 0.0 };
-            timeline.event(flodl::monitor::EventKind::EpochEnd {
-                epoch,
-                loss: final_loss,
-            });
-            let scalars = drain_epoch_scalars();
-            let mut line = format!("epoch {epoch}: loss={final_loss:.6}");
-            line.push_str(&format_scalars(&scalars));
-            line.push_str(&format!(", time={:.1}s", epoch_ms / 1000.0));
-            eprintln!("    {line}");
-            log_lines.push(line);
-
-            graph.record_scalar("loss", final_loss);
-            for (k, v) in &scalars {
-                graph.record_scalar(k, *v);
-            }
-            graph.flush(&[]);
-            monitor.log(epoch, epoch_start.elapsed(), graph);
-            epoch_times.push(epoch_ms);
-        }
-    } else {
-        let gpu_pool = preload_gpu_batches(dataset.as_ref(), device, config.batch_size)?;
-        let pool_len = gpu_pool.len();
-
-        for epoch in 0..config.epochs {
-            timeline.event(flodl::monitor::EventKind::EpochStart { epoch });
-            let epoch_start = Instant::now();
-            let mut total_loss = 0.0;
-
-            for batch_idx in 0..batches_per_epoch {
-                let batch = &gpu_pool[batch_idx % pool_len];
-
-                let loss = (model_def.train_fn)(graph, batch)?;
-                let loss_val = loss.item()?;
-
-                loss.backward()?;
-                graph.step()?;
-
-                total_loss += loss_val;
-            }
-
-            let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
-            final_loss = total_loss / batches_per_epoch as f64;
-            timeline.event(flodl::monitor::EventKind::EpochEnd {
-                epoch,
-                loss: final_loss,
-            });
-            let scalars = drain_epoch_scalars();
-            let mut line = format!("epoch {epoch}: loss={final_loss:.6}");
-            line.push_str(&format_scalars(&scalars));
-            line.push_str(&format!(", time={:.1}s", epoch_ms / 1000.0));
-            eprintln!("    {line}");
-            log_lines.push(line);
-
-            graph.record_scalar("loss", final_loss);
-            for (k, v) in &scalars {
-                graph.record_scalar(k, *v);
-            }
-            graph.flush(&[]);
-            monitor.log(epoch, epoch_start.elapsed(), graph);
-            epoch_times.push(epoch_ms);
-        }
-    }
-
-    // Final evaluation on test set (same as solo mode).
-    if let Some(eval_fn) = model_def.eval_fn {
-        model.eval();
-        let eval_dataset = test_dataset.as_ref().unwrap_or(&dataset);
-        let eval_data = preload_full_dataset(eval_dataset.as_ref(), device)?;
-        let n = eval_data[0].shape()[0] as usize;
-        let bs = config.batch_size;
-        let avg = flodl::autograd::no_grad(|| -> Result<f64> {
-            let mut total_metric = 0.0;
-            let mut eval_samples = 0usize;
-            for batch_start in (0..n).step_by(bs) {
-                let end = (batch_start + bs).min(n);
-                if end - batch_start < bs { break; }
-                let batch = slice_batch(&eval_data, batch_start, end, device)?;
-                let metric = eval_fn(model.as_ref(), &batch)?;
-                total_metric += metric * (end - batch_start) as f64;
-                eval_samples += end - batch_start;
-            }
-            Ok(if eval_samples > 0 { total_metric / eval_samples as f64 } else { 0.0 })
-        })?;
-        let line = format!("final eval={avg:.4}");
-        eprintln!("    {line}");
-        log_lines.push(line);
-    }
-
-    Ok((final_loss, epoch_times, log_lines))
-}
-
-// ---------------------------------------------------------------------------
-// Builder mode (thread-per-GPU DDP)
-// ---------------------------------------------------------------------------
-
-/// Builder mode: Trainer::builder() with thread-per-GPU.
+/// Run any DDP mode through `Trainer::builder` with thread-per-GPU.
+///
+/// Handles every `DdpMode::Builder { policy, backend }` combination
+/// (nccl-sync, nccl-cadence, nccl-async, cpu-sync, cpu-cadence, cpu-async).
+/// Solo runs of paper-baseline models go through [`run_baseline_solo`] instead.
 #[allow(clippy::borrowed_box, clippy::type_complexity, clippy::too_many_arguments)]
-fn run_builder(
+fn run_unified(
     model_def: &ModelDef,
     policy: ApplyPolicy,
     backend: AverageBackend,
@@ -661,6 +518,17 @@ fn run_builder(
     .backend(backend)
     .timeline(Arc::clone(timeline));
 
+    // Heterogeneous topology: explicit per-rank shares disable the uniform
+    // default. Without this, the fast GPU idles waiting for the slow ones at
+    // every sync barrier (the publication-arc anti-pattern).
+    if let Some(ratios) = &config.partition_ratios {
+        builder = builder.partition_ratios(ratios);
+    }
+
+    if config.elche_relax_up {
+        builder = builder.elche_relax_up(true);
+    }
+
     if let Some(sf) = sched_factory {
         let bpe = batches_per_epoch;
         builder = builder.scheduler(move |world_size| {
@@ -686,6 +554,52 @@ fn run_builder(
         line.push_str(&format!(", time={:.1}s", metrics.epoch_ms / 1000.0));
         eprintln!("    {line}");
         log_lines.push(line);
+
+        // Per-rank breakdown for multi-rank runs. Layout is
+        //   [highest-share]  [random middle]  [lowest-share]
+        // where highest-share is the fastest rank in the cadence (gets
+        // the most batches) and lowest-share is the slow-anchor rank.
+        // Random middle is sampled uniformly from the in-between ranks
+        // each epoch — O(1) per epoch and ergodic over the run, which
+        // scales to large worlds without flooding the log line. For
+        // world_size == 2 the middle is omitted; for == 3 the middle is
+        // the unique non-extreme rank (no randomness needed).
+        if metrics.device_indices.len() >= 2 {
+            let n = metrics.device_indices.len();
+            let mut sorted: Vec<usize> = (0..n).collect();
+            sorted.sort_by(|&a, &b| {
+                let sa = metrics.per_rank_batch_share.get(a).copied().unwrap_or(0.0);
+                let sb = metrics.per_rank_batch_share.get(b).copied().unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let highest = sorted[0];
+            let lowest = sorted[n - 1];
+            let middle: Option<usize> = match n {
+                2 => None,
+                3 => Some(sorted[1]),
+                _ => {
+                    let pick = flodl::Rng::from_entropy().usize(n - 2);
+                    Some(sorted[1 + pick])
+                }
+            };
+
+            let render = |r: usize| -> String {
+                let dev = metrics.device_indices[r];
+                let share = metrics.per_rank_batch_share.get(r).copied().unwrap_or(0.0);
+                let tput = metrics.per_rank_throughput.get(r).copied().unwrap_or(0.0);
+                format!(" rank{r}[cuda{dev},share={share:.4},tput={tput:.2}]")
+            };
+
+            let mut rank_line = String::from("per-rank:");
+            rank_line.push_str(&render(highest));
+            if let Some(mid) = middle {
+                rank_line.push_str(&render(mid));
+            }
+            rank_line.push_str(&render(lowest));
+            eprintln!("    {rank_line}");
+            log_lines.push(rank_line);
+        }
+
         monitor.log(
             metrics.epoch,
             Duration::from_millis(metrics.epoch_ms as u64),

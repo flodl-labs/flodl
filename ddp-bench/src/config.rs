@@ -9,8 +9,6 @@ use flodl::distributed::{ApplyPolicy, AverageBackend};
 pub enum DdpMode {
     /// Single GPU, no DDP.
     Solo(usize),
-    /// Synchronous El Che via `Trainer::setup_with()` (graph-based).
-    Sync,
     /// Thread-per-GPU via `Trainer::builder()`.
     Builder {
         policy: ApplyPolicy,
@@ -19,10 +17,9 @@ pub enum DdpMode {
 }
 
 impl DdpMode {
-    /// Parse a mode string like "solo-0", "sync", "nccl-cadence", "cpu-async".
+    /// Parse a mode string like "solo-0", "nccl-sync", "nccl-cadence", "cpu-async".
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "sync" => Some(DdpMode::Sync),
             "nccl-sync" => Some(DdpMode::Builder {
                 policy: ApplyPolicy::Sync,
                 backend: AverageBackend::Nccl,
@@ -57,7 +54,7 @@ impl DdpMode {
         &[
             "solo-0",
             "solo-1",
-            "sync",
+            "solo-2",
             "nccl-sync",
             "nccl-cadence",
             "nccl-async",
@@ -77,7 +74,6 @@ impl fmt::Display for DdpMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DdpMode::Solo(idx) => write!(f, "solo-{idx}"),
-            DdpMode::Sync => write!(f, "sync"),
             DdpMode::Builder { policy, backend } => {
                 let b = match backend {
                     AverageBackend::Nccl => "nccl",
@@ -114,4 +110,13 @@ pub struct RunConfig {
     pub output_dir: String,
     pub data_dir: std::path::PathBuf,
     pub monitor_port: Option<u16>,
+    /// Explicit per-rank partition ratios for heterogeneous DDP. When set,
+    /// passed to `DdpBuilder::partition_ratios` to disable the uniform
+    /// default and dispatch batches in proportion. Length must match the
+    /// visible GPU count and values must sum to ~1.0.
+    pub partition_ratios: Option<Vec<f64>>,
+    /// Enable ElChe's anchor relax-up on stable convergence verdicts.
+    /// When true, passed as `DdpBuilder::elche_relax_up(true)`. Default
+    /// false (relax-up disabled, anchor under overhead-based auto-tune only).
+    pub elche_relax_up: bool,
 }

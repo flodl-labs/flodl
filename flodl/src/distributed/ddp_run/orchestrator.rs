@@ -283,6 +283,36 @@ impl DdpHandle {
             el_che = el_che.with_max_batch_diff(diff);
         }
 
+        // Cold-start anchor: precedence is partition_ratios > spec prior >
+        // rank-0 fallback. When the user supplied per-rank ratios, the
+        // smallest ratio is the slow rank by user assertion. Otherwise we
+        // ask the GPUs themselves (compute capability + VRAM) which one is
+        // most likely the slowest. Either way, the pick is "soft" — once
+        // timing data accumulates, election may move the anchor.
+        if let Some(ratios) = config.partition_ratios.as_ref() {
+            if ratios.len() == world_size {
+                if let Some((slow_rank, _)) = ratios
+                    .iter()
+                    .enumerate()
+                    .min_by(|(ra, a), (rb, b)| {
+                        a.partial_cmp(b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(ra.cmp(rb))
+                    })
+                {
+                    el_che = el_che.with_initial_anchor(slow_rank);
+                }
+            }
+        } else {
+            let cuda_indices: Vec<i32> = devices.iter().filter_map(|d| match d {
+                Device::CUDA(idx) => Some(*idx as i32),
+                _ => None,
+            }).collect();
+            if cuda_indices.len() == world_size {
+                el_che = el_che.with_device_indices(&cuda_indices);
+            }
+        }
+
         // Step 3b: Create epoch metrics channel (coordinator -> main thread)
         let (epoch_metrics_tx, epoch_metrics_rx) = mpsc::channel();
 
@@ -324,7 +354,8 @@ impl DdpHandle {
                 .progressive(progressive)
                 .batch_size(coord_batch_size)
                 .timeline(coord_timeline.clone())
-                .max_overshoot(config.max_overshoot);
+                .max_overshoot(config.max_overshoot)
+                .elche_relax_up(config.elche_relax_up);
                 if let Some(mf) = metrics_fn {
                     builder = builder.metrics_fn(mf);
                 }
@@ -728,8 +759,11 @@ impl DdpHandle {
                 msgs.push(m);
             }
             if !msgs.is_empty() {
+                // Single-GPU fast path: only one rank, so the cadence-share
+                // is trivially [1.0]. No balancer involved.
+                let bc_share = vec![1.0_f64];
                 let metrics = super::coordinator::aggregate_epoch_metrics(
-                    epoch, &msgs, &device_indices,
+                    epoch, &msgs, &device_indices, &bc_share,
                 );
                 if let Some(f) = &metrics_fn {
                     if let Err(e) = f(&metrics) {
@@ -1182,12 +1216,41 @@ where
         self
     }
 
+    /// Set explicit per-rank partition ratios, e.g. `[0.55, 0.225, 0.225]`
+    /// for a fast rank plus two slower ranks.
+    ///
+    /// **Static fixed splits — does not auto-rebalance.** When set, the
+    /// coordinator dispatches each epoch's batches in proportion to these
+    /// ratios and skips ElChe's throughput-based rebalancer. Length must
+    /// match the auto-detected `world_size` and values must sum to ~1.0.
+    ///
+    /// **Currently honored in `Sync` policy only.** The `Cadence` and
+    /// `Async` policies use progressive dispatch driven by ElChe; they
+    /// do not consult `partition_ratios`. For dynamic heterogeneous
+    /// scheduling under those policies, ElChe's auto-calibration is
+    /// the intended path (see `speed_hint` for an initial seed).
+    pub fn partition_ratios(mut self, ratios: &[f64]) -> Self {
+        self.config = self.config.with_partition_ratios(ratios);
+        self
+    }
+
     /// Set the maximum overshoot past the planned sync point.
     ///
     /// Controls how far a fast GPU can stream past its planned batch count
     /// into the next epoch's data. Default: auto-tuned from convergence.
     pub fn max_overshoot(mut self, max: usize) -> Self {
         self.config = self.config.with_max_overshoot(max);
+        self
+    }
+
+    /// Allow or suppress ElChe's anchor relax-up on stable convergence.
+    ///
+    /// Default: `false` (opt-in). When `true`, each `Stable` convergence
+    /// verdict triggers `el_che.relax_anchor_up()` to grow the anchor toward
+    /// `max_anchor`. Opt in when measuring the relax-up regime; the default
+    /// keeps the anchor under overhead-based auto-tune alone.
+    pub fn elche_relax_up(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_elche_relax_up(enabled);
         self
     }
 

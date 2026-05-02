@@ -142,6 +142,10 @@ pub struct Coordinator {
     pub(super) overshoot_initial: usize,
     /// Absolute ceiling on max_overshoot (safety valve, applied after auto-tune).
     overshoot_ceiling: usize,
+    /// Allow ElChe to grow the anchor on Stable convergence verdicts.
+    /// When false, `relax_anchor_up()` is suppressed so the anchor only
+    /// changes via the overhead-based auto-tune in `el_che.report_timing`.
+    pub(super) elche_relax_up: bool,
 
     // Divergence monitoring (per-sync-interval, reset after averaging)
     /// Per-rank cumulative loss since last sync (monitoring/logging only,
@@ -160,6 +164,12 @@ pub struct Coordinator {
     timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
     /// Instant when the last NCCL sync started (for duration measurement).
     nccl_sync_start: Option<std::time::Instant>,
+    /// Wall-time duration (ms) of the most-recent completed NCCL sync.
+    /// Captured in `process_timing_msg` when the last rank acks. Fed to
+    /// `ElChe::report_timing` as `sync_ms` so the anchor auto-tune block
+    /// (el_che.rs:292-308) actually fires on NCCL backend. Was previously
+    /// always 0 because `last_avg_ms` is only populated by the CPU avg path.
+    last_nccl_sync_ms: f64,
 
     // NCCL sync acknowledgment
     /// Per-rank: last worker `step_count` seen in a TimingMsg.
@@ -201,6 +211,8 @@ pub struct CoordinatorBuilder {
     max_overshoot: Option<usize>,
     /// Absolute ceiling on max_overshoot (safety valve). Default: 15.
     overshoot_ceiling: usize,
+    /// Allow anchor relax-up on Stable convergence. Default: false.
+    elche_relax_up: bool,
     metrics_fn: Option<super::MetricsFn>,
 }
 
@@ -314,6 +326,14 @@ impl CoordinatorBuilder {
         self
     }
 
+    /// Allow or suppress ElChe's anchor relax-up on Stable convergence.
+    /// Default: false (off). Opt in to grow the anchor on `Stable` verdicts;
+    /// when false the anchor only changes via the overhead-based auto-tune.
+    pub fn elche_relax_up(mut self, enabled: bool) -> Self {
+        self.elche_relax_up = enabled;
+        self
+    }
+
     /// Build the coordinator.
     pub fn build(self) -> Coordinator {
         let total_batches = self.total_samples / self.batch_size.max(1);
@@ -342,6 +362,7 @@ impl CoordinatorBuilder {
             wall_ms_accum: vec![0.0; self.world_size],
             last_batch_ms: vec![0.0; self.world_size],
             last_avg_ms: 0.0,
+            last_nccl_sync_ms: 0.0,
             throttled: vec![false; self.world_size],
             avg_count: 0,
             checkpoint_every: self.checkpoint_every,
@@ -365,6 +386,7 @@ impl CoordinatorBuilder {
             overshoot_auto,
             overshoot_initial,
             overshoot_ceiling: self.overshoot_ceiling,
+            elche_relax_up: self.elche_relax_up,
             loss_accum: vec![0.0; self.world_size],
             loss_count: vec![0; self.world_size],
             nccl_sync_divergence: vec![None; self.world_size],
@@ -422,6 +444,7 @@ impl Coordinator {
             timeline: None,
             max_overshoot: None,
             overshoot_ceiling: 15,
+            elche_relax_up: false,
             metrics_fn: None,
         }
     }
@@ -861,6 +884,7 @@ impl Coordinator {
                     && step_count > self.nccl_sync_step[rank]
                 {
                     self.nccl_ack[rank] = true;
+                    self.capture_nccl_sync_elapsed_if_complete();
                 }
             }
             TimingMsg::SyncAck { rank, step_count, divergence } => {
@@ -877,10 +901,26 @@ impl Coordinator {
                     && step_count > self.nccl_sync_step[rank]
                 {
                     self.nccl_ack[rank] = true;
+                    self.capture_nccl_sync_elapsed_if_complete();
                 }
             }
             TimingMsg::Exiting { .. } => {
                 self.active_count = self.active_count.saturating_sub(1);
+            }
+        }
+    }
+
+    /// If every rank has now acknowledged the in-flight NCCL sync, record
+    /// its wall-time duration (sent SyncNow → all ranks past the AllReduce).
+    /// The next call to `finish_averaging_nccl` will feed this as `sync_ms`
+    /// to `ElChe::report_timing`, so the anchor auto-tune block actually
+    /// fires on NCCL backend (was always 0 before — `last_avg_ms` is only
+    /// populated by the CPU averaging path).
+    fn capture_nccl_sync_elapsed_if_complete(&mut self) {
+        if self.nccl_ack.iter().all(|&a| a) {
+            if let Some(start) = self.nccl_sync_start.take() {
+                self.last_nccl_sync_ms =
+                    start.elapsed().as_secs_f64() * 1000.0;
             }
         }
     }
@@ -967,7 +1007,8 @@ impl Coordinator {
         complete.sort_unstable();
         for epoch in complete {
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
-                let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                let bc_share = self.el_che.recent_batch_share();
+                let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices, &bc_share);
                 if let Some(f) = &self.metrics_fn {
                     if let Err(e) = f(&metrics) {
                         eprintln!("  ddp: metrics_fn returned error (epoch {epoch}): {e}");
@@ -1003,7 +1044,8 @@ impl Coordinator {
             self.chunk_pools.remove(&epoch);
 
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
-                let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                let bc_share = self.el_che.recent_batch_share();
+                let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices, &bc_share);
                 metrics.epoch_ms = epoch_ms;
                 if let Some(f) = &self.metrics_fn {
                     if let Err(e) = f(&metrics) {
@@ -1283,7 +1325,18 @@ fn ratio_to_sizes(ratios: &[f64], total: usize) -> Vec<usize> {
 /// chunk (not per epoch), so there may be many more messages than ranks.
 /// This function aggregates by rank first so the output always has
 /// exactly `world_size` entries per vector.
-pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_indices: &[u8]) -> super::EpochMetrics {
+/// `bc_share` is the smoothed per-rank batch-share view from the balancer
+/// (i.e. `el_che.recent_batch_share()` averaged over the last few sync
+/// snapshots). It replaces the prior "samples-consumed / total-samples"
+/// share, which conflated cadence allocation with progressive dispatch
+/// tail-balance dynamics. Caller is expected to pass `world_size` entries
+/// summing to ~1.0; degenerate input falls back to equal shares.
+pub(super) fn aggregate_epoch_metrics(
+    epoch: usize,
+    msgs: &[MetricsMsg],
+    device_indices: &[u8],
+    bc_share: &[f64],
+) -> super::EpochMetrics {
     let world_size = device_indices.len();
 
     // --- Step 1: Aggregate per-chunk messages by rank ---
@@ -1291,6 +1344,9 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
     let mut rank_samples: Vec<usize> = vec![0; world_size];
     let mut rank_loss_sum: Vec<f64> = vec![0.0; world_size];
     let mut rank_time_ms: Vec<f64> = vec![0.0; world_size];
+    let mut rank_share_complete_ms: Vec<f64> = vec![0.0; world_size];
+    let mut rank_compute_only_ms: Vec<f64> = vec![0.0; world_size];
+    let mut rank_data_starve_ms: Vec<f64> = vec![0.0; world_size];
     // Per-rank scalar accumulators: (sum, count) per key
     let mut rank_scalars: Vec<std::collections::HashMap<String, (f64, usize)>> =
         (0..world_size).map(|_| std::collections::HashMap::new()).collect();
@@ -1300,8 +1356,15 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
         rank_batches[r] += m.batches_processed;
         rank_samples[r] += m.samples_processed;
         rank_loss_sum[r] += m.avg_loss * m.batches_processed as f64;
-        // Max time across chunks (sequential within a rank)
+        // Max time across chunks (sequential within a rank). Mirrors
+        // existing epoch_ms aggregation: chunk messages report monotonic
+        // cumulative-from-epoch-start times in progressive dispatch, so the
+        // largest is the rank's epoch total. The new fields use the same
+        // convention so the worker can populate them consistently.
         rank_time_ms[r] = rank_time_ms[r].max(m.epoch_ms);
+        rank_share_complete_ms[r] = rank_share_complete_ms[r].max(m.share_complete_ms);
+        rank_compute_only_ms[r] = rank_compute_only_ms[r].max(m.compute_only_ms);
+        rank_data_starve_ms[r] = rank_data_starve_ms[r].max(m.data_starve_ms);
         for (k, (sum, count)) in &m.scalars {
             let entry = rank_scalars[r].entry(k.clone()).or_insert((0.0, 0));
             entry.0 += sum;
@@ -1356,18 +1419,52 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
         }
     }
 
-    // Per-rank throughput (samples/ms) and batch share
+    // Per-rank throughput (samples/ms) and batch share.
+    //
+    // Throughput uses share_complete_ms as the denominator, NOT epoch_ms.
+    // epoch_ms includes any post-completion idle the fast rank spends
+    // waiting at the sync barrier for slower ranks; dividing by it produces
+    // an inverted tput signal (the fast rank looks slow because it idles
+    // more), which feeds the balancer a signal that says "give the fast
+    // rank less work" — exactly backwards. share_complete_ms = compute +
+    // data-pipeline wait, measured per rank, excludes peer-induced idle,
+    // so the resulting tput tracks the rank's actual capacity.
+    //
+    // Falls back to epoch_ms when share_complete_ms wasn't populated (legacy
+    // call sites or test fixtures using the old MetricsMsg shape).
     let total_samples: usize = rank_samples.iter().sum();
     let per_rank_throughput: Vec<f64> = (0..world_size).map(|r| {
-        if rank_time_ms[r] > 0.0 { rank_samples[r] as f64 / rank_time_ms[r] } else { 0.0 }
+        let denom = if rank_share_complete_ms[r] > 0.0 {
+            rank_share_complete_ms[r]
+        } else {
+            rank_time_ms[r]
+        };
+        if denom > 0.0 { rank_samples[r] as f64 / denom } else { 0.0 }
     }).collect();
-    let per_rank_batch_share: Vec<f64> = (0..world_size).map(|r| {
-        if total_samples > 0 { rank_samples[r] as f64 / total_samples as f64 } else { 0.0 }
-    }).collect();
+    // Per-rank batch share comes from the balancer's smoothed view of its
+    // own recent batch_counts allocation (`el_che.recent_batch_share()`),
+    // not from samples consumed. Under progressive dispatch the latter is
+    // equalized by tail-balance and obscures the cadence's actual ratios.
+    // Degenerate input (wrong length, all zeros) falls back to equal shares.
+    let per_rank_batch_share: Vec<f64> = if bc_share.len() == world_size {
+        let sum: f64 = bc_share.iter().sum();
+        if sum > 0.0 {
+            bc_share.to_vec()
+        } else {
+            vec![1.0 / world_size as f64; world_size]
+        }
+    } else {
+        vec![1.0 / world_size as f64; world_size]
+    };
+    let _ = total_samples; // retained above for per_rank_throughput
 
     super::EpochMetrics {
         epoch, scalars, per_rank, avg_loss, epoch_ms,
-        per_rank_throughput, per_rank_batch_share, device_indices: device_indices.to_vec(),
+        per_rank_throughput, per_rank_batch_share,
+        per_rank_share_complete_ms: rank_share_complete_ms,
+        per_rank_compute_only_ms: rank_compute_only_ms,
+        per_rank_data_starve_ms: rank_data_starve_ms,
+        device_indices: device_indices.to_vec(),
     }
 }
 
