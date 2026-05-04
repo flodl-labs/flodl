@@ -73,4 +73,9 @@ name = "showcase"
 path = "examples/showcase/main.rs"
 doc-scrape-examples = false
 
+[[example]]
+name = "flowbuilder_residual"
+path = "examples/flowbuilder_residual/main.rs"
+doc-scrape-examples = false
+
 [dev-dependencies]
