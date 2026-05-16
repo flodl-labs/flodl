@@ -1,0 +1,3386 @@
+//! Cluster coordinator: process-model port of the OLD threaded
+//! `ddp_run::coordinator::Coordinator`.
+//!
+//! Owns the per-cluster scheduling state (ElChe, ConvergenceGuard,
+//! per-rank wall-time accumulation, sync acknowledgments) and drives
+//! averaging decisions for the cluster. Where the OLD design used
+//! `mpsc::{Sender, Receiver}` to talk to in-process worker threads,
+//! this type talks to remote rank processes over TCP. The state
+//! machine and decision logic are ported literally; only the I/O
+//! changes.
+//!
+//! # Architecture
+//!
+//! ```text
+//! launcher process:
+//!   ClusterCoordinator::start(bind_addr, world_size, salt, config)
+//!     ├── binds control TcpListener
+//!     ├── accepts N rank connections (handshake validates salt)
+//!     ├── spawns one reader thread per rank
+//!     │     reads ControlFrame, decodes TimingMsgWire / MetricsMsgWire,
+//!     │     forwards on internal mpsc::Sender
+//!     └── owns Vec<TcpStream> (write half, for outbound ControlFrame)
+//!
+//! caller drives:
+//!   coord.tick()  // drain timing mpsc, check_throttle, should_average,
+//!                  // trigger_averaging
+//! ```
+//!
+//! # Scope of 4b.D.1d.1
+//!
+//! Ports the load-bearing subset from the OLD coordinator:
+//!
+//! - State fields: ElChe, ConvergenceGuard, `steps_since_avg`,
+//!   `wall_ms_accum`, `last_step_count`, `nccl_sync_step` / `nccl_ack`,
+//!   `nccl_sync_divergence` / `pre_norm` / `post_norm`, `throttled`,
+//!   `active_count`, `version`, `avg_count`, `global_step`,
+//!   `last_nccl_sync_ms`.
+//! - Methods: [`Self::process_timing_msg`], [`Self::should_average`],
+//!   [`Self::trigger_averaging`] (NCCL path), [`Self::check_throttle`],
+//!   [`Self::drain_timing`], [`Self::tick`].
+//! - New: [`Self::start`] + [`Self::shutdown`] (TCP accept loop +
+//!   per-rank reader threads).
+//!
+//! Deferred to later slices: epoch dispatch / progressive chunk pools
+//! (1d.3+), CPU 3-phase averaging (1d.4), heartbeat fault detection
+//! (1d.5), metrics aggregation (1d.5+), meta-controller observe wiring
+//! (1d.3+).
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use hmac_sha256::HMAC;
+
+use crate::distributed::ddp::ElChe;
+use crate::distributed::ddp_run::convergence::{
+    self, ConvergenceAction, ConvergenceGuard, NoGuard, TrendGuard,
+};
+use crate::distributed::ddp_run::{ApplyPolicy, AverageBackend};
+use crate::distributed::wire::{
+    ControlFrame, ControlMsgWire, FrameRead, MsgKind, SessionSalt, TimingMsgWire,
+};
+use crate::tensor::{Result, TensorError};
+
+// ---------------------------------------------------------------------------
+// Control-channel handshake
+// ---------------------------------------------------------------------------
+
+/// Rank → coordinator handshake magic (mirrors
+/// [`wire::CONTROL_HANDSHAKE_MAGIC_RANK`]).
+pub(crate) const CTRL_HS_RANK: u32 = crate::distributed::wire::CONTROL_HANDSHAKE_MAGIC_RANK;
+
+/// Coordinator → rank handshake-ack magic.
+pub(crate) const CTRL_HS_ACK: u32 = crate::distributed::wire::CONTROL_HANDSHAKE_MAGIC_ACK;
+
+/// Wire-version used inside the handshake bytes.
+pub(crate) const CTRL_HS_VERSION: u32 = crate::distributed::wire::CONTROL_PROTOCOL_VERSION;
+
+/// Handshake byte layout (rank → coordinator):
+///
+/// ```text
+/// u32 magic       = CTRL_HS_RANK
+/// u32 version     = CTRL_HS_VERSION
+/// u32 rank_id     (0..world_size)
+/// u32 world_size  (rank's view; coordinator validates)
+/// u64 auth_tag    = first 8 bytes of HMAC-SHA256(salt, hdr[0..16])
+/// ```
+///
+/// Total: 24 bytes. The HMAC proves the rank shares the launcher's
+/// session salt; mismatched salts surface here before any control
+/// frame round-trip.
+const HS_RANK_BYTES: usize = 24;
+
+/// Handshake-ack layout (coordinator → rank):
+///
+/// ```text
+/// u32 magic       = CTRL_HS_ACK
+/// u32 version     = CTRL_HS_VERSION
+/// u64 auth_tag    = first 8 bytes of HMAC-SHA256(salt, hdr[0..8])
+/// ```
+///
+/// Total: 16 bytes.
+const HS_ACK_BYTES: usize = 16;
+
+fn hmac_first8(salt: &SessionSalt, bytes: &[u8]) -> [u8; 8] {
+    let full: [u8; 32] = HMAC::mac(bytes, salt.as_slice());
+    full[0..8].try_into().unwrap()
+}
+
+/// Worker-side companion to [`read_handshake_rank`]. Exported at
+/// crate visibility for the upcoming `cluster_worker` slice (1d.2);
+/// the slice 1d.1 tests are the only current callers.
+#[allow(dead_code)]
+pub(crate) fn write_handshake_rank(
+    stream: &mut TcpStream,
+    rank_id: u32,
+    world_size: u32,
+    salt: &SessionSalt,
+) -> Result<()> {
+    let mut buf = [0u8; HS_RANK_BYTES];
+    buf[0..4].copy_from_slice(&CTRL_HS_RANK.to_le_bytes());
+    buf[4..8].copy_from_slice(&CTRL_HS_VERSION.to_le_bytes());
+    buf[8..12].copy_from_slice(&rank_id.to_le_bytes());
+    buf[12..16].copy_from_slice(&world_size.to_le_bytes());
+    let tag = hmac_first8(salt, &buf[0..16]);
+    buf[16..24].copy_from_slice(&tag);
+    stream.write_all(&buf).map_err(|e| {
+        TensorError::new(&format!("cluster_coordinator: handshake write: {e}"))
+    })
+}
+
+fn read_handshake_rank(
+    stream: &mut TcpStream,
+    expected_world_size: u32,
+    salt: &SessionSalt,
+) -> Result<u32> {
+    let mut buf = [0u8; HS_RANK_BYTES];
+    stream.read_exact(&mut buf).map_err(|e| {
+        TensorError::new(&format!("cluster_coordinator: handshake read: {e}"))
+    })?;
+    let magic = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+    if magic != CTRL_HS_RANK {
+        return Err(TensorError::new(&format!(
+            "cluster_coordinator: handshake magic 0x{magic:08x} != 0x{CTRL_HS_RANK:08x}"
+        )));
+    }
+    let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    if version != CTRL_HS_VERSION {
+        return Err(TensorError::new(&format!(
+            "cluster_coordinator: handshake version {version} != {CTRL_HS_VERSION}"
+        )));
+    }
+    let rank_id = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+    let world_size = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+    if world_size != expected_world_size {
+        return Err(TensorError::new(&format!(
+            "cluster_coordinator: handshake world_size {world_size} != expected {expected_world_size}"
+        )));
+    }
+    let expected_tag = hmac_first8(salt, &buf[0..16]);
+    let got_tag: [u8; 8] = buf[16..24].try_into().unwrap();
+    if expected_tag != got_tag {
+        return Err(TensorError::new(
+            "cluster_coordinator: handshake HMAC verification failed; \
+             session salt disagreement (rank from a different training session, \
+             or wrong key configured)",
+        ));
+    }
+    Ok(rank_id)
+}
+
+fn write_handshake_ack(stream: &mut TcpStream, salt: &SessionSalt) -> Result<()> {
+    let mut buf = [0u8; HS_ACK_BYTES];
+    buf[0..4].copy_from_slice(&CTRL_HS_ACK.to_le_bytes());
+    buf[4..8].copy_from_slice(&CTRL_HS_VERSION.to_le_bytes());
+    let tag = hmac_first8(salt, &buf[0..8]);
+    buf[8..16].copy_from_slice(&tag);
+    stream.write_all(&buf).map_err(|e| {
+        TensorError::new(&format!("cluster_coordinator: handshake ack write: {e}"))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ClusterCoordinator
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`ClusterCoordinator::start`]. Subset of OLD
+/// `CoordinatorBuilder`: only the fields needed for the slice 1d.1
+/// scope (NCCL averaging + ElChe ownership + ConvergenceGuard).
+pub struct ClusterCoordinatorConfig {
+    pub policy: ApplyPolicy,
+    pub backend: AverageBackend,
+    pub world_size: usize,
+    pub el_che: ElChe,
+    /// Boxed convergence guard. Defaults to [`TrendGuard::default()`]
+    /// when omitted in the builder; set [`NoGuard`] to disable.
+    pub convergence_guard: Box<dyn ConvergenceGuard>,
+    /// Allow ElChe anchor relax-up on Stable convergence verdicts.
+    pub elche_relax_up: bool,
+    /// Initial max-overshoot (Async-only). Auto-tuned upward on Stable
+    /// verdicts; reset to `overshoot_initial` on NudgeDown.
+    pub overshoot_initial: usize,
+    pub overshoot_ceiling: usize,
+    /// True when the user did not set `max_overshoot` explicitly; lets
+    /// `trigger_averaging` adjust the bound on convergence verdicts.
+    pub overshoot_auto: bool,
+
+    /// Total samples in the dataset; basis for partition sizing in
+    /// [`ClusterCoordinator::dispatch_epoch`]. Default 0 (caller must
+    /// set via [`Self::total_samples`] before dispatching epochs).
+    pub total_samples: usize,
+    /// Batch size; carried for symmetry with OLD Coordinator (the
+    /// progressive chunk-pool path uses it, slice 1d.6 wiring).
+    pub batch_size: usize,
+    /// Total number of epochs to train; informs `dispatch_epoch`'s
+    /// out-of-range guard. Default 0 = unbounded (caller controls).
+    pub num_epochs: usize,
+    /// User-specified per-rank partition ratios. When `Some`, takes
+    /// precedence over ElChe-derived throughput sizing. Length must
+    /// equal `world_size` if set.
+    pub partition_ratios: Option<Vec<f64>>,
+    /// Enable the LR-aware meta-controller above ElChe. Default: false
+    /// (off; opt-in). When enabled, a
+    /// [`crate::distributed::lr_event_meta::LrEventMeta`] is constructed
+    /// and held by the coordinator; per-rank LR updates from
+    /// [`TimingMsgWire::LrUpdate`] populate `last_lr_per_rank`, and the
+    /// meta is consulted after every averaging-cycle guard verdict (see
+    /// [`ClusterCoordinator::observe_meta`]). `MetaAction::NudgeDown`
+    /// dispatches to [`crate::distributed::ddp::ElChe::nudge_anchor_down`].
+    pub meta_controller: bool,
+
+    /// Shared dead-rank ledger (with the cluster controller). When the
+    /// coord declares a rank dead (stale heartbeat), it sets the
+    /// ledger flag and shuts down the rank's controller-side stream
+    /// so any in-flight AllReduce releases with surviving ranks only.
+    /// Pass the same Arc clone to
+    /// [`crate::distributed::controller::ClusterController::start_with_dead_ranks`].
+    /// `None` = elastic-membership disabled.
+    pub dead_ranks: Option<Arc<crate::distributed::controller::DeadRanks>>,
+
+    /// Heartbeat staleness threshold (seconds). If a rank's last
+    /// TimingMsg-frame arrival is older than this, the coord declares
+    /// the rank dead. Default 30s. Ignored when `dead_ranks` is None.
+    pub heartbeat_timeout_secs: u64,
+
+    /// Global ranks running on the same host as the coordinator
+    /// process (the launcher's host in production, the test
+    /// process in tests). NCCL re-rendezvous prefers picking the
+    /// UID generator from this set when any are alive — same-host
+    /// rank is same-process latency for the UID hand-off and has
+    /// lower correlated-failure risk than a network peer. Defaults
+    /// to empty (no preference; picker falls back to fastest
+    /// surviving network rank by `wall_ms_accum / steps_since_avg`,
+    /// breaking ties by lowest global rank).
+    pub local_ranks: Vec<usize>,
+}
+
+impl ClusterCoordinatorConfig {
+    /// Construct with sensible defaults: TrendGuard with default
+    /// threshold, no anchor relax-up, overshoot_initial=3, ceiling=15.
+    pub fn new(
+        policy: ApplyPolicy,
+        backend: AverageBackend,
+        world_size: usize,
+        el_che: ElChe,
+    ) -> Self {
+        ClusterCoordinatorConfig {
+            policy,
+            backend,
+            world_size,
+            el_che,
+            convergence_guard: Box::new(TrendGuard::default()),
+            elche_relax_up: false,
+            overshoot_initial: 3,
+            overshoot_ceiling: 15,
+            overshoot_auto: true,
+            total_samples: 0,
+            batch_size: 1,
+            num_epochs: 0,
+            partition_ratios: None,
+            meta_controller: false,
+            dead_ranks: None,
+            heartbeat_timeout_secs: 30,
+            local_ranks: Vec::new(),
+        }
+    }
+
+    pub fn total_samples(mut self, n: usize) -> Self {
+        self.total_samples = n;
+        self
+    }
+
+    pub fn batch_size(mut self, n: usize) -> Self {
+        self.batch_size = n.max(1);
+        self
+    }
+
+    pub fn num_epochs(mut self, n: usize) -> Self {
+        self.num_epochs = n;
+        self
+    }
+
+    pub fn partition_ratios(mut self, ratios: Option<Vec<f64>>) -> Self {
+        self.partition_ratios = ratios;
+        self
+    }
+
+    pub fn with_convergence_guard(
+        mut self,
+        guard: Box<dyn ConvergenceGuard>,
+    ) -> Self {
+        self.convergence_guard = guard;
+        self
+    }
+
+    pub fn no_divergence_guard(mut self) -> Self {
+        self.convergence_guard = Box::new(NoGuard);
+        self
+    }
+
+    pub fn elche_relax_up(mut self, enabled: bool) -> Self {
+        self.elche_relax_up = enabled;
+        self
+    }
+
+    pub fn overshoot(mut self, initial: usize, ceiling: usize, auto: bool) -> Self {
+        self.overshoot_initial = initial;
+        self.overshoot_ceiling = ceiling;
+        self.overshoot_auto = auto;
+        self
+    }
+
+    /// Enable the LR-aware meta-controller above ElChe. Default: false.
+    ///
+    /// When enabled, a [`crate::distributed::lr_event_meta::LrEventMeta`]
+    /// is constructed by [`ClusterCoordinator::start_from_listener`] and
+    /// observed after every averaging-cycle guard verdict. Ports the
+    /// OLD `CoordinatorBuilder::meta_controller` opt-in (see
+    /// [`crate::distributed::lr_event_meta`] for the design and rollout
+    /// stages).
+    pub fn meta_controller(mut self, enabled: bool) -> Self {
+        self.meta_controller = enabled;
+        self
+    }
+
+    /// Share a dead-rank ledger with the cluster controller. Required
+    /// for elastic-membership (rank-death-survives-the-run) semantics.
+    /// Pass the same `Arc<DeadRanks>` to
+    /// [`crate::distributed::controller::ClusterController::start_with_dead_ranks`].
+    pub fn dead_ranks(
+        mut self,
+        ledger: Arc<crate::distributed::controller::DeadRanks>,
+    ) -> Self {
+        self.dead_ranks = Some(ledger);
+        self
+    }
+
+    /// Override the heartbeat staleness threshold. Default 30s.
+    pub fn heartbeat_timeout_secs(mut self, secs: u64) -> Self {
+        self.heartbeat_timeout_secs = secs;
+        self
+    }
+
+    /// Mark ranks running on the same host as the coord process.
+    /// The NCCL re-rendezvous picker prefers these when picking a
+    /// UID generator (local same-process latency + lower correlated
+    /// failure risk). Used by the launcher to pin its local GPU
+    /// rank(s); standalone-coord tests typically leave this empty.
+    pub fn local_ranks(mut self, ranks: Vec<usize>) -> Self {
+        self.local_ranks = ranks;
+        self
+    }
+}
+
+/// CPU-backend averaging state machine. Restores cycle-1 guard-verdict
+/// correctness on the CPU path: the worker bridges compute the
+/// AllReduce + weight-space divergence and emit
+/// [`crate::distributed::wire::TimingMsgWire::SyncAck`] with the
+/// divergence triple; the coordinator now waits for all of those
+/// SyncAcks (via this state) before calling
+/// [`ClusterCoordinator::finish_averaging_cpu`], so the guard sees real
+/// divergence instead of the all-Nones sentinel that
+/// [`unwrap_or(0.0)`] collapses to zero.
+///
+/// **Wait policy:** the coordinator waits **indefinitely** for every
+/// rank's SyncAck. Dropping a CPU averaging cycle is a correctness
+/// violation for Local SGD (per-rank drift accumulates super-linearly
+/// across missed rendezvous points), so the only safe response to a
+/// stalled rank is to keep waiting. **Liveness detection lives outside
+/// the averaging path**: heartbeats (planned 1d.5) feed the coordinator
+/// independently and surface dead ranks as fatal training errors. Slow
+/// (but live) ranks are absorbed by ElChe on the next cycle, which
+/// rebalances [`crate::distributed::ddp::ElChe::batch_counts`] from the
+/// observed wall-time. **Elastic averaging on confirmed rank death**
+/// (rebuild [`crate::distributed::cpu_reduce::CpuReduceClient`] with a
+/// shrunken world, reshard the dead rank's remaining partition onto the
+/// fastest survivors) is a separate later slice.
+///
+/// NCCL backend keeps the synchronous trigger → finish pattern (OLD
+/// `Coordinator::finish_averaging_nccl` parity).
+#[derive(Debug)]
+enum CpuAvgState {
+    /// No averaging cycle in flight.
+    Idle,
+    /// `trigger_averaging` broadcast `RequestParams` and is waiting for
+    /// every rank's bridge SyncAck to populate `nccl_sync_divergence` /
+    /// `nccl_sync_pre_norm` / `nccl_sync_post_norm`.
+    /// `poll_cpu_averaging` transitions back to `Idle` once `nccl_ack`
+    /// is all-true (finalizes the cycle). No deadline — see the
+    /// type-level docstring above for the rationale.
+    Pending,
+}
+
+/// In-flight NCCL re-rendezvous bookkeeping. Created when the coord
+/// declares one or more dead ranks on the NCCL path; cleared when the
+/// chosen generator rank ships back a fresh `NcclUniqueId` and the
+/// coord broadcasts [`crate::distributed::wire::ControlMsgWire::NewNcclSession`]
+/// to every survivor.
+#[derive(Debug)]
+struct NcclRendezvousPending {
+    /// Rank we sent `RequestNewNcclId` to. The coord drops any
+    /// `NewNcclIdGenerated` whose `rank` field doesn't match.
+    generator_rank: usize,
+    /// Survivor ranks ordered by ascending global index, captured at
+    /// initiation time. Currently unread (the broadcast helper
+    /// recomputes the alive set so additional deaths during the
+    /// rendezvous wait are reflected); kept for diagnostics and as
+    /// the seed for the future 1d.3c "rendezvous timeout retry"
+    /// path which would re-pick a generator from this set if the
+    /// chosen one also dies before responding.
+    #[allow(dead_code)]
+    survivors_ordered: Vec<usize>,
+}
+
+/// Process-model coordinator: ports the OLD threaded
+/// `ddp_run::coordinator::Coordinator` to talk to remote rank
+/// processes over TCP.
+///
+/// Hand off control of one TCP control channel + one reader thread per
+/// rank. Drive the state machine via [`Self::tick`] from the
+/// containing thread.
+pub struct ClusterCoordinator {
+    // --- Static config ---
+    policy: ApplyPolicy,
+    backend: AverageBackend,
+    world_size: usize,
+    overshoot_initial: usize,
+    overshoot_ceiling: usize,
+    overshoot_auto: bool,
+    elche_relax_up: bool,
+
+    // --- Scheduling state (ported literally) ---
+    el_che: ElChe,
+    convergence_guard: Box<dyn ConvergenceGuard>,
+    version: u64,
+    avg_count: u64,
+    global_step: usize,
+    /// Set once ElChe has its first timing report.
+    calibrated: bool,
+    /// World_size minus exited workers.
+    active_count: usize,
+    /// Async-only: max batches a rank can run past the planned sync.
+    max_overshoot: usize,
+
+    /// Per-rank steps since the last averaging cycle.
+    steps_since_avg: Vec<usize>,
+    /// Per-rank wall-clock ms accumulated since the last averaging cycle.
+    wall_ms_accum: Vec<f64>,
+    /// Per-rank most-recent batch duration (ms).
+    last_batch_ms: Vec<f64>,
+    /// Per-rank most-recent worker step counter.
+    last_step_count: Vec<usize>,
+    /// Per-rank: `last_step_count` snapshot at the time SyncNow was sent.
+    nccl_sync_step: Vec<usize>,
+    /// Per-rank: true once a post-sync timing message has arrived.
+    nccl_ack: Vec<bool>,
+    /// Per-rank: weight-space divergence reported in the last SyncAck.
+    nccl_sync_divergence: Vec<Option<f64>>,
+    /// Per-rank: pre-AllReduce L2 norm from the last SyncAck.
+    nccl_sync_pre_norm: Vec<Option<f64>>,
+    /// Post-AllReduce L2 norm (identical across ranks; populated by the
+    /// first rank's SyncAck).
+    nccl_sync_post_norm: Option<f64>,
+    /// Per-rank: True if a Throttle has been sent and not yet cleared.
+    throttled: Vec<bool>,
+    /// Wall-time (ms) of the last completed NCCL sync; fed to ElChe as
+    /// `sync_ms` on the next `report_timing` call.
+    last_nccl_sync_ms: f64,
+    /// Instant the most recent SyncNow was emitted.
+    nccl_sync_start: Option<Instant>,
+
+    /// LR-aware meta-controller above ElChe. `None` when
+    /// [`ClusterCoordinatorConfig::meta_controller`] is `false` (default).
+    /// Observed after every averaging-cycle guard verdict via
+    /// [`Self::observe_meta`]; dispatches
+    /// [`crate::distributed::lr_event_meta::MetaAction::NudgeDown`] to
+    /// [`crate::distributed::ddp::ElChe::nudge_anchor_down`].
+    lr_event_meta: Option<crate::distributed::lr_event_meta::LrEventMeta>,
+    /// Most recent learning rate observed per rank via
+    /// [`TimingMsgWire::LrUpdate`]. Indexed by rank. `None` until the
+    /// first LR update from that rank arrives.
+    last_lr_per_rank: Vec<Option<f64>>,
+
+    /// CPU-backend averaging state machine. See [`CpuAvgState`].
+    cpu_avg_state: CpuAvgState,
+    /// Shared dead-rank ledger with the controller. `None` when
+    /// elastic membership is disabled (legacy / NCCL-only setups).
+    /// Mutating side: [`Self::check_dead_ranks`] calls `declare_dead`
+    /// on heartbeat staleness; reading side: should_average,
+    /// poll_cpu_averaging, and other gates skip dead ranks.
+    dead_ranks: Option<Arc<crate::distributed::controller::DeadRanks>>,
+    /// Heartbeat staleness threshold copied from config.
+    heartbeat_timeout_secs: u64,
+    /// Per-rank wall-clock of the last TimingMsg frame received from
+    /// that rank (any TimingMsgWire variant counts as a liveness
+    /// signal — Batch, SyncAck, Heartbeat, SnapshotReady, LrUpdate).
+    /// Initialized to `Instant::now()` at coord start; updated by
+    /// [`Self::process_timing_msg`] before any other per-message work.
+    /// Drives [`Self::check_dead_ranks`].
+    last_heartbeat: Vec<Instant>,
+    /// Per-rank snapshot of `last_step_count[r]` at the moment
+    /// [`Self::dispatch_epoch`] emitted `StartEpoch` to rank `r`.
+    /// Computing `last_step_count[r] - last_step_count_at_epoch_start[r]`
+    /// at dead-rank-declaration time yields the number of batches rank
+    /// `r` has processed in the current epoch, which translates to a
+    /// sample-count offset into its partition for the un-processed
+    /// remainder to redistribute to survivors via `ExtendPartition`.
+    /// Initialized to 0; refreshed every `dispatch_epoch`.
+    last_step_count_at_epoch_start: Vec<usize>,
+    /// In-flight NCCL re-rendezvous (NCCL backend only). `Some` while
+    /// the coord is awaiting a fresh `NcclUniqueId` from the chosen
+    /// generator rank; cleared once the new session has been
+    /// broadcast to survivors. CPU backend always leaves this `None`.
+    nccl_rendezvous_pending: Option<NcclRendezvousPending>,
+    /// Ranks co-located with the coord process. NCCL re-rendezvous
+    /// UID-generator picker prefers these (Tier 1) over fastest
+    /// network rank (Tier 2). Sourced from
+    /// [`ClusterCoordinatorConfig::local_ranks`].
+    local_ranks: Vec<usize>,
+    /// Per-rank wall-time (ms) from the most recent averaging cycle's
+    /// `RequestParams` broadcast to that rank's SyncAck arrival.
+    /// Populated by [`Self::process_timing_msg`]'s SyncAck arm.
+    ///
+    /// **Caveat: barrier-correlated, NOT per-rank capacity.** A rank's
+    /// bridge blocks inside the AllReduce barrier until every rank
+    /// arrives, so individual lag values converge toward the slowest
+    /// rank's contribution. Use this as a *cycle latency* indicator
+    /// only — do NOT feed it into ElChe or partition-balancing logic
+    /// as a per-rank throughput proxy. Honest per-rank capacity
+    /// instead comes from `wall_ms_accum` / `steps_since_avg` (already
+    /// excludes the barrier wait) and the future per-rank
+    /// upload-completion marker planned alongside heartbeat (1d.5+).
+    last_observed_sync_lag_ms: Vec<Option<f64>>,
+
+    // --- Epoch dispatch ---
+    /// Per-rank current epoch (last StartEpoch dispatched).
+    rank_epoch: Vec<usize>,
+    /// Last globally-aggregated epoch index (all ranks reported).
+    /// `None` until the first aggregation.
+    last_aggregated_epoch: Option<usize>,
+    /// Cached epoch plans: computed once per epoch, consistent across
+    /// ranks regardless of when the StartEpoch frame goes out.
+    epoch_plan_cache: std::collections::HashMap<usize, Vec<crate::distributed::wire::EpochPlanWire>>,
+    /// Total samples in the dataset; basis for partition computation.
+    total_samples: usize,
+    /// Batch size; carried for symmetry with OLD Coordinator (1d.6).
+    batch_size: usize,
+    /// Total number of epochs the trainer asked for.
+    num_epochs: usize,
+    /// User-specified per-rank partition ratios, if any.
+    partition_ratios: Option<Vec<f64>>,
+
+    // --- Channels / threads ---
+    /// Reader threads (one per rank) push decoded timing messages here;
+    /// the coordinator thread drains via [`Self::drain_timing`].
+    timing_rx: mpsc::Receiver<TimingMsgWire>,
+    /// Outbound control streams (one per rank, write half held here).
+    /// Reader thread holds a try-cloned read half.
+    control_streams: Vec<TcpStream>,
+    /// Reader-thread join handles. Drop on [`Self::shutdown`].
+    reader_handles: Vec<Option<JoinHandle<()>>>,
+    /// Signals reader threads to stop reading and exit.
+    shutdown_flag: Arc<AtomicBool>,
+    /// Bound port of the control listener (for tests / diagnostics).
+    bound_port: u16,
+    /// Session salt — write side uses it for outbound ControlFrames.
+    salt: SessionSalt,
+}
+
+impl ClusterCoordinator {
+    /// Bind a control TcpListener at `bind_addr`, accept exactly
+    /// `world_size` rank connections (validating the session salt at
+    /// handshake), spawn per-rank reader threads, and return the
+    /// configured coordinator.
+    ///
+    /// Returns `Err` if any handshake fails (loud error: salt mismatch,
+    /// magic mismatch, version mismatch, world_size disagreement,
+    /// duplicate rank_id).
+    pub fn start(
+        bind_addr: SocketAddr,
+        salt: SessionSalt,
+        config: ClusterCoordinatorConfig,
+    ) -> Result<Self> {
+        let (listener, _port) = Self::bind(bind_addr)?;
+        Self::start_from_listener(listener, salt, config)
+    }
+
+    /// Bind the control listener without blocking on accept. Useful for
+    /// tests that need to publish the bound port before spawning rank
+    /// connections (the post-bind accept loop blocks the calling
+    /// thread until every rank has connected).
+    pub fn bind(bind_addr: SocketAddr) -> Result<(TcpListener, u16)> {
+        let listener = TcpListener::bind(bind_addr).map_err(|e| {
+            TensorError::new(&format!(
+                "cluster_coordinator: bind {bind_addr} failed: {e}"
+            ))
+        })?;
+        let bound_port = listener
+            .local_addr()
+            .map_err(|e| {
+                TensorError::new(&format!(
+                    "cluster_coordinator: local_addr() failed: {e}"
+                ))
+            })?
+            .port();
+        Ok((listener, bound_port))
+    }
+
+    /// Accept connections + handshake on a pre-bound listener. Pair
+    /// with [`Self::bind`] when the caller needs the port before
+    /// blocking on accepts (e.g. tests that spawn rank threads after
+    /// publishing the port through a channel).
+    pub fn start_from_listener(
+        listener: TcpListener,
+        salt: SessionSalt,
+        config: ClusterCoordinatorConfig,
+    ) -> Result<Self> {
+        let world_size = config.world_size;
+        if world_size == 0 {
+            return Err(TensorError::new(
+                "cluster_coordinator: world_size must be > 0",
+            ));
+        }
+        let bound_port = listener
+            .local_addr()
+            .map_err(|e| {
+                TensorError::new(&format!(
+                    "cluster_coordinator: local_addr() failed: {e}"
+                ))
+            })?
+            .port();
+
+        // Accept world_size connections, validate handshake, place each
+        // at its claimed rank slot. Order-independent.
+        let mut streams: Vec<Option<TcpStream>> =
+            (0..world_size).map(|_| None).collect();
+        let mut connected = 0usize;
+        while connected < world_size {
+            let (mut stream, _peer) = listener.accept().map_err(|e| {
+                TensorError::new(&format!(
+                    "cluster_coordinator: accept failed: {e}"
+                ))
+            })?;
+            // 10s handshake timeout protects against wedged ranks.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .map_err(|e| {
+                    TensorError::new(&format!(
+                        "cluster_coordinator: set_read_timeout: {e}"
+                    ))
+                })?;
+            let rank_id = read_handshake_rank(&mut stream, world_size as u32, &salt)?;
+            let rank_idx = rank_id as usize;
+            if rank_idx >= world_size {
+                return Err(TensorError::new(&format!(
+                    "cluster_coordinator: handshake rank_id {rank_idx} >= world_size {world_size}"
+                )));
+            }
+            if streams[rank_idx].is_some() {
+                return Err(TensorError::new(&format!(
+                    "cluster_coordinator: duplicate rank_id {rank_idx} connected"
+                )));
+            }
+            write_handshake_ack(&mut stream, &salt)?;
+            // Clear the handshake timeout; ControlFrame reads can take
+            // arbitrarily long under load.
+            stream
+                .set_read_timeout(None)
+                .map_err(|e| {
+                    TensorError::new(&format!(
+                        "cluster_coordinator: clear read_timeout: {e}"
+                    ))
+                })?;
+            streams[rank_idx] = Some(stream);
+            connected += 1;
+        }
+        let mut streams: Vec<TcpStream> = streams.into_iter()
+            .map(|s| s.expect("all slots filled by accept loop"))
+            .collect();
+
+        // Spawn one reader thread per rank. Each thread holds the read
+        // half of a try_clone'd stream; the coordinator owns the write
+        // half. ControlFrame::read_from handles HMAC validation per frame.
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let (timing_tx, timing_rx) = mpsc::channel::<TimingMsgWire>();
+
+        let mut reader_handles: Vec<Option<JoinHandle<()>>> = Vec::with_capacity(world_size);
+        for (rank, stream) in streams.iter_mut().enumerate() {
+            let mut read_half = stream.try_clone().map_err(|e| {
+                TensorError::new(&format!(
+                    "cluster_coordinator: stream try_clone for rank {rank}: {e}"
+                ))
+            })?;
+            // Reader uses a short timeout to observe shutdown between frames.
+            read_half
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .map_err(|e| {
+                    TensorError::new(&format!(
+                        "cluster_coordinator: reader set_read_timeout: {e}"
+                    ))
+                })?;
+            let tx = timing_tx.clone();
+            let salt_for_reader = salt;
+            let shutdown_for_reader = Arc::clone(&shutdown_flag);
+            let handle = thread::Builder::new()
+                .name(format!("flodl-coord-reader:r{rank}"))
+                .spawn(move || {
+                    reader_loop(rank, &mut read_half, &salt_for_reader, &shutdown_for_reader, &tx);
+                })
+                .map_err(|e| {
+                    TensorError::new(&format!(
+                        "cluster_coordinator: spawn reader for rank {rank}: {e}"
+                    ))
+                })?;
+            reader_handles.push(Some(handle));
+        }
+        // Drop the extra sender we cloned for the closures; loop exit
+        // depends on every cloned sender being dropped, but that happens
+        // automatically when reader threads exit.
+        drop(timing_tx);
+
+        Ok(ClusterCoordinator {
+            policy: config.policy,
+            backend: config.backend,
+            world_size,
+            overshoot_initial: config.overshoot_initial,
+            overshoot_ceiling: config.overshoot_ceiling,
+            overshoot_auto: config.overshoot_auto,
+            elche_relax_up: config.elche_relax_up,
+            el_che: config.el_che,
+            convergence_guard: config.convergence_guard,
+            version: 0,
+            avg_count: 0,
+            global_step: 0,
+            calibrated: false,
+            active_count: world_size,
+            max_overshoot: config.overshoot_initial,
+            steps_since_avg: vec![0; world_size],
+            wall_ms_accum: vec![0.0; world_size],
+            last_batch_ms: vec![0.0; world_size],
+            last_step_count: vec![0; world_size],
+            nccl_sync_step: vec![0; world_size],
+            nccl_ack: vec![true; world_size],
+            nccl_sync_divergence: vec![None; world_size],
+            nccl_sync_pre_norm: vec![None; world_size],
+            nccl_sync_post_norm: None,
+            throttled: vec![false; world_size],
+            last_nccl_sync_ms: 0.0,
+            nccl_sync_start: None,
+            lr_event_meta: if config.meta_controller {
+                Some(crate::distributed::lr_event_meta::LrEventMeta::with_default_config())
+            } else {
+                None
+            },
+            last_lr_per_rank: vec![None; world_size],
+            cpu_avg_state: CpuAvgState::Idle,
+            dead_ranks: config.dead_ranks,
+            heartbeat_timeout_secs: config.heartbeat_timeout_secs,
+            last_heartbeat: vec![Instant::now(); world_size],
+            last_step_count_at_epoch_start: vec![0; world_size],
+            nccl_rendezvous_pending: None,
+            local_ranks: config.local_ranks.clone(),
+            last_observed_sync_lag_ms: vec![None; world_size],
+            rank_epoch: vec![0; world_size],
+            last_aggregated_epoch: None,
+            epoch_plan_cache: std::collections::HashMap::new(),
+            total_samples: config.total_samples,
+            batch_size: config.batch_size.max(1),
+            num_epochs: config.num_epochs,
+            partition_ratios: config.partition_ratios,
+            timing_rx,
+            control_streams: streams,
+            reader_handles,
+            shutdown_flag,
+            bound_port,
+            salt,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Public accessors (mirror the OLD coordinator's getters)
+    // -----------------------------------------------------------------
+
+    pub fn bound_port(&self) -> u16 {
+        self.bound_port
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn is_calibrated(&self) -> bool {
+        self.calibrated
+    }
+
+    pub fn steps_since_avg(&self) -> &[usize] {
+        &self.steps_since_avg
+    }
+
+    pub fn avg_count(&self) -> u64 {
+        self.avg_count
+    }
+
+    pub fn global_step(&self) -> usize {
+        self.global_step
+    }
+
+    pub fn world_size(&self) -> usize {
+        self.world_size
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.active_count
+    }
+
+    pub fn max_overshoot(&self) -> usize {
+        self.max_overshoot
+    }
+
+    pub fn el_che(&self) -> &ElChe {
+        &self.el_che
+    }
+
+    /// Test-only peek at the most-recent per-rank LR snapshot. Mirrors
+    /// the OLD coordinator's `last_lr_per_rank`. `None` for ranks that
+    /// have not yet sent a [`TimingMsgWire::LrUpdate`].
+    #[cfg(test)]
+    pub(crate) fn last_lr_per_rank_for_test(&self) -> &[Option<f64>] {
+        &self.last_lr_per_rank
+    }
+
+    /// Test-only peek at whether the LR-aware meta-controller is
+    /// active. Returns `true` when
+    /// [`ClusterCoordinatorConfig::meta_controller`] was set.
+    #[cfg(test)]
+    pub(crate) fn meta_controller_enabled_for_test(&self) -> bool {
+        self.lr_event_meta.is_some()
+    }
+
+    /// Test-only peek at the per-rank observed sync-lag history (ms).
+    /// See [`Self::last_observed_sync_lag_ms`] for the caveat about
+    /// barrier correlation.
+    #[cfg(test)]
+    pub(crate) fn last_observed_sync_lag_ms_for_test(&self) -> &[Option<f64>] {
+        &self.last_observed_sync_lag_ms
+    }
+
+    /// Feed an averaging-cycle observation to the LR-aware meta-controller
+    /// (when enabled) and dispatch any returned action to ElChe.
+    ///
+    /// Ported from OLD `Coordinator::observe_meta` (`coordinator/mod.rs`);
+    /// matches behavior including `MetaAction::NudgeDown` dispatch via
+    /// [`crate::distributed::ddp::ElChe::nudge_anchor_down`] (OLD's Stage
+    /// 3 — already landed per `project_06_controller_arc.md`).
+    ///
+    /// No-op when:
+    /// - the meta-controller is disabled (`lr_event_meta` is `None`),
+    /// - no rank has reported its LR yet (cold-start, ≤ 1 cycle).
+    ///
+    /// On [`crate::distributed::lr_event_meta::MetaAction::NudgeDown`]
+    /// the resulting anchor change is captured by the cycle's net
+    /// `AnchorChanged` event in the caller (we don't emit a duplicate
+    /// event here — only a `verbose!` log line, mirroring OLD).
+    fn observe_meta(
+        &mut self,
+        verdict: crate::distributed::ddp_run::convergence::ConvergenceAction,
+    ) {
+        let Some(lr) = self.last_lr_per_rank.iter().copied().find_map(|x| x) else {
+            return;
+        };
+        let anchor = self.el_che.anchor();
+        let phase = self.el_che.phase();
+        let action = match self.lr_event_meta.as_mut() {
+            Some(meta) => meta.observe(lr, anchor, verdict, phase),
+            None => return,
+        };
+        if let crate::distributed::lr_event_meta::MetaAction::NudgeDown { factor } = action {
+            let old = self.el_che.anchor();
+            self.el_che.nudge_anchor_down(factor);
+            let new = self.el_che.anchor();
+            crate::verbose!(
+                "  ddp: meta-controller nudge factor={:.3} anchor {} -> {}",
+                factor, old, new,
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // State-machine drive
+    // -----------------------------------------------------------------
+
+    /// Process a single timing message. Ported literally from OLD
+    /// `Coordinator::process_timing_msg`, modulo the field-name `rank`
+    /// being `u64` on the wire vs `usize` in-process.
+    fn process_timing_msg(&mut self, msg: TimingMsgWire) {
+        // Liveness tick: every frame from a rank counts as proof-of-
+        // life. Updates `last_heartbeat[rank]` before any per-message
+        // work so even malformed-rank frames (rejected below) at least
+        // refresh the slot. `check_dead_ranks` later compares against
+        // wall-clock.
+        let rank_for_liveness: Option<usize> = match &msg {
+            TimingMsgWire::Batch { rank, .. }
+            | TimingMsgWire::SyncAck { rank, .. }
+            | TimingMsgWire::Exiting { rank }
+            | TimingMsgWire::LrUpdate { rank, .. }
+            | TimingMsgWire::Heartbeat { rank, .. }
+            | TimingMsgWire::SnapshotReady { rank }
+            | TimingMsgWire::NewNcclIdGenerated { rank, .. } => Some(*rank as usize),
+        };
+        if let Some(r) = rank_for_liveness {
+            if r < self.last_heartbeat.len() {
+                self.last_heartbeat[r] = Instant::now();
+            }
+        }
+        match msg {
+            TimingMsgWire::Batch {
+                rank,
+                batch_ms,
+                step_count,
+                param_norm,
+                batch_loss,
+                sync_divergence,
+            } => {
+                let rank = rank as usize;
+                let step_count = step_count as usize;
+                if rank >= self.world_size {
+                    return; // ignore malformed; tests will fail loudly
+                }
+                self.steps_since_avg[rank] =
+                    self.steps_since_avg[rank].saturating_add(1);
+                self.wall_ms_accum[rank] += batch_ms;
+                self.last_step_count[rank] =
+                    self.last_step_count[rank].max(step_count);
+                self.last_batch_ms[rank] = batch_ms;
+                let _ = batch_loss; // monitoring only in this slice
+                let _ = param_norm;
+                if let Some(div) = sync_divergence {
+                    self.nccl_sync_divergence[rank] = Some(div);
+                }
+                if rank < self.nccl_ack.len()
+                    && !self.nccl_ack[rank]
+                    && step_count > self.nccl_sync_step[rank]
+                {
+                    self.nccl_ack[rank] = true;
+                    self.capture_nccl_sync_elapsed_if_complete();
+                }
+            }
+            TimingMsgWire::SyncAck {
+                rank,
+                step_count,
+                divergence,
+                post_norm,
+                pre_norm,
+            } => {
+                let rank = rank as usize;
+                let step_count = step_count as usize;
+                if rank >= self.world_size {
+                    return;
+                }
+                self.last_step_count[rank] =
+                    self.last_step_count[rank].max(step_count);
+                if let Some(div) = divergence {
+                    self.nccl_sync_divergence[rank] = Some(div);
+                }
+                if let Some(p) = pre_norm {
+                    self.nccl_sync_pre_norm[rank] = Some(p);
+                }
+                if let Some(p) = post_norm {
+                    match self.nccl_sync_post_norm {
+                        None => self.nccl_sync_post_norm = Some(p),
+                        Some(prev) => debug_assert!(
+                            (prev - p).abs() <= 1e-6 * prev.abs().max(1.0),
+                            "post_norm rank-disagreement: prev={prev} new={p} (rank {rank})"
+                        ),
+                    }
+                }
+                if rank < self.nccl_ack.len()
+                    && !self.nccl_ack[rank]
+                    && step_count > self.nccl_sync_step[rank]
+                {
+                    self.nccl_ack[rank] = true;
+                    // Per-rank sync lag (wall time from
+                    // `RequestParams` / `SyncNow` broadcast to this
+                    // rank's SyncAck). Captured BEFORE
+                    // `capture_nccl_sync_elapsed_if_complete` takes
+                    // `nccl_sync_start` on the all-acked transition.
+                    // Feeds the adaptive CPU deadline computed in the
+                    // NEXT `trigger_averaging`.
+                    if let Some(start) = self.nccl_sync_start {
+                        if rank < self.last_observed_sync_lag_ms.len() {
+                            self.last_observed_sync_lag_ms[rank] =
+                                Some(start.elapsed().as_secs_f64() * 1000.0);
+                        }
+                    }
+                    self.capture_nccl_sync_elapsed_if_complete();
+                }
+            }
+            TimingMsgWire::Exiting { rank: _ } => {
+                self.active_count = self.active_count.saturating_sub(1);
+            }
+            TimingMsgWire::LrUpdate { rank, lr } => {
+                let rank = rank as usize;
+                if rank < self.last_lr_per_rank.len() {
+                    self.last_lr_per_rank[rank] = Some(lr);
+                }
+                // The meta-controller is consulted on every averaging
+                // cycle via `observe_meta`; per-message work is just
+                // recording the latest LR.
+            }
+            TimingMsgWire::Heartbeat { .. } => {
+                // Liveness slot already refreshed above; nothing
+                // further to do per-frame. `check_dead_ranks` reads
+                // last_heartbeat each tick.
+            }
+            TimingMsgWire::SnapshotReady { .. } => {
+                // Pure operational telemetry for now: marks the end of
+                // per-rank snapshot+upload (honest per-rank capacity
+                // signal, NOT polluted by the AllReduce barrier wait
+                // that follows). A future slice will feed this into
+                // ElChe's partition rebalancer when we add a per-rank
+                // upload-throughput estimator separate from
+                // wall_ms_accum. For 1d.5 it's enough that the wire
+                // path is in place and liveness is refreshed above.
+            }
+            TimingMsgWire::NewNcclIdGenerated { rank, uid_bytes } => {
+                let rank = rank as usize;
+                if let Some(state) = self.nccl_rendezvous_pending.take() {
+                    if state.generator_rank != rank {
+                        crate::verbose!(
+                            "  ddp: dropping NewNcclIdGenerated from rank {} \
+                             (expected from generator rank {})",
+                            rank,
+                            state.generator_rank,
+                        );
+                        // Put back so we keep waiting for the real generator.
+                        self.nccl_rendezvous_pending = Some(state);
+                        return;
+                    }
+                    // Broadcast the new uid to each surviving rank
+                    // with its position-in-shrunken-cohort. Survivors
+                    // are ordered by ascending global rank.
+                    if let Err(e) =
+                        self.broadcast_new_nccl_session(uid_bytes)
+                    {
+                        crate::verbose!(
+                            "  ddp: NewNcclSession broadcast failed: {} \
+                             (NCCL elastic membership will not recover \
+                             from this round of deaths; cluster may hang)",
+                            e,
+                        );
+                    }
+                } else {
+                    crate::verbose!(
+                        "  ddp: dropping unexpected NewNcclIdGenerated \
+                         from rank {} (no rendezvous pending)",
+                        rank,
+                    );
+                }
+            }
+        }
+    }
+
+    fn capture_nccl_sync_elapsed_if_complete(&mut self) {
+        if self.nccl_ack.iter().all(|&a| a) {
+            if let Some(start) = self.nccl_sync_start.take() {
+                self.last_nccl_sync_ms =
+                    start.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+    }
+
+    /// Drain every pending timing message non-blocking.
+    pub fn drain_timing(&mut self) {
+        while let Ok(msg) = self.timing_rx.try_recv() {
+            self.process_timing_msg(msg);
+        }
+    }
+
+    /// Block up to `timeout` for the first timing message, then drain
+    /// the rest non-blocking. Returns `false` when every reader thread
+    /// has exited (all senders dropped) so the caller can break its
+    /// loop. Mirrors OLD `Coordinator::drain_timing_blocking`.
+    pub fn drain_timing_blocking(&mut self, timeout: Duration) -> bool {
+        match self.timing_rx.recv_timeout(timeout) {
+            Ok(msg) => self.process_timing_msg(msg),
+            Err(mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+        while let Ok(msg) = self.timing_rx.try_recv() {
+            self.process_timing_msg(msg);
+        }
+        true
+    }
+
+    /// Check whether an averaging cycle should be triggered now. Ported
+    /// literally from OLD `Coordinator::should_average`.
+    ///
+    /// `nccl_ack` is named for the NCCL path's SyncAck mechanism but
+    /// serves both backends in the new TCP model: workers send a
+    /// `TimingMsg::SyncAck` after every averaging round (regardless of
+    /// backend) so the coordinator can gate re-triggering until the
+    /// previous round has settled.
+    pub fn should_average(&self) -> bool {
+        // Every gate skips dead ranks: they won't ack, won't step, and
+        // won't accumulate wall_ms. Treating them as "satisfied" lets
+        // the surviving cohort keep training.
+        for r in 0..self.world_size {
+            if self.is_dead(r) {
+                continue;
+            }
+            if !self.nccl_ack[r] {
+                return false;
+            }
+            if self.steps_since_avg[r] == 0 {
+                return false;
+            }
+        }
+        // active_count must be > 0 — if every rank is dead, training
+        // is over (caller's responsibility to detect that separately).
+        if self.active_count == 0 {
+            return false;
+        }
+        match self.policy {
+            ApplyPolicy::Sync => (0..self.world_size)
+                .filter(|r| !self.is_dead(*r))
+                .all(|r| self.steps_since_avg[r] >= 1),
+            ApplyPolicy::Cadence => {
+                let target = self.el_che.anchor_wall_ms();
+                if target > 0.0 {
+                    let min_wall = (0..self.world_size)
+                        .filter(|r| !self.is_dead(*r))
+                        .map(|r| self.wall_ms_accum[r])
+                        .fold(f64::MAX, f64::min);
+                    return min_wall >= target;
+                }
+                let counts = self.el_che.batch_counts();
+                (0..self.world_size)
+                    .filter(|r| !self.is_dead(*r))
+                    .all(|r| self.steps_since_avg[r] >= counts[r])
+            }
+            ApplyPolicy::Async => {
+                let counts = self.el_che.batch_counts();
+                (0..self.world_size)
+                    .filter(|r| !self.is_dead(*r))
+                    .all(|r| self.steps_since_avg[r] >= counts[r])
+            }
+        }
+    }
+
+    /// Throttle fast workers. Ported literally from OLD
+    /// `Coordinator::check_throttle`. NCCL backend is a no-op (collective
+    /// already coordinates), CPU backend not yet supported in 1d.1.
+    pub fn check_throttle(&mut self) -> Result<()> {
+        if matches!(self.backend, AverageBackend::Nccl) {
+            return Ok(());
+        }
+        let max_diff = match self.el_che.max_batch_diff() {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        if self.active_count < self.world_size {
+            return Ok(());
+        }
+        let min_steps = self.steps_since_avg.iter().copied().min().unwrap_or(0);
+        // Snapshot to avoid borrow-conflict on self.control_streams in send.
+        let mut to_throttle: Vec<usize> = Vec::new();
+        for (rank, &steps) in self.steps_since_avg.iter().enumerate() {
+            let should = steps > min_steps + max_diff;
+            if should && !self.throttled[rank] {
+                to_throttle.push(rank);
+            }
+        }
+        for rank in to_throttle {
+            self.send_control(rank, &ControlMsgWire::Throttle)?;
+            self.throttled[rank] = true;
+        }
+        Ok(())
+    }
+
+    /// Trigger an averaging cycle. Dispatches to the backend-specific
+    /// trigger message + finish hook. Mirrors OLD
+    /// `Coordinator::trigger_averaging`.
+    ///
+    /// - NCCL: broadcast `SyncNow`; finish_averaging_nccl runs
+    ///   convergence inline using last-round divergence data + emits
+    ///   `SetGlobalStep`.
+    /// - CPU: broadcast `RequestParams`; finish_averaging_cpu mirrors
+    ///   the NCCL flow but emits `Update{version}` as the lifecycle
+    ///   barrier. Workers receive averaged tensors via the data
+    ///   channel ([`crate::distributed::cpu_reduce::CpuReduceClient`])
+    ///   between RequestParams and the next round.
+    pub fn trigger_averaging(&mut self) -> Result<()> {
+        match self.backend {
+            AverageBackend::Nccl => {
+                self.nccl_sync_start = Some(Instant::now());
+                self.broadcast_control(&ControlMsgWire::SyncNow)?;
+                for rank in 0..self.world_size {
+                    self.nccl_sync_step[rank] = self.last_step_count[rank];
+                    self.nccl_ack[rank] = false;
+                }
+                self.finish_averaging_nccl()?;
+            }
+            AverageBackend::Cpu => {
+                self.nccl_sync_start = Some(Instant::now());
+                self.broadcast_control(&ControlMsgWire::RequestParams)?;
+                for rank in 0..self.world_size {
+                    self.nccl_sync_step[rank] = self.last_step_count[rank];
+                    self.nccl_ack[rank] = false;
+                }
+                // Defer `finish_averaging_cpu` until every rank's
+                // bridge SyncAck has populated `nccl_sync_divergence`
+                // (otherwise the guard reads all-Nones → zero, breaking
+                // divergence-driven cadence control on cycle 1).
+                // `poll_cpu_averaging` (called from `tick`) finalizes.
+                //
+                // No deadline: dropping a CPU averaging cycle is a
+                // correctness violation for Local SGD (per-rank drift
+                // accumulates super-linearly across missed rendezvous
+                // points). Liveness is a SEPARATE concern handled by
+                // heartbeats (1d.5+); slow-but-alive ranks are
+                // absorbed by ElChe's per-rank `wall_ms_accum` /
+                // `batch_counts` rebalance on the next cycle.
+                self.cpu_avg_state = CpuAvgState::Pending;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drive the CPU averaging state machine one tick. No-op when
+    /// [`CpuAvgState::Idle`].
+    ///
+    /// In [`CpuAvgState::Pending`]: if every ALIVE rank has acked,
+    /// runs [`Self::finish_averaging_cpu`] and returns to `Idle`.
+    /// Dead ranks (per [`Self::dead_ranks`]) count as "acked" because
+    /// they won't ever ack — the controller has already released the
+    /// in-flight AllReduce with surviving ranks only, so finalizing
+    /// here is correct.
+    fn poll_cpu_averaging(&mut self) -> Result<()> {
+        if !matches!(self.cpu_avg_state, CpuAvgState::Pending) {
+            return Ok(());
+        }
+        let all_alive_acked = (0..self.world_size).all(|r| {
+            if self.is_dead(r) {
+                return true;
+            }
+            self.nccl_ack[r]
+        });
+        if all_alive_acked {
+            self.cpu_avg_state = CpuAvgState::Idle;
+            return self.finish_averaging_cpu();
+        }
+        Ok(())
+    }
+
+    /// Scan `last_heartbeat` for stale entries. For each rank whose
+    /// most-recent frame arrival exceeds `heartbeat_timeout_secs` and
+    /// is not already dead, declare it dead via the shared
+    /// [`crate::distributed::controller::DeadRanks`] ledger.
+    ///
+    /// Declaring a rank dead:
+    /// - Sets the rank's flag (shared with controller).
+    /// - Shuts down the rank's controller-side stream, waking any
+    ///   in-flight AllReduce so it releases with surviving ranks.
+    /// - Decrements `active_count` so subsequent `should_average`
+    ///   gates use the smaller quorum.
+    ///
+    /// No-op when `dead_ranks` is `None` (elastic membership not
+    /// configured — rank death is permanently blocking, matching
+    /// pre-1d.5 behavior).
+    fn check_dead_ranks(&mut self) {
+        let Some(ledger) = self.dead_ranks.as_ref().cloned() else {
+            return;
+        };
+        let now = Instant::now();
+        let threshold = Duration::from_secs(self.heartbeat_timeout_secs);
+        let mut any_newly_dead = false;
+        for r in 0..self.world_size {
+            if ledger.is_dead(r) {
+                continue;
+            }
+            if now.duration_since(self.last_heartbeat[r]) > threshold {
+                crate::verbose!(
+                    "  ddp: heartbeat stale on rank {} (>{}s), declaring dead",
+                    r,
+                    self.heartbeat_timeout_secs,
+                );
+                // Compute the dead rank's un-processed remainder
+                // BEFORE flipping `active_count` (the survivor count
+                // used by the redistribution formula reads the
+                // pre-decrement value plus the to-die rank).
+                let remainder_plan = self.compute_dead_rank_remainder(r);
+                ledger.declare_dead(r);
+                self.active_count = self.active_count.saturating_sub(1);
+                self.last_heartbeat[r] = now;
+                any_newly_dead = true;
+                // NCCL backend: notify every surviving worker so they
+                // can update their LOCAL dead-rank ledgers and the
+                // NCCL watchdog can abort the in-flight collective.
+                // CPU backend doesn't need this — the controller-side
+                // stream shutdown via the shared `DeadRanks` ledger
+                // already releases its blocked AllReduce read.
+                if matches!(self.backend, AverageBackend::Nccl) {
+                    if let Err(e) = self.broadcast_control(
+                        &ControlMsgWire::DeclareDead { rank: r as u64 },
+                    ) {
+                        crate::verbose!(
+                            "  ddp: DeclareDead broadcast for rank {} failed: {}",
+                            r,
+                            e,
+                        );
+                    }
+                }
+                if let Some((remainder_offset, remainder_size)) = remainder_plan {
+                    if let Err(e) = self.redistribute_dead_rank_partition(
+                        r,
+                        remainder_offset,
+                        remainder_size,
+                    ) {
+                        crate::verbose!(
+                            "  ddp: ExtendPartition dispatch for dead rank {} \
+                             remainder failed: {} (samples will roll into \
+                             next epoch's reshuffle)",
+                            r,
+                            e,
+                        );
+                    }
+                }
+            }
+        }
+        // After processing all deaths this tick, kick off a single
+        // NCCL re-rendezvous (no-op if backend is CPU or rendezvous
+        // already pending or fewer than 2 survivors).
+        if any_newly_dead {
+            if let Err(e) = self.initiate_nccl_rendezvous_if_needed() {
+                crate::verbose!(
+                    "  ddp: NCCL rendezvous initiation failed: {}",
+                    e,
+                );
+            }
+        }
+    }
+
+    /// Compute the un-processed `(partition_offset, partition_size)`
+    /// inside dead rank `r`'s current-epoch partition. Returns `None`
+    /// when there's nothing to redistribute (rank already finished its
+    /// partition, partition_size was zero, or `epoch_plan_cache` has
+    /// no entry for this rank's epoch).
+    fn compute_dead_rank_remainder(&self, r: usize) -> Option<(u64, u64)> {
+        let epoch = self.rank_epoch[r];
+        let plans = self.epoch_plan_cache.get(&epoch)?;
+        let plan = plans.get(r)?;
+        let processed_batches = self
+            .last_step_count[r]
+            .saturating_sub(self.last_step_count_at_epoch_start[r]);
+        let processed_samples = (processed_batches * self.batch_size) as u64;
+        if processed_samples >= plan.partition_size {
+            return None;
+        }
+        let remainder_offset = plan.partition_offset + processed_samples;
+        let remainder_size = plan.partition_size - processed_samples;
+        Some((remainder_offset, remainder_size))
+    }
+
+    /// Slice the dead rank's un-processed remainder across surviving
+    /// ranks and emit an [`crate::distributed::wire::ControlMsgWire::ExtendPartition`]
+    /// frame to each. Currently splits equally; ElChe-weighted
+    /// distribution (using `partition_ratios` or throughput-derived
+    /// sizes) is a refinement landing alongside SnapshotReady →
+    /// ElChe consumer in a future slice. Per-rank slice sizes that
+    /// don't divide evenly distribute the remainder one sample at a
+    /// time to the first ranks.
+    ///
+    /// `dead_rank` itself is skipped. `world_size - active_count` may
+    /// already include `dead_rank` if the caller decremented
+    /// `active_count` before calling this method — that's fine
+    /// because the filter below uses the live `is_dead` ledger which
+    /// the caller already flipped.
+    fn redistribute_dead_rank_partition(
+        &mut self,
+        dead_rank: usize,
+        remainder_offset: u64,
+        remainder_size: u64,
+    ) -> Result<()> {
+        if remainder_size == 0 {
+            return Ok(());
+        }
+        let survivors: Vec<usize> = (0..self.world_size)
+            .filter(|r| *r != dead_rank && !self.is_dead(*r))
+            .collect();
+        if survivors.is_empty() {
+            return Err(TensorError::new(
+                "cluster_coordinator: redistribute called with no surviving ranks",
+            ));
+        }
+        let n = survivors.len() as u64;
+        let per_size = remainder_size / n;
+        let leftover = remainder_size % n;
+        let mut cursor = remainder_offset;
+        for (i, rank) in survivors.iter().enumerate() {
+            let extra = if (i as u64) < leftover { 1 } else { 0 };
+            let slice_size = per_size + extra;
+            if slice_size == 0 {
+                continue;
+            }
+            let msg = ControlMsgWire::ExtendPartition {
+                partition_offset: cursor,
+                partition_size: slice_size,
+            };
+            self.send_control(*rank, &msg)?;
+            cursor += slice_size;
+        }
+        crate::verbose!(
+            "  ddp: redistributed dead rank {}'s {} un-processed samples \
+             across {} survivors",
+            dead_rank,
+            remainder_size,
+            survivors.len(),
+        );
+        Ok(())
+    }
+
+    /// True iff `rank` is known dead via the shared ledger. Returns
+    /// false when no ledger is configured.
+    fn is_dead(&self, rank: usize) -> bool {
+        self.dead_ranks
+            .as_ref()
+            .map(|d| d.is_dead(rank))
+            .unwrap_or(false)
+    }
+
+    /// NCCL-backend re-rendezvous initiation. Called from
+    /// [`Self::check_dead_ranks`] once a rank has been declared dead
+    /// on the NCCL path. No-op on CPU backend (the controller-side
+    /// release handles CPU AllReduces). No-op when a rendezvous is
+    /// already pending — additional deaths during the wait will be
+    /// rolled into the same rendezvous when it completes
+    /// (`broadcast_new_nccl_session` reads the *current* alive set,
+    /// not the snapshot from rendezvous-initiation time).
+    fn initiate_nccl_rendezvous_if_needed(&mut self) -> Result<()> {
+        if !matches!(self.backend, AverageBackend::Nccl) {
+            return Ok(());
+        }
+        if self.nccl_rendezvous_pending.is_some() {
+            return Ok(());
+        }
+        let survivors_ordered: Vec<usize> = (0..self.world_size)
+            .filter(|r| !self.is_dead(*r))
+            .collect();
+        if survivors_ordered.len() < 2 {
+            crate::verbose!(
+                "  ddp: NCCL rendezvous skipped — fewer than 2 survivors \
+                 ({} alive of {})",
+                survivors_ordered.len(),
+                self.world_size,
+            );
+            return Ok(());
+        }
+        let generator_rank = self.pick_uid_generator(&survivors_ordered);
+        self.send_control(generator_rank, &ControlMsgWire::RequestNewNcclId)?;
+        self.nccl_rendezvous_pending = Some(NcclRendezvousPending {
+            generator_rank,
+            survivors_ordered,
+        });
+        Ok(())
+    }
+
+    /// Pick the rank that should generate the next NCCL unique-id.
+    ///
+    /// Tier 1: the lowest-numbered SURVIVING rank that's in
+    /// [`Self::local_ranks`] (co-located with the coord process,
+    /// same-process latency, lowest correlated-failure risk).
+    ///
+    /// Tier 2: the surviving rank with the smallest observed
+    /// `wall_ms_accum / steps_since_avg` (per-batch wall, NOT
+    /// barrier-correlated — clean per-rank capacity proxy). Ties
+    /// break by lowest global rank. When no rank has timing
+    /// history yet, this collapses to "lowest surviving global rank"
+    /// (deterministic).
+    fn pick_uid_generator(&self, survivors_ordered: &[usize]) -> usize {
+        // Tier 1: prefer a local survivor.
+        if let Some(&local) = self
+            .local_ranks
+            .iter()
+            .filter(|r| !self.is_dead(**r))
+            .min()
+        {
+            return local;
+        }
+        // Tier 2: fastest network survivor (per-batch wall time,
+        // tiebreak by global rank). `f64::partial_cmp` returns None
+        // on NaN; treat as Equal so the rank tiebreak applies.
+        survivors_ordered
+            .iter()
+            .copied()
+            .min_by(|&a, &b| {
+                let ta = self.per_rank_ms_per_batch(a);
+                let tb = self.per_rank_ms_per_batch(b);
+                ta.partial_cmp(&tb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.cmp(&b))
+            })
+            .unwrap_or(survivors_ordered[0])
+    }
+
+    /// Average per-batch wall-time (ms) for rank `r` from the current
+    /// cadence-interval accumulators. Returns `f64::INFINITY` when
+    /// the rank has no batches yet (cold start) so it sorts LAST in
+    /// the "fastest" picker — un-calibrated ranks shouldn't be
+    /// preferred as UID generators.
+    fn per_rank_ms_per_batch(&self, r: usize) -> f64 {
+        let steps = self.steps_since_avg.get(r).copied().unwrap_or(0);
+        if steps == 0 {
+            return f64::INFINITY;
+        }
+        let wall = self.wall_ms_accum.get(r).copied().unwrap_or(0.0);
+        wall / steps as f64
+    }
+
+    /// Broadcast `NewNcclSession` to every survivor. Called from the
+    /// `NewNcclIdGenerated` arm of `process_timing_msg` after the
+    /// generator rank ships back its freshly-generated UID. Each
+    /// survivor receives a frame whose `new_rank` reflects its
+    /// position among survivors ordered by ascending global rank.
+    fn broadcast_new_nccl_session(&mut self, uid_bytes: Vec<u8>) -> Result<()> {
+        // Recompute the survivor set from the *current* `is_dead`
+        // ledger — additional deaths during the rendezvous wait must
+        // be reflected in the broadcast so we don't ship a
+        // NewNcclSession to an already-dead rank.
+        let survivors: Vec<usize> = (0..self.world_size)
+            .filter(|r| !self.is_dead(*r))
+            .collect();
+        if survivors.len() < 2 {
+            return Err(TensorError::new(
+                "cluster_coordinator: NewNcclSession broadcast aborted; \
+                 fewer than 2 surviving ranks (NCCL requires world_size >= 2)",
+            ));
+        }
+        let new_world_size = survivors.len() as u64;
+        for (new_rank, &global_rank) in survivors.iter().enumerate() {
+            let msg = ControlMsgWire::NewNcclSession {
+                uid_bytes: uid_bytes.clone(),
+                new_rank: new_rank as u64,
+                new_world_size,
+            };
+            self.send_control(global_rank, &msg)?;
+        }
+        Ok(())
+    }
+
+    fn finish_averaging_nccl(&mut self) -> Result<()> {
+        let prev_sync_ms = self.last_nccl_sync_ms;
+        self.last_nccl_sync_ms = 0.0;
+        if self.wall_ms_accum.iter().any(|&ms| ms > 0.0) {
+            self.el_che.report_timing(
+                &self.wall_ms_accum,
+                &self.steps_since_avg,
+                prev_sync_ms,
+            );
+            if !self.calibrated && self.el_che.is_calibrated() {
+                self.calibrated = true;
+            }
+        }
+
+        let nccl_pre_norms: Option<Vec<f64>> =
+            if self.nccl_sync_pre_norm.iter().all(|p| p.is_some()) {
+                Some(self.nccl_sync_pre_norm.iter().map(|p| p.unwrap()).collect())
+            } else {
+                None
+            };
+        let report = convergence::DivergenceReport {
+            deltas: self
+                .nccl_sync_divergence
+                .iter()
+                .map(|d| d.unwrap_or(0.0))
+                .collect(),
+            pre_norms: nccl_pre_norms,
+            post_norm: self.nccl_sync_post_norm,
+        };
+        let cycle_batches: usize = self.steps_since_avg.iter().sum();
+        let k_max = self.steps_since_avg.iter().copied().max().unwrap_or(0);
+        let action = self.convergence_guard.report(&report, cycle_batches, k_max);
+
+        // LR-aware meta-controller (OLD `observe_meta` parity): consult
+        // the meta after the guard verdict; a `NudgeDown` MetaAction
+        // dispatches to `el_che.nudge_anchor_down` and composes
+        // multiplicatively with the guard's own anchor adjustment
+        // below.
+        self.observe_meta(action);
+
+        self.version += 1;
+        self.avg_count += 1;
+
+        match action {
+            ConvergenceAction::Stable => {
+                if self.policy == ApplyPolicy::Async {
+                    if self.overshoot_auto {
+                        self.max_overshoot =
+                            (self.max_overshoot + 1).min(self.overshoot_ceiling);
+                    }
+                    if self.elche_relax_up {
+                        self.el_che.relax_anchor_up();
+                    }
+                }
+            }
+            ConvergenceAction::SuppressGrowth => {}
+            ConvergenceAction::NudgeDown { factor } => {
+                self.el_che.nudge_anchor_down(factor);
+                if self.overshoot_auto && self.policy == ApplyPolicy::Async {
+                    self.max_overshoot = self.overshoot_initial;
+                }
+            }
+        }
+        if self.policy == ApplyPolicy::Async {
+            self.max_overshoot = self.max_overshoot.min(self.overshoot_ceiling);
+        }
+
+        self.global_step += cycle_batches;
+
+        self.broadcast_control(&ControlMsgWire::SetGlobalStep {
+            global_step: self.global_step as u64,
+        })?;
+
+        for s in &mut self.steps_since_avg {
+            *s = 0;
+        }
+        for a in &mut self.wall_ms_accum {
+            *a = 0.0;
+        }
+        for t in &mut self.throttled {
+            *t = false;
+        }
+        for d in &mut self.nccl_sync_divergence {
+            *d = None;
+        }
+        for p in &mut self.nccl_sync_pre_norm {
+            *p = None;
+        }
+        self.nccl_sync_post_norm = None;
+        Ok(())
+    }
+
+    /// CPU-backend counterpart to [`Self::finish_averaging_nccl`].
+    ///
+    /// Differs from the NCCL path in one place: the lifecycle barrier
+    /// emitted to workers is `ControlMsgWire::Update { version }` (the
+    /// workers received their averaged tensors via the data channel
+    /// already; this notification bumps their `current_version` and
+    /// resets `steps_since_avg`).
+    ///
+    /// Everything else (ElChe report, convergence guard verdict,
+    /// overshoot / anchor tuning, counter reset) mirrors NCCL.
+    fn finish_averaging_cpu(&mut self) -> Result<()> {
+        let prev_sync_ms = self.last_nccl_sync_ms;
+        self.last_nccl_sync_ms = 0.0;
+        if self.wall_ms_accum.iter().any(|&ms| ms > 0.0) {
+            self.el_che.report_timing(
+                &self.wall_ms_accum,
+                &self.steps_since_avg,
+                prev_sync_ms,
+            );
+            if !self.calibrated && self.el_che.is_calibrated() {
+                self.calibrated = true;
+            }
+        }
+
+        let pre_norms: Option<Vec<f64>> =
+            if self.nccl_sync_pre_norm.iter().all(|p| p.is_some()) {
+                Some(self.nccl_sync_pre_norm.iter().map(|p| p.unwrap()).collect())
+            } else {
+                None
+            };
+        let report = convergence::DivergenceReport {
+            deltas: self
+                .nccl_sync_divergence
+                .iter()
+                .map(|d| d.unwrap_or(0.0))
+                .collect(),
+            pre_norms,
+            post_norm: self.nccl_sync_post_norm,
+        };
+        let cycle_batches: usize = self.steps_since_avg.iter().sum();
+        let k_max = self.steps_since_avg.iter().copied().max().unwrap_or(0);
+        let action = self.convergence_guard.report(&report, cycle_batches, k_max);
+
+        // LR-aware meta-controller (OLD `observe_meta` parity); see
+        // [`Self::finish_averaging_nccl`] for the rationale.
+        self.observe_meta(action);
+
+        self.version += 1;
+        self.avg_count += 1;
+
+        match action {
+            ConvergenceAction::Stable => {
+                if self.policy == ApplyPolicy::Async {
+                    if self.overshoot_auto {
+                        self.max_overshoot =
+                            (self.max_overshoot + 1).min(self.overshoot_ceiling);
+                    }
+                    if self.elche_relax_up {
+                        self.el_che.relax_anchor_up();
+                    }
+                }
+            }
+            ConvergenceAction::SuppressGrowth => {}
+            ConvergenceAction::NudgeDown { factor } => {
+                self.el_che.nudge_anchor_down(factor);
+                if self.overshoot_auto && self.policy == ApplyPolicy::Async {
+                    self.max_overshoot = self.overshoot_initial;
+                }
+            }
+        }
+        if self.policy == ApplyPolicy::Async {
+            self.max_overshoot = self.max_overshoot.min(self.overshoot_ceiling);
+        }
+
+        self.global_step += cycle_batches;
+
+        // CPU lifecycle barrier: workers received averaged tensors on
+        // the data channel; this Update notification tells them to
+        // bump `current_version` and reset `steps_since_avg`.
+        self.broadcast_control(&ControlMsgWire::Update {
+            version: self.version,
+        })?;
+        // SetGlobalStep is still broadcast so workers can update the
+        // per-batch LR scheduler base. Same as the NCCL path.
+        self.broadcast_control(&ControlMsgWire::SetGlobalStep {
+            global_step: self.global_step as u64,
+        })?;
+
+        for s in &mut self.steps_since_avg {
+            *s = 0;
+        }
+        for a in &mut self.wall_ms_accum {
+            *a = 0.0;
+        }
+        for t in &mut self.throttled {
+            *t = false;
+        }
+        for d in &mut self.nccl_sync_divergence {
+            *d = None;
+        }
+        for p in &mut self.nccl_sync_pre_norm {
+            *p = None;
+        }
+        self.nccl_sync_post_norm = None;
+        Ok(())
+    }
+
+    /// One coordinator tick: drain incoming timing, throttle fast
+    /// workers, and trigger averaging when due. Mirrors OLD
+    /// `Coordinator::tick`. Returns `false` when every reader thread
+    /// has exited so the caller can break its loop.
+    pub fn tick(&mut self) -> Result<bool> {
+        self.drain_timing();
+        // Heartbeat-driven dead-rank detection. Must run BEFORE
+        // poll_cpu_averaging / should_average so the rest of this
+        // tick already sees the updated active membership; a rank
+        // declared dead this tick won't gate the cycle's finalize.
+        // No-op when elastic membership isn't configured.
+        self.check_dead_ranks();
+        self.check_throttle()?;
+        // CPU-backend async finalize: if a cycle's `RequestParams` was
+        // broadcast in a prior tick and all bridge SyncAcks have now
+        // arrived (alive ranks only), finalize it here.
+        // No-op on NCCL backend (state stays `Idle`).
+        self.poll_cpu_averaging()?;
+        if self.should_average() {
+            self.trigger_averaging()?;
+        }
+        // The mpsc returns Disconnected when every cloned sender has
+        // dropped (every reader thread has exited). drain_timing alone
+        // can't see that — try_recv just returns Empty if there's no
+        // current message and the channel is healthy. Probe explicitly.
+        let alive = self.active_count > 0
+            && self.reader_handles.iter().any(|h| h.is_some());
+        Ok(alive)
+    }
+
+    // -----------------------------------------------------------------
+    // Epoch dispatch (ports OLD coordinator/mod.rs compute_partition_sizes
+    // + plans_for_epoch + send_all_plans, with ControlMsgWire frames
+    // replacing the OLD mpsc::Sender<ControlMsg>.)
+    // -----------------------------------------------------------------
+
+    /// Compute per-rank partition sizes for one epoch.
+    ///
+    /// Priority order:
+    /// 1. Explicit `partition_ratios` from the config (test rigs,
+    ///    user override).
+    /// 2. ElChe throughput-derived sizes once calibrated (or once a
+    ///    `with_speed_hint` is set in the config).
+    /// 3. Equal sizes (fallback at startup before ElChe has
+    ///    observations).
+    ///
+    /// Verbatim port of OLD `Coordinator::compute_partition_sizes`.
+    fn compute_partition_sizes(&self) -> Vec<usize> {
+        if let Some(ratios) = &self.partition_ratios {
+            return crate::distributed::ddp_run::ratio_to_sizes(
+                ratios,
+                self.total_samples,
+            );
+        }
+        match self.policy {
+            ApplyPolicy::Sync => crate::distributed::ddp_run::equal_sizes(
+                self.world_size,
+                self.total_samples,
+            ),
+            ApplyPolicy::Cadence | ApplyPolicy::Async => {
+                if self.el_che.is_calibrated() || self.el_che.has_speed_hint() {
+                    crate::distributed::ddp_run::throughput_sizes(
+                        &self.el_che,
+                        self.total_samples,
+                    )
+                } else {
+                    crate::distributed::ddp_run::equal_sizes(
+                        self.world_size,
+                        self.total_samples,
+                    )
+                }
+            }
+        }
+    }
+
+    /// Get (or lazily compute + cache) the per-rank plans for `epoch`.
+    ///
+    /// Caching guarantees every rank receives consistent
+    /// `(partition_offset, partition_size)` even when [`Self::dispatch_epoch`]
+    /// gets called twice for the same epoch (the second call returns
+    /// the cached plans). Verbatim port of OLD
+    /// `Coordinator::plans_for_epoch`.
+    fn plans_for_epoch(
+        &mut self,
+        epoch: usize,
+    ) -> Vec<crate::distributed::wire::EpochPlanWire> {
+        use crate::distributed::wire::EpochPlanWire;
+        if let Some(plans) = self.epoch_plan_cache.get(&epoch) {
+            return plans.clone();
+        }
+        let sizes = self.compute_partition_sizes();
+        let mut plans: Vec<EpochPlanWire> = Vec::with_capacity(self.world_size);
+        let mut offset: u64 = 0;
+        for &size in &sizes {
+            plans.push(EpochPlanWire {
+                epoch: epoch as u64,
+                partition_offset: offset,
+                partition_size: size as u64,
+            });
+            offset += size as u64;
+        }
+        self.epoch_plan_cache.insert(epoch, plans.clone());
+        plans
+    }
+
+    /// Broadcast `StartEpoch(plan)` to every connected rank, updating
+    /// `rank_epoch[r]` to `epoch` for each rank as it goes out.
+    ///
+    /// Mirrors OLD `Coordinator::send_all_plans` minus the progressive
+    /// chunk-pool branch (1d.6 wiring). Returns the plans dispatched
+    /// so callers can pair the call with rank-side acknowledgments in
+    /// tests.
+    pub fn dispatch_epoch(
+        &mut self,
+        epoch: usize,
+    ) -> Result<Vec<crate::distributed::wire::EpochPlanWire>> {
+        if self.total_samples == 0 {
+            return Err(TensorError::new(
+                "cluster_coordinator: dispatch_epoch requires total_samples > 0; \
+                 set ClusterCoordinatorConfig::total_samples before constructing.",
+            ));
+        }
+        let plans = self.plans_for_epoch(epoch);
+        for (rank, plan) in plans.iter().enumerate() {
+            let msg = ControlMsgWire::StartEpoch(plan.clone());
+            self.send_control(rank, &msg)?;
+            self.rank_epoch[rank] = epoch;
+            // Snapshot per-rank monotonic batch counter so a future
+            // dead-rank declaration can compute how many of this
+            // epoch's samples rank `r` had already processed (and
+            // therefore how many remain to redistribute via
+            // `ExtendPartition`).
+            self.last_step_count_at_epoch_start[rank] = self.last_step_count[rank];
+        }
+        Ok(plans)
+    }
+
+    /// Borrow per-rank current-epoch state for diagnostics / tests.
+    pub fn rank_epoch(&self) -> &[usize] {
+        &self.rank_epoch
+    }
+
+    /// Last globally-aggregated epoch (all ranks reported). `None`
+    /// until [`Self::on_epoch_aggregated`] fires the first time
+    /// (deferred to 1d.5 when metrics aggregation lands).
+    pub fn last_aggregated_epoch(&self) -> Option<usize> {
+        self.last_aggregated_epoch
+    }
+
+    /// Batch size carried from config; used by progressive chunk
+    /// dispatch in 1d.6.
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    /// Number of epochs the trainer asked for; informs upcoming
+    /// `dispatch_epoch` bounds and 1d.5 metrics aggregation.
+    pub fn num_epochs(&self) -> usize {
+        self.num_epochs
+    }
+
+    /// Total samples across the dataset; basis for partition sizing.
+    pub fn total_samples(&self) -> usize {
+        self.total_samples
+    }
+
+    // -----------------------------------------------------------------
+    // Outbound control frame I/O
+    // -----------------------------------------------------------------
+
+    fn send_control(&mut self, rank: usize, msg: &ControlMsgWire) -> Result<()> {
+        if rank >= self.world_size {
+            return Err(TensorError::new(&format!(
+                "cluster_coordinator: send_control rank {rank} >= world_size {}",
+                self.world_size
+            )));
+        }
+        let frame = ControlFrame::encode(&self.salt, MsgKind::Control, msg)?;
+        frame.write_to(&mut self.control_streams[rank]).map_err(|e| {
+            TensorError::new(&format!(
+                "cluster_coordinator: send_control(rank={rank}): {e}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn broadcast_control(&mut self, msg: &ControlMsgWire) -> Result<()> {
+        for rank in 0..self.world_size {
+            self.send_control(rank, msg)?;
+        }
+        Ok(())
+    }
+
+    /// Send Shutdown to every rank. Called from [`Self::shutdown`];
+    /// kept public so callers running the coordinator inline can drop
+    /// it from a different point in their loop if needed.
+    pub fn shutdown_workers(&mut self) -> Result<()> {
+        self.broadcast_control(&ControlMsgWire::Shutdown)
+    }
+
+    /// Stop reader threads, send Shutdown to every connected rank,
+    /// join the threads, drop streams. Idempotent on the shutdown flag.
+    pub fn shutdown(mut self) -> Result<()> {
+        // Best-effort send Shutdown before tearing readers down. Ignore
+        // write errors here: a rank may already have exited.
+        let _ = self.shutdown_workers();
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+        for handle_opt in self.reader_handles.iter_mut() {
+            if let Some(handle) = handle_opt.take() {
+                let _ = handle.join();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ClusterCoordinator {
+    fn drop(&mut self) {
+        // Best-effort shutdown if the caller forgot to call shutdown().
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+        for handle_opt in self.reader_handles.iter_mut() {
+            if let Some(handle) = handle_opt.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-rank reader thread
+// ---------------------------------------------------------------------------
+
+/// Read [`ControlFrame`]s from one rank's control stream, decode the
+/// payload according to [`MsgKind`], and forward to the coordinator
+/// via `tx`. Exits when:
+///
+/// - `shutdown` flips to true (set by [`ClusterCoordinator::shutdown`]),
+/// - the stream EOFs cleanly (rank closed),
+/// - or any wire-level error surfaces (HMAC mismatch, bincode decode,
+///   bad msg_kind).
+fn reader_loop(
+    rank: usize,
+    stream: &mut TcpStream,
+    salt: &SessionSalt,
+    shutdown: &Arc<AtomicBool>,
+    tx: &mpsc::Sender<TimingMsgWire>,
+) {
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        match ControlFrame::try_read_from(stream, salt) {
+            Ok(FrameRead::Frame(frame)) => match frame.kind {
+                MsgKind::Timing => match frame.decode::<TimingMsgWire>() {
+                    Ok(msg) => {
+                        if tx.send(msg).is_err() {
+                            // Coordinator dropped its receiver.
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "cluster_coordinator: reader r{rank} decode TimingMsg: {e}"
+                        );
+                        return;
+                    }
+                },
+                MsgKind::Metrics => {
+                    // 1d.5 wires per-epoch metrics aggregation; drop for now.
+                }
+                MsgKind::Heartbeat => {
+                    // Orphan scaffolding from an earlier protocol draft.
+                    // 1d.5 routes heartbeats through `TimingMsgWire::Heartbeat`
+                    // over `MsgKind::Timing` instead, so this arm is
+                    // intentionally unreached in current builds. Kept for
+                    // wire-format stability (the enum value is part of
+                    // protocol version 2's surface).
+                }
+                MsgKind::Control | MsgKind::ParamSnapshotMeta => {
+                    eprintln!(
+                        "cluster_coordinator: reader r{rank} got unexpected \
+                         MsgKind {:?} on rank→coord path; dropping",
+                        frame.kind
+                    );
+                }
+            },
+            Ok(FrameRead::WouldBlock) => {
+                // Idle tick: re-check shutdown and keep reading.
+                continue;
+            }
+            Ok(FrameRead::Eof) => {
+                // Peer closed cleanly.
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "cluster_coordinator: reader r{rank} wire error: {e}"
+                );
+                return;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distributed::wire::TimingMsgWire;
+    use std::net::Ipv4Addr;
+
+    /// Deterministic non-zero test salt (mirrors controller.rs::tests).
+    const TEST_SALT: SessionSalt = [
+        0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+        0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    ];
+
+    /// Spawn a fake rank that connects to `port`, handshakes with
+    /// `salt`, runs `body` against the connected stream, then drops it.
+    fn fake_rank<F>(
+        port: u16,
+        rank_id: u32,
+        world_size: u32,
+        salt: SessionSalt,
+        body: F,
+    ) -> thread::JoinHandle<Result<()>>
+    where
+        F: Send + 'static + FnOnce(&mut TcpStream, &SessionSalt) -> Result<()>,
+    {
+        thread::spawn(move || -> Result<()> {
+            let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+            let mut stream = TcpStream::connect(addr).map_err(|e| {
+                TensorError::new(&format!("fake_rank {rank_id} connect: {e}"))
+            })?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .map_err(|e| TensorError::new(&format!("set_read_timeout: {e}")))?;
+            write_handshake_rank(&mut stream, rank_id, world_size, &salt)?;
+            let mut ack = [0u8; HS_ACK_BYTES];
+            stream.read_exact(&mut ack).map_err(|e| {
+                TensorError::new(&format!("fake_rank {rank_id} ack read: {e}"))
+            })?;
+            let magic = u32::from_le_bytes(ack[0..4].try_into().unwrap());
+            if magic != CTRL_HS_ACK {
+                return Err(TensorError::new(&format!(
+                    "fake_rank {rank_id}: unexpected ack magic 0x{magic:08x}"
+                )));
+            }
+            // Verify the ack HMAC ourselves.
+            let expected = hmac_first8(&salt, &ack[0..8]);
+            let got: [u8; 8] = ack[8..16].try_into().unwrap();
+            if expected != got {
+                return Err(TensorError::new(
+                    "fake_rank: ack HMAC verification failed",
+                ));
+            }
+            stream
+                .set_read_timeout(None)
+                .map_err(|e| TensorError::new(&format!("clear timeout: {e}")))?;
+            body(&mut stream, &salt)
+        })
+    }
+
+    fn cfg_sync_nccl(world_size: usize) -> ClusterCoordinatorConfig {
+        // ElChe::new requires ≥ 2 devices; tests use world_size ≥ 2.
+        assert!(world_size >= 2, "tests use world_size >= 2");
+        ClusterCoordinatorConfig::new(
+            ApplyPolicy::Sync,
+            AverageBackend::Nccl,
+            world_size,
+            ElChe::new(world_size, 1),
+        )
+        .no_divergence_guard()
+    }
+
+    fn cfg_async_nccl(world_size: usize) -> ClusterCoordinatorConfig {
+        assert!(world_size >= 2, "tests use world_size >= 2");
+        ClusterCoordinatorConfig::new(
+            ApplyPolicy::Async,
+            AverageBackend::Nccl,
+            world_size,
+            ElChe::new(world_size, 4)
+                .with_max_batch_diff(2),
+        )
+        .no_divergence_guard()
+    }
+
+    /// Send a Timing-kind ControlFrame on a fake-rank stream.
+    fn send_timing(
+        stream: &mut TcpStream,
+        salt: &SessionSalt,
+        msg: TimingMsgWire,
+    ) -> Result<()> {
+        let frame = ControlFrame::encode(salt, MsgKind::Timing, &msg)?;
+        frame.write_to(stream)
+    }
+
+    /// Read one Control-kind ControlFrame from the rank-side stream.
+    fn recv_control(
+        stream: &mut TcpStream,
+        salt: &SessionSalt,
+    ) -> Result<ControlMsgWire> {
+        let frame = ControlFrame::read_from(stream, salt)?
+            .ok_or_else(|| TensorError::new("EOF before frame"))?;
+        if frame.kind != MsgKind::Control {
+            return Err(TensorError::new(&format!(
+                "unexpected frame kind {:?}",
+                frame.kind
+            )));
+        }
+        frame.decode::<ControlMsgWire>()
+    }
+
+    /// Pre-bind a listener in the test (so we can publish the port
+    /// before any accept blocks), spawn rank threads against that
+    /// port, then drive the coordinator's accept + state machine in
+    /// a worker thread. Returns the rank-side and coord-side join
+    /// handles plus the bound port for the rank-side connect.
+    fn spawn_coord<F>(
+        _world_size: usize,
+        config_fn: impl FnOnce() -> ClusterCoordinatorConfig + Send + 'static,
+        drive: F,
+    ) -> (u16, thread::JoinHandle<Result<()>>)
+    where
+        F: Send + 'static + FnOnce(&mut ClusterCoordinator) -> Result<()>,
+    {
+        let (listener, port) = ClusterCoordinator::bind(
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        )
+        .expect("bind succeeds");
+        assert_eq!(listener.local_addr().unwrap().port(), port);
+        let handle = thread::spawn(move || -> Result<()> {
+            let mut coord = ClusterCoordinator::start_from_listener(
+                listener, TEST_SALT, config_fn(),
+            )?;
+            let r = drive(&mut coord);
+            // Best-effort shutdown even on failure so the readers join.
+            let _ = coord.shutdown();
+            r
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn handshake_round_trip_with_matching_salt() {
+        // 2 ranks, Sync; both handshake and immediately drop. No
+        // averaging cycle expected — `drive` just returns Ok.
+        let world_size = 2;
+        let (port, coord_handle) =
+            spawn_coord(world_size, move || cfg_sync_nccl(world_size), |_coord| Ok(()));
+
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        r0.join().unwrap().expect("rank 0 handshake");
+        r1.join().unwrap().expect("rank 1 handshake");
+        coord_handle.join().unwrap().expect("coord drives clean");
+    }
+
+    #[test]
+    fn handshake_rejects_wrong_salt_full_path() {
+        // Coordinator has TEST_SALT; rank 0 connects with all-zero salt.
+        // The accept loop's handshake validation fails →
+        // start_from_listener returns an error.
+        let world_size = 2;
+        let bad_salt: SessionSalt = [0u8; 16];
+
+        let (listener, port) = ClusterCoordinator::bind(
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        )
+        .unwrap();
+        let coord_handle = thread::spawn(move || -> Result<ClusterCoordinator> {
+            ClusterCoordinator::start_from_listener(
+                listener, TEST_SALT, cfg_sync_nccl(world_size),
+            )
+        });
+
+        let rank = thread::spawn(move || {
+            let mut s = TcpStream::connect(
+                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
+            )
+            .unwrap();
+            // Wrong salt → handshake HMAC fails server-side.
+            let _ = write_handshake_rank(&mut s, 0, world_size as u32, &bad_salt);
+            // Read until the server drops us.
+            let mut throwaway = [0u8; 16];
+            let _ = s.read_exact(&mut throwaway);
+        });
+        let err = match coord_handle.join().unwrap() {
+            Ok(_) => panic!("expected start_from_listener to fail on bad-salt rank"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("HMAC verification failed"),
+            "expected HMAC failure, got: {err}"
+        );
+        let _ = rank.join();
+    }
+
+    /// Bind a listener ourselves, hand the connection to the
+    /// handshake validator directly, exercise the wrong-salt branch.
+    #[test]
+    fn read_handshake_rank_rejects_wrong_salt_direct() {
+        let listener = TcpListener::bind(
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)
+        ).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let bad_salt: SessionSalt = [0u8; 16];
+        assert_ne!(bad_salt, TEST_SALT);
+
+        let rank = thread::spawn(move || {
+            let mut s = TcpStream::connect(
+                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
+            ).unwrap();
+            // Send a handshake keyed by the wrong salt.
+            write_handshake_rank(&mut s, 0, 1, &bad_salt).unwrap();
+            // Don't expect an ack; the coordinator should drop us.
+            drop(s);
+        });
+
+        let (mut server_stream, _) = listener.accept().unwrap();
+        server_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let err = read_handshake_rank(&mut server_stream, 1, &TEST_SALT).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HMAC verification failed"),
+            "expected HMAC failure, got: {msg}"
+        );
+        rank.join().unwrap();
+    }
+
+    #[test]
+    fn sync_policy_fires_after_each_rank_step_once() {
+        // 2 ranks, Sync policy: after each rank reports one Batch, the
+        // coordinator should fire SyncNow + SetGlobalStep exactly once.
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_nccl(world_size),
+            |coord| {
+                let start = Instant::now();
+                while coord.avg_count() == 0 {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        return Err(TensorError::new(
+                            "sync_policy_fires timed out waiting for avg_count",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert_eq!(coord.avg_count(), 1, "exactly one averaging cycle");
+                Ok(())
+            },
+        );
+
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 0,
+                batch_ms: 10.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.5,
+                sync_divergence: None,
+            })?;
+            let msg = recv_control(s, salt)?;
+            assert_eq!(msg, ControlMsgWire::SyncNow);
+            let msg2 = recv_control(s, salt)?;
+            assert!(matches!(msg2, ControlMsgWire::SetGlobalStep { .. }));
+            Ok(())
+        });
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 1,
+                batch_ms: 12.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.4,
+                sync_divergence: None,
+            })?;
+            let msg = recv_control(s, salt)?;
+            assert_eq!(msg, ControlMsgWire::SyncNow);
+            let msg2 = recv_control(s, salt)?;
+            assert!(matches!(msg2, ControlMsgWire::SetGlobalStep { .. }));
+            Ok(())
+        });
+
+        r0.join().unwrap().expect("rank 0 sees SyncNow + SetGlobalStep");
+        r1.join().unwrap().expect("rank 1 sees SyncNow + SetGlobalStep");
+        coord_handle.join().unwrap().expect("coord finishes");
+    }
+
+    // Throttle is an Async/CPU-backend concept; NCCL backend uses
+    // AllReduce as the coordination mechanism (sending Throttle there
+    // would deadlock with the collective). Slice 1d.1 only wires the
+    // NCCL backend, so a Throttle behavioral test belongs to 1d.4 when
+    // AverageBackend::Cpu lands. The path is structurally exercised
+    // here by `cfg_async_nccl`, which goes through `check_throttle`
+    // and confirms the NCCL early-return guard (the function returns
+    // without sending a frame to any rank).
+    #[test]
+    fn check_throttle_nccl_backend_is_no_op() {
+        // Construct a coord with Async+Nccl; tick once with both ranks
+        // having reported a single batch. check_throttle must return
+        // Ok and send no Throttle frames.
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_async_nccl(world_size),
+            |coord| {
+                // Wait for at least one timing message per rank, then
+                // run a few ticks. If check_throttle were to send a
+                // Throttle here, the rank-side recv would surface it
+                // and the rank closure would assert. We don't.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while coord.steps_since_avg().contains(&0) {
+                    if Instant::now() > deadline {
+                        return Err(TensorError::new(
+                            "did not receive a batch from each rank",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                // A few extra ticks — no Throttle should fire.
+                for _ in 0..10 {
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Ok(())
+            },
+        );
+
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 0,
+                batch_ms: 5.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.5,
+                sync_divergence: None,
+            })?;
+            // Drain inbound frames until the coordinator drops us.
+            // We must NOT receive a Throttle; if we do, assert.
+            let mut got = ControlFrame::read_from(s, salt);
+            while let Ok(Some(frame)) = got {
+                let kind = frame.kind;
+                let msg = frame.decode::<ControlMsgWire>()?;
+                assert!(
+                    !matches!(msg, ControlMsgWire::Throttle),
+                    "Throttle must not fire on NCCL backend (rank 0, kind={kind:?})"
+                );
+                got = ControlFrame::read_from(s, salt);
+            }
+            Ok(())
+        });
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 1,
+                batch_ms: 5.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.5,
+                sync_divergence: None,
+            })?;
+            let mut got = ControlFrame::read_from(s, salt);
+            while let Ok(Some(frame)) = got {
+                let msg = frame.decode::<ControlMsgWire>()?;
+                assert!(
+                    !matches!(msg, ControlMsgWire::Throttle),
+                    "Throttle must not fire on NCCL backend (rank 1)"
+                );
+                got = ControlFrame::read_from(s, salt);
+            }
+            Ok(())
+        });
+
+        coord_handle.join().unwrap().expect("coord drives");
+        // Rank threads may still be reading frames; coord.shutdown sent
+        // Shutdown frames to them which they should decode and exit.
+        // The asserts above guard the no-Throttle invariant.
+        let _ = r0.join();
+        let _ = r1.join();
+    }
+
+    // -----------------------------------------------------------------
+    // 4b.D.1d.3a — epoch dispatch
+    // -----------------------------------------------------------------
+
+    fn cfg_sync_nccl_with_dataset(world_size: usize, total_samples: usize) -> ClusterCoordinatorConfig {
+        cfg_sync_nccl(world_size)
+            .total_samples(total_samples)
+            .batch_size(2)
+            .num_epochs(1)
+    }
+
+    #[test]
+    fn dispatch_epoch_partitions_cover_dataset_no_overlap() {
+        // 2 ranks, Sync, 10 samples → expect ranks to split (5, 5) by
+        // equal_sizes (Sync ignores ElChe ratios).
+        let world_size = 2;
+        let total_samples = 10;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_nccl_with_dataset(world_size, total_samples),
+            move |coord| {
+                let plans = coord.dispatch_epoch(0)?;
+                // Smoke checks on the returned plans match what the
+                // wire dispatched.
+                assert_eq!(plans.len(), world_size);
+                let total: u64 = plans.iter().map(|p| p.partition_size).sum();
+                assert_eq!(total, total_samples as u64);
+                let mut offset = 0u64;
+                for plan in &plans {
+                    assert_eq!(plan.epoch, 0);
+                    assert_eq!(plan.partition_offset, offset);
+                    offset += plan.partition_size;
+                }
+                // rank_epoch updated.
+                assert_eq!(coord.rank_epoch(), &[0, 0]);
+                Ok(())
+            },
+        );
+
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |s, salt| {
+            let frame = ControlFrame::read_from(s, salt)?
+                .ok_or_else(|| TensorError::new("rank 0 EOF before StartEpoch"))?;
+            assert_eq!(frame.kind, MsgKind::Control);
+            let msg: ControlMsgWire = frame.decode()?;
+            match msg {
+                ControlMsgWire::StartEpoch(plan) => {
+                    assert_eq!(plan.epoch, 0);
+                    assert_eq!(plan.partition_offset, 0);
+                    assert_eq!(plan.partition_size, 5);
+                    Ok(())
+                }
+                other => Err(TensorError::new(&format!(
+                    "rank 0 expected StartEpoch, got {other:?}"
+                ))),
+            }
+        });
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |s, salt| {
+            let frame = ControlFrame::read_from(s, salt)?
+                .ok_or_else(|| TensorError::new("rank 1 EOF before StartEpoch"))?;
+            let msg: ControlMsgWire = frame.decode()?;
+            match msg {
+                ControlMsgWire::StartEpoch(plan) => {
+                    assert_eq!(plan.epoch, 0);
+                    assert_eq!(plan.partition_offset, 5);
+                    assert_eq!(plan.partition_size, 5);
+                    Ok(())
+                }
+                other => Err(TensorError::new(&format!(
+                    "rank 1 expected StartEpoch, got {other:?}"
+                ))),
+            }
+        });
+
+        r0.join().unwrap().expect("rank 0 receives StartEpoch (0, 5)");
+        r1.join().unwrap().expect("rank 1 receives StartEpoch (5, 5)");
+        coord_handle.join().unwrap().expect("coord finishes");
+    }
+
+    #[test]
+    fn dispatch_epoch_honors_explicit_partition_ratios() {
+        // 2 ranks, Sync, 12 samples, explicit ratios [1.0, 3.0] →
+        // ranks should split (3, 9) — but Sync policy normally uses
+        // equal_sizes; partition_ratios overrides that.
+        let world_size = 2;
+        let total_samples = 12;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || {
+                cfg_sync_nccl(world_size)
+                    .total_samples(total_samples)
+                    .partition_ratios(Some(vec![1.0, 3.0]))
+            },
+            move |coord| {
+                let plans = coord.dispatch_epoch(0)?;
+                assert_eq!(plans[0].partition_size, 3);
+                assert_eq!(plans[1].partition_size, 9);
+                let total: u64 = plans.iter().map(|p| p.partition_size).sum();
+                assert_eq!(total, total_samples as u64);
+                Ok(())
+            },
+        );
+
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |s, salt| {
+            let frame = ControlFrame::read_from(s, salt)?.unwrap();
+            let msg: ControlMsgWire = frame.decode()?;
+            if let ControlMsgWire::StartEpoch(plan) = msg {
+                assert_eq!(plan.partition_size, 3);
+            } else {
+                return Err(TensorError::new("expected StartEpoch"));
+            }
+            Ok(())
+        });
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |s, salt| {
+            let frame = ControlFrame::read_from(s, salt)?.unwrap();
+            let msg: ControlMsgWire = frame.decode()?;
+            if let ControlMsgWire::StartEpoch(plan) = msg {
+                assert_eq!(plan.partition_size, 9);
+            } else {
+                return Err(TensorError::new("expected StartEpoch"));
+            }
+            Ok(())
+        });
+        r0.join().unwrap().expect("rank 0 sees ratio[0] partition");
+        r1.join().unwrap().expect("rank 1 sees ratio[1] partition");
+        coord_handle.join().unwrap().expect("coord finishes");
+    }
+
+    #[test]
+    fn dispatch_epoch_caches_plans_for_same_epoch() {
+        // Calling dispatch_epoch twice for the same epoch must return
+        // identical plans both times (cache hit; rank_epoch reset to
+        // the same value). The wire receives two frames per rank.
+        let world_size = 2;
+        let total_samples = 8;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_nccl_with_dataset(world_size, total_samples),
+            move |coord| {
+                let plans_a = coord.dispatch_epoch(0)?;
+                let plans_b = coord.dispatch_epoch(0)?;
+                assert_eq!(plans_a, plans_b, "epoch plan cache must be deterministic");
+                Ok(())
+            },
+        );
+
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |s, salt| {
+            for _ in 0..2 {
+                let frame = ControlFrame::read_from(s, salt)?.unwrap();
+                let _: ControlMsgWire = frame.decode()?;
+            }
+            Ok(())
+        });
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |s, salt| {
+            for _ in 0..2 {
+                let frame = ControlFrame::read_from(s, salt)?.unwrap();
+                let _: ControlMsgWire = frame.decode()?;
+            }
+            Ok(())
+        });
+        r0.join().unwrap().expect("rank 0 reads 2 frames");
+        r1.join().unwrap().expect("rank 1 reads 2 frames");
+        coord_handle.join().unwrap().expect("coord finishes");
+    }
+
+    fn cfg_sync_cpu(world_size: usize) -> ClusterCoordinatorConfig {
+        assert!(world_size >= 2, "tests use world_size >= 2");
+        ClusterCoordinatorConfig::new(
+            ApplyPolicy::Sync,
+            AverageBackend::Cpu,
+            world_size,
+            ElChe::new(world_size, 1),
+        )
+        .no_divergence_guard()
+    }
+
+    #[test]
+    fn sync_cpu_trigger_broadcasts_request_params_then_update() {
+        // 2 ranks, Sync+Cpu. After each rank sends one Batch + SyncAck
+        // (mocking the post-data-channel ack), coord should fire
+        // RequestParams + Update{version} + SetGlobalStep exactly
+        // once. Mirrors sync_policy_fires_after_each_rank_step_once
+        // for the CPU backend.
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_cpu(world_size),
+            |coord| {
+                let start = Instant::now();
+                while coord.avg_count() == 0 {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        return Err(TensorError::new(
+                            "sync_cpu_trigger timed out waiting for avg_count",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert_eq!(coord.avg_count(), 1, "exactly one averaging cycle");
+                Ok(())
+            },
+        );
+
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 0,
+                batch_ms: 10.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.5,
+                sync_divergence: None,
+            })?;
+            let msg = recv_control(s, salt)?;
+            assert_eq!(msg, ControlMsgWire::RequestParams);
+            // Mock the post-data-channel ack the real bridge will send
+            // in 1d.4's worker-side wiring.
+            send_timing(s, salt, TimingMsgWire::SyncAck {
+                rank: 0,
+                step_count: 2,
+                divergence: None,
+                post_norm: None,
+                pre_norm: None,
+            })?;
+            let msg2 = recv_control(s, salt)?;
+            assert!(matches!(msg2, ControlMsgWire::Update { .. }));
+            let msg3 = recv_control(s, salt)?;
+            assert!(matches!(msg3, ControlMsgWire::SetGlobalStep { .. }));
+            Ok(())
+        });
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 1,
+                batch_ms: 12.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.4,
+                sync_divergence: None,
+            })?;
+            let msg = recv_control(s, salt)?;
+            assert_eq!(msg, ControlMsgWire::RequestParams);
+            send_timing(s, salt, TimingMsgWire::SyncAck {
+                rank: 1,
+                step_count: 2,
+                divergence: None,
+                post_norm: None,
+                pre_norm: None,
+            })?;
+            let msg2 = recv_control(s, salt)?;
+            assert!(matches!(msg2, ControlMsgWire::Update { .. }));
+            let msg3 = recv_control(s, salt)?;
+            assert!(matches!(msg3, ControlMsgWire::SetGlobalStep { .. }));
+            Ok(())
+        });
+
+        r0.join().unwrap().expect("rank 0 sees RequestParams + Update + SetGlobalStep");
+        r1.join().unwrap().expect("rank 1 sees RequestParams + Update + SetGlobalStep");
+        coord_handle.join().unwrap().expect("coord finishes");
+    }
+
+    #[test]
+    fn dispatch_epoch_errors_when_total_samples_zero() {
+        // Forgetting to set total_samples on the config must surface
+        // as a loud error, not silently produce empty partitions.
+        let world_size = 2;
+        let (listener, _port) = ClusterCoordinator::bind(
+            SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        )
+        .unwrap();
+        let coord_thread = thread::spawn(move || -> Result<()> {
+            let mut coord = ClusterCoordinator::start_from_listener(
+                listener,
+                TEST_SALT,
+                cfg_sync_nccl(world_size),
+            )?;
+            let err = coord.dispatch_epoch(0).unwrap_err();
+            assert!(
+                err.to_string().contains("total_samples > 0"),
+                "expected total_samples guard, got: {err}"
+            );
+            let _ = coord.shutdown();
+            Ok(())
+        });
+        // No real coord port handshake here — bind happened on the
+        // listener that lives inside the coord thread. We need
+        // 2 ranks to handshake before start_from_listener returns.
+        let port = _port;
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        let _ = r0.join();
+        let _ = r1.join();
+        coord_thread.join().unwrap().expect("coord error path");
+    }
+
+    // -----------------------------------------------------------------
+    // LR-aware meta-controller (1d.5a)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn meta_controller_default_is_off() {
+        // Opt-in semantics: a config built without `.meta_controller(true)`
+        // must produce a coordinator with the meta DISABLED. Mirrors OLD
+        // `CoordinatorBuilder` parity (default `meta_controller = false`).
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_nccl(world_size),
+            |coord| {
+                assert!(
+                    !coord.meta_controller_enabled_for_test(),
+                    "meta_controller must default to OFF"
+                );
+                let lrs = coord.last_lr_per_rank_for_test();
+                assert_eq!(lrs.len(), 2);
+                assert!(lrs.iter().all(|x| x.is_none()), "cold-start LRs = None");
+                Ok(())
+            },
+        );
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        r0.join().unwrap().expect("rank 0 handshake");
+        r1.join().unwrap().expect("rank 1 handshake");
+        coord_handle.join().unwrap().expect("coord drives clean");
+    }
+
+    #[test]
+    fn meta_controller_builder_enables_meta() {
+        // `.meta_controller(true)` on the config must produce a
+        // coordinator with `lr_event_meta = Some(_)`.
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_nccl(world_size).meta_controller(true),
+            |coord| {
+                assert!(
+                    coord.meta_controller_enabled_for_test(),
+                    "meta_controller(true) must produce an active meta"
+                );
+                Ok(())
+            },
+        );
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        r0.join().unwrap().expect("rank 0 handshake");
+        r1.join().unwrap().expect("rank 1 handshake");
+        coord_handle.join().unwrap().expect("coord drives clean");
+    }
+
+    #[test]
+    fn lr_update_frame_populates_last_lr_per_rank() {
+        // Worker-side `TimingMsg::LrUpdate` is forwarded as
+        // `TimingMsgWire::LrUpdate` over the control channel. The coord
+        // captures the most-recent LR per rank in `last_lr_per_rank`,
+        // which is what `observe_meta` reads each averaging cycle.
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_nccl(world_size).meta_controller(true),
+            |coord| {
+                // Drain reader threads until both LRs have arrived.
+                let start = Instant::now();
+                while coord
+                    .last_lr_per_rank_for_test()
+                    .iter()
+                    .any(|lr| lr.is_none())
+                {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        return Err(TensorError::new(
+                            "lr_update_frame_populates_last_lr_per_rank: \
+                             LRs never arrived from fake ranks within 5s",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let lrs = coord.last_lr_per_rank_for_test();
+                assert_eq!(lrs[0], Some(0.01));
+                assert_eq!(lrs[1], Some(0.02));
+                Ok(())
+            },
+        );
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(
+                s,
+                salt,
+                TimingMsgWire::LrUpdate { rank: 0, lr: 0.01 },
+            )?;
+            // Stay alive long enough for the coord to drain the frame.
+            thread::sleep(Duration::from_millis(200));
+            Ok(())
+        });
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |s, salt| {
+            send_timing(
+                s,
+                salt,
+                TimingMsgWire::LrUpdate { rank: 1, lr: 0.02 },
+            )?;
+            thread::sleep(Duration::from_millis(200));
+            Ok(())
+        });
+        r0.join().unwrap().expect("rank 0 sends LrUpdate");
+        r1.join().unwrap().expect("rank 1 sends LrUpdate");
+        coord_handle.join().unwrap().expect("coord captures both LRs");
+    }
+
+    // -----------------------------------------------------------------
+    // CPU finalize state machine (1d.4d)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn cpu_finalize_defers_until_all_sync_acks_arrived() {
+        // Sync+Cpu cycle: the coord broadcasts RequestParams but must
+        // NOT call finish_averaging_cpu until every rank's SyncAck has
+        // landed and populated `nccl_sync_divergence`. Gate the second
+        // rank's SyncAck behind a barrier; the cycle must stay at
+        // avg_count=0 (and `cpu_avg_pending_for_test=true`) until that
+        // second SyncAck is delivered.
+        let world_size = 2;
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_cpu(world_size),
+            |coord| {
+                let start = Instant::now();
+                while coord.avg_count() == 0 {
+                    if start.elapsed() > Duration::from_secs(10) {
+                        return Err(TensorError::new(
+                            "cpu_finalize_defers: avg_count never advanced",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert_eq!(coord.avg_count(), 1);
+                Ok(())
+            },
+        );
+
+        let barrier_for_r0 = Arc::clone(&barrier);
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, move |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 0,
+                batch_ms: 10.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.5,
+                sync_divergence: None,
+            })?;
+            let _ = recv_control(s, salt)?; // RequestParams
+            // Rank 0 sends SyncAck immediately so coord goes into Pending
+            // but still has rank 1 outstanding.
+            send_timing(s, salt, TimingMsgWire::SyncAck {
+                rank: 0,
+                step_count: 2,
+                divergence: Some(0.05),
+                post_norm: Some(1.0),
+                pre_norm: Some(1.05),
+            })?;
+            // Wait for the test thread (rank 1) to release the barrier
+            // BEFORE rank 1 sends its SyncAck. Until then, coord must
+            // stay in Pending.
+            barrier_for_r0.wait();
+            let _ = recv_control(s, salt)?; // Update (only after r1 acks)
+            let _ = recv_control(s, salt)?; // SetGlobalStep
+            Ok(())
+        });
+        let barrier_for_r1 = Arc::clone(&barrier);
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, move |s, salt| {
+            send_timing(s, salt, TimingMsgWire::Batch {
+                rank: 1,
+                batch_ms: 12.0,
+                step_count: 1,
+                param_norm: None,
+                batch_loss: 0.4,
+                sync_divergence: None,
+            })?;
+            let _ = recv_control(s, salt)?; // RequestParams
+            // Hold the SyncAck briefly so the test's drive loop observes
+            // `cpu_avg_pending_for_test=true && avg_count=0`. Use the
+            // shared barrier with r0 so timing is deterministic.
+            thread::sleep(Duration::from_millis(200));
+            barrier_for_r1.wait();
+            send_timing(s, salt, TimingMsgWire::SyncAck {
+                rank: 1,
+                step_count: 2,
+                divergence: Some(0.06),
+                post_norm: Some(1.0),
+                pre_norm: Some(1.04),
+            })?;
+            let _ = recv_control(s, salt)?; // Update
+            let _ = recv_control(s, salt)?; // SetGlobalStep
+            Ok(())
+        });
+        r0.join().unwrap().expect("rank 0 path");
+        r1.join().unwrap().expect("rank 1 path");
+        coord_handle.join().unwrap().expect("coord finalizes after both acks");
+    }
+
+    #[test]
+    fn cpu_finalize_records_per_rank_lag_for_diagnostics() {
+        // After one successful CPU averaging cycle, every rank's
+        // observed sync-lag slot should be populated and finite — the
+        // adaptive deadline computed on the NEXT trigger reads these
+        // and scales accordingly. Doesn't assert the deadline value
+        // directly (would couple to Instant timing); proves the lag
+        // pipeline is wired.
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_cpu(world_size),
+            |coord| {
+                let start = Instant::now();
+                while coord.avg_count() == 0 {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        return Err(TensorError::new(
+                            "adaptive_deadline: avg_count never advanced",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                let lags = coord.last_observed_sync_lag_ms_for_test();
+                assert!(
+                    lags.iter().all(|l| l.is_some()),
+                    "every rank's sync lag populated after cycle 1: {lags:?}"
+                );
+                for l in lags {
+                    let v = l.unwrap();
+                    assert!(
+                        v.is_finite() && v >= 0.0,
+                        "per-rank lag must be finite & non-negative, got {v}"
+                    );
+                }
+                Ok(())
+            },
+        );
+        let body = |rank: u64| {
+            move |s: &mut TcpStream, salt: &SessionSalt| -> Result<()> {
+                send_timing(s, salt, TimingMsgWire::Batch {
+                    rank,
+                    batch_ms: 10.0,
+                    step_count: 1,
+                    param_norm: None,
+                    batch_loss: 0.5,
+                    sync_divergence: None,
+                })?;
+                let _ = recv_control(s, salt)?; // RequestParams
+                send_timing(s, salt, TimingMsgWire::SyncAck {
+                    rank,
+                    step_count: 2,
+                    divergence: Some(0.05),
+                    post_norm: Some(1.0),
+                    pre_norm: Some(1.05),
+                })?;
+                let _ = recv_control(s, salt)?; // Update
+                let _ = recv_control(s, salt)?; // SetGlobalStep
+                Ok(())
+            }
+        };
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, body(0));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, body(1));
+        r0.join().unwrap().expect("rank 0 path");
+        r1.join().unwrap().expect("rank 1 path");
+        coord_handle.join().unwrap().expect("coord captures per-rank lags");
+    }
+
+    // -----------------------------------------------------------------
+    // Heartbeat + dead-rank detection (1d.5)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn heartbeat_stale_declares_rank_dead_and_unblocks_should_average() {
+        // 3 ranks share a DeadRanks ledger with the coord. Ranks 0 and
+        // 1 each send a Batch + SyncAck (a complete averaging cycle).
+        // Rank 2 handshakes the control channel but emits no frames
+        // at all — its `last_heartbeat` slot never updates past the
+        // initial `Instant::now()` from coord construction, so once
+        // the configured `heartbeat_timeout_secs` elapses `check_dead_ranks`
+        // marks rank 2 dead. `should_average`'s `.filter(!is_dead)`
+        // then lets the cycle fire with just ranks 0 & 1, and
+        // `poll_cpu_averaging`'s "all-alive-acked" gate finalizes.
+        let world_size = 3;
+        let dead_ranks = crate::distributed::controller::DeadRanks::new(world_size);
+        let dead_for_coord = Arc::clone(&dead_ranks);
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || {
+                ClusterCoordinatorConfig::new(
+                    ApplyPolicy::Sync,
+                    AverageBackend::Cpu,
+                    world_size,
+                    ElChe::new(world_size, 1),
+                )
+                .no_divergence_guard()
+                .dead_ranks(dead_for_coord)
+                // 1-second window so the test runs in ~1.5s rather than
+                // the 30s production default.
+                .heartbeat_timeout_secs(1)
+            },
+            |coord| {
+                let start = Instant::now();
+                while coord.avg_count() == 0 {
+                    if start.elapsed() > Duration::from_secs(10) {
+                        return Err(TensorError::new(
+                            "heartbeat_stale: avg_count never advanced",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(20));
+                }
+                assert!(
+                    coord.avg_count() >= 1,
+                    "cycle finalized with surviving ranks"
+                );
+                Ok(())
+            },
+        );
+
+        // Rank 2: handshake only, then sleep without sending any
+        // frames. Coord's heartbeat-staleness check will trigger.
+        // Keep alive long enough for the cycle to complete.
+        let dead_for_assertion = Arc::clone(&dead_ranks);
+        let r2 = fake_rank(port, 2, world_size as u32, TEST_SALT, move |_s, _salt| {
+            thread::sleep(Duration::from_millis(3500));
+            Ok(())
+        });
+
+        let body = |rank: u64| {
+            move |s: &mut TcpStream, salt: &SessionSalt| -> Result<()> {
+                send_timing(
+                    s,
+                    salt,
+                    TimingMsgWire::Batch {
+                        rank,
+                        batch_ms: 10.0,
+                        step_count: 1,
+                        param_norm: None,
+                        batch_loss: 0.5,
+                        sync_divergence: None,
+                    },
+                )?;
+                let _ = recv_control(s, salt)?; // RequestParams
+                send_timing(
+                    s,
+                    salt,
+                    TimingMsgWire::SyncAck {
+                        rank,
+                        step_count: 2,
+                        divergence: Some(0.05),
+                        post_norm: Some(1.0),
+                        pre_norm: Some(1.05),
+                    },
+                )?;
+                let _ = recv_control(s, salt)?; // Update
+                let _ = recv_control(s, salt)?; // SetGlobalStep
+                Ok(())
+            }
+        };
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, body(0));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, body(1));
+        r0.join().unwrap().expect("rank 0 completes averaging");
+        r1.join().unwrap().expect("rank 1 completes averaging");
+        let _ = r2.join();
+        coord_handle.join().unwrap().expect("coord drives clean");
+
+        // Post-hoc invariant: the shared ledger registers rank 2 dead.
+        // Don't assert about ranks 0/1: by the time the test's r2
+        // sleep elapses (3.5s) they've been silent past the 1s
+        // threshold too and may also have been declared dead. That's
+        // not a regression — it's the heartbeat detector doing its
+        // job on what looks like additional dead ranks once the run
+        // is wrapping up. The load-bearing invariant is that rank 2
+        // (the silent one DURING the cycle) was detected as dead.
+        assert!(
+            dead_for_assertion.is_dead(2),
+            "rank 2 must be flagged dead in shared ledger"
+        );
+    }
+
+    #[test]
+    fn dead_rank_remainder_redistributed_via_extend_partition() {
+        // 3-rank Sync+Cpu setup with dispatched epoch + shared
+        // DeadRanks ledger + 1s heartbeat timeout. Ranks 0 + 1 send
+        // ONE Batch each (representing one batch of training before
+        // the failure), then rank 2 goes silent. The coord's
+        // heartbeat-stale check declares rank 2 dead; the
+        // redistribution path computes rank 2's un-processed
+        // remainder (its full partition: 0 batches processed) and
+        // emits one ExtendPartition frame to each survivor. The
+        // survivors receive the frames over the wire.
+        //
+        // Invariant: total samples reshard = rank 2's partition size.
+        // Each survivor's received slice sums with the others to
+        // exactly that count — no samples lost, no samples duplicated.
+        let world_size = 3;
+        let total_samples = 30;
+        let batch_size = 1;
+        let dead_ranks = crate::distributed::controller::DeadRanks::new(world_size);
+        let dead_for_coord = Arc::clone(&dead_ranks);
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || {
+                ClusterCoordinatorConfig::new(
+                    ApplyPolicy::Sync,
+                    AverageBackend::Cpu,
+                    world_size,
+                    ElChe::new(world_size, 1),
+                )
+                .no_divergence_guard()
+                .dead_ranks(dead_for_coord)
+                .heartbeat_timeout_secs(1)
+                .total_samples(total_samples)
+                .batch_size(batch_size)
+                .num_epochs(1)
+            },
+            |coord| {
+                coord.dispatch_epoch(0)?;
+                let start = Instant::now();
+                while !coord.dead_ranks.as_ref().unwrap().is_dead(2) {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        return Err(TensorError::new(
+                            "dead_rank_redistribute: rank 2 never declared dead",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(())
+            },
+        );
+
+        // Ranks 0 + 1 collect StartEpoch + count any ExtendPartition
+        // they receive (size). Returned through a shared atomic
+        // because fake_rank's body returns Result<()>.
+        use std::sync::atomic::AtomicU64;
+        let r0_extension = Arc::new(AtomicU64::new(0));
+        let r1_extension = Arc::new(AtomicU64::new(0));
+        let r0_acc = Arc::clone(&r0_extension);
+        let r1_acc = Arc::clone(&r1_extension);
+
+        let make_alive = |rank: u64, acc: Arc<AtomicU64>| {
+            move |s: &mut TcpStream, salt: &SessionSalt| -> Result<()> {
+                let mut received_start_epoch = false;
+                let read_deadline = Instant::now() + Duration::from_secs(4);
+                while Instant::now() < read_deadline {
+                    s.set_read_timeout(Some(Duration::from_millis(200))).ok();
+                    match ControlFrame::read_from(s, salt) {
+                        Ok(Some(frame)) => match frame.decode::<ControlMsgWire>() {
+                            Ok(ControlMsgWire::StartEpoch(_)) => {
+                                received_start_epoch = true;
+                                send_timing(
+                                    s,
+                                    salt,
+                                    TimingMsgWire::Batch {
+                                        rank,
+                                        batch_ms: 5.0,
+                                        step_count: 1,
+                                        param_norm: None,
+                                        batch_loss: 0.1,
+                                        sync_divergence: None,
+                                    },
+                                )?;
+                            }
+                            Ok(ControlMsgWire::ExtendPartition {
+                                partition_size,
+                                ..
+                            }) => {
+                                acc.fetch_add(partition_size, Ordering::SeqCst);
+                            }
+                            Ok(_other) => {
+                                // RequestParams / SetGlobalStep / etc.
+                            }
+                            Err(_) => break,
+                        },
+                        Ok(None) => break,
+                        Err(_) => continue,
+                    }
+                }
+                assert!(received_start_epoch, "rank {rank} got StartEpoch");
+                Ok(())
+            }
+        };
+
+        // Rank 2 handshakes then sleeps — coord will declare it dead.
+        let r2 = fake_rank(port, 2, world_size as u32, TEST_SALT, |_s, _salt| {
+            thread::sleep(Duration::from_millis(3500));
+            Ok(())
+        });
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, make_alive(0, r0_acc));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, make_alive(1, r1_acc));
+
+        r0.join().unwrap().expect("rank 0 path");
+        r1.join().unwrap().expect("rank 1 path");
+        let _ = r2.join();
+        coord_handle.join().unwrap().expect("coord drives clean");
+
+        // Rank 2's partition for a 3-rank, 30-sample equal-split is
+        // 10 samples. Since rank 2 sent no Batch (its
+        // last_step_count stayed at the epoch-start snapshot),
+        // processed_samples = 0, so the entire partition (10) is
+        // redistributed across the 2 survivors. Sum across survivors
+        // must equal 10 exactly.
+        let r0_total = r0_extension.load(Ordering::SeqCst);
+        let r1_total = r1_extension.load(Ordering::SeqCst);
+        let total_redistributed = r0_total + r1_total;
+        assert_eq!(
+            total_redistributed, 10,
+            "dead rank 2's un-processed remainder (10) must be reshared \
+             across survivors; got r0={r0_total}, r1={r1_total}"
+        );
+    }
+
+    #[test]
+    fn dead_ranks_optional_default_disables_elastic_membership() {
+        // When `dead_ranks` is None in the config (default), the
+        // heartbeat-stale check is a no-op and no rank can be
+        // declared dead. Same standard cycle as the basic Sync+CPU
+        // test, just verifying the opt-in semantics: forgetting to
+        // wire the ledger doesn't accidentally declare ranks dead.
+        let world_size = 2;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || {
+                cfg_sync_cpu(world_size).heartbeat_timeout_secs(0)
+                // No `.dead_ranks(...)` — elastic membership disabled.
+            },
+            move |coord| {
+                // Drive a cycle; sleep enough that timeout-0 WOULD
+                // declare every rank dead if elastic membership were
+                // active. Verify nothing fires.
+                thread::sleep(Duration::from_millis(50));
+                coord.tick()?;
+                // Still active; no decrement.
+                assert_eq!(
+                    coord.active_count(),
+                    world_size,
+                    "dead-rank detection must be off without ledger"
+                );
+                Ok(())
+            },
+        );
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, |_, _| Ok(()));
+        r0.join().unwrap().expect("rank 0 handshake");
+        r1.join().unwrap().expect("rank 1 handshake");
+        coord_handle.join().unwrap().expect("coord drives clean");
+    }
+
+    #[test]
+    fn observe_meta_runs_during_averaging_cycle_no_anchor_change_in_probe() {
+        // Drive one averaging cycle on Sync+NCCL with meta enabled.
+        // Each rank reports its LR + one Batch; coord triggers cycle 1.
+        // observe_meta runs inside finish_averaging_nccl but the meta
+        // is in Probe phase on the first cycle (no calibration), so
+        // it returns Noop and the ElChe anchor stays at 1.
+        // This guards the wire integrity: enabling the meta must not
+        // crash or spuriously nudge the anchor at startup.
+        let world_size = 2;
+        let initial_anchor = 1usize;
+        let (port, coord_handle) = spawn_coord(
+            world_size,
+            move || cfg_sync_nccl(world_size).meta_controller(true),
+            move |coord| {
+                let start = Instant::now();
+                while coord.avg_count() == 0 {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        return Err(TensorError::new(
+                            "observe_meta_runs: avg_count never advanced",
+                        ));
+                    }
+                    coord.tick()?;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert_eq!(
+                    coord.el_che().anchor(),
+                    initial_anchor,
+                    "Probe-phase meta must NOT nudge the anchor on first cycle"
+                );
+                // LR was observed even though no MetaAction fired.
+                let lrs = coord.last_lr_per_rank_for_test();
+                assert!(lrs.iter().all(|lr| lr.is_some()), "LRs captured");
+                Ok(())
+            },
+        );
+        let body = |rank: u32| {
+            let rank = rank as u64;
+            move |s: &mut TcpStream, salt: &SessionSalt| -> Result<()> {
+                send_timing(
+                    s,
+                    salt,
+                    TimingMsgWire::LrUpdate { rank, lr: 0.01 },
+                )?;
+                send_timing(
+                    s,
+                    salt,
+                    TimingMsgWire::Batch {
+                        rank,
+                        batch_ms: 10.0,
+                        step_count: 1,
+                        param_norm: None,
+                        batch_loss: 1.0,
+                        sync_divergence: None,
+                    },
+                )?;
+                // Wait for SyncNow + SetGlobalStep then ack with SyncAck.
+                let _ = recv_control(s, salt)?;
+                send_timing(
+                    s,
+                    salt,
+                    TimingMsgWire::SyncAck {
+                        rank,
+                        step_count: 2,
+                        divergence: Some(0.05),
+                        post_norm: Some(1.0),
+                        pre_norm: Some(1.05),
+                    },
+                )?;
+                let _ = recv_control(s, salt)?; // SetGlobalStep
+                Ok(())
+            }
+        };
+        let r0 = fake_rank(port, 0, world_size as u32, TEST_SALT, body(0));
+        let r1 = fake_rank(port, 1, world_size as u32, TEST_SALT, body(1));
+        r0.join().unwrap().expect("rank 0 path");
+        r1.join().unwrap().expect("rank 1 path");
+        coord_handle.join().unwrap().expect("coord cycle 1 with meta on");
+    }
+}

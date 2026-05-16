@@ -91,27 +91,13 @@ impl<const N: usize> Metrics for &[(&str, f64); N] {
     }
 }
 
-/// Build per-GPU DDP metrics from a Graph's distributed state.
-fn graph_gpu_metrics(graph: &Graph) -> Vec<GpuMetrics> {
-    if !graph.is_distributed() {
-        return Vec::new();
-    }
-    let devices = graph.devices();
-    let ratios = graph.chunk_ratios();
-    let throughput = graph.throughput();
-    let shard_sizes = graph.shard_sizes();
-
-    devices.iter().enumerate().map(|(i, dev)| {
-        GpuMetrics {
-            device_index: match dev {
-                crate::tensor::Device::CUDA(idx) => *idx,
-                _ => i as u8,
-            },
-            throughput: throughput.get(i).copied().unwrap_or(0.0),
-            chunk_ratio: ratios.get(i).copied().unwrap_or(0.0),
-            shard_size: shard_sizes.get(i).copied().unwrap_or(0),
-        }
-    }).collect()
+/// Build per-GPU DDP metrics from a Graph.
+///
+/// In process-per-rank cluster mode, each process only sees its own rank;
+/// per-rank telemetry surfacing across ranks needs the cross-process
+/// observability protocol (deferred). Returns empty for now.
+fn graph_gpu_metrics(_graph: &Graph) -> Vec<GpuMetrics> {
+    Vec::new()
 }
 
 /// Graph only: `&model` -- reads latest epoch history.
@@ -421,16 +407,24 @@ impl Monitor {
         }
         line.push(']');
 
-        // Resource summary (compact)
+        // Resource summary (compact). The VRAM/util numbers come from a
+        // randomly-sampled rank (see ResourceSample::aggregate_rank); the
+        // label exposes which rank, so a reader can correlate across
+        // epochs as the sample drifts.
         let res = &resources;
         if let Some(alloc) = res.vram_allocated_bytes {
             let spill = match res.vram_total_bytes {
                 Some(total) if alloc > total => alloc - total,
                 _ => 0,
             };
+            let label = match res.aggregate_rank {
+                Some(idx) => format!("VRAM[cuda{idx}]"),
+                None => String::from("VRAM"),
+            };
             let _ = write!(
                 line,
-                "  VRAM: {} / {}",
+                "  {}: {} / {}",
+                label,
                 format_bytes(alloc),
                 format_bytes(spill),
             );

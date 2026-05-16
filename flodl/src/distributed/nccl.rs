@@ -63,16 +63,6 @@ pub struct NcclComms {
 unsafe impl Send for NcclComms {}
 
 impl NcclComms {
-    /// Create from a raw handle and device list. Used internally for testing.
-    ///
-    /// # Safety
-    /// Caller must ensure `handle` is a valid NCCL communicator handle
-    /// (or null for mock/test use). Drop on null handle is a no-op.
-    #[cfg(test)]
-    pub(crate) unsafe fn from_raw(handle: *mut c_void, devices: Vec<Device>) -> Self {
-        NcclComms { handle, devices }
-    }
-
     /// Initialize NCCL communicators for the given CUDA devices.
     ///
     /// All devices must be distinct CUDA devices. Returns error on CPU
@@ -364,6 +354,15 @@ impl NcclUniqueId {
     pub fn as_bytes(&self) -> &[u8; NCCL_UNIQUE_ID_BYTES] {
         &self.bytes
     }
+
+    /// Reconstruct a unique ID from raw bytes.
+    ///
+    /// Used by the multi-host rendezvous to materialize the master-generated
+    /// ID on worker hosts after receiving it over TCP. Single-process callers
+    /// should use [`new`](Self::new) instead.
+    pub fn from_bytes(bytes: [u8; NCCL_UNIQUE_ID_BYTES]) -> Self {
+        NcclUniqueId { bytes }
+    }
 }
 
 impl std::fmt::Debug for NcclUniqueId {
@@ -555,6 +554,69 @@ impl NcclRankComm {
         };
         check_err(err)
     }
+
+    /// In-place Broadcast from `root` rank to all other ranks, using the
+    /// default stream.
+    ///
+    /// All ranks must call this concurrently with the same number of tensors
+    /// and the same `root` for the collective to complete. The `root` rank's
+    /// tensor contents are sent in-place to all other ranks.
+    ///
+    /// # Parameters
+    ///
+    /// - `tensors`: one or more tensors on this rank's device. On non-root
+    ///   ranks, contents are overwritten with the root rank's values.
+    /// - `root`: source rank, in `0..world_size()`.
+    pub fn broadcast(&self, tensors: &[&Tensor], root: usize) -> Result<()> {
+        if root >= self.world_size {
+            return Err(crate::TensorError::new(&format!(
+                "NcclRankComm::broadcast: root {root} out of range \
+                 (world_size = {})",
+                self.world_size
+            )));
+        }
+        let mut handles: Vec<ffi::FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_nccl_broadcast_rank(
+                self.handle,
+                handles.as_mut_ptr(),
+                handles.len() as i32,
+                ptr::null_mut(),
+                root as i32,
+            )
+        };
+        check_err(err)
+    }
+
+    /// In-place Broadcast on an explicit CUDA stream.
+    ///
+    /// Same semantics as [`broadcast`](Self::broadcast), but NCCL work is
+    /// enqueued on the provided stream for overlap with compute kernels.
+    pub fn broadcast_on_stream(
+        &self,
+        tensors: &[&Tensor],
+        root: usize,
+        stream: &CudaStream,
+    ) -> Result<()> {
+        if root >= self.world_size {
+            return Err(crate::TensorError::new(&format!(
+                "NcclRankComm::broadcast_on_stream: root {root} out of range \
+                 (world_size = {})",
+                self.world_size
+            )));
+        }
+        let mut handles: Vec<ffi::FlodlTensor> = tensors.iter().map(|t| t.handle).collect();
+        let err = unsafe {
+            ffi::flodl_nccl_broadcast_rank(
+                self.handle,
+                handles.as_mut_ptr(),
+                handles.len() as i32,
+                stream.as_ptr(),
+                root as i32,
+            )
+        };
+        check_err(err)
+    }
 }
 
 impl Drop for NcclRankComm {
@@ -586,15 +648,20 @@ mod tests {
     use crate::distributed::ddp::NCCL_LOCK;
 
     fn require_multi_gpu() -> bool {
-        if !test_device().is_cuda() || cuda_device_count() < 2 {
+        require_n_gpu(2)
+    }
+
+    fn require_n_gpu(n: i32) -> bool {
+        if !test_device().is_cuda() || cuda_device_count() < n {
             return false;
         }
-        // Verify all devices can run compute kernels (e.g., GTX 1060
+        // Verify all required devices can run compute kernels (e.g., GTX 1060
         // sm_61 is unsupported by libtorch cu128 builds).
-        for i in 0..2 {
-            let opts = TensorOptions { dtype: DType::Float32, device: Device::CUDA(i) };
+        for i in 0..n {
+            let dev = Device::CUDA(i as u8);
+            let opts = TensorOptions { dtype: DType::Float32, device: dev };
             if Tensor::zeros(&[1], opts).is_err() {
-                eprintln!("Device CUDA({i}) cannot run compute kernels, skipping multi-GPU test");
+                eprintln!("Device CUDA({i}) cannot run compute kernels, skipping {n}-GPU test");
                 return false;
             }
         }
@@ -930,5 +997,121 @@ mod tests {
         let vb1 = b1.to_f32_vec().unwrap();
         assert!(va1.iter().all(|&v| (v - 2.0).abs() < 1e-5), "a1 should be 2.0");
         assert!(vb1.iter().all(|&v| (v - 150.0).abs() < 1e-5), "b1 should be 150.0");
+    }
+
+    #[test]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
+    fn test_nccl_rank_comm_broadcast() {
+        if !require_multi_gpu() { return; }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let uid = NcclUniqueId::new().unwrap();
+        let uid0 = uid.clone();
+        let uid1 = uid;
+
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            NcclRankComm::init_rank(0, 2, &uid0).unwrap()
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            NcclRankComm::init_rank(1, 2, &uid1).unwrap()
+        });
+        let comm0 = h0.join().unwrap();
+        let comm1 = h1.join().unwrap();
+
+        // Rank 0 (root) holds 42.0; rank 1 holds 0.0. After broadcast(root=0)
+        // both ranks must hold 42.0.
+        let opts0 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(0) };
+        let opts1 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(1) };
+        let t0 = Tensor::full(&[64], 42.0, opts0).unwrap();
+        let t1 = Tensor::zeros(&[64], opts1).unwrap();
+        let t0c = t0.clone();
+        let t1c = t1.clone();
+
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            comm0.broadcast(&[&t0c], 0).unwrap();
+            cuda_synchronize(0);
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            comm1.broadcast(&[&t1c], 0).unwrap();
+            cuda_synchronize(1);
+        });
+        h0.join().unwrap();
+        h1.join().unwrap();
+
+        let vals0 = t0.to_f32_vec().unwrap();
+        let vals1 = t1.to_f32_vec().unwrap();
+        assert!(vals0.iter().all(|&v| (v - 42.0).abs() < 1e-5),
+            "rank 0 (root) should retain 42.0, got {}", vals0[0]);
+        assert!(vals1.iter().all(|&v| (v - 42.0).abs() < 1e-5),
+            "rank 1 should receive 42.0 from root, got {}", vals1[0]);
+    }
+
+    #[test]
+    #[ignore = "NCCL init needs exclusive GPU; run with: fdl cuda-test-all"]
+    fn test_nccl_rank_comm_broadcast_rejects_oob_root() {
+        // The root-vs-world_size check is in Rust (pre-FFI), but constructing
+        // a real NcclRankComm needs live NCCL init -- there's no public
+        // builder for a stub instance. So this test runs only on CUDA builds.
+        if !require_multi_gpu() { return; }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let uid = NcclUniqueId::new().unwrap();
+        let uid0 = uid.clone();
+        let uid1 = uid;
+        let h0 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(0);
+            NcclRankComm::init_rank(0, 2, &uid0).unwrap()
+        });
+        let h1 = std::thread::spawn(move || {
+            crate::tensor::set_current_cuda_device(1);
+            NcclRankComm::init_rank(1, 2, &uid1).unwrap()
+        });
+        let comm0 = h0.join().unwrap();
+        let _comm1 = h1.join().unwrap();
+
+        let opts0 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(0) };
+        let t = Tensor::zeros(&[4], opts0).unwrap();
+        // world_size = 2; root=2 must error before invoking FFI.
+        let err = comm0.broadcast(&[&t], 2).unwrap_err();
+        assert!(err.to_string().contains("out of range"), "got: {err}");
+    }
+
+    // 3-GPU smoke: heterogeneous topology (e.g. RTX 5060 Ti sm_120 +
+    // 2x GTX 1060 sm_61). Uses NcclComms main-thread init since
+    // ncclCommInitRank from worker threads corrupts CUDA context across
+    // heterogeneous architectures.
+    #[test]
+    #[ignore = "NCCL init needs exclusive GPU; needs 3 GPUs; run with: fdl cuda-test-all"]
+    fn test_nccl_three_gpu_all_reduce_sum() {
+        if !require_n_gpu(3) { return; }
+        let _lock = NCCL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let comms = NcclComms::new(&[
+            Device::CUDA(0), Device::CUDA(1), Device::CUDA(2),
+        ]).unwrap();
+        assert_eq!(comms.size(), 3);
+
+        let opts0 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(0) };
+        let opts1 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(1) };
+        let opts2 = TensorOptions { dtype: DType::Float32, device: Device::CUDA(2) };
+
+        let t0 = Tensor::full(&[64], 1.0, opts0).unwrap();
+        let t1 = Tensor::full(&[64], 2.0, opts1).unwrap();
+        let t2 = Tensor::full(&[64], 3.0, opts2).unwrap();
+
+        comms.all_reduce(&[&t0, &t1, &t2], ReduceOp::Sum).unwrap();
+        cuda_synchronize(0);
+        cuda_synchronize(1);
+        cuda_synchronize(2);
+
+        // Sum: 1 + 2 + 3 = 6 on every device.
+        for (i, t) in [&t0, &t1, &t2].iter().enumerate() {
+            let vals = t.to_f32_vec().unwrap();
+            assert!(vals.iter().all(|&v| (v - 6.0).abs() < 1e-5),
+                "rank {i} should have 6.0 after AllReduce Sum, got {}", vals[0]);
+        }
     }
 }

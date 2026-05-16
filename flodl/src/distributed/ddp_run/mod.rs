@@ -68,8 +68,12 @@ pub mod convergence;
 
 pub use worker::*;
 pub use coordinator::*;
+pub(crate) use coordinator::{equal_sizes, ratio_to_sizes, throughput_sizes};
 pub use orchestrator::*;
-pub use convergence::{ConvergenceAction, ConvergenceGuard, DivergenceReport};
+pub use convergence::{
+    ConvergenceAction, ConvergenceGuard, DivergenceReport, LambdaEstimator, LambdaSample,
+    MsfGuard, NoGuard, TrendGuard,
+};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -250,10 +254,22 @@ pub struct EpochMetrics {
     pub avg_loss: f64,
     /// Wall-clock epoch time (ms), max across ranks.
     pub epoch_ms: f64,
-    /// Per-rank throughput in samples/ms (index = rank).
+    /// Per-rank throughput in samples/ms (index = rank). Computed from
+    /// `share_complete_ms` (epoch start to end of rank's last batch),
+    /// not from `epoch_ms`, to exclude post-completion sync-barrier idle.
+    /// This is the honest capacity signal that the balancer should consume.
     pub per_rank_throughput: Vec<f64>,
     /// Per-rank batch share as fraction 0.0..1.0 (index = rank).
     pub per_rank_batch_share: Vec<f64>,
+    /// Per-rank time on assigned work (ms), from epoch start to last batch
+    /// finishing. Excludes post-completion sync wait. Source of `per_rank_throughput`.
+    pub per_rank_share_complete_ms: Vec<f64>,
+    /// Per-rank pure compute time (ms): sum of train_step durations.
+    /// Diagnostic only; not used by the balancer.
+    pub per_rank_compute_only_ms: Vec<f64>,
+    /// Per-rank cumulative data-wait time (ms): time blocked waiting for
+    /// the next batch. Diagnostic for prefetch tuning; not a balancer input.
+    pub per_rank_data_starve_ms: Vec<f64>,
     /// CUDA device index per rank (for dashboard GPU tabs).
     pub device_indices: Vec<u8>,
 }
@@ -337,8 +353,18 @@ pub enum AverageBackend {
 pub struct DdpRunConfig {
     /// ElChe overhead target (fraction of compute time). Default: 0.10.
     pub overhead_target: Option<f64>,
-    /// Maximum anchor count (gradient staleness limit). Default: 200.
+    /// Maximum anchor count (gradient staleness limit). Default: 1000.
     pub max_anchor: Option<usize>,
+    /// Minimum anchor count (auto-tune floor). Default: equals the
+    /// initial anchor (so the auto-tune cannot shrink below the start
+    /// value). Set explicitly to force the auto-tune above its natural
+    /// overhead-equilibrium setpoint, or together with `max_anchor` to
+    /// pin the anchor at a fixed cadence (`min == max`).
+    ///
+    /// Note: the convergence guard's `NudgeDown` action is the only
+    /// path that bypasses this floor (treated as a stronger signal than
+    /// overhead). Use `with_convergence_guard(NoGuard)` for hard pinning.
+    pub min_anchor: Option<usize>,
     /// Initial ElChe anchor (batches before first sync). Default: 10.
     pub anchor: Option<usize>,
     /// Divergence threshold for the trend guardrail. Default: 0.05.
@@ -406,6 +432,53 @@ pub struct DdpRunConfig {
     ///
     /// Tune this if convergence degrades at higher GPU counts.
     pub lr_scale_ratio: f64,
+    /// Allow ElChe to relax the anchor upward on stable convergence. Default: `false`.
+    ///
+    /// When `false` (default), the anchor only changes via the overhead-based
+    /// auto-tune in `el_che.report_timing`. This matches pre-relax-up
+    /// behavior and is the reproducibility-friendly default.
+    ///
+    /// When `true`, each `Stable` convergence-guard verdict triggers
+    /// `el_che.relax_anchor_up()`, growing the anchor toward `max_anchor` to
+    /// reduce sync frequency on workloads where convergence is healthy.
+    /// Opt in when measuring the relax-up policy specifically; aware that
+    /// the periodic loosen → drift → tighten → recover cycle adds an
+    /// implicit regularizer to the optimizer's gradient-averaging schedule.
+    pub elche_relax_up: bool,
+    /// EASGD elastic averaging weight (0.0 < α ≤ 1.0). Default: `None`
+    /// (current behavior: full overwrite of local params with averaged
+    /// consensus, equivalent to α=1.0).
+    ///
+    /// When set to a value in `(0, 1)`, the cpu-async load_averaged path
+    /// applies an elastic blend instead of full overwrite:
+    ///
+    /// ```text
+    /// W_local := (1 − α) · W_local + α · W_avg
+    /// ```
+    ///
+    /// Preserves the local progress made between snapshot-time and
+    /// averaging-completion (the "ahead-of-sync drift" that current
+    /// cpu-async discards). Reference: Zhang, Choromanska, LeCun 2015,
+    /// "Deep learning with Elastic Averaging SGD," NeurIPS 2015
+    /// (<https://arxiv.org/abs/1412.6651>).
+    ///
+    /// Honored on the cpu-async path only (`AverageBackend::Cpu` +
+    /// `ApplyPolicy::Async`). NCCL paths use in-place AllReduce(Avg) and
+    /// have no equivalent overwrite step. Values outside `(0, 1]` are
+    /// rejected at config time.
+    pub easgd_alpha: Option<f64>,
+    /// Enable the LR-aware meta-controller above ElChe. Default: `false`
+    /// (opt-in until validation sweep).
+    ///
+    /// When enabled, the meta-controller observes the LR trajectory, anchor
+    /// trend, and convergence guard verdicts each averaging cycle, and
+    /// reactively dispatches `nudge_anchor_down` on sharp LR drops or
+    /// sustained divergence patterns. ElChe's natural overhead auto-tune
+    /// handles recovery; the meta layer only adds reactive corrections that
+    /// the natural feedback can't absorb fast enough.
+    ///
+    /// See [`crate::distributed::lr_event_meta`] for the design.
+    pub meta_controller: bool,
 }
 
 impl Default for DdpRunConfig {
@@ -420,6 +493,7 @@ impl DdpRunConfig {
         DdpRunConfig {
             overhead_target: None,
             max_anchor: None,
+            min_anchor: None,
             anchor: None,
             divergence_threshold: None,
             no_divergence_guard: false,
@@ -432,6 +506,9 @@ impl DdpRunConfig {
             timeline: None,
             max_overshoot: None,
             lr_scale_ratio: 1.0,
+            elche_relax_up: false,
+            easgd_alpha: None,
+            meta_controller: false,
         }
     }
 
@@ -444,6 +521,19 @@ impl DdpRunConfig {
     /// Set the maximum anchor count.
     pub fn with_max_anchor(mut self, max: usize) -> Self {
         self.max_anchor = Some(max);
+        self
+    }
+
+    /// Set the minimum anchor count (auto-tune floor).
+    ///
+    /// Forces the overhead auto-tune above its natural equilibrium. Combined
+    /// with `with_max_anchor(min)` (same value), pins the anchor at a fixed
+    /// cadence — useful for fixed-k experiments. The convergence guard and
+    /// divergence nudge-down paths BYPASS this floor; pair with
+    /// `with_convergence_guard(NoGuard)` + `with_no_divergence_guard()` for
+    /// truly hard pinning.
+    pub fn with_min_anchor(mut self, min: usize) -> Self {
+        self.min_anchor = Some(min);
         self
     }
 
@@ -554,6 +644,42 @@ impl DdpRunConfig {
         self.lr_scale_ratio = ratio;
         self
     }
+
+    /// Allow or suppress ElChe's anchor relax-up on stable convergence.
+    ///
+    /// Default: `false` (off). Set to `true` to enable: each `Stable`
+    /// convergence-guard verdict will grow the anchor via
+    /// `el_che.relax_anchor_up()`. Opt in when measuring the relax-up
+    /// regime; the default keeps the anchor under overhead-based control
+    /// alone, matching pre-relax-up behavior.
+    pub fn with_elche_relax_up(mut self, enabled: bool) -> Self {
+        self.elche_relax_up = enabled;
+        self
+    }
+
+    /// Set the EASGD elastic averaging weight α. Must be in `(0, 1]`.
+    /// `None` (default) is full overwrite (equivalent to α=1.0 with the
+    /// fast copy_ path). Values in `(0, 1)` enable elastic blending on
+    /// the cpu-async path; α=1.0 also enables blending but is functionally
+    /// identical to the overwrite default. See `easgd_alpha` field docs
+    /// for the formula and reference.
+    pub fn with_easgd_alpha(mut self, alpha: f64) -> Self {
+        assert!(
+            alpha > 0.0 && alpha <= 1.0,
+            "easgd_alpha must be in (0, 1], got {alpha}"
+        );
+        self.easgd_alpha = Some(alpha);
+        self
+    }
+
+    /// Enable the LR-aware meta-controller above ElChe.
+    ///
+    /// Off by default (opt-in). See the `meta_controller` field for behavior
+    /// and `crate::distributed::lr_event_meta` for the design.
+    pub fn with_meta_controller(mut self, enabled: bool) -> Self {
+        self.meta_controller = enabled;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -599,6 +725,16 @@ pub enum TimingMsg {
         /// Weight-space divergence from the AllReduce:
         /// `||params_before - params_after|| / ||params_after||`.
         divergence: Option<f64>,
+        /// Post-AllReduce consensus L2 norm `||params_after||`. Identical
+        /// across ranks (all params identical post-AllReduce); the coordinator
+        /// can take any rank's value. Used for longitudinal meta-velocity
+        /// tracking. `None` when divergence is also `None`.
+        post_norm: Option<f64>,
+        /// Pre-AllReduce per-rank L2 norm `||params_before||_i`. With
+        /// `divergence` and `post_norm` this gives the cosine-similarity /
+        /// magnitude-shift decomposition (MSF/SWA directional vs magnitude
+        /// split). `None` when divergence is also `None`.
+        pre_norm: Option<f64>,
     },
     /// Worker is about to exit. Coordinator must stop including this rank
     /// in collectives before processing any further messages.
@@ -606,12 +742,52 @@ pub enum TimingMsg {
         /// Which GPU is exiting.
         rank: usize,
     },
+    /// Per-batch learning rate snapshot from a worker, used by the LR-aware
+    /// meta-controller to detect sharp drops between averaging cycles.
+    ///
+    /// Cheap fire-and-forget message: just a `(rank, lr)` pair. The
+    /// coordinator caches the most recent value per rank and feeds it into
+    /// [`crate::distributed::lr_event_meta::LrEventMeta::observe`] each
+    /// averaging cycle. Workers can choose to emit only on LR change or on
+    /// every batch — receiver is idempotent.
+    LrUpdate {
+        /// Which GPU sent this.
+        rank: usize,
+        /// Current optimizer learning rate.
+        lr: f64,
+    },
+    /// Periodic liveness signal from a cluster worker's heartbeat
+    /// thread. Cluster-only; OLD threaded path never emits these.
+    /// See [`crate::distributed::wire::TimingMsgWire::Heartbeat`] for
+    /// the failure-detection rationale.
+    Heartbeat {
+        /// Which rank sent this.
+        rank: usize,
+        /// Worker's local step counter at emission time. Diagnostic.
+        step_count: usize,
+    },
+    /// Cluster-mode "snapshot ready, entering AllReduce barrier"
+    /// marker emitted by the worker's CPU-averaging param bridge.
+    /// See [`crate::distributed::wire::TimingMsgWire::SnapshotReady`].
+    SnapshotReady {
+        /// Which rank sent this.
+        rank: usize,
+    },
+    /// Response from the chosen surviving rank to coord's
+    /// [`ControlMsg::RequestNewNcclId`]: 128 raw bytes of a freshly
+    /// generated `NcclUniqueId`.
+    NewNcclIdGenerated {
+        /// Sender rank (so coord validates against its request).
+        rank: usize,
+        /// 128 bytes of NCCL unique-id.
+        uid_bytes: Vec<u8>,
+    },
 }
 
 /// Epoch-end metrics sent from a GPU worker to the coordinator.
 ///
 /// Fire-and-forget: worker sends this and immediately starts the next epoch.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MetricsMsg {
     /// Which GPU sent this.
     pub rank: usize,
@@ -621,10 +797,30 @@ pub struct MetricsMsg {
     pub avg_loss: f64,
     /// Number of batches processed in this epoch.
     pub batches_processed: usize,
-    /// Wall-clock time for this epoch (ms).
+    /// Wall-clock time for this epoch (ms). Includes any post-completion
+    /// idle time waiting for collective sync. Kept for backwards-compatibility
+    /// and as a coarse outer-bound timing; do not use as a balancer denominator
+    /// for heterogeneous DDP — see `share_complete_ms`.
     pub epoch_ms: f64,
     /// Total samples processed this epoch (batches * batch_size).
     pub samples_processed: usize,
+    /// Time the rank spent on its assigned work, from epoch start to its last
+    /// batch finishing (ms). Includes data-pipeline waits (the rank's own
+    /// pipeline limitation), excludes post-completion sync-barrier idle.
+    /// This is the honest balancer denominator: tput = samples_processed
+    /// / share_complete_ms reflects the rank's actual capacity.
+    pub share_complete_ms: f64,
+    /// Pure compute time within the epoch (sum of forward+backward+optimizer
+    /// step durations, ms). Diagnostic only — not used by the balancer.
+    /// Useful for capacity / saturation analysis.
+    pub compute_only_ms: f64,
+    /// Cumulative time the rank was blocked waiting for data (ms).
+    /// On the prefetch path this is time spent in `recv()` on the prefetch
+    /// channel; on the sync path this is time spent in `dataset.get_batch()`
+    /// plus host-to-device transfer. Diagnostic only: surfacing this drives
+    /// prefetch-tuning decisions, not balancer share allocation. Feeding
+    /// it back to the balancer would create a contaminated control loop.
+    pub data_starve_ms: f64,
     /// Named scalar metrics recorded via [`record_scalar()`] during this epoch.
     /// Each value is `(sum, count)` for computing the mean.
     pub scalars: HashMap<String, (f64, usize)>,
@@ -694,6 +890,49 @@ pub enum ControlMsg {
     /// reconstruct their sample indices from the global permutation using the
     /// plan's offset and size.
     StartEpoch(EpochPlan),
+    /// Mid-epoch partition extension. Coord-emitted when redistributing
+    /// a freshly-dead rank's un-processed samples onto survivors so the
+    /// epoch still processes its intended sample count. Worker appends
+    /// the resolved indices to its in-flight `partition` Vec; the
+    /// epoch loop re-checks `partition.len()` each iteration so the
+    /// new batches are processed before declaring the epoch complete.
+    ExtendPartition {
+        /// Offset into the global epoch permutation where the new
+        /// slice starts (resolved via the same `make_partition` call
+        /// the worker would use for `StartEpoch`).
+        partition_offset: usize,
+        /// Number of additional sample indices to append.
+        partition_size: usize,
+    },
+    /// Coord-emitted notification that a peer rank has been declared
+    /// dead. The cluster-worker's inbound bridge converts this into
+    /// a local-ledger update so the NCCL watchdog thread can react;
+    /// it is NOT dispatched to the inner GpuWorker because the inner
+    /// is typically blocked in an in-flight NCCL collective and
+    /// cannot service control messages until the watchdog aborts the
+    /// comm. See [`crate::distributed::wire::ControlMsgWire::DeclareDead`].
+    DeclareDead {
+        /// Global rank that just died.
+        rank: usize,
+    },
+    /// Coord-emitted directive to rebuild the local NCCL comm with
+    /// the shrunken cohort. Sent after one or more `DeclareDead`s.
+    /// See [`crate::distributed::wire::ControlMsgWire::NewNcclSession`].
+    NewNcclSession {
+        /// 128-byte NCCL unique-id, identical across survivors.
+        uid_bytes: Vec<u8>,
+        /// Recipient's new rank-in-comm (its position among
+        /// survivors ordered by ascending global rank).
+        new_rank: usize,
+        /// Total ranks in the new comm.
+        new_world_size: usize,
+    },
+    /// Coord-emitted request to generate a fresh NCCL unique-id and
+    /// ship its bytes back via the timing channel
+    /// ([`TimingMsg::NewNcclIdGenerated`]). Only one rank receives
+    /// this per re-rendezvous cycle (the lowest-numbered survivor).
+    /// See [`crate::distributed::wire::ControlMsgWire::RequestNewNcclId`].
+    RequestNewNcclId,
     /// Worker is too far ahead: block until the next real command arrives.
     /// Sent when the worker's batch lead exceeds `ElChe::max_batch_diff`.
     Throttle,
@@ -741,6 +980,12 @@ pub struct WorkerConfig {
     pub seed: u64,
     /// Maximum gradient norm for clipping (None = no clipping).
     pub max_grad_norm: Option<f64>,
+    /// EASGD elastic averaging weight (0, 1]. `None` = full overwrite of
+    /// local params with averaged consensus on the cpu-async path (current
+    /// behavior). When set, [`crate::distributed::GpuWorker::load_averaged`]
+    /// blends `W_local := (1-α)·W_local + α·W_avg` instead. See
+    /// [`DdpRunConfig::easgd_alpha`] for details.
+    pub easgd_alpha: Option<f64>,
     /// Optional system timeline for high-frequency profiling.
     pub timeline: Option<Arc<crate::monitor::Timeline>>,
     /// Training policy (Sync/Cadence/Async). Used to gate divergence measurement:

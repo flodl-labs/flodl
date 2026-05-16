@@ -50,8 +50,9 @@
 use crate::autograd::Variable;
 use crate::graph::Graph;
 use crate::nn::{Buffer, Module, Optimizer, Parameter};
-use super::cuda_event::CudaEvent;
-use super::nccl::{NcclComms, ReduceOp};
+use super::cluster::LocalCluster;
+use super::nccl::{NcclRankComm, ReduceOp};
+use super::rendezvous::TcpRendezvous;
 use super::ddp_run::{DdpBuilder, DdpHandle};
 pub use super::el_che::ElChe;
 use crate::tensor::{Device, Result, Tensor, TensorError};
@@ -63,281 +64,47 @@ use crate::tensor::{Device, Result, Tensor, TensorError};
 #[cfg(test)]
 pub(crate) static NCCL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Default number of steps before the first rebalance.
-pub(crate) const DEFAULT_CALIBRATION_STEPS: usize = 10;
-
-/// How often to re-evaluate chunk ratios after calibration.
-pub(crate) const DEFAULT_REBALANCE_INTERVAL: usize = 50;
-
-/// EMA smoothing factor for throughput tracking (higher = more reactive).
-const EMA_ALPHA: f64 = 0.3;
-
-/// Minimum ratio any device can receive (prevents starving a GPU entirely).
-const MIN_CHUNK_RATIO: f64 = 0.05;
-
 // ---------------------------------------------------------------------------
-// Internal distributed state (held by Graph)
+// Cluster-mode ElChe state (process-per-rank heterogeneous DDP)
 // ---------------------------------------------------------------------------
 
-/// Internal distributed state held by Graph when `distribute()` is called.
-pub(crate) struct DistributedState {
-    /// Model replicas for ranks 1..N (rank 0 is the Graph itself).
-    pub replicas: Vec<Box<dyn Module>>,
-    /// NCCL communicators (one per device).
-    pub comms: NcclComms,
-    /// All devices including rank 0.
-    pub devices: Vec<Device>,
-    /// Per-replica optimizers indexed by rank (including rank 0).
-    pub optimizers: Vec<Box<dyn Optimizer>>,
-    /// Chunk ratios for auto-balancing (sum = 1.0). Default: equal.
-    pub chunk_ratios: Vec<f64>,
-    /// Parameters matched across replicas: param_groups\[param_idx\]\[rank\].
-    pub param_groups: Vec<Vec<Variable>>,
-    /// Buffers matched across replicas: buffer_groups\[buf_idx\]\[rank\].
-    pub buffer_groups: Vec<Vec<Buffer>>,
-
-    // -- Auto-balancer state --
-
-    /// Per-rank forward timing events from last forward pass: (start, end).
-    /// Set by forward_distributed(), read by step().
-    pub last_timing: Option<Vec<(CudaEvent, CudaEvent)>>,
-    /// Shard sizes from last forward pass (for throughput calculation).
-    pub last_shard_sizes: Vec<i64>,
-    /// EMA throughput per rank (samples/ms). Zero until first measurement.
-    pub ema_throughput: Vec<f64>,
-    /// Number of completed training steps.
-    pub step_count: usize,
-    /// Steps of equal-split calibration before first rebalance.
-    pub calibration_steps: usize,
-    /// Steps between ratio recalculations after calibration.
-    pub rebalance_interval: usize,
-
-    // -- El Che cadence (heterogeneous DDP) --
-
-    /// El Che cadence strategy. When Some, Graph uses per-device multi-batch
-    /// forward instead of per-batch scatter. When None, existing scatter path.
-    pub el_che: Option<ElChe>,
-    /// Per-rank batch counts from the last El Che forward pass.
-    /// Set by forward_distributed_el_che(), read by step().
-    pub last_el_che_counts: Vec<usize>,
-    /// Wall-clock time at end of last El Che AllReduce.
-    pub last_el_che_sync: Option<std::time::Instant>,
-    /// Maximum gradient norm for per-rank clipping in El Che mode.
+/// Per-process state for cluster-mode El Che heterogeneous DDP.
+///
+/// Each rank holds its own copy. On every cadence boundary all ranks run
+/// a cross-process timing AllReduce ([`Ddp::all_reduce_per_rank_f64`]) and
+/// then call [`ElChe::report_timing`] with identical inputs — so the
+/// anchor and per-rank batch counts stay coherent across the cluster
+/// without a separate broadcast step.
+///
+/// Lives behind `Graph.cluster_el_che`; [`Graph::step`] reads the local
+/// cadence target (`el_che.batch_counts()[my_rank]`) and only fires the
+/// actual sync + optimizer step when `local_batch_idx` reaches it. Between
+/// cadences, `step()` increments the counter and returns (gradients
+/// accumulate on the replica's parameters via subsequent `backward()`
+/// calls).
+pub(crate) struct ClusterElCheState {
+    /// El Che cadence strategy (anchor auto-tune lives here).
+    pub el_che: ElChe,
+    /// Batches processed locally since last sync. Reaches the local target
+    /// (`el_che.batch_counts()[my_rank]`) at the cadence boundary.
+    pub local_batch_idx: usize,
+    /// Wall-clock at start of current cycle. Set on the first `step()` of
+    /// the cycle, cleared after the cadence-boundary sync. Used to feed
+    /// `ElChe::report_timing` per-rank compute wall times.
+    pub cycle_start: Option<std::time::Instant>,
+    /// Optional per-rank gradient clipping norm. Applied to the accumulated
+    /// gradients before normalize-by-count and the weighted AllReduce.
     pub max_grad_norm: Option<f64>,
-    /// Optional system timeline for high-frequency profiling.
-    pub timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
 }
 
-impl DistributedState {
-    /// AllReduce-average gradients across all replicas.
-    pub fn all_reduce_gradients(&self) -> Result<()> {
-        for group in &self.param_groups {
-            // Skip frozen parameters (no gradient on rank 0)
-            if group[0].grad().is_none() {
-                continue;
-            }
-            let grads: Vec<Tensor> = group
-                .iter()
-                .map(|v| v.grad().expect("gradient missing on replica"))
-                .collect();
-            let refs: Vec<&Tensor> = grads.iter().collect();
-            self.comms.all_reduce(&refs, ReduceOp::Avg)?;
-        }
-        Ok(())
-    }
+impl ClusterElCheState {
+    /// Default initial anchor — matches single-process El Che semantics.
+    /// Auto-tunes from observed timing after the warmup window.
+    pub(crate) const DEFAULT_INITIAL_ANCHOR: usize = 10;
 
-    /// Broadcast buffers from rank 0 to all replicas (BatchNorm stats etc).
-    pub fn sync_buffers(&self) -> Result<()> {
-        for group in &self.buffer_groups {
-            let tensors: Vec<Tensor> = group.iter().map(|b| b.get()).collect();
-            let refs: Vec<&Tensor> = tensors.iter().collect();
-            self.comms.broadcast(&refs, 0)?;
-        }
-        Ok(())
-    }
-
-    /// Broadcast parameters and buffers from rank 0 to all replicas.
-    pub fn sync_params(&self) -> Result<()> {
-        for group in &self.param_groups {
-            let tensors: Vec<Tensor> = group.iter().map(|v| v.data()).collect();
-            let refs: Vec<&Tensor> = tensors.iter().collect();
-            self.comms.broadcast(&refs, 0)?;
-        }
-        self.sync_buffers()
-    }
-
-    /// Compute shard sizes from chunk ratios, guaranteeing they sum to batch_size.
-    pub fn compute_shard_sizes(&self, batch_size: i64) -> Vec<i64> {
-        let n = self.devices.len();
-        let mut sizes = Vec::with_capacity(n);
-        let mut remaining = batch_size;
-
-        for i in 0..n {
-            if i == n - 1 {
-                // Last device gets whatever is left
-                sizes.push(remaining);
-            } else {
-                let s = (batch_size as f64 * self.chunk_ratios[i]).round() as i64;
-                let s = s.max(1).min(remaining - (n - i - 1) as i64); // leave at least 1 per remaining device
-                sizes.push(s);
-                remaining -= s;
-            }
-        }
-
-        sizes
-    }
-
-    /// Number of devices.
-    pub fn world_size(&self) -> usize {
-        self.devices.len()
-    }
-
-    /// Whether chunk ratios are meaningfully unequal (need weighted gradients).
-    pub fn is_balanced(&self) -> bool {
-        let first = self.chunk_ratios[0];
-        self.chunk_ratios.iter().all(|r| (r - first).abs() < 1e-6)
-    }
-
-    /// AllReduce gradients with weighted averaging for unequal shard sizes.
-    ///
-    /// Each replica's gradient is scaled by `(shard_size / batch_size)` before
-    /// AllReduce Sum, which produces the correct mean gradient regardless of
-    /// how the batch was split.
-    pub fn weighted_all_reduce_gradients(&self, batch_size: i64) -> Result<()> {
-        for group in &self.param_groups {
-            if group[0].grad().is_none() {
-                continue;
-            }
-            let grads: Vec<Tensor> = group
-                .iter()
-                .enumerate()
-                .map(|(rank, v)| {
-                    let g = v.grad().expect("gradient missing on replica");
-                    let weight = self.last_shard_sizes[rank] as f64 / batch_size as f64;
-                    g.mul_scalar_(weight).ok();
-                    g
-                })
-                .collect();
-            let refs: Vec<&Tensor> = grads.iter().collect();
-            self.comms.all_reduce(&refs, ReduceOp::Sum)?;
-        }
-        Ok(())
-    }
-
-    /// Read timing from last forward pass, update EMA throughput, and
-    /// rebalance chunk ratios if it's time.
-    ///
-    /// Called from Graph::step() after gradient sync. Returns true if
-    /// chunk ratios were updated this step.
-    pub fn update_balance(&mut self) -> Result<bool> {
-        self.step_count += 1;
-
-        // Read timing events (set by forward_distributed)
-        if let Some(timing) = self.last_timing.take() {
-            for (rank, (start, end)) in timing.iter().enumerate() {
-                let ms = CudaEvent::elapsed_time(start, end)?;
-                if ms > 0.0 && self.last_shard_sizes[rank] > 0 {
-                    let throughput = self.last_shard_sizes[rank] as f64 / ms as f64;
-                    if self.ema_throughput[rank] == 0.0 {
-                        // First measurement: initialize directly
-                        self.ema_throughput[rank] = throughput;
-                    } else {
-                        self.ema_throughput[rank] =
-                            EMA_ALPHA * throughput + (1.0 - EMA_ALPHA) * self.ema_throughput[rank];
-                    }
-                }
-            }
-        }
-
-        // Check if it's time to rebalance
-        let should_rebalance = if self.step_count == self.calibration_steps {
-            true
-        } else if self.step_count > self.calibration_steps {
-            (self.step_count - self.calibration_steps) % self.rebalance_interval == 0
-        } else {
-            false
-        };
-
-        if should_rebalance {
-            self.rebalance();
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    /// Recompute chunk_ratios proportional to EMA throughput.
-    fn rebalance(&mut self) {
-        let total: f64 = self.ema_throughput.iter().sum();
-        if total <= 0.0 {
-            return; // no data yet
-        }
-
-        let n = self.devices.len();
-        let min_total = MIN_CHUNK_RATIO * n as f64;
-
-        // Compute raw proportional ratios
-        let mut ratios: Vec<f64> = self.ema_throughput.iter().map(|t| t / total).collect();
-
-        // Clamp: no device below MIN_CHUNK_RATIO
-        let mut deficit = 0.0;
-        let mut unclamped = 0;
-        for r in &mut ratios {
-            if *r < MIN_CHUNK_RATIO {
-                deficit += MIN_CHUNK_RATIO - *r;
-                *r = MIN_CHUNK_RATIO;
-            } else {
-                unclamped += 1;
-            }
-        }
-
-        // Redistribute deficit from unclamped devices proportionally
-        if deficit > 0.0 && unclamped > 0 {
-            let unclamped_total: f64 = ratios
-                .iter()
-                .filter(|&&r| r > MIN_CHUNK_RATIO + 1e-9)
-                .sum();
-            if unclamped_total > min_total {
-                for r in &mut ratios {
-                    if *r > MIN_CHUNK_RATIO + 1e-9 {
-                        *r -= deficit * (*r / unclamped_total);
-                        *r = r.max(MIN_CHUNK_RATIO);
-                    }
-                }
-            }
-        }
-
-        // Normalize to sum exactly to 1.0
-        let sum: f64 = ratios.iter().sum();
-        if sum > 0.0 {
-            for r in &mut ratios {
-                *r /= sum;
-            }
-        }
-
-        self.chunk_ratios = ratios;
-    }
-
-    /// Configure El Che cadence from a [`DdpConfig`].
-    ///
-    /// Creates an internal ElChe when enabled (max_anchor != Some(0)),
-    /// seeds chunk_ratios from speed_hint if provided.
-    pub(crate) fn configure_el_che(&mut self, config: &DdpConfig) {
-        let n = self.devices.len();
-        if n < 2 {
-            return;
-        }
-
-        // max_anchor = Some(0) → disabled (traditional DDP)
-        if config.max_anchor == Some(0) {
-            self.el_che = None;
-            return;
-        }
-
-        // Build ElChe with sensible defaults
-        let anchor = 10; // initial anchor, auto-tunes from timing
-        let mut el_che = ElChe::new(n, anchor);
-
+    pub(crate) fn from_config(world_size: usize, config: &DdpConfig) -> Self {
+        let anchor = ClusterElCheState::DEFAULT_INITIAL_ANCHOR;
+        let mut el_che = ElChe::new(world_size, anchor);
         if let Some(target) = config.overhead_target {
             el_che = el_che.with_overhead_target(target);
         }
@@ -346,25 +113,13 @@ impl DistributedState {
         }
         if let Some((slow_rank, ratio)) = config.speed_hint {
             el_che = el_che.with_speed_ratio(slow_rank, ratio);
-            // Also seed chunk_ratios for the existing auto-balancer
-            self.apply_speed_hint(slow_rank, ratio);
         }
-
-        self.el_che = Some(el_che);
-        self.max_grad_norm = config.max_grad_norm;
-    }
-
-    /// Seed chunk_ratios from a speed hint.
-    fn apply_speed_hint(&mut self, slow_rank: usize, ratio: f64) {
-        let n = self.devices.len();
-        if slow_rank >= n {
-            return;
+        Self {
+            el_che,
+            local_batch_idx: 0,
+            cycle_start: None,
+            max_grad_norm: config.max_grad_norm,
         }
-        let ratio = ratio.max(1.0);
-        let mut weights = vec![ratio; n];
-        weights[slow_rank] = 1.0;
-        let total: f64 = weights.iter().sum();
-        self.chunk_ratios = weights.iter().map(|w| w / total).collect();
     }
 }
 
@@ -372,126 +127,252 @@ impl DistributedState {
 // Manual DDP coordinator
 // ---------------------------------------------------------------------------
 
-/// Manual DDP coordinator for multi-GPU gradient sync.
+/// Manual DDP coordinator for cluster-mode (process-per-rank) gradient sync.
 ///
-/// For complex training patterns (GAN, RL, progressive) where transparent
-/// Graph-level DDP doesn't fit. Provides explicit control over parameter
-/// broadcast and gradient averaging.
-///
-/// For standard training, use [`crate::graph::Graph::distribute`] instead.
+/// Each process in the cluster holds one `Ddp` joining a cross-process NCCL
+/// group. For standard training, use [`Trainer::setup`] / [`Trainer::setup_with`].
 pub struct Ddp {
-    comms: NcclComms,
-    devices: Vec<Device>,
-    param_groups: Vec<Vec<Variable>>,
-    buffer_groups: Vec<Vec<Buffer>>,
+    comms: NcclRankComm,
+    device: Device,
+    params: Vec<Variable>,
+    buffers: Vec<Buffer>,
 }
 
 impl Ddp {
-    /// Wrap pre-created model replicas for manual DDP control.
+    /// Wrap a single model replica joined to a cross-process NCCL group.
     ///
-    /// Models must have identical architecture (same parameter count/shapes).
-    /// Each model should already reside on its target device.
-    pub fn wrap(models: &[&dyn Module], devices: &[Device]) -> Result<Self> {
-        if models.len() < 2 {
-            return Err(TensorError::new("Ddp::wrap requires at least 2 models"));
+    /// Each process in the cluster calls this with its own model, its own
+    /// CUDA device, its own global rank (typically from
+    /// [`super::LocalCluster::my_rank`]), and the rendezvous's shared
+    /// [`NcclUniqueId`](super::NcclUniqueId) (from
+    /// [`super::LocalCluster::rendezvous`]). NCCL synchronizes the group
+    /// internally via the UID handshake.
+    ///
+    /// Loud errors: `global_rank >= rdv.world_size()`. NCCL init failures
+    /// propagate from [`NcclRankComm::init_rank`].
+    pub fn wrap(
+        model: &dyn Module,
+        device: Device,
+        global_rank: usize,
+        rdv: &TcpRendezvous,
+    ) -> Result<Self> {
+        let world_size = rdv.world_size();
+        if global_rank >= world_size {
+            return Err(TensorError::new(&format!(
+                "Ddp::wrap: global_rank {global_rank} >= world_size {world_size}"
+            )));
         }
-        if models.len() != devices.len() {
-            return Err(TensorError::new(
-                "Ddp::wrap: model count must match device count",
-            ));
+        if let Device::CUDA(idx) = device {
+            crate::tensor::set_current_cuda_device(idx);
         }
+        let comms = NcclRankComm::init_rank(global_rank, world_size, rdv.unique_id())?;
 
-        let comms = NcclComms::new(devices)?;
+        let params: Vec<Variable> = model
+            .parameters()
+            .into_iter()
+            .map(|p| p.variable)
+            .collect();
+        let buffers: Vec<Buffer> = model.buffers();
 
-        // Match parameters across models
-        let all_params: Vec<Vec<Parameter>> =
-            models.iter().map(|m| m.parameters()).collect();
-        let n_params = all_params[0].len();
-        for (rank, params) in all_params.iter().enumerate().skip(1) {
-            if params.len() != n_params {
-                return Err(TensorError::new(&format!(
-                    "Ddp: replica {} has {} parameters, expected {}",
-                    rank,
-                    params.len(),
-                    n_params
-                )));
-            }
-        }
-
-        let mut param_groups = Vec::with_capacity(n_params);
-        for pi in 0..n_params {
-            let group: Vec<Variable> =
-                all_params.iter().map(|p| p[pi].variable.clone()).collect();
-            param_groups.push(group);
-        }
-
-        // Match buffers
-        let all_buffers: Vec<Vec<Buffer>> =
-            models.iter().map(|m| m.buffers()).collect();
-        let n_buffers = all_buffers[0].len();
-        let mut buffer_groups = Vec::with_capacity(n_buffers);
-        for bi in 0..n_buffers {
-            let group: Vec<Buffer> =
-                all_buffers.iter().map(|b| b[bi].clone()).collect();
-            buffer_groups.push(group);
-        }
-
-        Ok(Ddp {
-            comms,
-            devices: devices.to_vec(),
-            param_groups,
-            buffer_groups,
-        })
+        Ok(Ddp { comms, device, params, buffers })
     }
 
-    /// Broadcast all parameters and buffers from rank 0 to all replicas.
+    /// Build a `Ddp` from an existing per-rank NCCL communicator.
+    ///
+    /// Unlike [`Ddp::wrap`], which initializes a fresh
+    /// [`NcclRankComm`](super::NcclRankComm) via `init_rank`, this constructor
+    /// takes ownership of one that's already joined to the cluster group.
+    /// Use when the rendezvous + `init_rank` are driven externally (e.g. the
+    /// cluster-rank inline loops in
+    /// [`DdpBuilder`](crate::distributed::ddp_run::DdpBuilder), which need
+    /// access to the raw comm for broadcasting initial state before wrapping).
+    ///
+    /// Loud errors: `device` mismatch with the rank's bound CUDA device is
+    /// the caller's responsibility — no runtime check (FFI-level guarantees
+    /// already enforce same-device tensors per AllReduce).
+    pub fn from_comm(
+        comms: NcclRankComm,
+        model: &dyn Module,
+        device: Device,
+    ) -> Result<Self> {
+        let params: Vec<Variable> = model
+            .parameters()
+            .into_iter()
+            .map(|p| p.variable)
+            .collect();
+        let buffers: Vec<Buffer> = model.buffers();
+        Ok(Ddp { comms, device, params, buffers })
+    }
+
+    /// In-place AllReduce-average of parameters across all ranks (Local SGD).
+    ///
+    /// Use this at the cadence boundary of a Local-SGD loop: each rank does
+    /// `forward → backward → optimizer.step()` every batch independently,
+    /// then every K batches the param vectors are averaged across ranks via
+    /// NCCL AllReduce-Avg. Convergence properties match PyTorch's
+    /// `PostLocalSGDOptimizer` family.
+    ///
+    /// Distinct from [`all_reduce_gradients`](Self::all_reduce_gradients),
+    /// which averages **gradients** before the optimizer step (synchronous
+    /// minibatch SGD). The two are different algorithms — choose the one
+    /// matching the cadence policy.
+    ///
+    /// All ranks must call concurrently.
+    pub fn average_params(&self) -> Result<()> {
+        let tensors: Vec<Tensor> = self.params.iter().map(|v| v.data()).collect();
+        if tensors.is_empty() {
+            return Ok(());
+        }
+        let refs: Vec<&Tensor> = tensors.iter().collect();
+        self.comms.all_reduce(&refs, ReduceOp::Avg)?;
+        Ok(())
+    }
+
+    /// Allocate the pre-sync scratch buffer used by
+    /// [`average_params_with_divergence`](Self::average_params_with_divergence).
+    ///
+    /// Returns one zero-initialized tensor per parameter, matching shape /
+    /// dtype / device. Caller pins this for the lifetime of the cadence loop
+    /// so divergence measurement avoids per-cycle allocations.
+    pub fn make_divergence_scratch(&self) -> Result<Vec<Tensor>> {
+        self.params
+            .iter()
+            .map(|v| Tensor::zeros_like(&v.data()))
+            .collect()
+    }
+
+    /// AllReduce-average parameters and return this rank's weight-space
+    /// divergence triple `(divergence, post_norm, pre_norm)`.
+    ///
+    /// The same param-Avg primitive as [`average_params`](Self::average_params),
+    /// plus the per-cycle telemetry the convergence-guard pipeline needs:
+    ///
+    /// - `divergence = ||W_pre − W_post|| / ||W_post||` — this rank's
+    ///   transversal weight-space drift across the AllReduce. Fed (after
+    ///   cross-rank AllReduce-gather) into
+    ///   [`ConvergenceGuard::report`](crate::distributed::ddp_run::ConvergenceGuard::report)
+    ///   to drive [`ElChe::nudge_anchor_down`](super::ddp::ElChe::nudge_anchor_down)
+    ///   on rising drift.
+    /// - `post_norm = ||W_post||` — global L2 norm of averaged params.
+    ///   Identical across ranks post-AllReduce (modulo float-rounding
+    ///   noise); the OLD coordinator kept a single scalar from rank 0.
+    /// - `pre_norm = ||W_pre||` — global L2 norm of this rank's pre-sync
+    ///   params. Diverges across ranks pre-sync; gather like `divergence`.
+    ///
+    /// `scratch` is the per-param scratch buffer from
+    /// [`make_divergence_scratch`](Self::make_divergence_scratch), reused
+    /// across cycles. `scratch.len()` must equal the number of parameters.
+    ///
+    /// All ranks must call concurrently.
+    pub fn average_params_with_divergence(
+        &self,
+        scratch: &[Tensor],
+    ) -> Result<(f64, Option<f64>, Option<f64>)> {
+        let param_tensors: Vec<Tensor> = self.params.iter().map(|v| v.data()).collect();
+        if param_tensors.is_empty() {
+            return Ok((0.0, None, None));
+        }
+        if scratch.len() != param_tensors.len() {
+            return Err(TensorError::new(&format!(
+                "average_params_with_divergence: scratch.len() ({}) must equal \
+                 number of parameters ({})",
+                scratch.len(),
+                param_tensors.len(),
+            )));
+        }
+
+        // Snapshot pre-sync params into scratch.
+        for (dst, src) in scratch.iter().zip(&param_tensors) {
+            dst.copy_(src, false)?;
+        }
+
+        // In-place AllReduce-Avg on params.
+        let refs: Vec<&Tensor> = param_tensors.iter().collect();
+        self.comms.all_reduce(&refs, ReduceOp::Avg)?;
+
+        // pre_norm BEFORE the next foreach mutates scratch in place.
+        let pre_norm_tensors = Tensor::foreach_norm(scratch, 2.0)?;
+        let mut pre_sq = 0.0f64;
+        for n in &pre_norm_tensors {
+            let v: f64 = n.item()?;
+            pre_sq += v * v;
+        }
+        let pre_norm = pre_sq.sqrt();
+
+        // scratch[i] += -1 * param_tensors[i]  →  scratch[i] = pre - post.
+        Tensor::foreach_add_list_(scratch, &param_tensors, -1.0)?;
+
+        let diff_norms = Tensor::foreach_norm(scratch, 2.0)?;
+        let post_norms = Tensor::foreach_norm(&param_tensors, 2.0)?;
+
+        let mut diff_sq = 0.0f64;
+        for n in &diff_norms {
+            let v: f64 = n.item()?;
+            diff_sq += v * v;
+        }
+        let mut post_sq = 0.0f64;
+        for n in &post_norms {
+            let v: f64 = n.item()?;
+            post_sq += v * v;
+        }
+        let post_norm = post_sq.sqrt();
+        let divergence = if post_norm > 1e-10 {
+            diff_sq.sqrt() / post_norm
+        } else {
+            0.0
+        };
+
+        Ok((divergence, Some(post_norm), Some(pre_norm)))
+    }
+
+    /// Broadcast parameters and buffers from rank 0 to all ranks.
     pub fn sync_params(&self) -> Result<()> {
-        for group in &self.param_groups {
-            let tensors: Vec<Tensor> = group.iter().map(|v| v.data()).collect();
-            let refs: Vec<&Tensor> = tensors.iter().collect();
+        let p_tensors: Vec<Tensor> = self.params.iter().map(|v| v.data()).collect();
+        if !p_tensors.is_empty() {
+            let refs: Vec<&Tensor> = p_tensors.iter().collect();
             self.comms.broadcast(&refs, 0)?;
         }
-        for group in &self.buffer_groups {
-            let tensors: Vec<Tensor> = group.iter().map(|b| b.get()).collect();
-            let refs: Vec<&Tensor> = tensors.iter().collect();
+        let b_tensors: Vec<Tensor> = self.buffers.iter().map(|b| b.get()).collect();
+        if !b_tensors.is_empty() {
+            let refs: Vec<&Tensor> = b_tensors.iter().collect();
             self.comms.broadcast(&refs, 0)?;
         }
         Ok(())
     }
 
-    /// AllReduce-average gradients across all replicas.
+    /// AllReduce-average gradients across all ranks.
     /// Call after backward(), before optimizer.step().
     pub fn all_reduce_gradients(&self) -> Result<()> {
-        for group in &self.param_groups {
-            if group[0].grad().is_none() {
-                continue;
-            }
-            let grads: Vec<Tensor> = group
-                .iter()
-                .map(|v| v.grad().expect("gradient missing on replica"))
-                .collect();
-            let refs: Vec<&Tensor> = grads.iter().collect();
-            self.comms.all_reduce(&refs, ReduceOp::Avg)?;
+        // Batch every grad on this rank into a single NCCL group call.
+        // Frozen params (no grad) are skipped; collective ranks must call
+        // all_reduce with the same tensor count, so the user contract is
+        // "freeze the same params on every rank".
+        let grads: Vec<Tensor> = self.params.iter().filter_map(|v| v.grad()).collect();
+        if grads.is_empty() {
+            return Ok(());
         }
+        let refs: Vec<&Tensor> = grads.iter().collect();
+        self.comms.all_reduce(&refs, ReduceOp::Avg)?;
         Ok(())
     }
 
     /// Broadcast buffers from rank 0 (BatchNorm running stats etc).
     pub fn sync_buffers(&self) -> Result<()> {
-        for group in &self.buffer_groups {
-            let tensors: Vec<Tensor> = group.iter().map(|b| b.get()).collect();
-            let refs: Vec<&Tensor> = tensors.iter().collect();
-            self.comms.broadcast(&refs, 0)?;
+        let tensors: Vec<Tensor> = self.buffers.iter().map(|b| b.get()).collect();
+        if tensors.is_empty() {
+            return Ok(());
         }
+        let refs: Vec<&Tensor> = tensors.iter().collect();
+        self.comms.broadcast(&refs, 0)?;
         Ok(())
     }
 
-    /// AllReduce gradients weighted by per-device batch contribution.
+    /// AllReduce gradients weighted by per-rank batch contribution.
     ///
-    /// For heterogeneous DDP where devices process different numbers of
-    /// batches per sync step. Each replica's gradient is scaled by
-    /// `(batch_counts[rank] / total)` before AllReduce Sum, producing
-    /// the correct mean gradient.
+    /// For heterogeneous DDP where ranks process different numbers of batches
+    /// per sync step. This rank's gradient is scaled by
+    /// `(batch_counts[my_rank] / total)` before AllReduce Sum, producing the
+    /// correct mean gradient.
     ///
     /// Use with [`ElChe::batch_counts`] for automatic weighting
     /// (see [`ElChe`] for the full heterogeneous DDP strategy):
@@ -500,155 +381,76 @@ impl Ddp {
     /// ddp.weighted_all_reduce_gradients(cadence.batch_counts())?;
     /// ```
     pub fn weighted_all_reduce_gradients(&self, batch_counts: &[usize]) -> Result<()> {
-        if batch_counts.len() != self.devices.len() {
+        if batch_counts.len() != self.comms.world_size() {
             return Err(TensorError::new(&format!(
-                "weighted_all_reduce: batch_counts len ({}) != device count ({})",
+                "weighted_all_reduce: batch_counts len ({}) != world_size ({})",
                 batch_counts.len(),
-                self.devices.len(),
+                self.comms.world_size(),
             )));
         }
         let total: usize = batch_counts.iter().sum();
         if total == 0 {
-            return Err(TensorError::new("weighted_all_reduce: total batch count is 0"));
+            return Err(TensorError::new(
+                "weighted_all_reduce: total batch count is 0",
+            ));
         }
-        for group in &self.param_groups {
-            if group[0].grad().is_none() {
-                continue;
-            }
-            let grads: Vec<Tensor> = group
-                .iter()
-                .enumerate()
-                .map(|(rank, v)| {
-                    let g = v.grad().expect("gradient missing on replica");
-                    let weight = batch_counts[rank] as f64 / total as f64;
+        let my_rank = self.comms.rank();
+        let weight = batch_counts[my_rank] as f64 / total as f64;
+        let grads: Vec<Tensor> = self.params
+            .iter()
+            .filter_map(|v| {
+                v.grad().inspect(|g| {
                     g.mul_scalar_(weight).ok();
-                    g
                 })
-                .collect();
-            let refs: Vec<&Tensor> = grads.iter().collect();
-            self.comms.all_reduce(&refs, ReduceOp::Sum)?;
+            })
+            .collect();
+        if grads.is_empty() {
+            return Ok(());
         }
+        let refs: Vec<&Tensor> = grads.iter().collect();
+        self.comms.all_reduce(&refs, ReduceOp::Sum)?;
         Ok(())
     }
 
-    /// Number of devices.
+    /// World size: total ranks in the cross-process group.
     pub fn world_size(&self) -> usize {
-        self.devices.len()
+        self.comms.world_size()
     }
 
-    /// Devices in use.
-    pub fn devices(&self) -> &[Device] {
-        &self.devices
+    /// This process's global rank in the cluster.
+    pub fn rank(&self) -> usize {
+        self.comms.rank()
     }
 
-    // --- Deprecated aliases: use Trainer:: as the primary entry point ---
-
-    /// Deprecated: use [`Trainer::setup()`] instead.
+    /// AllReduce a per-rank `f64` measurement vector across the cluster.
     ///
-    /// [`Trainer`] is now the primary training entry point and carries the
-    /// same behavior for 1 or N GPUs. [`Ddp`] remains for explicit
-    /// multi-GPU control via [`Ddp::wrap`].
-    #[deprecated(note = "use Trainer::setup() - same behavior. Ddp::setup will be removed in a future release.")]
-    pub fn setup<F, M, G, O>(
-        model: &Graph,
-        builder: F,
-        optimizer: G,
-    ) -> Result<()>
-    where
-        F: Fn(Device) -> Result<M>,
-        M: Module + 'static,
-        G: Fn(&[Parameter]) -> O,
-        O: Optimizer + 'static,
-    {
-        Trainer::setup(model, builder, optimizer)
-    }
-
-    /// Deprecated: use [`Trainer::setup_with()`] instead.
-    #[deprecated(note = "use Trainer::setup_with() - same behavior. Ddp::setup_with will be removed in a future release.")]
-    pub fn setup_with<F, M, G, O>(
-        model: &Graph,
-        builder: F,
-        optimizer: G,
-        config: DdpConfig,
-    ) -> Result<()>
-    where
-        F: Fn(Device) -> Result<M>,
-        M: Module + 'static,
-        G: Fn(&[Parameter]) -> O,
-        O: Optimizer + 'static,
-    {
-        Trainer::setup_with(model, builder, optimizer, config)
-    }
-
-    /// Deprecated: renamed to [`Trainer::setup()`].
-    #[deprecated(since = "0.3.0", note = "Renamed to Trainer::setup()")]
-    pub fn auto<F, M, G, O>(
-        model: &Graph,
-        builder: F,
-        optimizer: G,
-    ) -> Result<()>
-    where
-        F: Fn(Device) -> Result<M>,
-        M: Module + 'static,
-        G: Fn(&[Parameter]) -> O,
-        O: Optimizer + 'static,
-    {
-        Trainer::setup(model, builder, optimizer)
-    }
-
-    /// Deprecated: renamed to [`Trainer::setup_with()`].
-    #[deprecated(since = "0.3.0", note = "Renamed to Trainer::setup_with()")]
-    pub fn auto_with<F, M, G, O>(
-        model: &Graph,
-        builder: F,
-        optimizer: G,
-        config: DdpConfig,
-    ) -> Result<()>
-    where
-        F: Fn(Device) -> Result<M>,
-        M: Module + 'static,
-        G: Fn(&[Parameter]) -> O,
-        O: Optimizer + 'static,
-    {
-        Trainer::setup_with(model, builder, optimizer, config)
-    }
-
-    // -------------------------------------------------------------------
-    // Deprecated builder entry: use Trainer::builder instead
-    // -------------------------------------------------------------------
-
-    /// Deprecated: use [`Trainer::builder()`] instead.
+    /// `local` must be length `world_size`. Caller writes its measurement
+    /// into its own slot (other slots zero); on return every rank sees the
+    /// sum vector. With each rank contributing only its slot, the sum is
+    /// the gathered vector — which lets every rank run identical bookkeeping
+    /// downstream (e.g. `ElChe::report_timing`) without a separate broadcast.
     ///
-    /// [`Trainer`] is the primary training entry point and works
-    /// transparently for single-GPU and multi-GPU. This alias is retained
-    /// for backwards compatibility and will be removed in a future release.
-    #[deprecated(note = "use Trainer::builder() - same behavior. Ddp::builder will be removed in a future release.")]
-    pub fn builder<F, M, G, O, T>(
-        model_factory: F,
-        optim_factory: G,
-        train_fn: T,
-    ) -> DdpBuilder<F, M, G, O, T>
-    where
-        F: Fn(Device) -> Result<M> + Send + Sync + 'static,
-        M: Module + 'static,
-        G: Fn(&[Parameter]) -> O + Send + Sync + 'static,
-        O: Optimizer + 'static,
-        T: Fn(&M, &[Tensor]) -> Result<Variable> + Send + Sync + 'static,
-    {
-        Trainer::builder(model_factory, optim_factory, train_fn)
-    }
-
-    /// Detect whether the current CUDA setup has different GPU models.
-    fn is_heterogeneous() -> bool {
-        use crate::tensor::{cuda_available, cuda_device_count, cuda_device_name_idx};
-        if !cuda_available() || cuda_device_count() < 2 {
-            return false;
+    /// Internally allocates a small CUDA tensor on this rank's device,
+    /// NCCL AllReduce Sum, copies back.
+    pub fn all_reduce_per_rank_f64(&self, local: &mut [f64]) -> Result<()> {
+        let world_size = self.comms.world_size();
+        if local.len() != world_size {
+            return Err(TensorError::new(&format!(
+                "all_reduce_per_rank_f64: vector len ({}) must equal world_size ({})",
+                local.len(),
+                world_size,
+            )));
         }
-        let n = cuda_device_count();
-        let names: Vec<Option<String>> = (0..n)
-            .map(cuda_device_name_idx)
-            .collect();
-        names.windows(2).any(|w| w[0] != w[1])
+        let t = Tensor::from_f64(local, &[world_size as i64], self.device)?;
+        self.comms.all_reduce(&[&t], ReduceOp::Sum)?;
+        let out = t.to_f64_vec()?;
+        local.copy_from_slice(&out);
+        Ok(())
+    }
+
+    /// Device owned by this `Ddp` instance (this process owns exactly one).
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Print a diagnostic summary of detected CUDA devices to stderr.
@@ -772,16 +574,19 @@ impl Trainer {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
+        dispatch_launcher_or_continue()?;
         Ddp::print_device_summary();
-        model.distribute(builder)?;
-        model.set_optimizer(optimizer);
-        model.set_training(true);
 
-        // Auto-enable El Che for heterogeneous GPU setups
-        if Ddp::is_heterogeneous() {
-            model.configure_el_che(&DdpConfig::new());
+        if let Some(cluster) = LocalCluster::from_env()? {
+            return setup_cluster(model, &cluster, builder, optimizer, None);
         }
 
+        // No cluster envelope: single-device mode. The `builder` is only
+        // used to construct per-rank replicas; in single-device mode the
+        // user already passed a fully-built `model` on the target device.
+        let _ = builder;
+        model.set_optimizer(optimizer);
+        model.set_training(true);
         Ok(())
     }
 
@@ -806,17 +611,24 @@ impl Trainer {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
+        dispatch_launcher_or_continue()?;
         Ddp::print_device_summary();
-        model.distribute(builder)?;
+
+        if let Some(cluster) = LocalCluster::from_env()? {
+            // Cluster mode: honor DdpConfig (max_anchor, speed_hint,
+            // overhead_target, max_grad_norm). Cross-process timeline
+            // event protocol lands in a follow-up.
+            return setup_cluster(model, &cluster, builder, optimizer, Some(&config));
+        }
+
+        // No cluster envelope: single-device mode. El Che cadence and
+        // cross-rank timeline are no-ops with one rank; the config knobs
+        // would have nothing to act on. The builder is only used for
+        // replication.
+        let _ = builder;
+        let _ = config;
         model.set_optimizer(optimizer);
         model.set_training(true);
-        model.configure_el_che(&config);
-        // Pass timeline to distributed state for event injection in step().
-        if let Some(tl) = config.timeline {
-            if let Some(ref mut state) = *model.distributed.borrow_mut() {
-                state.timeline = Some(tl);
-            }
-        }
         Ok(())
     }
 
@@ -909,16 +721,18 @@ impl Trainer {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
+        dispatch_launcher_or_continue()?;
         Ddp::print_device_summary();
         let graph = head.graph();
-        graph.distribute(move |dev| head_factory(dev).map(|h| HeadReplica { head: h }))?;
-        graph.set_optimizer(optimizer);
-        graph.set_training(true);
 
-        if Ddp::is_heterogeneous() {
-            graph.configure_el_che(&DdpConfig::new());
+        if let Some(cluster) = LocalCluster::from_env()? {
+            return setup_head_cluster(graph, &cluster, head_factory, optimizer, None);
         }
 
+        // No cluster envelope: single-device mode.
+        let _ = head_factory;
+        graph.set_optimizer(optimizer);
+        graph.set_training(true);
         Ok(())
     }
 
@@ -937,19 +751,168 @@ impl Trainer {
         G: Fn(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
+        dispatch_launcher_or_continue()?;
         Ddp::print_device_summary();
         let graph = head.graph();
-        graph.distribute(move |dev| head_factory(dev).map(|h| HeadReplica { head: h }))?;
+
+        if let Some(cluster) = LocalCluster::from_env()? {
+            return setup_head_cluster(graph, &cluster, head_factory, optimizer, Some(&config));
+        }
+
+        // No cluster envelope: single-device mode.
+        let _ = head_factory;
+        let _ = config;
         graph.set_optimizer(optimizer);
         graph.set_training(true);
-        graph.configure_el_che(&config);
-        if let Some(tl) = config.timeline {
-            if let Some(ref mut state) = *graph.distributed.borrow_mut() {
-                state.timeline = Some(tl);
-            }
-        }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cluster-mode setup helper (process-per-rank)
+// ---------------------------------------------------------------------------
+
+/// Wire `model` into the cluster's NCCL group for this process's rank.
+///
+/// Each process in the cluster runs this once on startup:
+/// 1. Read this process's slot (`(global_rank, device)`) from the envelope.
+/// 2. Rendezvous to obtain the shared `NcclUniqueId`.
+/// 3. Build one local replica on this rank's device via `builder`.
+/// 4. Wrap it with [`Ddp::wrap`] (one process = one rank, joined to
+///    the cross-process group).
+/// 5. Broadcast rank-0 parameters/buffers to every rank for an identical
+///    starting point.
+/// 6. Hand `(ddp, replica)` off to the graph; from that point on, the
+///    [`Module`] surface on `model` routes to the replica.
+///
+/// Loud errors at every step — silent fallthrough on a misconfigured
+/// cluster is the worst class of bug (data shard divergence, hangs,
+/// silently-wrong gradients).
+/// Cluster-role detection slot-in called from every `Trainer::setup*`.
+///
+/// Three outcomes:
+/// - [`Role::SingleDevice`]: no cluster env → return Ok so caller proceeds.
+/// - [`Role::Rank`]: rank slot env → return Ok so caller's cluster-path
+///   logic ([`LocalCluster::from_env`] + rendezvous + `Ddp::wrap`) runs.
+/// - [`Role::LauncherDone`]: this process was the launcher; fan-out
+///   completed, ranks all exited cleanly. The user's training-loop code
+///   has nothing to do here — exit the program with status 0.
+///
+/// Wrapping the role check in `Trainer::setup*` keeps the user code
+/// transparent: same `Trainer::setup(&model, factory, optim)?` line on
+/// single-host, multi-process single-host, and multi-host invocations.
+/// The launcher branch never returns to user code; everything below the
+/// `setup` call runs only on the rank-side.
+///
+/// [`Role::SingleDevice`]: crate::distributed::launcher::Role::SingleDevice
+/// [`Role::Rank`]: crate::distributed::launcher::Role::Rank
+/// [`Role::LauncherDone`]: crate::distributed::launcher::Role::LauncherDone
+/// [`LocalCluster::from_env`]: crate::distributed::cluster::LocalCluster::from_env
+fn dispatch_launcher_or_continue() -> Result<()> {
+    match crate::distributed::launcher::dispatch()? {
+        crate::distributed::launcher::Role::LauncherDone => std::process::exit(0),
+        crate::distributed::launcher::Role::Rank
+        | crate::distributed::launcher::Role::SingleDevice => Ok(()),
+    }
+}
+
+fn setup_cluster<F, M, G, O>(
+    model: &Graph,
+    cluster: &LocalCluster,
+    builder: F,
+    optimizer: G,
+    config: Option<&DdpConfig>,
+) -> Result<()>
+where
+    F: Fn(Device) -> Result<M>,
+    M: Module + 'static,
+    G: Fn(&[Parameter]) -> O,
+    O: Optimizer + 'static,
+{
+    let (global_rank, device) = cluster.my_rank()?;
+    // Caller-declared dataset fingerprint. Default `[0u8; 32]` (every rank
+    // trivially agrees); when set, mismatching ranks fail loudly at the
+    // rendezvous instead of silently training on divergent shards.
+    let dataset_sig = config.map_or([0u8; 32], |c| c.dataset_signature);
+    let rdv = cluster.rendezvous(dataset_sig)?;
+    let world_size = rdv.world_size();
+    let replica = builder(device)?;
+    let ddp = Ddp::wrap(&replica, device, global_rank, &rdv)?;
+    ddp.sync_params()?;
+    model.set_cluster_ddp(ddp, Box::new(replica));
+    model.set_optimizer(optimizer);
+    model.set_training(true);
+    enable_cluster_el_che(model, world_size, cluster, config);
+    Ok(())
+}
+
+/// Decide whether to enable cluster-mode El Che for this rank.
+///
+/// Mirrors the single-process auto-enable rule but reads the cluster
+/// envelope: a cluster that spans multiple hosts is, by construction,
+/// the heterogeneous case El Che is designed for. An explicit
+/// [`DdpConfig::max_anchor`] of `Some(0)` always opts out.
+fn enable_cluster_el_che(
+    model: &Graph,
+    world_size: usize,
+    cluster: &LocalCluster,
+    config: Option<&DdpConfig>,
+) {
+    if world_size < 2 {
+        return;
+    }
+    if let Some(cfg) = config {
+        if cfg.max_anchor == Some(0) {
+            return;
+        }
+        model.set_cluster_el_che(ClusterElCheState::from_config(world_size, cfg));
+        return;
+    }
+    // No explicit config: auto-enable only when the cluster spans hosts.
+    // Single-host multi-process clusters skip El Che by default; users can
+    // opt in via `Trainer::setup_with`.
+    if cluster.spans_multiple_hosts() {
+        model.set_cluster_el_che(ClusterElCheState::from_config(
+            world_size,
+            &DdpConfig::new(),
+        ));
+    }
+}
+
+/// Cluster-mode setup for a [`HasGraph`] task-head wrapper.
+///
+/// Same shape as [`setup_cluster`] but the local replica is the
+/// task-head wrapper (`H`) adapted to [`Module`] via [`HeadReplica`].
+/// User-side training code keeps working through the original `head`
+/// reference because `head.compute_loss` / `head.graph().forward_multi`
+/// route through the graph's cluster-aware short-circuits to the local
+/// replica's graph (which [`HeadReplica::as_graph`] exposes).
+fn setup_head_cluster<H, F, G, O>(
+    graph: &Graph,
+    cluster: &LocalCluster,
+    head_factory: F,
+    optimizer: G,
+    config: Option<&DdpConfig>,
+) -> Result<()>
+where
+    H: HasGraph + 'static,
+    F: Fn(Device) -> Result<H>,
+    G: Fn(&[Parameter]) -> O,
+    O: Optimizer + 'static,
+{
+    let (global_rank, device) = cluster.my_rank()?;
+    let dataset_sig = config.map_or([0u8; 32], |c| c.dataset_signature);
+    let rdv = cluster.rendezvous(dataset_sig)?;
+    let world_size = rdv.world_size();
+    let head_local = head_factory(device)?;
+    let replica = HeadReplica { head: head_local };
+    let ddp = Ddp::wrap(&replica, device, global_rank, &rdv)?;
+    ddp.sync_params()?;
+    graph.set_cluster_ddp(ddp, Box::new(replica));
+    graph.set_optimizer(optimizer);
+    graph.set_training(true);
+    enable_cluster_el_che(graph, world_size, cluster, config);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,6 +1015,15 @@ pub struct DdpConfig {
     pub max_grad_norm: Option<f64>,
     /// Optional system timeline for high-frequency profiling.
     pub timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
+    /// Cluster-mode dataset fingerprint exchanged at rendezvous.
+    ///
+    /// Every rank must present the same 32-byte signature; a mismatch is a
+    /// loud error at startup rather than silent data divergence during
+    /// training. Default all-zeros means "no fingerprint declared" — every
+    /// rank trivially agrees by construction.
+    ///
+    /// Single-host (non-cluster) DDP ignores this field.
+    pub dataset_signature: [u8; 32],
 }
 
 impl DdpConfig {
@@ -1063,6 +1035,7 @@ impl DdpConfig {
             max_anchor: None,
             max_grad_norm: None,
             timeline: None,
+            dataset_signature: [0u8; 32],
         }
     }
 
@@ -1112,6 +1085,17 @@ impl DdpConfig {
     /// Attach a system timeline for high-frequency profiling.
     pub fn timeline(mut self, tl: std::sync::Arc<crate::monitor::Timeline>) -> Self {
         self.timeline = Some(tl);
+        self
+    }
+
+    /// Declare a 32-byte dataset fingerprint exchanged at cluster rendezvous.
+    ///
+    /// Every rank must present the same signature; mismatches fail loudly
+    /// at startup instead of silently training on divergent shards. Typical
+    /// derivation: a sha-256 of the dataset's manifest, split config, and
+    /// version string.
+    pub fn dataset_signature(mut self, sig: [u8; 32]) -> Self {
+        self.dataset_signature = sig;
         self
     }
 }

@@ -86,6 +86,7 @@ fn test_worker_config_clone() {
         batch_size: 32,
         seed: 42,
         max_grad_norm: None,
+        easgd_alpha: None,
         timeline: None,
         policy: ApplyPolicy::Sync,
     };
@@ -170,6 +171,7 @@ fn make_test_worker_with(
         batch_size: 4,
         seed: 42,
         max_grad_norm: None,
+        easgd_alpha: None,
         timeline: None,
         policy: ApplyPolicy::Sync,
     };
@@ -326,7 +328,7 @@ fn test_worker_report_timing() {
 fn test_worker_report_epoch() {
     let (worker, ch) = make_test_worker();
 
-    worker.report_epoch(0.5, 100, 5000.0).unwrap();
+    worker.report_epoch(0.5, 100, 5000.0, 5000.0, 0.0, 0.0).unwrap();
 
     let msg = ch.metrics_rx.recv().unwrap();
     assert_eq!(msg.rank, 0);
@@ -465,7 +467,7 @@ fn test_worker_channels_create() {
     assert!(matches!(msg, TimingMsg::Batch { rank: 0, .. }));
 
     metrics_tx.send(MetricsMsg {
-        rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 10, epoch_ms: 100.0,
+        rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 10, epoch_ms: 100.0, share_complete_ms: 100.0, compute_only_ms: 100.0, data_starve_ms: 0.0,
         samples_processed: 320, scalars: HashMap::new(),
     }).unwrap();
     let msg = ch.metrics_rx.recv().unwrap();
@@ -668,15 +670,11 @@ fn test_async_uses_batch_count_not_wall_time() {
     // fire (fast rank wall = 100ms, slow = 100ms, but batch counts would
     // differ). With batch-count trigger it fires immediately.
     let counts = h.coord.el_che.batch_counts();
-    let mut step0 = 11usize;
-    let mut step1 = 11usize;
-    for _ in 0..counts[0] {
+    for step0 in 11..(11 + counts[0]) {
         h.timing_tx.send(TimingMsg::Batch { rank: 0, batch_ms: 5.0, step_count: step0, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
-        step0 += 1;
     }
-    for _ in 0..counts[1] {
+    for step1 in 11..(11 + counts[1]) {
         h.timing_tx.send(TimingMsg::Batch { rank: 1, batch_ms: 10.0, step_count: step1, param_norm: None, batch_loss: 0.1, sync_divergence: None }).unwrap();
-        step1 += 1;
     }
     h.coord.drain_timing();
     assert!(h.coord.should_average(), "async triggers on batch counts, not wall time");
@@ -835,7 +833,7 @@ fn test_coordinator_drain_metrics() {
     let mut h = make_coord_harness(2, ApplyPolicy::Sync, AverageBackend::Nccl);
 
     h.metrics_tx.send(MetricsMsg {
-        rank: 0, epoch: 1, avg_loss: 0.3, batches_processed: 50, epoch_ms: 2000.0,
+        rank: 0, epoch: 1, avg_loss: 0.3, batches_processed: 50, epoch_ms: 2000.0, share_complete_ms: 2000.0, compute_only_ms: 2000.0, data_starve_ms: 0.0,
         samples_processed: 1600, scalars: HashMap::new(),
     }).unwrap();
 
@@ -890,12 +888,12 @@ fn test_coordinator_metrics_fn_fires_per_epoch() {
 
     // Both ranks report epoch 0 -> aggregator fires.
     metrics_tx.send(MetricsMsg {
-        rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 60, epoch_ms: 1000.0,
+        rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 60, epoch_ms: 1000.0, share_complete_ms: 1000.0, compute_only_ms: 1000.0, data_starve_ms: 0.0,
         samples_processed: 1920,
         scalars: [("loss".to_string(), (3.0, 3_usize))].into(),
     }).unwrap();
     metrics_tx.send(MetricsMsg {
-        rank: 1, epoch: 0, avg_loss: 0.7, batches_processed: 40, epoch_ms: 1200.0,
+        rank: 1, epoch: 0, avg_loss: 0.7, batches_processed: 40, epoch_ms: 1200.0, share_complete_ms: 1200.0, compute_only_ms: 1200.0, data_starve_ms: 0.0,
         samples_processed: 1280,
         scalars: [("loss".to_string(), (4.0, 2_usize))].into(),
     }).unwrap();
@@ -1018,11 +1016,11 @@ fn test_coordinator_metrics_fn_error_continues_training() {
     // Fire two epochs; both should invoke the callback despite the error.
     for epoch in [0_usize, 1_usize] {
         metrics_tx.send(MetricsMsg {
-            rank: 0, epoch, avg_loss: 0.5, batches_processed: 50, epoch_ms: 1000.0,
+            rank: 0, epoch, avg_loss: 0.5, batches_processed: 50, epoch_ms: 1000.0, share_complete_ms: 1000.0, compute_only_ms: 1000.0, data_starve_ms: 0.0,
             samples_processed: 1600, scalars: HashMap::new(),
         }).unwrap();
         metrics_tx.send(MetricsMsg {
-            rank: 1, epoch, avg_loss: 0.5, batches_processed: 50, epoch_ms: 1000.0,
+            rank: 1, epoch, avg_loss: 0.5, batches_processed: 50, epoch_ms: 1000.0, share_complete_ms: 1000.0, compute_only_ms: 1000.0, data_starve_ms: 0.0,
             samples_processed: 1600, scalars: HashMap::new(),
         }).unwrap();
         coord.drain_metrics();
@@ -1073,9 +1071,16 @@ fn test_divergence_correction_nudges_anchor_down() {
 }
 
 #[test]
-fn test_divergence_below_threshold_no_correction() {
-    // Low divergence should NOT change the anchor.
+fn test_divergence_below_threshold_relaxes_anchor() {
+    // Low divergence in async mode should relax the anchor upward by 1
+    // (symmetric upward path to NudgeDown on stable convergence). The
+    // convergence guard returns Stable, finish_averaging_cpu calls
+    // ElChe::relax_anchor_up which grows anchor toward max_anchor.
+    //
+    // Relax-up is opt-in (default off) since 2026-05-01. This test
+    // explicitly opts in to exercise the relax-up code path.
     let mut h = make_coord_harness(2, ApplyPolicy::Async, AverageBackend::Cpu);
+    h.coord.elche_relax_up = true;
 
     // Calibrate with zero sync_ms.
     let steps = vec![10; 2];
@@ -1092,8 +1097,35 @@ fn test_divergence_below_threshold_no_correction() {
         post_norm: None,
     }));
 
-    // Divergence 0.01 < threshold 0.05: no correction applied.
-    assert_eq!(h.coord.el_che.anchor(), anchor_after_calibration);
+    // Divergence 0.01 < threshold: Stable. relax_anchor_up grows anchor by 1.
+    assert_eq!(h.coord.el_che.anchor(), anchor_after_calibration + 1);
+}
+
+#[test]
+fn test_relax_up_default_off_holds_anchor_on_stable() {
+    // Default: relax_up disabled. On Stable convergence verdict the anchor
+    // must NOT grow via relax_anchor_up; it stays where the overhead-based
+    // auto-tune in el_che.report_timing left it.
+    let mut h = make_coord_harness(2, ApplyPolicy::Async, AverageBackend::Cpu);
+    assert!(!h.coord.elche_relax_up, "default should be opt-out (off)");
+
+    let steps = vec![10; 2];
+    let wall_ms = vec![100.0; 2];
+    h.coord.finish_averaging_cpu(0.0, &steps, &wall_ms, None);
+    let anchor_after_calibration = h.coord.el_che.anchor();
+
+    let steps2 = vec![10; 2];
+    let wall_ms2 = vec![100.0; 2];
+    h.coord.finish_averaging_cpu(0.0, &steps2, &wall_ms2, Some(super::convergence::DivergenceReport {
+        deltas: vec![0.01, 0.01],
+        pre_norms: None,
+        post_norm: None,
+    }));
+
+    assert_eq!(
+        h.coord.el_che.anchor(), anchor_after_calibration,
+        "relax_up default-off must hold anchor on Stable verdict"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1991,9 +2023,9 @@ fn test_cpu_averaging_divergence_correction() {
     // After one round: report_timing auto-tunes anchor up (from overhead),
     // then divergence correction halves it. Final anchor should be lower
     // than the post-overhead-auto-tune value. We verify it completed and
-    // the anchor is reasonable (not at max_anchor=200).
+    // the anchor is reasonable (not at max_anchor=1000).
     let anchor = h.coord.el_che.anchor();
-    assert!(anchor < 200,
+    assert!(anchor < 1000,
         "divergence correction should have kept anchor below max, got {}", anchor);
     // Verify calibration happened.
     assert!(h.coord.is_calibrated());
@@ -2659,16 +2691,19 @@ fn test_aggregate_epoch_metrics() {
     let msgs = vec![
         MetricsMsg {
             rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 60,
-            epoch_ms: 1000.0, samples_processed: 1920, scalars: scalars_r0,
+            epoch_ms: 1000.0, share_complete_ms: 1000.0, compute_only_ms: 1000.0, data_starve_ms: 0.0, samples_processed: 1920, scalars: scalars_r0,
         },
         MetricsMsg {
             rank: 1, epoch: 0, avg_loss: 0.7, batches_processed: 40,
-            epoch_ms: 1200.0, samples_processed: 1280, scalars: scalars_r1,
+            epoch_ms: 1200.0, share_complete_ms: 1200.0, compute_only_ms: 1200.0, data_starve_ms: 0.0, samples_processed: 1280, scalars: scalars_r1,
         },
     ];
 
     let dev_indices = vec![0_u8, 1];
-    let m = aggregate_epoch_metrics(0, &msgs, &dev_indices);
+    // bc_share now comes from the balancer (smoothed batch_counts). Pass
+    // 60/40 explicitly to match the historical samples-driven assertion.
+    let bc_share = vec![0.6_f64, 0.4];
+    let m = aggregate_epoch_metrics(0, &msgs, &dev_indices, &bc_share);
     assert_eq!(m.epoch, 0);
 
     // Batch-weighted average loss: (0.5*60 + 0.7*40) / 100 = 0.58
@@ -2711,37 +2746,38 @@ fn test_aggregate_epoch_metrics_progressive() {
         // Rank 0 chunk 1
         MetricsMsg {
             rank: 0, epoch: 0, avg_loss: 0.5, batches_processed: 20,
-            epoch_ms: 300.0, samples_processed: 640,
+            epoch_ms: 300.0, share_complete_ms: 300.0, compute_only_ms: 300.0, data_starve_ms: 0.0, samples_processed: 640,
             scalars: [("loss".to_string(), (2.0, 2_usize))].into(),
         },
         // Rank 0 chunk 2
         MetricsMsg {
             rank: 0, epoch: 0, avg_loss: 0.4, batches_processed: 20,
-            epoch_ms: 600.0, samples_processed: 640,
+            epoch_ms: 600.0, share_complete_ms: 600.0, compute_only_ms: 600.0, data_starve_ms: 0.0, samples_processed: 640,
             scalars: [("loss".to_string(), (1.6, 2_usize))].into(),
         },
         // Rank 0 chunk 3
         MetricsMsg {
             rank: 0, epoch: 0, avg_loss: 0.6, batches_processed: 20,
-            epoch_ms: 900.0, samples_processed: 640,
+            epoch_ms: 900.0, share_complete_ms: 900.0, compute_only_ms: 900.0, data_starve_ms: 0.0, samples_processed: 640,
             scalars: [("loss".to_string(), (1.8, 2_usize))].into(),
         },
         // Rank 1 chunk 1
         MetricsMsg {
             rank: 1, epoch: 0, avg_loss: 0.7, batches_processed: 20,
-            epoch_ms: 500.0, samples_processed: 640,
+            epoch_ms: 500.0, share_complete_ms: 500.0, compute_only_ms: 500.0, data_starve_ms: 0.0, samples_processed: 640,
             scalars: [("loss".to_string(), (2.8, 2_usize))].into(),
         },
         // Rank 1 chunk 2
         MetricsMsg {
             rank: 1, epoch: 0, avg_loss: 0.8, batches_processed: 20,
-            epoch_ms: 1000.0, samples_processed: 640,
+            epoch_ms: 1000.0, share_complete_ms: 1000.0, compute_only_ms: 1000.0, data_starve_ms: 0.0, samples_processed: 640,
             scalars: [("loss".to_string(), (3.2, 2_usize))].into(),
         },
     ];
 
     let dev_indices = vec![0_u8, 1];
-    let m = aggregate_epoch_metrics(0, &msgs, &dev_indices);
+    let bc_share = vec![0.6_f64, 0.4];
+    let m = aggregate_epoch_metrics(0, &msgs, &dev_indices, &bc_share);
 
     // Must have exactly 2 entries (world_size), not 5 (one per msg)
     assert_eq!(m.per_rank_throughput.len(), 2, "should have world_size entries");
@@ -3028,7 +3064,7 @@ fn test_streaming_cross_epoch_dispatch() {
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 0, avg_loss: 0.1,
         batches_processed: dispatched / 10,
-        epoch_ms: 50.0, samples_processed: dispatched,
+        epoch_ms: 50.0, share_complete_ms: 50.0, compute_only_ms: 50.0, data_starve_ms: 0.0, samples_processed: dispatched,
         scalars: Default::default(),
     }).unwrap();
     h.coord.drain_metrics();
@@ -3062,12 +3098,12 @@ fn test_streaming_global_epoch_event_fires_when_all_complete() {
     // Report completion from both ranks.
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 1,
-        epoch_ms: 10.0, samples_processed: 10,
+        epoch_ms: 10.0, share_complete_ms: 10.0, compute_only_ms: 10.0, data_starve_ms: 0.0, samples_processed: 10,
         scalars: Default::default(),
     }).unwrap();
     h.metrics_tx.send(MetricsMsg {
         rank: 1, epoch: 0, avg_loss: 0.2, batches_processed: 1,
-        epoch_ms: 20.0, samples_processed: 10,
+        epoch_ms: 20.0, share_complete_ms: 20.0, compute_only_ms: 20.0, data_starve_ms: 0.0, samples_processed: 10,
         scalars: Default::default(),
     }).unwrap();
     h.coord.drain_metrics();
@@ -3094,7 +3130,7 @@ fn test_overshoot_gate_blocks_runaway() {
     // Report rank 0 completion (matches dispatched amount).
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 5,
-        epoch_ms: 50.0, samples_processed: 50,
+        epoch_ms: 50.0, share_complete_ms: 50.0, compute_only_ms: 50.0, data_starve_ms: 0.0, samples_processed: 50,
         scalars: Default::default(),
     }).unwrap();
     h.coord.drain_metrics();
@@ -3157,7 +3193,7 @@ fn test_overshoot_gate_skipped_for_nccl() {
     // Report rank 0 chunk completion.
     metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 5,
-        epoch_ms: 50.0, samples_processed: 50,
+        epoch_ms: 50.0, share_complete_ms: 50.0, compute_only_ms: 50.0, data_starve_ms: 0.0, samples_processed: 50,
         scalars: Default::default(),
     }).unwrap();
     coord.drain_metrics();
@@ -3254,13 +3290,13 @@ fn test_multi_pool_completion_tracking() {
     // Report epoch 0 completion from rank 0
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 5,
-        epoch_ms: 50.0, samples_processed: 50,
+        epoch_ms: 50.0, share_complete_ms: 50.0, compute_only_ms: 50.0, data_starve_ms: 0.0, samples_processed: 50,
         scalars: Default::default(),
     }).unwrap();
     // Report epoch 1 completion from rank 0
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 1, avg_loss: 0.2, batches_processed: 3,
-        epoch_ms: 30.0, samples_processed: 30,
+        epoch_ms: 30.0, share_complete_ms: 30.0, compute_only_ms: 30.0, data_starve_ms: 0.0, samples_processed: 30,
         scalars: Default::default(),
     }).unwrap();
     h.coord.drain_metrics();
@@ -3289,12 +3325,12 @@ fn test_shutdown_with_streaming_pools() {
     // Complete epoch 0 from both ranks.
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 1,
-        epoch_ms: 10.0, samples_processed: 10,
+        epoch_ms: 10.0, share_complete_ms: 10.0, compute_only_ms: 10.0, data_starve_ms: 0.0, samples_processed: 10,
         scalars: Default::default(),
     }).unwrap();
     h.metrics_tx.send(MetricsMsg {
         rank: 1, epoch: 0, avg_loss: 0.2, batches_processed: 1,
-        epoch_ms: 20.0, samples_processed: 10,
+        epoch_ms: 20.0, share_complete_ms: 20.0, compute_only_ms: 20.0, data_starve_ms: 0.0, samples_processed: 10,
         scalars: Default::default(),
     }).unwrap();
     h.coord.drain_metrics();
@@ -3316,12 +3352,12 @@ fn test_shutdown_with_streaming_pools() {
     // Complete epoch 1 (the last epoch).
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 1, avg_loss: 0.05, batches_processed: 1,
-        epoch_ms: 10.0, samples_processed: 10,
+        epoch_ms: 10.0, share_complete_ms: 10.0, compute_only_ms: 10.0, data_starve_ms: 0.0, samples_processed: 10,
         scalars: Default::default(),
     }).unwrap();
     h.metrics_tx.send(MetricsMsg {
         rank: 1, epoch: 1, avg_loss: 0.06, batches_processed: 1,
-        epoch_ms: 20.0, samples_processed: 10,
+        epoch_ms: 20.0, share_complete_ms: 20.0, compute_only_ms: 20.0, data_starve_ms: 0.0, samples_processed: 10,
         scalars: Default::default(),
     }).unwrap();
     h.coord.drain_metrics();
@@ -3373,7 +3409,7 @@ fn test_epoch_event_fires_with_mixed_epoch_ranks() {
     // -- Rank 0 reported epoch 1 completion earlier (buffered) --
     sh.inner.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 1, avg_loss: 0.10, batches_processed: 3,
-        epoch_ms: 30.0, samples_processed: 30,
+        epoch_ms: 30.0, share_complete_ms: 30.0, compute_only_ms: 30.0, data_starve_ms: 0.0, samples_processed: 30,
         scalars: [("loss".to_string(), (0.30, 3_usize))].into(),
     }).unwrap();
     sh.inner.coord.drain_metrics();
@@ -3390,7 +3426,7 @@ fn test_epoch_event_fires_with_mixed_epoch_ranks() {
     // -- Now slow rank (1) completes epoch 1 --
     sh.inner.metrics_tx.send(MetricsMsg {
         rank: 1, epoch: 1, avg_loss: 0.20, batches_processed: 3,
-        epoch_ms: 60.0, samples_processed: 30,
+        epoch_ms: 60.0, share_complete_ms: 60.0, compute_only_ms: 60.0, data_starve_ms: 0.0, samples_processed: 30,
         scalars: [("loss".to_string(), (0.60, 3_usize))].into(),
     }).unwrap();
     sh.inner.coord.drain_metrics();
@@ -3460,17 +3496,17 @@ fn test_dispatch_skips_aggregated_epochs() {
     // Complete all chunks: both ranks for epoch 0, rank 0 for epoch 1.
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 0, avg_loss: 0.1, batches_processed: 7,
-        epoch_ms: 50.0, samples_processed: 70,
+        epoch_ms: 50.0, share_complete_ms: 50.0, compute_only_ms: 50.0, data_starve_ms: 0.0, samples_processed: 70,
         scalars: Default::default(),
     }).unwrap();
     h.metrics_tx.send(MetricsMsg {
         rank: 1, epoch: 0, avg_loss: 0.2, batches_processed: 3,
-        epoch_ms: 80.0, samples_processed: 30,
+        epoch_ms: 80.0, share_complete_ms: 80.0, compute_only_ms: 80.0, data_starve_ms: 0.0, samples_processed: 30,
         scalars: Default::default(),
     }).unwrap();
     h.metrics_tx.send(MetricsMsg {
         rank: 0, epoch: 1, avg_loss: 0.1, batches_processed: 10,
-        epoch_ms: 100.0, samples_processed: 100,
+        epoch_ms: 100.0, share_complete_ms: 100.0, compute_only_ms: 100.0, data_starve_ms: 0.0, samples_processed: 100,
         scalars: Default::default(),
     }).unwrap();
 
@@ -3817,4 +3853,144 @@ fn test_cross_mode_lr_parity_with_lr_scale() {
         assert!((manual_lrs[step] - graph_lrs[step]).abs() < 1e-9,
             "step {step}: solo*scale={} vs graph={}", manual_lrs[step], graph_lrs[step]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// LR-aware meta-controller integration
+// ---------------------------------------------------------------------------
+
+/// Build a coordinator harness with the LR-aware meta-controller enabled.
+fn make_coord_harness_meta(n: usize) -> CoordTestHarness {
+    let (timing_tx, timing_rx) = mpsc::channel();
+    let (metrics_tx, metrics_rx) = mpsc::channel();
+    let (param_tx, param_rx) = mpsc::channel();
+
+    let mut control_txs = Vec::new();
+    let mut control_rxs = Vec::new();
+    let mut final_param_rxs = Vec::new();
+    for _ in 0..n {
+        let (tx, rx) = mpsc::channel();
+        control_txs.push(tx);
+        control_rxs.push(rx);
+        let (_ftx, frx) = mpsc::channel();
+        final_param_rxs.push(frx);
+    }
+
+    let el_che = crate::distributed::ddp::ElChe::new(n, 10);
+    let coord = Coordinator::builder(
+        timing_rx, metrics_rx, param_rx,
+        final_param_rxs, control_txs,
+        ApplyPolicy::Async, AverageBackend::Cpu,
+        n, 10000, el_che,
+    )
+    .meta_controller(true)
+    .build();
+
+    CoordTestHarness { coord, timing_tx, metrics_tx, param_tx, control_rxs }
+}
+
+/// Drive ElChe past Probe/Warmup into Stable so the meta-controller will
+/// act on observations (Probe is always silent, Warmup requires K=5
+/// sustained for convergence pattern).
+fn calibrate_to_stable(coord: &mut Coordinator) {
+    for _ in 0..6 {
+        coord.el_che.report_timing(&[10.0, 20.0], &[10, 10], 1.0);
+    }
+    assert!(coord.el_che.phase() >= crate::distributed::Phase::Stable);
+}
+
+#[test]
+fn test_meta_controller_dispatches_nudge_on_lr_cliff() {
+    let mut h = make_coord_harness_meta(2);
+    calibrate_to_stable(&mut h.coord);
+
+    // Establish baseline LR via the LrUpdate channel + drain.
+    h.timing_tx.send(TimingMsg::LrUpdate { rank: 0, lr: 0.1 }).unwrap();
+    h.coord.drain_timing();
+
+    // First observation: builds the LR window. anchor_window also starts here.
+    h.coord.observe_meta(super::convergence::ConvergenceAction::Stable);
+    let anchor_after_warmup = h.coord.el_che.anchor();
+
+    // Sharp LR drop (10x) on the next cycle: cliff watcher should fire.
+    h.timing_tx.send(TimingMsg::LrUpdate { rank: 0, lr: 0.01 }).unwrap();
+    h.coord.drain_timing();
+    h.coord.observe_meta(super::convergence::ConvergenceAction::Stable);
+
+    let anchor_after_cliff = h.coord.el_che.anchor();
+    assert!(
+        anchor_after_cliff < anchor_after_warmup,
+        "meta-controller should nudge anchor down on sharp LR drop: \
+         {anchor_after_warmup} -> {anchor_after_cliff}",
+    );
+}
+
+#[test]
+fn test_meta_controller_silent_on_smooth_decay() {
+    let mut h = make_coord_harness_meta(2);
+    calibrate_to_stable(&mut h.coord);
+
+    let anchor_initial = h.coord.el_che.anchor();
+    let mut lr = 0.1;
+    for _ in 0..10 {
+        h.timing_tx.send(TimingMsg::LrUpdate { rank: 0, lr }).unwrap();
+        h.coord.drain_timing();
+        h.coord.observe_meta(super::convergence::ConvergenceAction::Stable);
+        lr *= 0.98; // 2% per cycle, well under 30% cliff threshold
+    }
+
+    let anchor_final = h.coord.el_che.anchor();
+    assert_eq!(
+        anchor_final, anchor_initial,
+        "smooth decay should not trigger meta-controller; anchor unchanged \
+         from {anchor_initial}, got {anchor_final}",
+    );
+}
+
+#[test]
+fn test_meta_controller_disabled_no_dispatch() {
+    // Default harness: meta_controller flag off. Even with LR cliff input,
+    // observe_meta is a no-op.
+    let mut h = make_coord_harness(2, ApplyPolicy::Async, AverageBackend::Cpu);
+    calibrate_to_stable(&mut h.coord);
+
+    let anchor_initial = h.coord.el_che.anchor();
+
+    h.timing_tx.send(TimingMsg::LrUpdate { rank: 0, lr: 0.1 }).unwrap();
+    h.coord.drain_timing();
+    h.coord.observe_meta(super::convergence::ConvergenceAction::Stable);
+
+    h.timing_tx.send(TimingMsg::LrUpdate { rank: 0, lr: 0.01 }).unwrap();
+    h.coord.drain_timing();
+    h.coord.observe_meta(super::convergence::ConvergenceAction::Stable);
+
+    assert_eq!(
+        h.coord.el_che.anchor(),
+        anchor_initial,
+        "meta-controller off should not change anchor",
+    );
+}
+
+#[test]
+fn test_meta_controller_dispatches_on_sustained_convergence_pattern() {
+    let mut h = make_coord_harness_meta(2);
+    calibrate_to_stable(&mut h.coord);
+
+    h.timing_tx.send(TimingMsg::LrUpdate { rank: 0, lr: 0.1 }).unwrap();
+    h.coord.drain_timing();
+
+    // Stable phase requires K=3 sustained NudgeDown / SuppressGrowth verdicts.
+    let nudge = super::convergence::ConvergenceAction::NudgeDown { factor: 0.5 };
+    h.coord.observe_meta(nudge);
+    h.coord.observe_meta(nudge);
+    let anchor_after_two = h.coord.el_che.anchor();
+
+    h.coord.observe_meta(nudge);
+    let anchor_after_three = h.coord.el_che.anchor();
+
+    assert!(
+        anchor_after_three < anchor_after_two,
+        "convergence pattern (K=3 at Stable) should fire on third sustained verdict: \
+         {anchor_after_two} -> {anchor_after_three}",
+    );
 }

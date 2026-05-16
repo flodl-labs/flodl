@@ -54,7 +54,63 @@ pub(super) struct CpuAvgResult {
     divergence: Option<convergence::DivergenceReport>,
 }
 
+/// Per-epoch d-statistic summary drained at `on_epoch_aggregated`. Pure
+/// observables; lambda aggregates moved into the (pluggable) guard.
+#[derive(Debug, Clone, Copy)]
+pub(in super::super) struct EpochDSummary {
+    pub count: usize,
+    pub d_min: f64,
+    pub d_max: f64,
+    pub d_sum: f64,
+    pub d_at_epoch_end: f64,
+    pub k_at_epoch_end: usize,
+}
+
+impl EpochDSummary {
+    pub fn d_mean(&self) -> f64 {
+        if self.count == 0 { 0.0 } else { self.d_sum / self.count as f64 }
+    }
+}
+
 impl Coordinator {
+    /// Push one observation into the per-epoch d aggregator. Drained at
+    /// `on_epoch_aggregated` to populate the `DivergenceEpoch` event with
+    /// purely-observable d statistics. Lambda aggregates moved out of this
+    /// path now that guard pipelines are pluggable; analyze.rs recomputes
+    /// per-epoch lambda from the per-event observable trail.
+    pub(in super::super) fn update_epoch_d_aggregator(&mut self, d_raw: f64, k_max: usize) {
+        self.epoch_d_count += 1;
+        self.epoch_d_sum += d_raw;
+        if d_raw < self.epoch_d_min {
+            self.epoch_d_min = d_raw;
+        }
+        if d_raw > self.epoch_d_max {
+            self.epoch_d_max = d_raw;
+        }
+        self.epoch_last_d = d_raw;
+        self.epoch_last_k_max = k_max;
+    }
+
+    /// Drain the per-epoch d aggregator and return its summary; resets the
+    /// fields to fresh state for the next epoch.
+    pub(in super::super) fn take_epoch_d_summary(&mut self) -> EpochDSummary {
+        let summary = EpochDSummary {
+            count: self.epoch_d_count,
+            d_min: self.epoch_d_min,
+            d_max: self.epoch_d_max,
+            d_sum: self.epoch_d_sum,
+            d_at_epoch_end: self.epoch_last_d,
+            k_at_epoch_end: self.epoch_last_k_max,
+        };
+        self.epoch_d_min = f64::INFINITY;
+        self.epoch_d_max = f64::NEG_INFINITY;
+        self.epoch_d_sum = 0.0;
+        self.epoch_d_count = 0;
+        self.epoch_last_d = 0.0;
+        self.epoch_last_k_max = 0;
+        summary
+    }
+
     /// Trigger parameter averaging based on the configured backend.
     ///
     /// For NCCL: sends `SyncNow` to all workers, then runs the common tail
@@ -133,8 +189,15 @@ impl Coordinator {
     /// Cadence/Async use trend detection on `||pre-post|| / ||post||`.
     pub(in super::super) fn finish_averaging_nccl(&mut self) {
         let old_anchor = self.el_che.anchor();
+        // Use the wall-time elapsed of the PREVIOUS NCCL sync (captured in
+        // process_timing_msg when the last rank acked) as `sync_ms`. Without
+        // this, NCCL's `last_avg_ms` stayed at 0 and the anchor auto-tune
+        // block in el_che.rs:292-308 silently skipped. Result: anchor pinned
+        // at min, syncs too frequent, AllReduce barrier wait dominates.
+        let prev_sync_ms = self.last_nccl_sync_ms;
+        self.last_nccl_sync_ms = 0.0;
         if self.wall_ms_accum.iter().any(|&ms| ms > 0.0) {
-            self.el_che.report_timing(&self.wall_ms_accum, &self.steps_since_avg, self.last_avg_ms);
+            self.el_che.report_timing(&self.wall_ms_accum, &self.steps_since_avg, prev_sync_ms);
             self.last_avg_ms = 0.0;
             if !self.calibrated && self.el_che.is_calibrated() {
                 self.calibrated = true;
@@ -144,14 +207,34 @@ impl Coordinator {
         // Feed weight-space divergence (from previous sync's acks) to the guard.
         // Invariant: should_average() requires all nccl_ack == true before next
         // trigger, so all nccl_sync_divergence[rank] are populated by now.
+        // Post-norm is identical across ranks post-AllReduce; we keep a single
+        // scalar populated by the first rank's ack (debug_assert in the
+        // SyncAck handler enforces inter-rank agreement).
+        let nccl_pre_norms: Option<Vec<f64>> =
+            if self.nccl_sync_pre_norm.iter().all(|p| p.is_some()) {
+                Some(self.nccl_sync_pre_norm.iter().map(|p| p.unwrap()).collect())
+            } else {
+                None
+            };
         let report = convergence::DivergenceReport {
             deltas: self.nccl_sync_divergence.iter()
                 .map(|d| d.unwrap_or(0.0))
                 .collect(),
-            pre_norms: None,
-            post_norm: None,
+            pre_norms: nccl_pre_norms,
+            post_norm: self.nccl_sync_post_norm,
         };
-        let action = self.convergence_guard.report(&report);
+        // k_used / k_max passed to the guard match the values emitted into
+        // the Divergence event below — both refer to the cadence interval
+        // just completed.
+        let cycle_batches_for_guard: usize = self.steps_since_avg.iter().sum();
+        let k_max_for_guard = self.steps_since_avg.iter().copied().max().unwrap_or(0);
+        let action = self
+            .convergence_guard
+            .report(&report, cycle_batches_for_guard, k_max_for_guard);
+
+        // Stage 2: meta-controller observes the verdict alongside LR / anchor
+        // / phase. Action emission is dropped — Stage 3 wires it to dispatch.
+        self.observe_meta(action);
 
         self.version += 1;
         self.avg_count += 1;
@@ -159,9 +242,21 @@ impl Coordinator {
         // Apply convergence action. Overshoot is an Async-only concept.
         match action {
             convergence::ConvergenceAction::Stable => {
-                if self.overshoot_auto && self.policy == ApplyPolicy::Async {
-                    let cap = (self.total_samples / self.batch_size.max(1) / 50).clamp(3, 10);
-                    self.max_overshoot = (self.max_overshoot + 1).min(cap);
+                if self.policy == ApplyPolicy::Async {
+                    if self.overshoot_auto {
+                        let cap = (self.total_samples / self.batch_size.max(1) / 50).clamp(3, 10);
+                        self.max_overshoot = (self.max_overshoot + 1).min(cap);
+                    }
+                    // Symmetric upward path for anchor: relax cadence on stable
+                    // convergence (capped by max_batch_diff and max_anchor).
+                    // Without this, anchor stays pinned at min_anchor forever
+                    // because the overhead-based auto-tune lives in a dead
+                    // zone for low-overhead workloads. Suppressed when the
+                    // user disables relax-up (e.g. to isolate share-allocation
+                    // dynamics from the periodic anchor cycle).
+                    if self.elche_relax_up {
+                        self.el_che.relax_anchor_up();
+                    }
                 }
             }
             convergence::ConvergenceAction::SuppressGrowth => {
@@ -179,12 +274,14 @@ impl Coordinator {
             self.max_overshoot = self.max_overshoot.min(self.overshoot_ceiling);
         }
 
-        // Timeline: sync duration and anchor changes
+        // Timeline: sync duration and anchor changes. Uses the previous
+        // sync's measured duration (captured when last rank acked). The
+        // earlier code took `nccl_sync_start.elapsed()` here but that runs
+        // synchronously inside trigger_averaging immediately after sending
+        // SyncNow, before any rank can complete AllReduce — so the elapsed
+        // was always ~0ms.
         if let Some(ref tl) = self.timeline {
-            let dur = self.nccl_sync_start.take()
-                .map(|s| s.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-            tl.event(crate::monitor::EventKind::SyncEnd { duration_ms: dur });
+            tl.event(crate::monitor::EventKind::SyncEnd { duration_ms: prev_sync_ms });
             let new_anchor = self.el_che.anchor();
             if new_anchor != old_anchor {
                 tl.event(crate::monitor::EventKind::AnchorChanged {
@@ -196,7 +293,45 @@ impl Coordinator {
 
         // Advance global step by total batches from all GPUs in this cycle.
         let cycle_batches: usize = self.steps_since_avg.iter().sum();
+        let k_max = self.steps_since_avg.iter().copied().max().unwrap_or(0);
         self.global_step += cycle_batches;
+
+        // Per-AllReduce divergence event. Lambda fields are intentionally
+        // None going forward: λ̂ is now guard-specific (lives inside
+        // MsfGuard) and analyze.rs recomputes it from the observables
+        // (d_raw, k_max) regardless of which guard was active. Old logs
+        // still deserialize cleanly.
+        let d_raw = report.max_relative_delta();
+        self.update_epoch_d_aggregator(d_raw, k_max);
+        let in_flight_epoch = self.last_aggregated_epoch.map(|e| e + 1).unwrap_or(0);
+        if let Some(ref tl) = self.timeline {
+            tl.event(crate::monitor::EventKind::Divergence {
+                d_raw,
+                lambda_raw: None,
+                lambda_ema: None,
+                k_used: cycle_batches,
+                k_max,
+                step: self.global_step,
+                deltas: report.deltas.clone(),
+                post_norm: report.post_norm,
+                pre_norms: report.pre_norms.clone(),
+                epoch: Some(in_flight_epoch),
+            });
+            // Guard-specific diagnostics (e.g., MsfGuard's λ_raw / λ_ema)
+            // arrive on a separate event so analyze.rs can keep observables
+            // and interpretations cleanly separated.
+            let telemetry = self.convergence_guard.telemetry();
+            if !telemetry.is_empty() {
+                tl.event(crate::monitor::EventKind::GuardTelemetry {
+                    epoch: in_flight_epoch,
+                    step: self.global_step,
+                    values: telemetry
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                });
+            }
+        }
 
         // Broadcast new global step to all workers so they can compute
         // per-batch LR as scheduler.lr(global_step + local_offset).
@@ -228,6 +363,10 @@ impl Coordinator {
         for d in &mut self.nccl_sync_divergence {
             *d = None;
         }
+        for p in &mut self.nccl_sync_pre_norm {
+            *p = None;
+        }
+        self.nccl_sync_post_norm = None;
 
         // Re-dispatch to ranks that are idle (no in-flight chunks in any pool)
         // and may have been waiting at the overshoot gate. Now that
@@ -268,18 +407,33 @@ impl Coordinator {
             }
         }
 
-        // Feed divergence to the unified convergence guard.
+        // Feed divergence to the unified convergence guard. Use snapshot
+        // counters (the cadence interval that triggered this averaging) for
+        // k_used / k_max so the guard's rate computations align with the
+        // Divergence event payload below.
+        let cycle_batches_for_guard: usize = steps_snapshot.iter().sum();
+        let k_max_for_guard = steps_snapshot.iter().copied().max().unwrap_or(0);
         let action = if let Some(report) = divergence_report.as_ref() {
-            self.convergence_guard.report(report)
+            self.convergence_guard
+                .report(report, cycle_batches_for_guard, k_max_for_guard)
         } else {
             convergence::ConvergenceAction::Stable
         };
 
+        // Stage 2: meta-controller observes the verdict alongside LR / anchor
+        // / phase. Action emission is dropped — Stage 3 wires it to dispatch.
+        self.observe_meta(action);
+
         match action {
             convergence::ConvergenceAction::Stable => {
-                if self.overshoot_auto && self.policy == ApplyPolicy::Async {
-                    let cap = (self.total_samples / self.batch_size.max(1) / 50).clamp(3, 10);
-                    self.max_overshoot = (self.max_overshoot + 1).min(cap);
+                if self.policy == ApplyPolicy::Async {
+                    if self.overshoot_auto {
+                        let cap = (self.total_samples / self.batch_size.max(1) / 50).clamp(3, 10);
+                        self.max_overshoot = (self.max_overshoot + 1).min(cap);
+                    }
+                    if self.elche_relax_up {
+                        self.el_che.relax_anchor_up();
+                    }
                 }
             }
             convergence::ConvergenceAction::SuppressGrowth => {}
@@ -318,7 +472,43 @@ impl Coordinator {
         // Use snapshot (not current) counters -- batches during the averaging
         // window belong to the next cycle.
         let cycle_batches: usize = steps_snapshot.iter().sum();
+        let k_max = steps_snapshot.iter().copied().max().unwrap_or(0);
         self.global_step += cycle_batches;
+
+        // Per-AllReduce divergence event. Lambda fields are intentionally
+        // None going forward (see finish_averaging_nccl for rationale).
+        // Only emit when a divergence report was actually produced (Sync
+        // mode skips divergence computation entirely).
+        if let Some(ref report) = divergence_report {
+            let d_raw = report.max_relative_delta();
+            self.update_epoch_d_aggregator(d_raw, k_max);
+            let in_flight_epoch = self.last_aggregated_epoch.map(|e| e + 1).unwrap_or(0);
+            if let Some(ref tl) = self.timeline {
+                tl.event(crate::monitor::EventKind::Divergence {
+                    d_raw,
+                    lambda_raw: None,
+                    lambda_ema: None,
+                    k_used: cycle_batches,
+                    k_max,
+                    step: self.global_step,
+                    deltas: report.deltas.clone(),
+                    post_norm: report.post_norm,
+                    pre_norms: report.pre_norms.clone(),
+                    epoch: Some(in_flight_epoch),
+                });
+                let telemetry = self.convergence_guard.telemetry();
+                if !telemetry.is_empty() {
+                    tl.event(crate::monitor::EventKind::GuardTelemetry {
+                        epoch: in_flight_epoch,
+                        step: self.global_step,
+                        values: telemetry
+                            .into_iter()
+                            .map(|(k, v)| (k.to_string(), v))
+                            .collect(),
+                    });
+                }
+            }
+        }
 
         // Broadcast new global step to all workers.
         for tx in &self.control_txs {

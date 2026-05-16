@@ -43,6 +43,11 @@ pub struct GpuWorker<M: Module> {
 
     // -- Worker identity --
     rank: usize,
+    /// World size — populated from [`WorkerConfig::world_size`]. Read by
+    /// the self-driven cluster-rank loop to compute its data-partition
+    /// slice; not used by the coordinator-driven path (the coordinator
+    /// owns world topology there).
+    world_size: usize,
     device: Device,
 
     // -- CUDA streams for overlap (None on CPU) --
@@ -51,6 +56,20 @@ pub struct GpuWorker<M: Module> {
     /// Recorded on comm_stream after param copy/AllReduce.
     /// compute_stream waits on this before each forward.
     copy_done: Option<CudaEvent>,
+    /// Pending H2D wait flag for the cpu-avg path. Set in `load_averaged`
+    /// when params are copy_(non_blocking) on `comm_stream`, cleared in
+    /// `sync_before_forward` after host-synchronizing the comm stream.
+    /// Moves the post-Update H2D wait OUTSIDE `train_step`'s timing window —
+    /// otherwise the implicit GPU sync at `loss.data().item()?` propagates
+    /// the queued `wait_event` into `batch_ms` and pollutes ElChe's
+    /// throughput signal mode-asymmetrically (cpu-avg only; NCCL path
+    /// host-synchronizes inside `sync_now_nccl` already, so no flag set there).
+    pending_param_h2d: bool,
+    /// Most recent host-side H2D wait inside `sync_before_forward` (ms).
+    /// Diagnostic only — not fed back into the controller. Useful for
+    /// verifying the pollution removal under different rig topologies
+    /// (e.g. PCIe x8 vs chipset x2 lines on heterogeneous boards).
+    last_h2d_wait_ms: f64,
 
     // -- NCCL per-rank communicator (None for CPU averaging or CPU device) --
     nccl_comm: Option<NcclRankComm>,
@@ -108,6 +127,11 @@ pub struct GpuWorker<M: Module> {
     activation_peak_bytes: usize,
     /// Maximum gradient norm for clipping (None = no clipping).
     max_grad_norm: Option<f64>,
+    /// EASGD elastic averaging weight (0, 1]. `None` = full overwrite
+    /// (current behavior; uses fast non-blocking copy_). When `Some(α)`,
+    /// `load_averaged` blends `W_local := (1-α)·W_local + α·W_avg` instead
+    /// of overwriting. Reference: Zhang, Choromanska, LeCun, NeurIPS 2015.
+    easgd_alpha: Option<f64>,
     /// Optional system timeline for event injection.
     timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
 
@@ -197,6 +221,15 @@ impl<M: Module> GpuWorker<M> {
         G: FnOnce(&[Parameter]) -> O,
         O: Optimizer + 'static,
     {
+        // Set the per-thread log prefix so every flodl log line from this
+        // worker carries its identity. Single-host shows [rN]; cluster mode
+        // (when set_node_label has been called) shows [host:dev:rN].
+        let local_dev = match config.device {
+            Device::CUDA(d) => d,
+            _ => 0,
+        };
+        crate::log::set_thread_device(local_dev, Some(config.rank));
+
         // Create CUDA streams first (before model construction) so model
         // parameters are allocated on the same stream used by subsequent
         // forward/backward passes. Without this, AccumulateGrad nodes end
@@ -334,10 +367,13 @@ impl<M: Module> GpuWorker<M> {
             param_vars,
             buffer_list,
             rank: config.rank,
+            world_size: config.world_size,
             device: config.device,
             compute_stream,
             comm_stream,
             copy_done,
+            pending_param_h2d: false,
+            last_h2d_wait_ms: 0.0,
             nccl_comm,
             timing_tx,
             metrics_tx,
@@ -361,6 +397,7 @@ impl<M: Module> GpuWorker<M> {
             per_sample_bytes,
             activation_peak_bytes: 0,
             max_grad_norm: config.max_grad_norm,
+            easgd_alpha: config.easgd_alpha,
             timeline: config.timeline.clone(),
             pre_sync_scratch,
             _grad_accumulators: grad_accumulators,
@@ -485,10 +522,41 @@ impl<M: Module> GpuWorker<M> {
         let _guard = self.comm_stream.as_ref().map(StreamGuard::new);
 
         // no_grad: parameters are leaf tensors with requires_grad=true
+        //
+        // Two paths: full overwrite (default, fast — single non-blocking
+        // copy_ per param) and EASGD elastic blend (opt-in, when
+        // `easgd_alpha` is set — stages averaged params on GPU, then
+        // applies a batched in-place lerp `var := var + α(avg − var)`
+        // = `(1−α)·var + α·avg` across all params via one CUDA kernel
+        // launch). Buffers (BatchNorm running stats etc.) always overwrite
+        // — blending them is undefined under the EASGD framework.
         {
             let _no_grad = NoGradGuard::new();
-            for (var, src) in self.param_vars.iter().zip(&update.params) {
-                var.data().copy_(src, non_blocking)?;
+            match self.easgd_alpha {
+                None => {
+                    for (var, src) in self.param_vars.iter().zip(&update.params) {
+                        var.data().copy_(src, non_blocking)?;
+                    }
+                }
+                Some(alpha) => {
+                    let mut avg_staged: Vec<crate::tensor::Tensor> =
+                        Vec::with_capacity(update.params.len());
+                    let mut dst_handles: Vec<crate::tensor::Tensor> =
+                        Vec::with_capacity(update.params.len());
+                    for (var, src) in self.param_vars.iter().zip(&update.params) {
+                        let dst = var.data();
+                        // zeros_like allocates a same-shape/dtype/device
+                        // tensor; we immediately overwrite via copy_ so the
+                        // initial zeroing is unused (no `empty_like` in flodl).
+                        let avg_gpu = crate::tensor::Tensor::zeros_like(&dst)?;
+                        avg_gpu.copy_(src, non_blocking)?;
+                        avg_staged.push(avg_gpu);
+                        dst_handles.push(dst);
+                    }
+                    crate::tensor::Tensor::foreach_lerp_scalar_(
+                        &dst_handles, &avg_staged, alpha,
+                    )?;
+                }
             }
         }
         for (buf, src) in self.buffer_list.iter().zip(&update.buffers) {
@@ -499,6 +567,11 @@ impl<M: Module> GpuWorker<M> {
         if let (Some(ev), Some(stream)) = (&self.copy_done, &self.comm_stream) {
             ev.record_on(stream)?;
         }
+        // Mark H2D pending so the next `sync_before_forward` host-syncs the
+        // comm stream BEFORE `train_step`'s timing window opens. Without
+        // this, the wait_event-based path leaks the H2D wait into
+        // `batch_ms` via the implicit GPU sync at `loss.item()`.
+        self.pending_param_h2d = true;
 
         self.current_version = update.version;
         Ok(())
@@ -510,12 +583,24 @@ impl<M: Module> GpuWorker<M> {
     /// Runs on `comm_stream` and records `copy_done` so the compute stream waits
     /// before the next forward.
     ///
-    /// Returns the weight-space divergence for this rank: `||pre - post|| / ||post||`.
-    /// `None` when scratch buffers are absent (Sync mode or no NCCL comm).
-    fn sync_now_nccl(&self) -> Result<Option<f64>> {
+    /// Performs the in-place NCCL AllReduce(Avg) on this rank's parameters
+    /// and returns the divergence triple `(divergence, post_norm, pre_norm)`:
+    /// - `divergence = ||pre - post|| / ||post||` (this rank's transversal
+    ///   deviation from the post-AllReduce consensus),
+    /// - `post_norm = ||post||` (the L2 norm of the consensus weights after
+    ///   AllReduce; identical across ranks by construction),
+    /// - `pre_norm = ||W_i||` (this rank's pre-AllReduce L2 norm; per-rank).
+    ///
+    /// All three are `None` together when scratch buffers are absent
+    /// (Sync mode or no NCCL comm). With all three available the coordinator
+    /// gets the cosine-similarity / magnitude-shift decomposition for free
+    /// (MSF/SWA directional vs magnitude split) plus the longitudinal
+    /// meta-oscillator state.
+    fn sync_now_nccl(&self) -> Result<(Option<f64>, Option<f64>, Option<f64>)> {
+        let _diag_start = Instant::now();
         let comm = match &self.nccl_comm {
             Some(c) => c,
-            None => return Ok(None),
+            None => return Ok((None, None, None)),
         };
 
         let param_tensors: Vec<_> = self.param_vars.iter().map(|v| v.data()).collect();
@@ -531,13 +616,26 @@ impl<M: Module> GpuWorker<M> {
 
         if let Some(stream) = &self.comm_stream {
             // AllReduce on comm_stream (in-place averaging)
+            let nccl_start = Instant::now();
             comm.all_reduce_on_stream(&param_refs, ReduceOp::Avg, stream)?;
             // HOST-synchronize: block until AllReduce completes.
             stream.synchronize()?;
+            let nccl_ms = nccl_start.elapsed().as_secs_f64() * 1000.0;
 
             // Compute weight-space divergence: ||pre - post|| / ||post||
+            let divg_start = Instant::now();
             let divergence = if let Some(ref scratch) = self.pre_sync_scratch {
-                // scratch = pre (from copy above). Compute diff in-place:
+                // scratch = pre (from copy above). Compute pre-norm BEFORE
+                // mutating scratch (the next foreach_add_list_ overwrites it
+                // in place to scratch = pre - post).
+                let pre_norm_tensors = Tensor::foreach_norm(scratch, 2.0)?;
+                let mut pre_sq = 0.0f64;
+                for n in &pre_norm_tensors {
+                    let v: f64 = n.item()?;
+                    pre_sq += v * v;
+                }
+                let pre_norm = pre_sq.sqrt();
+
                 // scratch[i] += (-1) * param_tensors[i]  ->  scratch[i] = pre[i] - post[i]
                 Tensor::foreach_add_list_(scratch, &param_tensors, -1.0)?;
 
@@ -563,33 +661,57 @@ impl<M: Module> GpuWorker<M> {
                 };
 
                 crate::verbose!(
-                    "  ddp-worker: rank {} sync divergence={:.6} (||delta||={:.4}, ||post||={:.4})",
-                    self.rank, div, diff_sq.sqrt(), post_norm,
+                    "  ddp-worker: rank {} sync divergence={:.6} (||delta||={:.4}, ||pre||={:.4}, ||post||={:.4})",
+                    self.rank, div, diff_sq.sqrt(), pre_norm, post_norm,
                 );
-                Some(div)
+                (Some(div), Some(post_norm), Some(pre_norm))
             } else {
-                None
+                (None, None, None)
             };
 
             // Record event so compute_stream waits before next forward
             if let Some(ev) = &self.copy_done {
                 ev.record_on(stream)?;
             }
+            let divg_ms = divg_start.elapsed().as_secs_f64() * 1000.0;
+            let total_ms = _diag_start.elapsed().as_secs_f64() * 1000.0;
+            crate::verbose!(
+                "  ddp-sync-diag: rank {} sync_total={:.1}ms (nccl={:.1}ms divg={:.1}ms)",
+                self.rank, total_ms, nccl_ms, divg_ms,
+            );
 
             Ok(divergence)
         } else {
             comm.all_reduce(&param_refs, ReduceOp::Avg)?;
-            Ok(None)
+            Ok((None, None, None))
         }
     }
 
-    /// Wait for any pending parameter copy to complete on the compute stream.
+    /// Host-synchronize the comm stream so any pending cpu-avg H2D copy
+    /// completes BEFORE `train_step`'s timing window opens.
     ///
-    /// Must be called before each forward pass to prevent reading mid-copy params.
+    /// Must be called before each forward pass. The previous implementation
+    /// queued a `compute_stream.wait_event(copy_done)` here — a stream-level
+    /// dependency that returned to the host immediately. The catch: the
+    /// implicit GPU sync at `loss.data().item()?` inside the timing window
+    /// then propagated the H2D wait into the measured `batch_ms`, polluting
+    /// ElChe's throughput signal asymmetrically (cpu-avg only — NCCL's
+    /// `sync_now_nccl` host-synchronizes internally, so there's nothing to
+    /// wait for here on that path).
+    ///
+    /// The host-sync moves that wait outside the timing window. Total wall
+    /// time is identical (we pay the H2D wait either way); only the clock
+    /// that measures it changes. The `pending_param_h2d` flag avoids
+    /// per-batch synchronize overhead on batches that don't follow an Update.
     /// No-op on CPU (no streams).
-    fn sync_before_forward(&self) -> Result<()> {
-        if let (Some(ev), Some(stream)) = (&self.copy_done, &self.compute_stream) {
-            stream.wait_event(ev)?;
+    fn sync_before_forward(&mut self) -> Result<()> {
+        if self.pending_param_h2d
+            && let Some(stream) = &self.comm_stream
+        {
+            let t = Instant::now();
+            stream.synchronize()?;
+            self.last_h2d_wait_ms = t.elapsed().as_secs_f64() * 1000.0;
+            self.pending_param_h2d = false;
         }
         Ok(())
     }
@@ -661,6 +783,846 @@ impl<M: Module> GpuWorker<M> {
         Ok((loss_val, elapsed_ms))
     }
 
+    /// Trigger an NCCL AllReduce across all ranks on this worker's
+    /// parameters and reset the local steps-since-avg counter.
+    ///
+    /// Self-driven entry point for the cluster-rank inline loop (4b.D.1a.ii
+    /// onwards). Mirrors the SyncNow handler in `dispatch_control` but
+    /// skips the SyncAck — there's no coordinator listening in the new
+    /// process-per-rank model.
+    ///
+    /// All ranks must reach `sync_now` concurrently for the AllReduce
+    /// collective to complete. Caller is responsible for cadence
+    /// decisions (Sync: every batch; Cadence/Async: ElChe-determined K).
+    pub fn sync_now(&mut self) -> Result<()> {
+        let _ = self.sync_now_nccl()?;
+        self.steps_since_avg = 0;
+        self.local_step += 1;
+        Ok(())
+    }
+
+    /// Self-driven inline training loop for `ApplyPolicy::Sync +
+    /// AverageBackend::Nccl` (the simplest cluster-rank case).
+    ///
+    /// Runs for `num_epochs`. For each epoch:
+    /// 1. Compute this rank's slice of the global permutation (via
+    ///    [`make_partition`] — same deterministic shuffle the coordinator
+    ///    used so the cross-rank disjoint-coverage guarantee holds).
+    /// 2. For each batch:
+    ///    - Synchronous data load + H2D transfer
+    ///    - `train_step` (forward + backward + optional grad clipping +
+    ///      scheduler + optimizer step)
+    ///    - `sync_now` (NCCL AllReduce on params)
+    /// 3. Track `total_loss` across batches; caller can read it via
+    ///    [`GpuWorker::current_epoch`] etc.
+    ///
+    /// **Behavior preserved:** same `train_step` (including CUDA stream
+    /// management, AccumulateGrad node pinning, grad clipping, scheduler),
+    /// same `sync_now_nccl` (AllReduce + divergence measurement). The
+    /// orchestration change: no coordinator driving SyncNow control
+    /// messages — this rank decides Sync = every batch internally.
+    ///
+    /// **Not yet supported:**
+    /// - VRAM-aware prefetch (sync data loading only; future slice)
+    /// - Per-batch metrics + per-epoch MetricsMsg (future slice; DdpHandle
+    ///   metrics queue is empty until then)
+    /// - `Cadence` / `Async` policies (loud error in the cluster-rank
+    ///   dispatch — see 4b.D.1a.iii / iv)
+    /// - `epoch_fn` callback (future slice)
+    pub fn run_self_driven_sync_nccl(
+        &mut self,
+        num_epochs: usize,
+        train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
+    ) -> Result<()> {
+        if self.nccl_comm.is_none() {
+            return Err(TensorError::new(
+                "GpuWorker::run_self_driven_sync_nccl requires an NCCL comm; \
+                 caller must build the worker with Some(comm).",
+            ));
+        }
+
+        // Pin CUDA work to compute_stream for the full training session
+        // (same invariant run_epoch_plan relies on; protects AccumulateGrad
+        // node stream-pinning from interleaving with default-stream ops).
+        let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
+
+        for epoch in 0..num_epochs {
+            self.current_epoch = epoch;
+            let total_samples = self.dataset.len();
+            // Use the same global-permutation slice the coordinator would
+            // have assigned this rank. Equal share — no throughput-based
+            // rebalancing in this slice (future work).
+            let share = total_samples / self.world_size;
+            let offset = self.rank * share;
+            let size = if self.rank == self.world_size - 1 {
+                total_samples - offset // last rank picks up remainder
+            } else {
+                share
+            };
+            self.partition = make_partition(
+                offset, size, total_samples, epoch, self.base_seed,
+            );
+
+            let num_batches = self.partition.len() / self.batch_size;
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * self.batch_size;
+                let end = start + self.batch_size;
+                let indices = &self.partition[start..end];
+                let batch = self.dataset.get_batch(indices)?;
+                let batch: Vec<Tensor> = if self.device.is_cuda() {
+                    batch
+                        .into_iter()
+                        .map(|t| t.to_device(self.device))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    batch
+                };
+
+                let (_loss, _ms) = self.train_step(&batch, train_fn)?;
+                // ApplyPolicy::Sync: AllReduce after every batch.
+                self.sync_now()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Self-driven inline training loop for `ApplyPolicy::Sync +
+    /// AverageBackend::Cpu` — CPU-averaging counterpart of
+    /// [`Self::run_self_driven_sync_nccl`].
+    ///
+    /// Same per-batch protocol (forward + backward + optimizer step) and
+    /// same K=1 cadence (AllReduce-Avg after every batch). The reduce
+    /// mechanism switches from NCCL collective to TCP round-trip via
+    /// [`CpuReduceClient`]:
+    ///
+    /// - Each batch: `train_step` (Local SGD, identical to NCCL path)
+    /// - Then: `cpu_client.all_reduce_tensors(&params_on_cpu)` → averaged
+    ///   tensors on CPU
+    /// - Load averaged tensors back into the live params via `copy_`
+    ///   (handles the CPU-to-GPU move when params live on a CUDA device)
+    ///
+    /// **Behavior preserved (vs old threaded coordinator):** same
+    /// `train_step` (grad clipping, scheduler, optimizer step), Local SGD
+    /// semantics every batch, same `param_vars` set being averaged. The
+    /// orchestration switch (TCP rather than NCCL) is the only change.
+    ///
+    /// **Not yet supported (carried forward through later slices):**
+    /// VRAM-aware prefetch, per-epoch [`MetricsMsg`] aggregation,
+    /// `epoch_fn` / `metrics_fn` / `scheduler_fn` / `checkpoint_every`
+    /// callbacks, EASGD blending (the CPU-async slice's α-mixing —
+    /// 4b.D.1c).
+    ///
+    /// [`CpuReduceClient`]: crate::distributed::CpuReduceClient
+    pub fn run_self_driven_sync_cpu(
+        &mut self,
+        cpu_client: &mut crate::distributed::cpu_reduce::CpuReduceClient,
+        num_epochs: usize,
+        train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
+    ) -> Result<()> {
+        if (cpu_client.world_size() as usize) != self.world_size {
+            return Err(TensorError::new(&format!(
+                "GpuWorker::run_self_driven_sync_cpu: cpu_client world_size ({}) \
+                 must equal worker world_size ({})",
+                cpu_client.world_size(), self.world_size,
+            )));
+        }
+
+        let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
+
+        for epoch in 0..num_epochs {
+            self.current_epoch = epoch;
+            let total_samples = self.dataset.len();
+            let share = total_samples / self.world_size;
+            let offset = self.rank * share;
+            let size = if self.rank == self.world_size - 1 {
+                total_samples - offset
+            } else {
+                share
+            };
+            self.partition = make_partition(
+                offset, size, total_samples, epoch, self.base_seed,
+            );
+
+            let num_batches = self.partition.len() / self.batch_size;
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * self.batch_size;
+                let end = start + self.batch_size;
+                let indices = &self.partition[start..end];
+                let batch = self.dataset.get_batch(indices)?;
+                let batch: Vec<Tensor> = if self.device.is_cuda() {
+                    batch
+                        .into_iter()
+                        .map(|t| t.to_device(self.device))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    batch
+                };
+
+                let (_loss, _ms) = self.train_step(&batch, train_fn)?;
+
+                // CPU AllReduce-Avg: ship live params (move to CPU
+                // happens inside tensors_to_round_frame), receive
+                // averaged tensors, load back into live params.
+                let param_tensors: Vec<Tensor> = self
+                    .param_vars
+                    .iter()
+                    .map(|v| v.data())
+                    .collect();
+                let param_refs: Vec<&Tensor> = param_tensors.iter().collect();
+                let averaged = cpu_client.all_reduce_tensors(&param_refs)?;
+                for (dst, src) in param_tensors.iter().zip(&averaged) {
+                    dst.copy_(src, false)?;
+                }
+                self.steps_since_avg = 0;
+                self.local_step += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Self-driven inline training loop for `ApplyPolicy::Cadence` /
+    /// `ApplyPolicy::Async` + `AverageBackend::Nccl` — heterogeneous
+    /// Local-SGD with ElChe-driven K and the full convergence-guard
+    /// pipeline.
+    ///
+    /// Under NCCL backend, Cadence and Async share the same algorithm: the
+    /// only difference in the old coordinator was Async-mode overshoot
+    /// machinery, which is an async/CPU concept (see
+    /// `feedback_overshoot_async_only` and `feedback_nccl_no_overshoot_throttle`).
+    /// Both policies therefore route through this single loop in cluster-rank
+    /// mode.
+    ///
+    /// Per-cycle protocol (mirrors `Coordinator::finish_averaging_nccl`):
+    ///
+    /// 1. Run `train_step` (forward + backward + optimizer step) until the
+    ///    rank's `local_batch_idx` reaches `el_che.batch_counts()[rank]`.
+    /// 2. Measure cycle wall time and AllReduce the per-rank vector via
+    ///    `ddp.all_reduce_per_rank_f64` — deterministic gather, no broadcast.
+    /// 3. AllReduce-Avg parameters with weight-space divergence
+    ///    measurement via `ddp.average_params_with_divergence(&scratch)`.
+    /// 4. AllReduce per-rank `divergence` and per-rank `pre_norm` for the
+    ///    [`DivergenceReport`]; `post_norm` is identical across ranks
+    ///    post-AllReduce so it's used directly from this rank.
+    /// 5. Feed timing into [`ElChe::report_timing`].
+    /// 6. Run the guard: `convergence_guard.report(&report, k_used, k_max)`
+    ///    → [`ConvergenceAction`]:
+    ///    - [`ConvergenceAction::NudgeDown`] `{ factor }` → unconditional
+    ///      [`ElChe::nudge_anchor_down`] (matches old coordinator —
+    ///      applied for all non-Sync policies).
+    ///    - [`ConvergenceAction::Stable`] + `elche_relax_up` →
+    ///      [`ElChe::relax_anchor_up`]. **The old coordinator gated this
+    ///      on `policy == Async` (likely an MSF-arc leftover); the
+    ///      cluster-rank loop lifts the gate so the user-set flag works
+    ///      for Cadence too. `max_anchor` bounds anchor growth.**
+    ///    - [`ConvergenceAction::SuppressGrowth`] → no-op (hold cadence).
+    ///
+    /// **Behavior preserved (vs old threaded coordinator):** same
+    /// `train_step` (CUDA stream pinning, per-rank grad clipping,
+    /// scheduler, optimizer step), same Local-SGD param-Avg semantics,
+    /// same divergence math (snapshot → AllReduce-Avg → `||pre - post|| /
+    /// ||post||`), same guard verdict → ElChe action wiring.
+    ///
+    /// **Still deferred (carried forward through 4b.D.1b):** VRAM-aware
+    /// prefetch, per-epoch [`MetricsMsg`] aggregation, `epoch_fn` /
+    /// `metrics_fn` / `scheduler_fn` / `checkpoint_every` callbacks,
+    /// LR-aware meta-controller (needs scheduler_fn flow), Timeline
+    /// events for `Divergence` / `SyncEnd` / `AnchorChanged` /
+    /// `GuardTelemetry`, per-epoch partition recompute from current
+    /// ElChe ratios, Async-mode overshoot growth (irrelevant for NCCL —
+    /// async/CPU concept).
+    ///
+    /// [`ConvergenceAction`]: super::convergence::ConvergenceAction
+    /// [`ConvergenceAction::NudgeDown`]: super::convergence::ConvergenceAction::NudgeDown
+    /// [`ConvergenceAction::Stable`]: super::convergence::ConvergenceAction::Stable
+    /// [`ConvergenceAction::SuppressGrowth`]: super::convergence::ConvergenceAction::SuppressGrowth
+    /// [`DivergenceReport`]: super::convergence::DivergenceReport
+    /// [`ElChe::nudge_anchor_down`]: super::super::ddp::ElChe::nudge_anchor_down
+    /// [`ElChe::relax_anchor_up`]: super::super::ddp::ElChe::relax_anchor_up
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_self_driven_cadence_nccl(
+        &mut self,
+        ddp: &super::super::ddp::Ddp,
+        el_che: &mut super::super::ddp::ElChe,
+        convergence_guard: &mut dyn super::convergence::ConvergenceGuard,
+        scratch: &[Tensor],
+        partition_sizes: &[usize],
+        elche_relax_up: bool,
+        num_epochs: usize,
+        train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
+    ) -> Result<()> {
+        use super::convergence::{ConvergenceAction, DivergenceReport};
+
+        if partition_sizes.len() != self.world_size {
+            return Err(TensorError::new(&format!(
+                "GpuWorker::run_self_driven_cadence_nccl: partition_sizes len ({}) \
+                 must equal world_size ({})",
+                partition_sizes.len(), self.world_size,
+            )));
+        }
+        if ddp.world_size() != self.world_size {
+            return Err(TensorError::new(&format!(
+                "GpuWorker::run_self_driven_cadence_nccl: ddp world_size ({}) \
+                 must equal worker world_size ({})",
+                ddp.world_size(), self.world_size,
+            )));
+        }
+
+        let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
+
+        let total_samples = self.dataset.len();
+        let my_offset: usize = partition_sizes.iter().take(self.rank).sum();
+        let my_size = partition_sizes[self.rank];
+
+        for epoch in 0..num_epochs {
+            self.current_epoch = epoch;
+            self.partition = make_partition(
+                my_offset, my_size, total_samples, epoch, self.base_seed,
+            );
+
+            let num_batches = self.partition.len() / self.batch_size;
+            let mut local_batch_idx: usize = 0;
+            let mut cycle_start: Option<Instant> = None;
+
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * self.batch_size;
+                let end = start + self.batch_size;
+                let indices = &self.partition[start..end];
+                let batch = self.dataset.get_batch(indices)?;
+                let batch: Vec<Tensor> = if self.device.is_cuda() {
+                    batch
+                        .into_iter()
+                        .map(|t| t.to_device(self.device))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    batch
+                };
+
+                if cycle_start.is_none() {
+                    cycle_start = Some(Instant::now());
+                }
+                let (_loss, _ms) = self.train_step(&batch, train_fn)?;
+                local_batch_idx += 1;
+
+                let target = el_che.batch_counts()[self.rank];
+                if local_batch_idx >= target {
+                    let cycle_wall_ms = cycle_start
+                        .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0);
+
+                    // Cross-rank timing AllReduce: each rank writes its own
+                    // slot, AllReduce-Sum yields the gathered vector on every
+                    // rank — ElChe::report_timing's input.
+                    let mut wall_ms_vec = vec![0.0f64; self.world_size];
+                    wall_ms_vec[self.rank] = cycle_wall_ms;
+                    ddp.all_reduce_per_rank_f64(&mut wall_ms_vec)?;
+
+                    // Snapshot batch_counts BEFORE averaging — report_timing
+                    // and nudge_anchor_down both mutate ElChe.
+                    let counts: Vec<usize> = el_che.batch_counts().to_vec();
+
+                    // Param AllReduce-Avg + weight-space divergence triple
+                    // for this rank.
+                    let sync_start = Instant::now();
+                    let (local_div, local_post, local_pre) =
+                        ddp.average_params_with_divergence(scratch)?;
+                    let sync_ms = sync_start.elapsed().as_secs_f64() * 1000.0;
+
+                    // Gather divergence + pre_norm across ranks for the
+                    // ConvergenceGuard's DivergenceReport. post_norm is
+                    // identical on every rank post-AllReduce (modulo
+                    // float-rounding); use this rank's directly.
+                    let mut deltas = vec![0.0f64; self.world_size];
+                    deltas[self.rank] = local_div;
+                    ddp.all_reduce_per_rank_f64(&mut deltas)?;
+
+                    let mut pre_norms_vec = vec![0.0f64; self.world_size];
+                    pre_norms_vec[self.rank] = local_pre.unwrap_or(0.0);
+                    ddp.all_reduce_per_rank_f64(&mut pre_norms_vec)?;
+                    let pre_norms: Option<Vec<f64>> = if local_pre.is_some() {
+                        Some(pre_norms_vec)
+                    } else {
+                        None
+                    };
+
+                    el_che.report_timing(&wall_ms_vec, &counts, sync_ms);
+
+                    let report = DivergenceReport {
+                        deltas,
+                        pre_norms,
+                        post_norm: local_post,
+                    };
+                    let cycle_batches: usize = counts.iter().sum();
+                    let k_max = counts.iter().copied().max().unwrap_or(0);
+                    let action =
+                        convergence_guard.report(&report, cycle_batches, k_max);
+                    match action {
+                        ConvergenceAction::Stable => {
+                            if elche_relax_up {
+                                el_che.relax_anchor_up();
+                            }
+                        }
+                        ConvergenceAction::SuppressGrowth => {}
+                        ConvergenceAction::NudgeDown { factor } => {
+                            el_che.nudge_anchor_down(factor);
+                        }
+                    }
+
+                    self.steps_since_avg = 0;
+                    local_batch_idx = 0;
+                    cycle_start = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Self-driven inline training loop for `ApplyPolicy::Cadence +
+    /// AverageBackend::Cpu` — CPU-averaging counterpart of
+    /// [`Self::run_self_driven_cadence_nccl`].
+    ///
+    /// Same per-cycle protocol as the NCCL version (timing AllReduce →
+    /// param AllReduce-Avg with weight-space divergence → cross-rank
+    /// gather of `(divergence, pre_norm)` → `ElChe::report_timing` →
+    /// `convergence_guard.report(...)` → [`ConvergenceAction`] applied
+    /// to ElChe), but every collective routes through
+    /// [`CpuReduceClient`] instead of NCCL:
+    ///
+    /// - `cpu_client.all_reduce_per_rank_f64(...)` — gather timing /
+    ///   divergence / pre_norm vectors via the avg-trick
+    /// - `cpu_client.average_params_with_divergence(&params, &scratch)`
+    ///   — TCP round-trip averaging + scratch-based divergence triple
+    ///
+    /// `Async + Cpu` is **not** routed here: genuine async semantics
+    /// require the 3-phase Idle/Collecting/Computing machine that
+    /// lands in 4b.D.1c. Cadence + Cpu is the blocking-reduce variant.
+    ///
+    /// [`CpuReduceClient`]: crate::distributed::CpuReduceClient
+    /// [`ConvergenceAction`]: super::convergence::ConvergenceAction
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_self_driven_cadence_cpu(
+        &mut self,
+        cpu_client: &mut crate::distributed::cpu_reduce::CpuReduceClient,
+        el_che: &mut super::super::ddp::ElChe,
+        convergence_guard: &mut dyn super::convergence::ConvergenceGuard,
+        scratch: &[Tensor],
+        partition_sizes: &[usize],
+        elche_relax_up: bool,
+        num_epochs: usize,
+        train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
+    ) -> Result<()> {
+        use super::convergence::{ConvergenceAction, DivergenceReport};
+
+        if partition_sizes.len() != self.world_size {
+            return Err(TensorError::new(&format!(
+                "GpuWorker::run_self_driven_cadence_cpu: partition_sizes len ({}) \
+                 must equal world_size ({})",
+                partition_sizes.len(), self.world_size,
+            )));
+        }
+        if (cpu_client.world_size() as usize) != self.world_size {
+            return Err(TensorError::new(&format!(
+                "GpuWorker::run_self_driven_cadence_cpu: cpu_client world_size \
+                 ({}) must equal worker world_size ({})",
+                cpu_client.world_size(), self.world_size,
+            )));
+        }
+
+        let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
+
+        let total_samples = self.dataset.len();
+        let my_offset: usize = partition_sizes.iter().take(self.rank).sum();
+        let my_size = partition_sizes[self.rank];
+
+        for epoch in 0..num_epochs {
+            self.current_epoch = epoch;
+            self.partition = make_partition(
+                my_offset, my_size, total_samples, epoch, self.base_seed,
+            );
+
+            let num_batches = self.partition.len() / self.batch_size;
+            let mut local_batch_idx: usize = 0;
+            let mut cycle_start: Option<Instant> = None;
+
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * self.batch_size;
+                let end = start + self.batch_size;
+                let indices = &self.partition[start..end];
+                let batch = self.dataset.get_batch(indices)?;
+                let batch: Vec<Tensor> = if self.device.is_cuda() {
+                    batch
+                        .into_iter()
+                        .map(|t| t.to_device(self.device))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    batch
+                };
+
+                if cycle_start.is_none() {
+                    cycle_start = Some(Instant::now());
+                }
+                let (_loss, _ms) = self.train_step(&batch, train_fn)?;
+                local_batch_idx += 1;
+
+                let target = el_che.batch_counts()[self.rank];
+                if local_batch_idx >= target {
+                    let cycle_wall_ms = cycle_start
+                        .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0);
+
+                    // Cross-rank timing AllReduce via CPU avg-trick.
+                    let mut wall_ms_vec = vec![0.0f64; self.world_size];
+                    wall_ms_vec[self.rank] = cycle_wall_ms;
+                    cpu_client.all_reduce_per_rank_f64(&mut wall_ms_vec)?;
+
+                    let counts: Vec<usize> = el_che.batch_counts().to_vec();
+
+                    // Param AllReduce-Avg + weight-space divergence triple
+                    // via CPU client. Build the &[&Tensor] view over
+                    // self.param_vars once for this cycle.
+                    let param_tensors: Vec<Tensor> = self
+                        .param_vars
+                        .iter()
+                        .map(|v| v.data())
+                        .collect();
+                    let param_refs: Vec<&Tensor> = param_tensors.iter().collect();
+                    let sync_start = Instant::now();
+                    let (local_div, local_post, local_pre) = cpu_client
+                        .average_params_with_divergence(&param_refs, scratch)?;
+                    let sync_ms = sync_start.elapsed().as_secs_f64() * 1000.0;
+
+                    // Gather divergence + pre_norm across ranks.
+                    let mut deltas = vec![0.0f64; self.world_size];
+                    deltas[self.rank] = local_div;
+                    cpu_client.all_reduce_per_rank_f64(&mut deltas)?;
+
+                    let mut pre_norms_vec = vec![0.0f64; self.world_size];
+                    pre_norms_vec[self.rank] = local_pre.unwrap_or(0.0);
+                    cpu_client.all_reduce_per_rank_f64(&mut pre_norms_vec)?;
+                    let pre_norms: Option<Vec<f64>> = if local_pre.is_some() {
+                        Some(pre_norms_vec)
+                    } else {
+                        None
+                    };
+
+                    el_che.report_timing(&wall_ms_vec, &counts, sync_ms);
+
+                    let report = DivergenceReport {
+                        deltas,
+                        pre_norms,
+                        post_norm: local_post,
+                    };
+                    let cycle_batches: usize = counts.iter().sum();
+                    let k_max = counts.iter().copied().max().unwrap_or(0);
+                    let action =
+                        convergence_guard.report(&report, cycle_batches, k_max);
+                    match action {
+                        ConvergenceAction::Stable => {
+                            if elche_relax_up {
+                                el_che.relax_anchor_up();
+                            }
+                        }
+                        ConvergenceAction::SuppressGrowth => {}
+                        ConvergenceAction::NudgeDown { factor } => {
+                            el_che.nudge_anchor_down(factor);
+                        }
+                    }
+
+                    self.steps_since_avg = 0;
+                    local_batch_idx = 0;
+                    cycle_start = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Self-driven inline training loop for `ApplyPolicy::Async +
+    /// AverageBackend::Cpu` — the only **truly** asynchronous combo.
+    ///
+    /// Each rank submits a parameter-snapshot round to the controller
+    /// (non-blocking), keeps training while the round is in flight,
+    /// polls for completion every batch, and on receipt of the
+    /// averaged response performs an EASGD elastic blend with the
+    /// (now-drifted) live params. The convergence-guard pipeline runs
+    /// against `(snapshot_at_submit, averaged_response)` — matching
+    /// OLD coordinator behavior (averaging is on the parameters that
+    /// were submitted, not on the live drifted ones).
+    ///
+    /// **Overshoot bound:** `max_overshoot = 1` for this first pass —
+    /// if a round is still in flight when the K-boundary triggers the
+    /// next, we [`AsyncCpuReduceClient::block_poll`] until the
+    /// previous round completes before submitting the new one. The
+    /// previous round's EASGD-blend + guard verdict still applies
+    /// before the new snapshot is taken.
+    ///
+    /// **EASGD blend formula:** `W := (1-α)·W_local + α·W_avg` when
+    /// `easgd_alpha = Some(α)`; full overwrite (`copy_`) when `None`.
+    /// Matches OLD `worker.load_averaged`'s two cases.
+    ///
+    /// **Local-only guard verdict:** the cross-rank divergence gather
+    /// (NCCL/CPU AllReduce on per-rank divergence vec) is **deferred**
+    /// here. The guard runs with `deltas[rank] = local_div`, others
+    /// zero. Per user direction, this is acceptable: EASGD plus the
+    /// convergence guard (already LR-drop aware) absorb the per-rank
+    /// drift as long as overshoot stays bounded.
+    ///
+    /// **ElChe timing report is deferred** for the same reason —
+    /// without a cross-rank wall_ms gather, ElChe's auto-tune would
+    /// drift across ranks. Static cadence (anchor stays at config
+    /// init) for this first pass.
+    ///
+    /// **Epoch-event semantics:** LR scheduler updates fire per-rank
+    /// locally on epoch crossing (the fast rank applies LR drop for
+    /// epoch E+1 ahead of slow rank still finishing E). Metrics
+    /// reporting fires once all ranks have crossed — deferred to a
+    /// follow-up slice (per-rank epoch-completion tally via async TCP
+    /// channel).
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_self_driven_async_cpu(
+        &mut self,
+        async_client: &mut crate::distributed::cpu_reduce::AsyncCpuReduceClient,
+        el_che: &mut super::super::ddp::ElChe,
+        convergence_guard: &mut dyn super::convergence::ConvergenceGuard,
+        partition_sizes: &[usize],
+        elche_relax_up: bool,
+        easgd_alpha: Option<f64>,
+        num_epochs: usize,
+        train_fn: &impl Fn(&M, &[Tensor]) -> Result<Variable>,
+    ) -> Result<()> {
+        use super::convergence::{ConvergenceAction, DivergenceReport};
+        use crate::distributed::cpu_reduce::round_frame_to_tensors;
+        use crate::distributed::controller::RoundFrame;
+
+        if partition_sizes.len() != self.world_size {
+            return Err(TensorError::new(&format!(
+                "GpuWorker::run_self_driven_async_cpu: partition_sizes len ({}) \
+                 must equal world_size ({})",
+                partition_sizes.len(), self.world_size,
+            )));
+        }
+        if (async_client.world_size() as usize) != self.world_size {
+            return Err(TensorError::new(&format!(
+                "GpuWorker::run_self_driven_async_cpu: async_client world_size \
+                 ({}) must equal worker world_size ({})",
+                async_client.world_size(), self.world_size,
+            )));
+        }
+
+        let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
+
+        let total_samples = self.dataset.len();
+        let my_offset: usize = partition_sizes.iter().take(self.rank).sum();
+        let my_size = partition_sizes[self.rank];
+
+        // In-flight snapshot: the deep-cloned params at submit time.
+        // Kept alive across batches; consumed when the round completes
+        // (used as the "pre" side of the divergence math).
+        let mut in_flight_snapshot: Option<Vec<Tensor>> = None;
+
+        // Closure-like helper inlined twice (after poll-completion and
+        // after block-poll at max_overshoot=1). Encapsulates: divergence
+        // math, EASGD blend / full-overwrite, local-only guard report,
+        // action → ElChe.
+        let apply_completed_round = |snapshot: Vec<Tensor>,
+                                     avg_frame: RoundFrame,
+                                     el_che: &mut super::super::ddp::ElChe,
+                                     guard: &mut dyn super::convergence::ConvergenceGuard,
+                                     param_vars: &[Variable],
+                                     device: Device,
+                                     rank: usize,
+                                     world_size: usize,
+                                     elche_relax_up: bool,
+                                     easgd_alpha: Option<f64>|
+         -> Result<()> {
+            // Averaged frame comes back as CPU tensors. Move to the
+            // worker's device so foreach math + blending stay on-device.
+            let averaged_cpu = round_frame_to_tensors(&avg_frame)?;
+            let averaged: Vec<Tensor> = averaged_cpu
+                .iter()
+                .map(|t| t.to_device(device))
+                .collect::<Result<Vec<_>>>()?;
+
+            let param_tensors: Vec<Tensor> =
+                param_vars.iter().map(|v| v.data()).collect();
+
+            // Divergence math: pre_norm BEFORE mutating snapshot.
+            let pre_norm_tensors = Tensor::foreach_norm(&snapshot, 2.0)?;
+            let mut pre_sq = 0.0f64;
+            for n in &pre_norm_tensors {
+                let v: f64 = n.item()?;
+                pre_sq += v * v;
+            }
+            let pre_norm = pre_sq.sqrt();
+
+            // snapshot[i] += -1 * averaged[i]  →  snapshot = pre - post.
+            Tensor::foreach_add_list_(&snapshot, &averaged, -1.0)?;
+            let diff_norms = Tensor::foreach_norm(&snapshot, 2.0)?;
+            let post_norms = Tensor::foreach_norm(&averaged, 2.0)?;
+
+            let mut diff_sq = 0.0f64;
+            for n in &diff_norms {
+                let v: f64 = n.item()?;
+                diff_sq += v * v;
+            }
+            let mut post_sq = 0.0f64;
+            for n in &post_norms {
+                let v: f64 = n.item()?;
+                post_sq += v * v;
+            }
+            let post_norm = post_sq.sqrt();
+            let divergence = if post_norm > 1e-10 {
+                diff_sq.sqrt() / post_norm
+            } else {
+                0.0
+            };
+
+            // EASGD blend or full overwrite into live params.
+            match easgd_alpha {
+                Some(alpha) => {
+                    let beta = 1.0 - alpha;
+                    for live in &param_tensors {
+                        live.mul_scalar_(beta)?;
+                    }
+                    Tensor::foreach_add_list_(&param_tensors, &averaged, alpha)?;
+                }
+                None => {
+                    for (live, avg) in param_tensors.iter().zip(averaged.iter()) {
+                        live.copy_(avg, false)?;
+                    }
+                }
+            }
+
+            // Local-only guard: deltas[rank] = local_div, others zero.
+            // Cross-rank gather is deferred (see method doc).
+            let mut deltas = vec![0.0f64; world_size];
+            deltas[rank] = divergence;
+            let mut pre_norms_vec = vec![0.0f64; world_size];
+            pre_norms_vec[rank] = pre_norm;
+            let report = DivergenceReport {
+                deltas,
+                pre_norms: Some(pre_norms_vec),
+                post_norm: Some(post_norm),
+            };
+            // K-used / k-max approximations from this rank's slot only:
+            // local cycle batches. Cross-rank gather deferred.
+            let k_used = el_che.batch_counts()[rank];
+            let k_max = k_used;
+            let action = guard.report(&report, k_used, k_max);
+            match action {
+                ConvergenceAction::Stable => {
+                    if elche_relax_up {
+                        el_che.relax_anchor_up();
+                    }
+                }
+                ConvergenceAction::SuppressGrowth => {}
+                ConvergenceAction::NudgeDown { factor } => {
+                    el_che.nudge_anchor_down(factor);
+                }
+            }
+            Ok(())
+        };
+
+        for epoch in 0..num_epochs {
+            self.current_epoch = epoch;
+            self.partition = make_partition(
+                my_offset, my_size, total_samples, epoch, self.base_seed,
+            );
+
+            let num_batches = self.partition.len() / self.batch_size;
+            let mut local_batch_idx: usize = 0;
+
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * self.batch_size;
+                let end = start + self.batch_size;
+                let indices = &self.partition[start..end];
+                let batch = self.dataset.get_batch(indices)?;
+                let batch: Vec<Tensor> = if self.device.is_cuda() {
+                    batch
+                        .into_iter()
+                        .map(|t| t.to_device(self.device))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    batch
+                };
+
+                let (_loss, _ms) = self.train_step(&batch, train_fn)?;
+                local_batch_idx += 1;
+
+                // Drain any completed round non-blocking.
+                if in_flight_snapshot.is_some() {
+                    if let Some(avg_frame) = async_client.poll_round()? {
+                        let snapshot = in_flight_snapshot.take().unwrap();
+                        apply_completed_round(
+                            snapshot, avg_frame,
+                            el_che, convergence_guard,
+                            &self.param_vars, self.device,
+                            self.rank, self.world_size,
+                            elche_relax_up, easgd_alpha,
+                        )?;
+                    }
+                }
+
+                // K-boundary: submit a new round.
+                let target = el_che.batch_counts()[self.rank];
+                if local_batch_idx >= target {
+                    // max_overshoot = 1: if previous round still in
+                    // flight, block until it completes before submitting.
+                    if let Some(snapshot) = in_flight_snapshot.take() {
+                        let avg_frame = async_client.block_poll()?;
+                        apply_completed_round(
+                            snapshot, avg_frame,
+                            el_che, convergence_guard,
+                            &self.param_vars, self.device,
+                            self.rank, self.world_size,
+                            elche_relax_up, easgd_alpha,
+                        )?;
+                    }
+
+                    // Deep-clone the live params as the new snapshot
+                    // (shallow clone shares storage and would drift
+                    // when subsequent train_step mutates params).
+                    let snapshot: Vec<Tensor> = self
+                        .param_vars
+                        .iter()
+                        .map(|v| {
+                            let data = v.data();
+                            let copy = Tensor::zeros_like(&data)?;
+                            copy.copy_(&data, false)?;
+                            Ok(copy)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    // Build the wire frame and submit. The submit_round
+                    // call writes synchronously but doesn't read the
+                    // response — the reader thread does that later.
+                    let snap_refs: Vec<&Tensor> = snapshot.iter().collect();
+                    let frame = crate::distributed::cpu_reduce::tensors_to_round_frame(&snap_refs)?;
+                    async_client.submit_round(&frame)?;
+                    in_flight_snapshot = Some(snapshot);
+
+                    self.steps_since_avg = 0;
+                    local_batch_idx = 0;
+                }
+            }
+        }
+
+        // Drain any in-flight round at end of training so the last
+        // average gets applied before snapshot_params() captures the
+        // final state.
+        if let Some(snapshot) = in_flight_snapshot.take() {
+            let avg_frame = async_client.block_poll()?;
+            apply_completed_round(
+                snapshot, avg_frame,
+                el_che, convergence_guard,
+                &self.param_vars, self.device,
+                self.rank, self.world_size,
+                elche_relax_up, easgd_alpha,
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Process pending control messages (non-blocking).
     ///
     /// Returns `true` if a Shutdown was received.
@@ -710,7 +1672,7 @@ impl<M: Module> GpuWorker<M> {
             }
             ControlMsg::SyncNow => {
                 crate::debug!("  ddp-worker: rank {} SyncNow (step={}, epoch={})", self.rank, self.local_step, self.current_epoch);
-                let divergence = self.sync_now_nccl()?;
+                let (divergence, post_norm, pre_norm) = self.sync_now_nccl()?;
                 crate::debug!("  ddp-worker: rank {} SyncNow done", self.rank);
                 self.steps_since_avg = 0;
                 // Bump local_step and send a dedicated SyncAck so the
@@ -728,10 +1690,55 @@ impl<M: Module> GpuWorker<M> {
                     rank: self.rank,
                     step_count: self.local_step,
                     divergence,
+                    post_norm,
+                    pre_norm,
                 });
             }
             ControlMsg::StartEpoch(plan) => {
                 self.pending_plan = Some(plan);
+            }
+            ControlMsg::DeclareDead { .. }
+            | ControlMsg::NewNcclSession { .. }
+            | ControlMsg::RequestNewNcclId => {
+                // Cluster-mode elastic-membership signals. The
+                // cluster_worker layer intercepts these in its
+                // inbound bridge (updates a local DeadRanks ledger,
+                // stages a pending NCCL session, or generates a
+                // fresh UID and replies through the timing
+                // channel); they should not reach the inner
+                // GpuWorker. If one slips through (e.g. via test
+                // wiring), drop silently — the OLD threaded path
+                // has no comm-replacement surface to act on it.
+            }
+            ControlMsg::ExtendPartition {
+                partition_offset,
+                partition_size,
+            } => {
+                // Resolve the new slice through `make_partition` keyed
+                // on the SAME (current_epoch, base_seed) the worker
+                // used for its StartEpoch, so the appended indices
+                // align with the rest of the cluster's view of the
+                // permutation. Append in-place; `run_epoch_plan`'s
+                // sync loop re-checks `self.partition.len()` each
+                // iteration so the extension is processed before
+                // declaring the epoch complete.
+                //
+                // Prefetch (CUDA) path note: the prefetch consumer
+                // loop submits all batches at function entry and
+                // doesn't re-poll `partition.len()`, so mid-epoch
+                // extension on that path silently leaves the
+                // appended indices unprocessed. CUDA cluster mode
+                // isn't wired yet (1d.3b); when it lands, the
+                // prefetch path needs a similar dynamic-bound
+                // rework + `prefetch.load_batch` calls here.
+                let extra = make_partition(
+                    partition_offset,
+                    partition_size,
+                    self.dataset.len(),
+                    self.current_epoch,
+                    self.base_seed,
+                );
+                self.partition.extend(extra);
             }
             ControlMsg::Throttle => {
                 // Worker is ahead of the slowest rank: block until averaging
@@ -773,6 +1780,11 @@ impl<M: Module> GpuWorker<M> {
     }
 
     /// Send a timing report to the coordinator.
+    ///
+    /// Also emits a [`TimingMsg::LrUpdate`] piggyback message so the
+    /// coordinator's LR-aware meta-controller (when enabled) can track the
+    /// LR trajectory between averaging cycles. Cheap fire-and-forget; the
+    /// coordinator caches only the most recent value per rank.
     pub fn report_timing(
         &self,
         batch_ms: f64,
@@ -780,14 +1792,21 @@ impl<M: Module> GpuWorker<M> {
         batch_loss: f64,
         sync_divergence: Option<f64>,
     ) -> Result<()> {
-        self.timing_tx.send(TimingMsg::Batch {
+        let res = self.timing_tx.send(TimingMsg::Batch {
             rank: self.rank,
             batch_ms,
             step_count: self.local_step,
             param_norm,
             batch_loss,
             sync_divergence,
-        }).map_err(|_| TensorError::new("timing channel disconnected"))
+        }).map_err(|_| TensorError::new("timing channel disconnected"));
+        // Piggyback the current LR after the primary Batch. Failures are
+        // tolerated — the meta layer simply observes a stale value next cycle.
+        let _ = self.timing_tx.send(TimingMsg::LrUpdate {
+            rank: self.rank,
+            lr: self.optimizer.lr(),
+        });
+        res
     }
 
     /// Compute the L2 norm of all model parameters.
@@ -841,7 +1860,15 @@ impl<M: Module> GpuWorker<M> {
     ///
     /// Drains the thread-local scalar accumulator populated by
     /// [`record_scalar()`](super::record_scalar) calls during this epoch.
-    pub fn report_epoch(&self, avg_loss: f64, batches: usize, epoch_ms: f64) -> Result<()> {
+    pub fn report_epoch(
+        &self,
+        avg_loss: f64,
+        batches: usize,
+        epoch_ms: f64,
+        share_complete_ms: f64,
+        compute_only_ms: f64,
+        data_starve_ms: f64,
+    ) -> Result<()> {
         let scalars = super::drain_scalars();
         self.metrics_tx.send(MetricsMsg {
             rank: self.rank,
@@ -850,6 +1877,9 @@ impl<M: Module> GpuWorker<M> {
             batches_processed: batches,
             epoch_ms,
             samples_processed: batches * self.batch_size,
+            share_complete_ms,
+            compute_only_ms,
+            data_starve_ms,
             scalars,
         }).map_err(|_| TensorError::new("metrics channel disconnected"))
     }
@@ -861,16 +1891,21 @@ impl<M: Module> GpuWorker<M> {
     /// Returns `Some(plan)` for the next epoch, or `None` on Shutdown/disconnect.
     pub fn wait_for_epoch_plan(&mut self) -> Result<Option<EpochPlan>> {
         crate::debug!("  ddp-worker: rank {} waiting for plan (step={})", self.rank, self.local_step);
+        let wait_start = Instant::now();
         loop {
             // Check if a plan was queued by dispatch_control (e.g. StartEpoch
             // arrived during Throttle handler). Must be checked each iteration,
             // not just at entry, because dispatch_control may set it mid-loop.
             if let Some(plan) = self.pending_plan.take() {
+                let waited = wait_start.elapsed().as_secs_f64() * 1000.0;
+                crate::verbose!("  ddp-dispatch-diag: rank {} waited {:.0}ms (pending plan)", self.rank, waited);
                 crate::debug!("  ddp-worker: rank {} got plan (pending) epoch={}", self.rank, plan.epoch);
                 return Ok(Some(plan));
             }
             match self.control_rx.recv() {
                 Ok(ControlMsg::StartEpoch(plan)) => {
+                    let waited = wait_start.elapsed().as_secs_f64() * 1000.0;
+                    crate::verbose!("  ddp-dispatch-diag: rank {} waited {:.0}ms for StartEpoch", self.rank, waited);
                     crate::debug!("  ddp-worker: rank {} got plan epoch={}", self.rank, plan.epoch);
                     return Ok(Some(plan));
                 }
@@ -886,6 +1921,10 @@ impl<M: Module> GpuWorker<M> {
                             ControlMsg::Checkpoint { .. } => "Checkpoint",
                             ControlMsg::Shutdown => "Shutdown",
                             ControlMsg::StartEpoch(_) => "StartEpoch",
+                            ControlMsg::ExtendPartition { .. } => "ExtendPartition",
+                            ControlMsg::DeclareDead { .. } => "DeclareDead",
+                            ControlMsg::NewNcclSession { .. } => "NewNcclSession",
+                            ControlMsg::RequestNewNcclId => "RequestNewNcclId",
                         }
                     );
                     if self.dispatch_control(msg)? {
@@ -922,7 +1961,7 @@ impl<M: Module> GpuWorker<M> {
         let num_batches = self.partition.len() / self.batch_size;
         if num_batches == 0 {
             // Still report so coordinator gets the "done" signal.
-            let _ = self.report_epoch(0.0, 0, 0.0);
+            let _ = self.report_epoch(0.0, 0, 0.0, 0.0, 0.0, 0.0);
             return Ok(false);
         }
 
@@ -989,6 +2028,11 @@ impl<M: Module> GpuWorker<M> {
         }
         let epoch_start = Instant::now();
         let mut total_loss = 0.0;
+        // Per-chunk timing accumulators populated by both prefetch and sync
+        // paths. Read at chunk end to populate MetricsMsg fields and feed
+        // the balancer with an honest tput signal.
+        let mut compute_ms_total = 0.0_f64;
+        let mut data_starve_ms_total = 0.0_f64;
 
         if use_prefetch {
             // CUDA async path: prefetch with VRAM gauge.
@@ -1007,6 +2051,9 @@ impl<M: Module> GpuWorker<M> {
 
             // Consume prefetched batches as they become ready
             let mut batch_done = 0usize;
+            let chunk_diag_start = Instant::now();
+            let mut prefetch_wait_diag = std::time::Duration::ZERO;
+            let mut compute_ms_diag = 0.0_f64;
             for _ in 0..num_batches {
                 // Interleave control message processing with prefetch waiting.
                 // SyncNow can arrive at any time; if we block on batch_rx.recv()
@@ -1015,6 +2062,7 @@ impl<M: Module> GpuWorker<M> {
                 if self.handle_control()? {
                     return Ok(true);
                 }
+                let wait_start = Instant::now();
                 let prefetched = loop {
                     match batch_rx.recv_timeout(std::time::Duration::from_millis(10)) {
                         Ok(batch) => break batch
@@ -1029,6 +2077,7 @@ impl<M: Module> GpuWorker<M> {
                         }
                     }
                 };
+                prefetch_wait_diag += wait_start.elapsed();
 
                 // Ensure compute stream waits for async H2D copy to finish
                 #[cfg(feature = "cuda")]
@@ -1039,6 +2088,7 @@ impl<M: Module> GpuWorker<M> {
                 }
 
                 let (loss, ms) = self.train_step(&prefetched.tensors, train_fn)?;
+                compute_ms_diag += ms;
                 batch_done += 1;
                 total_loss += loss;
                 let norm = if self.steps_since_avg % 10 == 0 {
@@ -1051,16 +2101,35 @@ impl<M: Module> GpuWorker<M> {
                     return Ok(true); // Shutdown
                 }
             }
+            let chunk_total_ms = chunk_diag_start.elapsed().as_secs_f64() * 1000.0;
+            let prefetch_ms = prefetch_wait_diag.as_secs_f64() * 1000.0;
+            let other_ms = chunk_total_ms - prefetch_ms - compute_ms_diag;
+            crate::verbose!(
+                "  ddp-worker-diag: rank {} chunk={} batches | total={:.0}ms compute={:.0}ms prefetch_wait={:.0}ms other(sync/ctrl)={:.0}ms",
+                self.rank, batch_done, chunk_total_ms, compute_ms_diag, prefetch_ms, other_ms,
+            );
+            compute_ms_total = compute_ms_diag;
+            data_starve_ms_total = prefetch_ms;
             crate::debug!("  ddp-worker: rank {} epoch {} chunk done ({} batches)", self.rank, plan.epoch, batch_done);
         } else {
             // Sync path: load one batch at a time, move to device if needed.
             // Used for CPU devices, or CUDA when VRAM is too tight for prefetch.
+            //
+            // The loop bound is re-evaluated each iteration off
+            // `self.partition.len()` so a mid-epoch
+            // `ControlMsg::ExtendPartition` (cluster-mode reshard
+            // after a rank dies) injects extra batches and they get
+            // processed before the epoch completes. The prefetch
+            // branch above doesn't yet support this — see the comment
+            // in `dispatch_control`'s `ExtendPartition` arm.
             let measuring_peak = self.activation_peak_bytes == 0 && self.device.is_cuda();
 
-            for batch_idx in 0..num_batches {
+            let mut batch_idx: usize = 0;
+            while batch_idx < self.partition.len() / self.batch_size {
                 let start = batch_idx * self.batch_size;
                 let end = start + self.batch_size;
                 let indices = &self.partition[start..end];
+                let data_start = Instant::now();
                 let batch = self.dataset.get_batch(indices)?;
 
                 let batch: Vec<Tensor> = if self.device.is_cuda() {
@@ -1070,8 +2139,10 @@ impl<M: Module> GpuWorker<M> {
                 } else {
                     batch
                 };
+                data_starve_ms_total += data_start.elapsed().as_secs_f64() * 1000.0;
 
                 let (loss, ms) = self.train_step(&batch, train_fn)?;
+                compute_ms_total += ms;
                 total_loss += loss;
 
                 // After first batch: measure activation peak from CUDA stats.
@@ -1104,18 +2175,35 @@ impl<M: Module> GpuWorker<M> {
                 if self.handle_control()? {
                     return Ok(true); // Shutdown
                 }
+                batch_idx += 1;
             }
         }
 
         let epoch_ms = epoch_start.elapsed().as_secs_f64() * 1000.0;
+        // Honest balancer denominator: time the rank spent on its assigned
+        // work (compute + data wait), excluding any post-completion idle
+        // waiting at a sync barrier. epoch_ms includes that idle on the
+        // fast rank, which inverts the tput signal the balancer reads.
+        // share_complete_ms is computed from the rank's own pipeline times
+        // (compute_ms_total + data_starve_ms_total), so it tracks the
+        // rank's actual capacity, not how long it idles for peers.
+        let share_complete_ms = compute_ms_total + data_starve_ms_total;
+        // Recompute batch count from current partition length so an
+        // `ExtendPartition`-driven reshard (cluster-mode dead-rank
+        // recovery) is reflected in `avg_loss` and the report.
+        let num_batches = self.partition.len() / self.batch_size;
         let avg_loss = total_loss / num_batches as f64;
         if let Some(ref tl) = self.timeline {
             tl.event(crate::monitor::EventKind::EpochEnd {
                 epoch: plan.epoch,
                 loss: avg_loss,
+                lr: self.optimizer.lr(),
             });
         }
-        let _ = self.report_epoch(avg_loss, num_batches, epoch_ms);
+        let _ = self.report_epoch(
+            avg_loss, num_batches, epoch_ms,
+            share_complete_ms, compute_ms_total, data_starve_ms_total,
+        );
 
         Ok(false)
     }

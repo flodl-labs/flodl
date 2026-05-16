@@ -142,6 +142,10 @@ pub struct Coordinator {
     pub(super) overshoot_initial: usize,
     /// Absolute ceiling on max_overshoot (safety valve, applied after auto-tune).
     overshoot_ceiling: usize,
+    /// Allow ElChe to grow the anchor on Stable convergence verdicts.
+    /// When false, `relax_anchor_up()` is suppressed so the anchor only
+    /// changes via the overhead-based auto-tune in `el_che.report_timing`.
+    pub(super) elche_relax_up: bool,
 
     // Divergence monitoring (per-sync-interval, reset after averaging)
     /// Per-rank cumulative loss since last sync (monitoring/logging only,
@@ -152,14 +156,49 @@ pub struct Coordinator {
     /// Per-rank weight-space divergence from the most recent AllReduce.
     /// Set via `sync_divergence` in TimingMsg ack. Reset after averaging.
     nccl_sync_divergence: Vec<Option<f64>>,
-    /// Unified convergence guard: owns ring buffer and mode-specific logic.
-    convergence_guard: super::convergence::ConvergenceGuard,
+    /// Per-rank pre-AllReduce L2 norm `||params_before||_i` from the most
+    /// recent AllReduce. Set via `pre_norm` in SyncAck (workers compute it
+    /// alongside divergence in the same loop). Reset after averaging.
+    nccl_sync_pre_norm: Vec<Option<f64>>,
+    /// Post-AllReduce consensus L2 norm `||params_after||`. Identical across
+    /// ranks by AllReduce construction, so a single scalar suffices. Set
+    /// from the first rank's SyncAck; subsequent rank acks are ignored
+    /// (debug_assert checks consistency). Reset after averaging.
+    nccl_sync_post_norm: Option<f64>,
+    /// Pluggable convergence-monitoring strategy. Wired in by the
+    /// builder; defaults to `TrendGuard::default()` when not set.
+    convergence_guard: Box<dyn super::convergence::ConvergenceGuard>,
+    /// Per-epoch d-aggregator (replaces the old EpochSnapshot owned by the
+    /// guard). Lambda aggregates moved out — analyze.rs recomputes them
+    /// from per-event observables now that the guard pipeline is plural.
+    epoch_d_min: f64,
+    epoch_d_max: f64,
+    epoch_d_sum: f64,
+    epoch_d_count: usize,
+    epoch_last_d: f64,
+    epoch_last_k_max: usize,
 
     // Timeline profiling
     /// Optional high-frequency system timeline for event injection.
     timeline: Option<std::sync::Arc<crate::monitor::Timeline>>,
     /// Instant when the last NCCL sync started (for duration measurement).
     nccl_sync_start: Option<std::time::Instant>,
+    /// Wall-time duration (ms) of the most-recent completed NCCL sync.
+    /// Captured in `process_timing_msg` when the last rank acks. Fed to
+    /// `ElChe::report_timing` as `sync_ms` so the anchor auto-tune block
+    /// (el_che.rs:292-308) actually fires on NCCL backend. Was previously
+    /// always 0 because `last_avg_ms` is only populated by the CPU avg path.
+    last_nccl_sync_ms: f64,
+
+    // LR-aware meta-controller (Stage 2: observed but emission not yet
+    // dispatched to nudge_anchor_down — that lands in Stage 3.)
+    /// Optional meta-controller above ElChe. `None` when
+    /// [`super::DdpRunConfig::with_meta_controller`] is `false` (default).
+    pub(super) lr_event_meta: Option<crate::distributed::lr_event_meta::LrEventMeta>,
+    /// Most recent LR observed per rank from
+    /// [`super::TimingMsg::LrUpdate`]. Indexed by rank. `None` until the
+    /// first message from that rank arrives.
+    pub(super) last_lr_per_rank: Vec<Option<f64>>,
 
     // NCCL sync acknowledgment
     /// Per-rank: last worker `step_count` seen in a TimingMsg.
@@ -188,6 +227,10 @@ pub struct CoordinatorBuilder {
     el_che: crate::distributed::ddp::ElChe,
     divergence_threshold: f64,
     divergence_guard: bool,
+    /// Pluggable convergence guard. When set, takes precedence over the
+    /// legacy `(divergence_guard, divergence_threshold)` pair, which become
+    /// `TrendGuard` configuration only when no explicit guard is supplied.
+    convergence_guard_override: Option<Box<dyn super::convergence::ConvergenceGuard>>,
     checkpoint_every: Option<usize>,
     snapshot_timeout_secs: u64,
     epoch_metrics_tx: Option<mpsc::Sender<super::EpochMetrics>>,
@@ -201,7 +244,13 @@ pub struct CoordinatorBuilder {
     max_overshoot: Option<usize>,
     /// Absolute ceiling on max_overshoot (safety valve). Default: 15.
     overshoot_ceiling: usize,
+    /// Allow anchor relax-up on Stable convergence. Default: false.
+    elche_relax_up: bool,
     metrics_fn: Option<super::MetricsFn>,
+    /// Enable the LR-aware meta-controller. Default: false (off; opt-in
+    /// until validation sweep). See
+    /// [`crate::distributed::lr_event_meta`] for the design.
+    meta_controller: bool,
 }
 
 impl CoordinatorBuilder {
@@ -236,6 +285,16 @@ impl CoordinatorBuilder {
     /// is an optional safety net that suppresses anchor growth when replicas
     /// drift apart. Disable when you know your workload is stable or prefer
     /// full control via ElChe's parameters.
+    /// Install a fully-configured convergence guard. Takes precedence over
+    /// the legacy `divergence_threshold` / `no_divergence_guard` settings.
+    pub fn convergence_guard(
+        mut self,
+        guard: Box<dyn super::convergence::ConvergenceGuard>,
+    ) -> Self {
+        self.convergence_guard_override = Some(guard);
+        self
+    }
+
     pub fn no_divergence_guard(mut self) -> Self {
         self.divergence_guard = false;
         self
@@ -249,7 +308,7 @@ impl CoordinatorBuilder {
     }
 
     /// Set the maximum anchor (max batches between AllReduce).
-    /// Default: 200. Controls gradient staleness bound.
+    /// Default: 1000. Controls gradient staleness bound.
     pub fn max_anchor(mut self, max: usize) -> Self {
         self.el_che = self.el_che.with_max_anchor(max);
         self
@@ -314,6 +373,25 @@ impl CoordinatorBuilder {
         self
     }
 
+    /// Allow or suppress ElChe's anchor relax-up on Stable convergence.
+    /// Default: false (off). Opt in to grow the anchor on `Stable` verdicts;
+    /// when false the anchor only changes via the overhead-based auto-tune.
+    pub fn elche_relax_up(mut self, enabled: bool) -> Self {
+        self.elche_relax_up = enabled;
+        self
+    }
+
+    /// Enable the LR-aware meta-controller above ElChe. Default: false.
+    ///
+    /// When enabled, a [`crate::distributed::lr_event_meta::LrEventMeta`]
+    /// is constructed and held by the coordinator. Stage 1 of the rollout
+    /// keeps the meta dormant (field present, no observations); later
+    /// stages wire LR + verdict forwarding and action dispatch.
+    pub fn meta_controller(mut self, enabled: bool) -> Self {
+        self.meta_controller = enabled;
+        self
+    }
+
     /// Build the coordinator.
     pub fn build(self) -> Coordinator {
         let total_batches = self.total_samples / self.batch_size.max(1);
@@ -342,6 +420,7 @@ impl CoordinatorBuilder {
             wall_ms_accum: vec![0.0; self.world_size],
             last_batch_ms: vec![0.0; self.world_size],
             last_avg_ms: 0.0,
+            last_nccl_sync_ms: 0.0,
             throttled: vec![false; self.world_size],
             avg_count: 0,
             checkpoint_every: self.checkpoint_every,
@@ -365,16 +444,33 @@ impl CoordinatorBuilder {
             overshoot_auto,
             overshoot_initial,
             overshoot_ceiling: self.overshoot_ceiling,
+            elche_relax_up: self.elche_relax_up,
             loss_accum: vec![0.0; self.world_size],
             loss_count: vec![0; self.world_size],
             nccl_sync_divergence: vec![None; self.world_size],
-            convergence_guard: super::convergence::ConvergenceGuard::new(
-                self.policy,
-                self.divergence_guard,
-                self.divergence_threshold,
-            ),
+            nccl_sync_pre_norm: vec![None; self.world_size],
+            nccl_sync_post_norm: None,
+            convergence_guard: self.convergence_guard_override.unwrap_or_else(|| {
+                if self.divergence_guard {
+                    Box::new(super::convergence::TrendGuard::new(self.divergence_threshold))
+                } else {
+                    Box::new(super::convergence::NoGuard)
+                }
+            }),
+            epoch_d_min: f64::INFINITY,
+            epoch_d_max: f64::NEG_INFINITY,
+            epoch_d_sum: 0.0,
+            epoch_d_count: 0,
+            epoch_last_d: 0.0,
+            epoch_last_k_max: 0,
             timeline: self.timeline,
             nccl_sync_start: None,
+            lr_event_meta: if self.meta_controller {
+                Some(crate::distributed::lr_event_meta::LrEventMeta::with_default_config())
+            } else {
+                None
+            },
+            last_lr_per_rank: vec![None; self.world_size],
             last_step_count: vec![0; self.world_size],
             nccl_sync_step: vec![0; self.world_size],
             nccl_ack: vec![true; self.world_size],
@@ -411,6 +507,7 @@ impl Coordinator {
             el_che,
             divergence_threshold: 0.05,
             divergence_guard: true,
+            convergence_guard_override: None,
             checkpoint_every: None,
             snapshot_timeout_secs: 5,
             epoch_metrics_tx: None,
@@ -422,7 +519,53 @@ impl Coordinator {
             timeline: None,
             max_overshoot: None,
             overshoot_ceiling: 15,
+            elche_relax_up: false,
             metrics_fn: None,
+            meta_controller: false,
+        }
+    }
+
+    /// Feed an averaging-cycle observation to the LR-aware meta-controller
+    /// (when enabled) and dispatch any returned action to ElChe.
+    ///
+    /// No-op when:
+    /// - meta is disabled (`lr_event_meta` is `None`),
+    /// - no rank has reported its LR yet (cold-start, ≤ 1 cycle).
+    ///
+    /// On [`crate::distributed::lr_event_meta::MetaAction::NudgeDown`], calls
+    /// [`crate::distributed::ElChe::nudge_anchor_down`] with the
+    /// trend-dampened factor and logs the transition. ElChe's overhead
+    /// auto-tune handles the natural relax-back over subsequent cycles.
+    pub(super) fn observe_meta(
+        &mut self,
+        verdict: super::convergence::ConvergenceAction,
+    ) {
+        let Some(lr) = self.last_lr_per_rank.iter().copied().find_map(|x| x) else {
+            return;
+        };
+        let anchor = self.el_che.anchor();
+        let phase = self.el_che.phase();
+        let action = match self.lr_event_meta.as_mut() {
+            Some(meta) => meta.observe(lr, anchor, verdict, phase),
+            None => return,
+        };
+        if let crate::distributed::lr_event_meta::MetaAction::NudgeDown { factor } = action {
+            let old = self.el_che.anchor();
+            self.el_che.nudge_anchor_down(factor);
+            let new = self.el_che.anchor();
+            // Don't emit AnchorChanged here: the post-match block in
+            // finish_averaging_{nccl,cpu} captures the cycle's net anchor
+            // change and emits a single event covering both the meta nudge
+            // and any guard-driven adjustment that follows.
+            if let Some(ref tl) = self.timeline {
+                tl.event(crate::monitor::EventKind::Custom {
+                    label: format!("meta-nudge factor={factor:.3} anchor={old}->{new}"),
+                });
+            }
+            crate::verbose!(
+                "  ddp: meta-controller nudge factor={:.3} anchor {} -> {}",
+                factor, old, new,
+            );
         }
     }
 
@@ -783,6 +926,31 @@ impl Coordinator {
         self.last_aggregated_epoch = Some(epoch);
         self.epoch_plan_cache.remove(&epoch);
 
+        // Drain per-epoch d-aggregator. Lambda fields are intentionally
+        // None going forward — pluggable guards mean per-epoch lambda
+        // aggregation belongs to analyze.rs (it recomputes from per-event
+        // observables) rather than to a guard-specific snapshot. Emit only
+        // when at least one AllReduce happened (Sync mode with no
+        // divergence reports yields count=0).
+        let snap = self.take_epoch_d_summary();
+        if snap.count > 0
+            && let Some(ref tl) = self.timeline
+        {
+            tl.event(crate::monitor::EventKind::DivergenceEpoch {
+                epoch,
+                sync_count: snap.count,
+                d_min: snap.d_min,
+                d_max: snap.d_max,
+                d_mean: snap.d_mean(),
+                lambda_min: None,
+                lambda_max: None,
+                lambda_mean: None,
+                lambda_ema_at_epoch_end: None,
+                d_at_epoch_end: snap.d_at_epoch_end,
+                k_at_epoch_end: snap.k_at_epoch_end,
+            });
+        }
+
         // Checkpoint on global epoch boundaries (1-based for file naming).
         if let Some(every) = self.checkpoint_every {
             if every > 0 && (epoch + 1) % every == 0 {
@@ -861,26 +1029,69 @@ impl Coordinator {
                     && step_count > self.nccl_sync_step[rank]
                 {
                     self.nccl_ack[rank] = true;
+                    self.capture_nccl_sync_elapsed_if_complete();
                 }
             }
-            TimingMsg::SyncAck { rank, step_count, divergence } => {
+            TimingMsg::SyncAck { rank, step_count, divergence, post_norm, pre_norm } => {
                 // Post-SyncNow ack: update step count for nccl_ack + capture
-                // divergence, but do NOT increment steps_since_avg. Treating
-                // this as a batch inflates global_step by one per sync per
-                // rank, firing LR schedulers early.
+                // divergence + pre/post_norm, but do NOT increment
+                // steps_since_avg. Treating this as a batch inflates
+                // global_step by one per sync per rank, firing LR schedulers
+                // early.
                 self.last_step_count[rank] = self.last_step_count[rank].max(step_count);
                 if let Some(div) = divergence {
                     self.nccl_sync_divergence[rank] = Some(div);
+                }
+                if let Some(p) = pre_norm {
+                    self.nccl_sync_pre_norm[rank] = Some(p);
+                }
+                if let Some(p) = post_norm {
+                    // Post-AllReduce identical across ranks; first rank wins,
+                    // subsequent acks must agree to within fp tolerance.
+                    match self.nccl_sync_post_norm {
+                        None => self.nccl_sync_post_norm = Some(p),
+                        Some(prev) => debug_assert!(
+                            (prev - p).abs() <= 1e-6 * prev.abs().max(1.0),
+                            "post_norm rank-disagreement: prev={prev} new={p} (rank {rank})"
+                        ),
+                    }
                 }
                 if rank < self.nccl_ack.len()
                     && !self.nccl_ack[rank]
                     && step_count > self.nccl_sync_step[rank]
                 {
                     self.nccl_ack[rank] = true;
+                    self.capture_nccl_sync_elapsed_if_complete();
                 }
             }
             TimingMsg::Exiting { .. } => {
                 self.active_count = self.active_count.saturating_sub(1);
+            }
+            TimingMsg::LrUpdate { rank, lr } => {
+                if rank < self.last_lr_per_rank.len() {
+                    self.last_lr_per_rank[rank] = Some(lr);
+                }
+            }
+            // Cluster-mode only; OLD threaded coordinator never sees
+            // these (workers emit them from the cluster-mode heartbeat
+            // thread + CPU param bridge + NCCL re-rendezvous helper).
+            TimingMsg::Heartbeat { .. } => {}
+            TimingMsg::SnapshotReady { .. } => {}
+            TimingMsg::NewNcclIdGenerated { .. } => {}
+        }
+    }
+
+    /// If every rank has now acknowledged the in-flight NCCL sync, record
+    /// its wall-time duration (sent SyncNow → all ranks past the AllReduce).
+    /// The next call to `finish_averaging_nccl` will feed this as `sync_ms`
+    /// to `ElChe::report_timing`, so the anchor auto-tune block actually
+    /// fires on NCCL backend (was always 0 before — `last_avg_ms` is only
+    /// populated by the CPU averaging path).
+    fn capture_nccl_sync_elapsed_if_complete(&mut self) {
+        if self.nccl_ack.iter().all(|&a| a) {
+            if let Some(start) = self.nccl_sync_start.take() {
+                self.last_nccl_sync_ms =
+                    start.elapsed().as_secs_f64() * 1000.0;
             }
         }
     }
@@ -967,7 +1178,8 @@ impl Coordinator {
         complete.sort_unstable();
         for epoch in complete {
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
-                let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                let bc_share = self.el_che.recent_batch_share();
+                let metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices, &bc_share);
                 if let Some(f) = &self.metrics_fn {
                     if let Err(e) = f(&metrics) {
                         eprintln!("  ddp: metrics_fn returned error (epoch {epoch}): {e}");
@@ -1003,7 +1215,8 @@ impl Coordinator {
             self.chunk_pools.remove(&epoch);
 
             if let Some(msgs) = self.epoch_buffer.remove(&epoch) {
-                let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices);
+                let bc_share = self.el_che.recent_batch_share();
+                let mut metrics = aggregate_epoch_metrics(epoch, &msgs, &self.device_indices, &bc_share);
                 metrics.epoch_ms = epoch_ms;
                 if let Some(f) = &self.metrics_fn {
                     if let Err(e) = f(&metrics) {
@@ -1207,7 +1420,7 @@ impl Coordinator {
 // ---------------------------------------------------------------------------
 
 /// Equal partition sizes with remainder distributed to the first ranks.
-fn equal_sizes(world_size: usize, total: usize) -> Vec<usize> {
+pub(crate) fn equal_sizes(world_size: usize, total: usize) -> Vec<usize> {
     let base = total / world_size;
     let remainder = total % world_size;
     (0..world_size)
@@ -1219,7 +1432,10 @@ fn equal_sizes(world_size: usize, total: usize) -> Vec<usize> {
 ///
 /// Faster ranks (lower ms/batch) get more samples. Remainder distributed
 /// to the fastest ranks.
-fn throughput_sizes(el_che: &crate::distributed::ddp::ElChe, total: usize) -> Vec<usize> {
+pub(crate) fn throughput_sizes(
+    el_che: &crate::distributed::ddp::ElChe,
+    total: usize,
+) -> Vec<usize> {
     let ms = el_che.ms_per_batch();
     // Inverse of ms_per_batch = throughput (batches/ms). Guard against zero.
     let throughputs: Vec<f64> = ms.iter().map(|&m| 1.0 / m.max(0.001)).collect();
@@ -1250,7 +1466,7 @@ fn throughput_sizes(el_che: &crate::distributed::ddp::ElChe, total: usize) -> Ve
 ///
 /// Ratios are normalized to sum to 1.0. Remainder distributed to the
 /// ranks with the largest ratios.
-fn ratio_to_sizes(ratios: &[f64], total: usize) -> Vec<usize> {
+pub(crate) fn ratio_to_sizes(ratios: &[f64], total: usize) -> Vec<usize> {
     let sum: f64 = ratios.iter().sum();
     let norm: Vec<f64> = if sum > 0.0 {
         ratios.iter().map(|r| r / sum).collect()
@@ -1283,7 +1499,18 @@ fn ratio_to_sizes(ratios: &[f64], total: usize) -> Vec<usize> {
 /// chunk (not per epoch), so there may be many more messages than ranks.
 /// This function aggregates by rank first so the output always has
 /// exactly `world_size` entries per vector.
-pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_indices: &[u8]) -> super::EpochMetrics {
+/// `bc_share` is the smoothed per-rank batch-share view from the balancer
+/// (i.e. `el_che.recent_batch_share()` averaged over the last few sync
+/// snapshots). It replaces the prior "samples-consumed / total-samples"
+/// share, which conflated cadence allocation with progressive dispatch
+/// tail-balance dynamics. Caller is expected to pass `world_size` entries
+/// summing to ~1.0; degenerate input falls back to equal shares.
+pub(super) fn aggregate_epoch_metrics(
+    epoch: usize,
+    msgs: &[MetricsMsg],
+    device_indices: &[u8],
+    bc_share: &[f64],
+) -> super::EpochMetrics {
     let world_size = device_indices.len();
 
     // --- Step 1: Aggregate per-chunk messages by rank ---
@@ -1291,6 +1518,9 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
     let mut rank_samples: Vec<usize> = vec![0; world_size];
     let mut rank_loss_sum: Vec<f64> = vec![0.0; world_size];
     let mut rank_time_ms: Vec<f64> = vec![0.0; world_size];
+    let mut rank_share_complete_ms: Vec<f64> = vec![0.0; world_size];
+    let mut rank_compute_only_ms: Vec<f64> = vec![0.0; world_size];
+    let mut rank_data_starve_ms: Vec<f64> = vec![0.0; world_size];
     // Per-rank scalar accumulators: (sum, count) per key
     let mut rank_scalars: Vec<std::collections::HashMap<String, (f64, usize)>> =
         (0..world_size).map(|_| std::collections::HashMap::new()).collect();
@@ -1300,8 +1530,15 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
         rank_batches[r] += m.batches_processed;
         rank_samples[r] += m.samples_processed;
         rank_loss_sum[r] += m.avg_loss * m.batches_processed as f64;
-        // Max time across chunks (sequential within a rank)
+        // Max time across chunks (sequential within a rank). Mirrors
+        // existing epoch_ms aggregation: chunk messages report monotonic
+        // cumulative-from-epoch-start times in progressive dispatch, so the
+        // largest is the rank's epoch total. The new fields use the same
+        // convention so the worker can populate them consistently.
         rank_time_ms[r] = rank_time_ms[r].max(m.epoch_ms);
+        rank_share_complete_ms[r] = rank_share_complete_ms[r].max(m.share_complete_ms);
+        rank_compute_only_ms[r] = rank_compute_only_ms[r].max(m.compute_only_ms);
+        rank_data_starve_ms[r] = rank_data_starve_ms[r].max(m.data_starve_ms);
         for (k, (sum, count)) in &m.scalars {
             let entry = rank_scalars[r].entry(k.clone()).or_insert((0.0, 0));
             entry.0 += sum;
@@ -1356,18 +1593,52 @@ pub(super) fn aggregate_epoch_metrics(epoch: usize, msgs: &[MetricsMsg], device_
         }
     }
 
-    // Per-rank throughput (samples/ms) and batch share
+    // Per-rank throughput (samples/ms) and batch share.
+    //
+    // Throughput uses share_complete_ms as the denominator, NOT epoch_ms.
+    // epoch_ms includes any post-completion idle the fast rank spends
+    // waiting at the sync barrier for slower ranks; dividing by it produces
+    // an inverted tput signal (the fast rank looks slow because it idles
+    // more), which feeds the balancer a signal that says "give the fast
+    // rank less work" — exactly backwards. share_complete_ms = compute +
+    // data-pipeline wait, measured per rank, excludes peer-induced idle,
+    // so the resulting tput tracks the rank's actual capacity.
+    //
+    // Falls back to epoch_ms when share_complete_ms wasn't populated (legacy
+    // call sites or test fixtures using the old MetricsMsg shape).
     let total_samples: usize = rank_samples.iter().sum();
     let per_rank_throughput: Vec<f64> = (0..world_size).map(|r| {
-        if rank_time_ms[r] > 0.0 { rank_samples[r] as f64 / rank_time_ms[r] } else { 0.0 }
+        let denom = if rank_share_complete_ms[r] > 0.0 {
+            rank_share_complete_ms[r]
+        } else {
+            rank_time_ms[r]
+        };
+        if denom > 0.0 { rank_samples[r] as f64 / denom } else { 0.0 }
     }).collect();
-    let per_rank_batch_share: Vec<f64> = (0..world_size).map(|r| {
-        if total_samples > 0 { rank_samples[r] as f64 / total_samples as f64 } else { 0.0 }
-    }).collect();
+    // Per-rank batch share comes from the balancer's smoothed view of its
+    // own recent batch_counts allocation (`el_che.recent_batch_share()`),
+    // not from samples consumed. Under progressive dispatch the latter is
+    // equalized by tail-balance and obscures the cadence's actual ratios.
+    // Degenerate input (wrong length, all zeros) falls back to equal shares.
+    let per_rank_batch_share: Vec<f64> = if bc_share.len() == world_size {
+        let sum: f64 = bc_share.iter().sum();
+        if sum > 0.0 {
+            bc_share.to_vec()
+        } else {
+            vec![1.0 / world_size as f64; world_size]
+        }
+    } else {
+        vec![1.0 / world_size as f64; world_size]
+    };
+    let _ = total_samples; // retained above for per_rank_throughput
 
     super::EpochMetrics {
         epoch, scalars, per_rank, avg_loss, epoch_ms,
-        per_rank_throughput, per_rank_batch_share, device_indices: device_indices.to_vec(),
+        per_rank_throughput, per_rank_batch_share,
+        per_rank_share_complete_ms: rank_share_complete_ms,
+        per_rank_compute_only_ms: rank_compute_only_ms,
+        per_rank_data_starve_ms: rank_data_starve_ms,
+        device_indices: device_indices.to_vec(),
     }
 }
 
@@ -1953,17 +2224,9 @@ mod tests {
         assert_eq!(coord.nccl_sync_divergence, vec![None, None]);
     }
 
-    #[test]
-    fn divergence_history_capped_at_5() {
-        let mut coord = make_test_coordinator(2, ApplyPolicy::Cadence, 1000);
-
-        for _ in 0..8 {
-            run_interval_with_divergence(&mut coord, 0.03, 0.05);
-        }
-
-        assert!(coord.convergence_guard.history().len() <= 5,
-            "history should be capped at 5, got {}", coord.convergence_guard.history().len());
-    }
+    // `divergence_history_capped_at_5` removed: the ring-buffer cap is
+    // now an implementation detail of the concrete guard. Coverage moved
+    // to `convergence::tests::trend_history_capped_at_5`.
 
     #[test]
     fn divergence_overshoot_ceiling_caps() {
@@ -2035,6 +2298,7 @@ mod tests {
         for rank in 0..2 {
             coord.process_timing_msg(TimingMsg::SyncAck {
                 rank, step_count: 11, divergence: Some(0.01),
+                post_norm: Some(1.0), pre_norm: Some(1.01),
             });
         }
 
@@ -2062,6 +2326,7 @@ mod tests {
         for rank in 0..2 {
             coord.process_timing_msg(TimingMsg::SyncAck {
                 rank, step_count: 6, divergence: None,
+                post_norm: None, pre_norm: None,
             });
         }
         assert_eq!(coord.nccl_ack, vec![true, true],

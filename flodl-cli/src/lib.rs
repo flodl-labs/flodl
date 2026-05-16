@@ -61,6 +61,20 @@ pub mod completions;
 /// `fdl.yml` manifest loading, validation, and resolved-command types.
 pub mod config;
 
+/// Cluster-mode env preparation. fdl-cli sets `FLODL_FULL_CLUSTER_JSON`
+/// + `FLODL_FDL_CMD` + `FDL_ENV` on its process env so the user binary
+/// inherits them and detects launcher role via
+/// `flodl::distributed::launcher::dispatch`. Fan-out, log fan-in, and
+/// ClusterController all live on the flodl side.
+/// Entry point [`cluster::prepare_cluster_env`]; recursion guard via
+/// [`cluster::should_dispatch`].
+pub mod cluster;
+
+/// `--gpus` flag parsing + single-host cluster envelope synthesis (loopback,
+/// one host, N ranks). Used when `--gpus` is set on a cluster-aware command
+/// and no `cluster:` block is configured in YAML.
+pub mod gpus;
+
 /// Cross-cutting context passed to sub-command handlers (resolved config,
 /// verbosity, overlay selection, working directory, ...).
 pub mod context;
