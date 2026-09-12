@@ -90,6 +90,18 @@ pub(super) fn preflight(
         });
     }
 
+    // A host firewall drops inbound on the door port BEFORE sshd can
+    // log it, and every check this box can run on itself rides the
+    // loopback exemption, so the gap is invisible from here: outside
+    // dials time out against an empty auth journal, which reads as a
+    // broken router. Whether the port is allowed is not readable
+    // without root either, so like the SELinux check this one states
+    // the obligation whenever the firewall is active and how to prove
+    // it from outside.
+    for fw in host_firewalls() {
+        checks.push(firewall_check(fw, port));
+    }
+
     // The door's own tool runs on THIS side, as the forced command.
     match door {
         Door::B => {
@@ -131,6 +143,102 @@ pub(super) fn preflight(
     }
 
     checks
+}
+
+/// The door-port obligation for an active firewall layer. The rule
+/// itself is root-readable only, and a local dial cannot stand in for
+/// the answer (loopback is exempt), so the check never claims ok; it
+/// names the command that allows the port where an honest one exists,
+/// and the probe that proves arrival from outside the box.
+pub(super) fn firewall_check(fw: &'static str, port: u16) -> Check {
+    // The fix follows the DETECTED layer, never the platform family:
+    // any manager can run on any family, and one box can stack several
+    // layers (a WSL2 guest's ufw under the Windows host firewall).
+    let fix = match fw {
+        "ufw" => Some(format!("sudo ufw allow {port}/tcp")),
+        "firewalld" => Some(format!(
+            "sudo firewall-cmd --permanent --add-port={port}/tcp && sudo firewall-cmd --reload"
+        )),
+        // App-scoped, not port-scoped: allowing sshd is the whole rule.
+        "the macOS application firewall" => Some(
+            "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/sbin/sshd \
+             --unblockapp /usr/sbin/sshd   # or System Settings > Network > Firewall"
+                .to_string(),
+        ),
+        // Runs on the HOST, not here: WSL2 inbound needs a Windows
+        // portproxy plus a Defender rule, both from an admin PowerShell.
+        "the Windows host firewall (WSL2)" => Some(format!(
+            "netsh interface portproxy add v4tov4 listenport={port} connectport={port} \
+             connectaddress=$(wsl hostname -I)   # then: New-NetFirewallRule -DisplayName \
+             flodl-door -Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow \
+             — both on the Windows host, admin PowerShell"
+        )),
+        // A raw ruleset service: the rules are root-readable only and
+        // no one-line allow is honest for an unknown ruleset.
+        _ => None,
+    };
+    Check {
+        what: format!(
+            "{fw} admits the door port {port} — not verifiable without \
+             root, and a dial from this box proves nothing (loopback is \
+             exempt); prove it from outside, e.g. \
+             `curl -4 https://ifconfig.co/port/{port}`"
+        ),
+        ok: false,
+        fix,
+    }
+}
+
+/// Every firewall layer standing between the door port and the world
+/// that this box can detect without root, best-effort per OS. Several
+/// can apply at once and each gets its own check. Raw nftables /
+/// iptables rulesets are reported only when their systemd unit is
+/// active — the rules themselves are unreadable without root, and
+/// probing kernel state would false-alarm on boxes where docker or
+/// libvirt install rules of their own.
+fn host_firewalls() -> Vec<&'static str> {
+    let mut layers = Vec::new();
+    if cfg!(target_os = "linux") {
+        // A WSL2 guest sits behind the Windows host firewall no matter
+        // what runs inside the guest.
+        if std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+        {
+            layers.push("the Windows host firewall (WSL2)");
+        }
+        for (unit, label) in [
+            ("ufw", "ufw"),
+            ("firewalld", "firewalld"),
+            ("nftables", "the nftables ruleset service"),
+            ("netfilter-persistent", "the persistent iptables ruleset"),
+        ] {
+            let active = std::process::Command::new("systemctl")
+                .args(["is-active", unit])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+                .unwrap_or(false);
+            if active {
+                layers.push(label);
+            }
+        }
+    } else if cfg!(target_os = "macos") {
+        // Best-effort: --getglobalstate answers without root on the
+        // macOS versions that let it; anything else reads as absent.
+        let enabled = std::process::Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
+            .arg("--getglobalstate")
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .to_lowercase()
+                    .contains("enabled")
+            })
+            .unwrap_or(false);
+        if enabled {
+            layers.push("the macOS application firewall");
+        }
+    }
+    layers
 }
 
 /// Whether systemd's ssh socket unit currently owns the listener.

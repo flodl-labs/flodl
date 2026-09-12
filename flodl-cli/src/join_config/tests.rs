@@ -1050,3 +1050,42 @@ fn the_self_test_probe_is_one_rrsync_does_not_whitelist() {
     );
     let _ = fs::remove_dir_all(&tmp);
 }
+
+/// An active host firewall is a stated obligation, never a pass: the
+/// allow rule is root-readable only and a self-dial rides the loopback
+/// exemption, so a green here would be the exact false comfort that
+/// hid a dropped door port behind an empty auth journal. The fix
+/// follows the detected firewall, not the platform family.
+#[test]
+fn an_active_host_firewall_is_an_obligation_with_its_own_managers_fix() {
+    let ufw = super::preflight::firewall_check("ufw", 2322);
+    assert!(!ufw.ok);
+    assert_eq!(ufw.fix.as_deref(), Some("sudo ufw allow 2322/tcp"));
+    assert!(ufw.what.contains("prove it from outside"), "{}", ufw.what);
+    assert!(ufw.what.contains("loopback"), "{}", ufw.what);
+
+    let fwd = super::preflight::firewall_check("firewalld", 2322);
+    assert!(!fwd.ok);
+    let fix = fwd.fix.as_deref().unwrap();
+    assert!(
+        fix.contains("firewall-cmd") && fix.contains("--add-port=2322/tcp"),
+        "{fix}"
+    );
+
+    // A raw ruleset service gets no fabricated one-liner: the rules are
+    // unknown, so the honest fix is none at all.
+    let nft = super::preflight::firewall_check("the nftables ruleset service", 2322);
+    assert!(!nft.ok);
+    assert!(nft.fix.is_none(), "{:?}", nft.fix);
+
+    // The layers that are not port-scoped still carry an honest fix:
+    // app-scoped on macOS, host-side PowerShell for a WSL2 guest.
+    let mac = super::preflight::firewall_check("the macOS application firewall", 2322);
+    assert!(mac.fix.as_deref().unwrap().contains("socketfilterfw"));
+    let wsl = super::preflight::firewall_check("the Windows host firewall (WSL2)", 2322);
+    let fix = wsl.fix.as_deref().unwrap();
+    assert!(
+        fix.contains("portproxy") && fix.contains("Windows host"),
+        "{fix}"
+    );
+}
