@@ -142,8 +142,11 @@ def main():
     ap.add_argument("--seed", type=int, default=None, help="the cell's seed, for pairing")
     ap.add_argument("--band", default=None, help="band root holding s<seed>/… cells")
     ap.add_argument("--floor", type=float, default=0.3, help="divergence guard floor")
-    ap.add_argument("--sd", type=float, default=2.0, help="band tolerance in sample SDs")
-    ap.add_argument("--min-band", type=int, default=3, help="band members needed to judge")
+    ap.add_argument("--warn-sd", type=float, default=2.0,
+                    help="an arm cell beyond this many band SDs is flagged, still GO")
+    ap.add_argument("--stop-sd", type=float, default=3.0,
+                    help="an arm cell beyond this many band SDs is a STOP")
+    ap.add_argument("--min-band", type=int, default=3, help="band members needed to judge an arm")
     args = ap.parse_args()
 
     tlog = os.path.join(args.cell, "training.log")
@@ -177,22 +180,41 @@ def main():
     if d_max is not None and d_max >= args.floor:
         reasons.append(f"d_raw peaked at {d_max:.3f}, at or above the {args.floor} guard floor")
 
-    # Band placement.
+    # Band placement. A cell that is itself a band member is placed among
+    # the OTHER members and never judged: the band is what defines the
+    # spread, and a partial band's SD says nothing yet (three tight seeds
+    # once read a fourth, ordinary one as +7.6 SD and stopped the ladder).
+    # Arm cells are judged: beyond --warn-sd is flagged, beyond --stop-sd
+    # is a STOP, and the paired delta against the same seed is printed
+    # beside the z because it cancels the seed's own share of the spread.
     band = band_final_evals(args.band) if args.band else {}
-    others = {s: v for s, v in band.items() if not (args.seed is not None and s == args.seed
-                                                    and os.path.abspath(args.band) in os.path.abspath(args.cell))}
+    # Membership is a path-component test, not a substring one: a cohort
+    # named `band-repeat` must not read as a member of `band`.
+    in_band = bool(args.band) and (
+        os.path.abspath(args.cell) + os.sep
+    ).startswith(os.path.abspath(args.band) + os.sep)
+    others = {s: v for s, v in band.items() if not (in_band and s == args.seed)}
     z = None
     paired = None
+    mean = sd = None
     if train["final_eval"] is not None and len(others) >= 2:
         mean = statistics.mean(others.values())
-        sd = statistics.stdev(others.values()) if len(others) >= 2 else None
-        if sd and sd > 0:
+        sd = statistics.stdev(others.values())
+        if sd > 0:
             z = (train["final_eval"] - mean) / sd
-        if args.seed in band and args.band and os.path.abspath(args.band) not in os.path.abspath(args.cell):
+        if not in_band and args.seed in band:
             paired = train["final_eval"] - band[args.seed]
-        if len(others) >= args.min_band and z is not None and abs(z) > args.sd:
+        if in_band:
+            notes.append("band member: placed among the other members, not judged")
+        elif len(others) < args.min_band:
+            notes.append(f"band has {len(others)} completed cell(s); eval reported, not judged "
+                         f"(needs {args.min_band})")
+        elif z is not None and abs(z) > args.stop_sd:
             reasons.append(f"final eval {train['final_eval']:.4f} is {z:+.1f} SD from the band "
                            f"mean {mean:.4f} (SD {sd:.4f}, n={len(others)})")
+        elif z is not None and abs(z) > args.warn_sd:
+            notes.append(f"final eval is {z:+.1f} SD from the band mean: outside the "
+                         f"{args.warn_sd} SD comfort zone, inside the {args.stop_sd} SD stop")
     elif args.band:
         notes.append(f"band has {len(others)} completed cell(s); eval reported, not judged "
                      f"(needs {args.min_band})")
@@ -222,9 +244,9 @@ def main():
         print(f"shares:      {train['shares']}")
     print(f"final eval:  {fmt(train['final_eval'])}")
     if others:
-        mean = statistics.mean(others.values())
-        sd = statistics.stdev(others.values()) if len(others) >= 2 else None
-        print(f"band:        mean {mean:.4f}, SD {fmt(sd)}, n={len(others)}, "
+        b_mean = statistics.mean(others.values())
+        b_sd = statistics.stdev(others.values()) if len(others) >= 2 else None
+        print(f"band:        mean {b_mean:.4f}, SD {fmt(b_sd)}, n={len(others)}, "
               f"z {fmt(z, '{:+.2f}')}, paired delta {fmt(paired, '{:+.4f}')}")
     # The curve, by step. Consecutive equal values are one measurement.
     if ctrl and ctrl["eval_points"]:

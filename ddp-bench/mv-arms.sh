@@ -50,6 +50,9 @@
 #   MV_FDL_FLAGS default "-v": the controller's verbose tier carries the
 #                per-reduce overshoot budget and the per-eval step, both of
 #                which the verdict reads. Do not lower it.
+#   MV_MONITOR   live dashboard port on the controller (default 8787). The
+#                launcher binds it, `fdl status` prints it, and `fdl ui`'s run
+#                tab embeds it; set empty to run without a live page.
 #   MV_BAND      band root the verdict compares against (default runs/mv/band)
 #   MV_STOP_ON   stop (default) exits 3 after a STOP verdict; continue runs on
 #   MV_OUT       output root (default runs/mv/$COHORT)
@@ -68,6 +71,7 @@ SEEDS=${SEEDS:-42 43 44 45 46}
 MV_TOKENS=${MV_TOKENS:-20M}
 MV_SPLITS=${MV_SPLITS:-20}
 MV_FDL_FLAGS=${MV_FDL_FLAGS:--v}
+MV_MONITOR=${MV_MONITOR-8787}
 MV_BAND=${MV_BAND:-runs/mv/band}
 MV_STOP_ON=${MV_STOP_ON:-stop}
 OUT=${MV_OUT:-runs/mv/$COHORT}
@@ -201,8 +205,13 @@ for seed in $SEEDS; do
   CORE_ARGS="$FIXED --seed $seed"
   clog="$LOGDIR/$label-controller.log"
 
+  # The live dashboard is the controller's: the flag rides the controller
+  # line only (it reaches the walk-ins through the accept anyway, where a
+  # rank child never binds it).
+  monitor_arg=""
+  [ -n "$MV_MONITOR" ] && monitor_arg="--monitor $MV_MONITOR"
   # shellcheck disable=SC2086
-  ./fdl $MV_FDL_FLAGS "@$FARM" ddp-bench $CORE_ARGS --output "$OUT/$label" > "$clog" 2>&1 &
+  ./fdl $MV_FDL_FLAGS "@$FARM" ddp-bench $CORE_ARGS $monitor_arg --output "$OUT/$label" > "$clog" 2>&1 &
   cpid=$!
 
   waited=0
@@ -237,7 +246,11 @@ for seed in $SEEDS; do
     [ -n "$before" ] || before=0
     nw=$((nw+1))
     wlog="$LOGDIR/$label-walkin-$nw.log"
-    sh -c "$cmd -- $CORE_ARGS" > "$wlog" 2>&1 &
+    # stdin from /dev/null: a backgrounded ssh dial otherwise inherits this
+    # loop's heredoc as its stdin and swallows every dial line after it. The
+    # band never met it because its ssh dial was listed last; a pascal-first
+    # probe lost exa's dial to it (2026-09-20).
+    sh -c "$cmd -- $CORE_ARGS" < /dev/null > "$wlog" 2>&1 &
     wpids="$wpids $!"
     wlogs="$wlogs $wlog"
     waited=0
@@ -314,7 +327,7 @@ EOF
   if [ $rc -eq 0 ] && [ "$degraded" -eq 0 ] && [ "$warns" -eq 0 ] \
      && [ "$agents_ok" -eq 1 ] && [ "$id_ok" -eq 1 ] \
      && grep -aq "done:" "$clog" && cell_done "$label"; then
-    stamp "$label" "$seed" "fdl $MV_FDL_FLAGS @$FARM ddp-bench $CORE_ARGS --output $OUT/$label" "$nw" "$clog"
+    stamp "$label" "$seed" "fdl $MV_FDL_FLAGS @$FARM ddp-bench $CORE_ARGS $monitor_arg --output $OUT/$label" "$nw" "$clog"
     echo "$(ts) OK $COHORT/$label"
   else
     echo "$(ts) FAIL $COHORT/$label rc=$rc degraded=$degraded libtorch_warnings=$warns agents_ok=$agents_ok identity=$id_ok"
@@ -331,7 +344,7 @@ EOF
       pgrep -af 'release/ddp-benc[h]'
       exit 1
     fi
-    echo "$(ts) STOP: a failed cell is a stop by definition; decide before spending the next one"
+    echo "$(ts) STOP: a failed cell is a stop by definition. Stop spending and decide: investigate, or MV_STOP_ON=continue."
     exit 3
   fi
 
@@ -344,7 +357,7 @@ EOF
       | tee "$ABS_OUT/$label/$CELL/verdict.txt"
     vrc=${PIPESTATUS[0]}
     if [ "$vrc" -eq 3 ] && [ "$MV_STOP_ON" = stop ]; then
-      echo "$(ts) STOP after $COHORT/$label: the verdict says stop; run the destroy runbook or set MV_STOP_ON=continue"
+      echo "$(ts) STOP after $COHORT/$label: the verdict says stop. This ladder destroys nothing; stop spending and decide (investigate, MV_STOP_ON=continue, or the destroy runbook if the box is rented)."
       exit 3
     fi
   fi

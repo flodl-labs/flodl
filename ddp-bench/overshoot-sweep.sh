@@ -525,7 +525,10 @@ for arm_seed in $(for a in $ARMS; do for s in $SEEDS; do echo "$a:$s"; done; don
     esac
     nw=$((nw+1))
     wlog="$LOGDIR/$label-walkin-$nw.log"
-    sh -c "$cmd -- $CORE_ARGS" > "$wlog" 2>&1 &
+    # stdin from /dev/null, or a backgrounded ssh dial inherits the heredoc
+    # feeding this loop and swallows the dial lines after it (only ever
+    # invisible here because the ssh dial is listed last).
+    sh -c "$cmd -- $CORE_ARGS" < /dev/null > "$wlog" 2>&1 &
     wpids="$wpids $!"
     wlogs="$wlogs $wlog"
   done <<EOF
