@@ -310,6 +310,9 @@ pub struct RunConfig {
     /// is snapped so the pass divides into whole batched events; see
     /// `models::olmo::resolve_train_corpus`.
     pub train_tokens: Option<u64>,
+    /// Held-out text the token models score (`--olmo-eval`): out-of-domain
+    /// C4-en web text (default) or an in-domain slice of the training shard.
+    pub olmo_eval: crate::models::OlmoEval,
     /// VRAM share for each rank's data plane (`--vram-max-usage`).
     /// `None` preserves the library default (0.90).
     pub vram_max_usage: Option<f64>,

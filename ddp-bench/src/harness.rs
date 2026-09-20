@@ -98,6 +98,11 @@ fn describe_run(
         if let Some(t) = config.train_tokens {
             obj.insert("train_tokens".into(), t.into());
         }
+        // A non-default eval set changes what `eval=` means; the card must
+        // say so or two runs' numbers get compared across metrics.
+        if config.olmo_eval == crate::models::OlmoEval::InDomain {
+            obj.insert("olmo_eval".into(), "in-domain".into());
+        }
         if let Some(a) = config.max_anchor {
             obj.insert("max_anchor".into(), a.into());
         }
@@ -264,6 +269,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         pool_size,
         data_source: config.data_source,
         train_tokens: config.train_tokens,
+        olmo_eval: config.olmo_eval,
         epoch_splits: config.epoch_splits,
         batch_size: config.batch_size,
     };
@@ -521,6 +527,16 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
                 h
             }
             None => local_header,
+        };
+        // Which held-out text `eval=` scores, when it is not the default: a
+        // metric change has to be legible from the log alone.
+        let header = match config.olmo_eval {
+            crate::models::OlmoEval::InDomain => format!(
+                "{header}# eval: in-domain, {} bytes of the training shard at byte {}\n",
+                crate::download::OLMO_IN_DOMAIN_EVAL_BYTES,
+                crate::download::OLMO_IN_DOMAIN_EVAL_OFFSET,
+            ),
+            crate::models::OlmoEval::OutOfDomain => header,
         };
         let total_secs = total_ms / 1000.0;
         let footer = format!(
