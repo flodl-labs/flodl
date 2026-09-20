@@ -271,15 +271,19 @@ impl ClusterCoordinator {
             None => elapsed_ms,
         });
         // One line per eval at the verbose tier: which rank scored it, what
-        // it read, and what it cost that rank, so the eval's price is in the
-        // run log rather than inferred from a share dip.
+        // it read, what it cost that rank, and the cohort's step count at
+        // the reduce it scored. The epoch tag is where the eval was ARMED;
+        // on the CPU path it fires at the next realized reduce, which can
+        // sit well inside the following epoch, so the step is the eval's
+        // true position on a curve and the tag is only its slot in the log.
         crate::verbose!(
-            "  ddp: eval (epoch {epoch}) on rank {rank}: {} in {elapsed_ms:.0}ms",
+            "  ddp: eval (epoch {epoch}) on rank {rank}: {} in {elapsed_ms:.0}ms at step {}",
             if error.is_some() {
                 "error".to_string()
             } else {
                 format!("{metric:.4}")
             },
+            self.global_step,
         );
         // User-facing dispatch: fire `eval_result_fn` on success; log
         // and continue on failure. Errors from the closure are logged
