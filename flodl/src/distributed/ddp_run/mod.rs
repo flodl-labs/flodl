@@ -239,9 +239,12 @@ pub enum EvalCadence {
 pub type EvalFn<M> =
     std::sync::Arc<dyn Fn(&M, &dyn crate::data::BatchDataSet) -> Result<f64> + Send + Sync>;
 
-/// Receiver for the [`EvalFn`] scalar result on the controller side.
-/// Mirrors [`MetricsFn`]'s shape — fires after the chosen rank's eval
-/// metric flows back over `EvalResult`.
+/// Receiver for the [`EvalFn`] scalar result on the controller side, called
+/// as `(epoch, metric)`. Mirrors [`MetricsFn`]'s shape — fires after the
+/// chosen rank's eval metric flows back over `EvalResult`. `epoch` is the
+/// eval's tagged epoch: the boundary a cadence eval was armed at (so tag `k`
+/// scores the consensus after epoch `k - 1`, counting `epoch_splits` events),
+/// and `num_epochs` for the final canonical eval.
 pub type EvalResultFn = std::sync::Arc<dyn Fn(usize, f64) -> Result<()> + Send + Sync>;
 
 /// Scheduler factory type: `(world_size) -> Arc<dyn Scheduler>`.

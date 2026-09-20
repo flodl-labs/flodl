@@ -1184,55 +1184,29 @@ fn run_unified(
         });
     }
 
-    // Per-epoch eval hook: when --per-epoch-eval is set and the model
-    // exposes eval_fn, install an EpochFn that fires on the worker's
-    // transition into epoch N+1 (so the model state is post-epoch-N).
-    // Only rank 0 evaluates (test data is identical across ranks; in
-    // Sync mode all ranks have consensus params, in Cadence/Async rank 0
-    // sees its own near-consensus state). Eval values stream back to the
-    // host over an mpsc channel and are merged into the per-epoch log
-    // line.
-    let (eval_tx, eval_rx) = std::sync::mpsc::channel::<(usize, f64)>();
-    if config.per_epoch_eval
-        && let Some(eval_fn) = model_def.eval_fn
-        && let Some(test_ds) = test_dataset.as_ref()
-    {
-        // Pre-load test data on rank 0's device. Workers run on
-        // `Device::CUDA(rank)`; rank 0 is `Device::CUDA(0)`.
-        let device = Device::CUDA(0);
-        let test_data = Arc::new(preload_full_dataset(test_ds.as_ref(), device)?);
-        let bs = config.batch_size;
-        let eval_tx_efn = eval_tx.clone();
-        builder = builder.epoch_fn(move |epoch: usize, worker: &mut flodl::distributed::ddp_run::GpuWorker<Box<dyn Module>>| {
-            // Skip rank > 0: eval is identical across ranks (Sync) or
-            // approximately so (Cadence/Async). Single eval per epoch.
-            if worker.rank() != 0 {
-                return;
-            }
-            // Skip epoch 0: this fires on transition INTO epoch 0, before
-            // any training has happened. There is no "previous epoch" to
-            // evaluate. The first useful eval fires on transition into
-            // epoch 1 and tags the result as epoch 0.
-            if epoch == 0 {
-                return;
-            }
-            let prev_epoch = epoch - 1;
-            let model: &Box<dyn Module> = worker.model();
-            model.eval();
-            let result = eval_weighted(model.as_ref(), &test_data, bs, device, eval_fn);
-            model.train();
-            if let Ok(metric) = result {
-                let _ = eval_tx_efn.send((prev_epoch, metric));
-            }
-        });
+    // Per-epoch eval (cluster modes) rides the coordinator's eval cadence.
+    // The controller arms the elected rank (Fastest) before a round's
+    // snapshot request; at the next realized reduce that rank scores the
+    // round's consensus (under EASGD: stash the blend, adopt the consensus,
+    // eval, restore the blend verbatim) and ships the scalar back, so an
+    // eval never changes what any rank trains, and the coordinator excludes
+    // its time from the balancer's view of that rank. Every `--epoch-splits`
+    // event is an epoch here, so a single-pass run gets a trajectory. On
+    // the NCCL backend the same cadence fires at the epoch boundary, where
+    // the post-collective model is the consensus.
+    let total_events = config.epochs * config.epoch_splits.max(1);
+    if config.per_epoch_eval && model_def.eval_fn.is_some() {
+        builder = builder.eval_every(flodl::distributed::ddp_run::EvalCadence::Epochs(1));
     }
-    drop(eval_tx); // worker keeps its own clone via the EpochFn closure
 
-    // Single canonical eval (cluster mode): the controller dispatches ONE
-    // eval to the chosen rank (Fastest by default) on the coherent consensus
-    // model after the final reduce, and the scalar flows back to
-    // `eval_result_fn` here on the launcher. This replaces the redundant
-    // per-rank final eval below for cluster runs.
+    // Eval results (cluster mode): the controller dispatches every eval to
+    // the chosen rank, the cadence ones above and the single canonical eval
+    // on the coherent consensus model after the final reduce, and each
+    // scalar flows back to `eval_result_fn` here on the launcher, tagged
+    // with the epoch boundary it was armed at. Cadence values go to
+    // `eval_rx` and are merged into the per-epoch log lines; the final one
+    // lands in `final_eval_cell`. This replaces the redundant per-rank
+    // final eval below for cluster runs.
     //
     // ROLE-SPLIT wiring: `eval_result_fn` runs on the LAUNCHER's coordinator
     // (it only RECEIVES the scalar), so it is gated on `eval_fn` alone — the
@@ -1242,11 +1216,22 @@ fn run_unified(
     // (rank children + single-host have the real data), so they are gated on
     // NOT being the launcher, with a training-data fallback when the model
     // ships no held-out split (matching the old per-rank eval).
+    let (eval_tx, eval_rx) = std::sync::mpsc::channel::<(usize, f64)>();
     let final_eval_cell: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
     if model_def.eval_fn.is_some() {
         let cell = Arc::clone(&final_eval_cell);
-        builder = builder.eval_result_fn(move |_rank: usize, metric: f64| -> Result<()> {
-            *cell.lock().unwrap() = Some(metric);
+        // Without the flag only the final eval arrives, and it stays on its
+        // own `final eval=` line so the log of a run that never asked for a
+        // trajectory does not change shape.
+        let trajectory = config.per_epoch_eval;
+        builder = builder.eval_result_fn(move |tag: usize, metric: f64| -> Result<()> {
+            let (epoch, is_final) = place_eval_report(tag, total_events);
+            if trajectory && let Some(epoch) = epoch {
+                let _ = eval_tx.send((epoch, metric));
+            }
+            if is_final {
+                *cell.lock().unwrap() = Some(metric);
+            }
             Ok(())
         });
     }
@@ -1331,9 +1316,11 @@ fn run_unified(
         emit_epoch_metrics_line(&metrics, eval_val, monitor, &mut log_lines);
     }
 
-    // Final drain: catches the last epoch's eval (which has no subsequent
-    // metrics tick to surface it via the per-tick past-epoch drain above)
-    // and any straggler values that arrived after the last metrics tick.
+    let state = handle.join()?;
+
+    // Final drain, after the join so the controller's teardown has run: the
+    // last epoch's eval has no metrics tick after it to surface it, and the
+    // final canonical eval is dispatched at teardown, so both land here.
     while let Ok((ep, val)) = eval_rx.try_recv() {
         pending_eval.insert(ep, val);
     }
@@ -1344,8 +1331,6 @@ fn run_unified(
         eprintln!("    {line}");
         log_lines.push(line);
     }
-
-    let state = handle.join()?;
 
     // Final evaluation.
     //
@@ -1664,4 +1649,48 @@ fn rotate_artifact(dir: &str, filename: &str) {
         format!("{dir}/{stem}_{ts}.{ext}")
     };
     let _ = std::fs::rename(&path, &rotated);
+}
+
+/// Where an elected-rank eval report lands in the log.
+///
+/// The controller tags a cadence eval with the epoch boundary it was armed
+/// at, so tag `k` scores the consensus after epoch `k - 1`, and tags the
+/// final canonical eval with the run's total event count (`epochs *
+/// epoch_splits`). Returns the log epoch the value belongs to, if any, and
+/// whether it is also the run's final eval. A cadence eval at the last
+/// boundary and the final eval score the same consensus, so both fill the
+/// last epoch's slot.
+fn place_eval_report(tag: usize, total_events: usize) -> (Option<usize>, bool) {
+    if tag == 0 {
+        // The boundary into epoch 0 precedes all training; nothing to score.
+        return (None, false);
+    }
+    if tag >= total_events {
+        return (total_events.checked_sub(1), true);
+    }
+    (Some(tag - 1), false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place_eval_report;
+
+    #[test]
+    fn a_cadence_tag_lands_on_the_epoch_it_scores() {
+        // Twenty events: tag 1 is the consensus after epoch 0.
+        assert_eq!(place_eval_report(1, 20), (Some(0), false));
+        assert_eq!(place_eval_report(19, 20), (Some(18), false));
+    }
+
+    #[test]
+    fn the_final_sentinel_fills_the_last_epoch_and_the_final_cell() {
+        assert_eq!(place_eval_report(20, 20), (Some(19), true));
+        // Past the sentinel is still the final eval, never a phantom epoch.
+        assert_eq!(place_eval_report(21, 20), (Some(19), true));
+    }
+
+    #[test]
+    fn the_boundary_into_epoch_zero_scores_nothing() {
+        assert_eq!(place_eval_report(0, 20), (None, false));
+    }
 }

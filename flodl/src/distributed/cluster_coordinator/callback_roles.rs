@@ -270,6 +270,17 @@ impl ClusterCoordinator {
             Some(prev) => alpha * elapsed_ms + (1.0 - alpha) * prev,
             None => elapsed_ms,
         });
+        // One line per eval at the verbose tier: which rank scored it, what
+        // it read, and what it cost that rank, so the eval's price is in the
+        // run log rather than inferred from a share dip.
+        crate::verbose!(
+            "  ddp: eval (epoch {epoch}) on rank {rank}: {} in {elapsed_ms:.0}ms",
+            if error.is_some() {
+                "error".to_string()
+            } else {
+                format!("{metric:.4}")
+            },
+        );
         // User-facing dispatch: fire `eval_result_fn` on success; log
         // and continue on failure. Errors from the closure are logged
         // and training continues, matching `metrics_fn`'s

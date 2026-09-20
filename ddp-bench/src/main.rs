@@ -339,9 +339,13 @@ struct Cli {
     /// `eval=X.XXXX` into `training.log`. Required to correlate the
     /// divergence growth rate `λ̂` against held-out accuracy. Default off.
     ///
-    /// Adds an eval pass per epoch on rank 0 (Sync: consensus params;
-    /// Cadence/Async: rank-local at start of next epoch — near-consensus,
-    /// trend-preserving for correlation analyses).
+    /// Cluster modes: one consensus eval per epoch, run by the rank the
+    /// controller elects (fastest) on the round's averaged parameters, with
+    /// its own state restored verbatim afterwards, so the eval never changes
+    /// what a rank trains. Under `--epoch-splits` every split is an epoch, so
+    /// a single-pass run gets a trajectory. CPU modes score at the first
+    /// realized reduce after the epoch boundary, so an epoch with no reduce
+    /// carries no point. Solo modes eval in-process.
     #[option]
     per_epoch_eval: bool,
 
