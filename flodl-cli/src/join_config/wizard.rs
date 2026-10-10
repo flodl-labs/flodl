@@ -17,8 +17,8 @@ use crate::util::platform;
 use super::authorized_keys::{install_authorized_line, set_mode};
 use super::cloud_init::{docker_services, fdl_install, render_cloud_init};
 use super::credentials::{
-    command_hint, confirm, ensure_key, ensure_overlay, foreign_identity_warning, recover_shape,
-    resolve_label, validate_label,
+    command_hint, confirm, ensure_key, ensure_overlay, foreign_identity_warning,
+    recover_cloud_init_user, recover_libtorch, recover_shape, resolve_label, validate_label,
 };
 use super::preflight::preflight;
 use super::publish_recipe::{derive_publish, freshness_report, render_publish_block};
@@ -194,7 +194,12 @@ pub(super) fn wizard_built(
     };
 
     // ── Worker yml ──────────────────────────────────────────────────────
-    let worker_yml = render_worker_yml(&label, &controller, &token, door, cli);
+    let libtorch = cli
+        .libtorch
+        .clone()
+        .or_else(|| recover_libtorch(&farm_dir))
+        .unwrap_or_else(|| "auto".to_string());
+    let worker_yml = render_worker_yml(&label, &controller, &token, door, cli, &libtorch);
     let worker_yml_path = farm_dir.join("worker.yml");
     changes.write(&worker_yml_path, &worker_yml, "worker fdl.yml")?;
 
@@ -220,7 +225,12 @@ pub(super) fn wizard_built(
 
     // ── cloud-init (opt-in) ─────────────────────────────────────────────
     let cloud_init_path = if let Some(fdl) = &fdl {
-        let user = cli.cloud_init_user.as_deref().unwrap_or("ubuntu");
+        let user = cli
+            .cloud_init_user
+            .clone()
+            .or_else(|| recover_cloud_init_user(&farm_dir))
+            .unwrap_or_else(|| "ubuntu".to_string());
+        let user = user.as_str();
         let private_key =
             if cli.dry_run && matches!(key_action, KeyAction::Generated | KeyAction::Regenerated) {
                 PLACEHOLDER_PRIVATE.to_string()
