@@ -177,7 +177,9 @@ rung_4() {
         [ -n "$cmd" ] || continue
         n=$((n+1))
         local wlog="$LOGDIR/rung4-walkin-$n.log"
-        sh -c "$cmd" > "$wlog" 2>&1 &
+        # stdin from /dev/null: a backgrounded ssh dial otherwise inherits
+        # the heredoc feeding this loop and swallows the dial lines after it.
+        sh -c "$cmd" < /dev/null > "$wlog" 2>&1 &
         pids="$pids $!"
         logs="$logs $wlog"
     done <<EOF

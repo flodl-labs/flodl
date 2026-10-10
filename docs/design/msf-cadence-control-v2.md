@@ -1066,7 +1066,7 @@ families:
   - `ddp-bench/src/harness.rs`: builder wiring.
 
 Both change families pass `fdl gpu-clippy` clean and `fdl
-cuda-test-nccl` (12 tests pass).
+gpu-test-nccl` (12 tests pass).
 
 ### Sweep names map to numbered phases
 

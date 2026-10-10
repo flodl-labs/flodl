@@ -36,6 +36,20 @@ pub enum DataSource {
     Disk,
 }
 
+/// Which held-out text the token models (`olmo`, `olmo-graph`) score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OlmoEval {
+    /// Held-out text from ANOTHER domain than the training shard: OLMo's
+    /// C4-en validation slice (web text). The historical metric and the
+    /// default, so no existing invocation changes meaning; it barely moves
+    /// at bench scale.
+    OutOfDomain,
+    /// Held-out text from the training shard itself, at a fixed offset and
+    /// disjoint from any staged prefix by construction: it moves with
+    /// training, and it still catches memorisation.
+    InDomain,
+}
+
 /// Model names whose dataset factory honors [`DataSource::Disk`].
 pub const DISK_SOURCE_MODELS: [&str; 2] = ["resnet", "resnet-graph"];
 
@@ -50,6 +64,8 @@ pub struct DatasetConfig {
     /// Requested training tokens (`--train-tokens`), token models only.
     /// `None` = the model's default corpus.
     pub train_tokens: Option<u64>,
+    /// Held-out text the token models score (`--olmo-eval`).
+    pub olmo_eval: OlmoEval,
     /// Slices per data pass, and the batch size. Together they set the
     /// multiple a staged corpus is snapped to, so that one pass divides
     /// into whole batched events with nothing left over.

@@ -517,7 +517,11 @@ itself, since it holds keys):
   read-only sftp data mount; `nologin` tunnel-only) and the sshd
   `Match` hardening block, saved to `install-notes.md`;
 - **the paste-ready worker `fdl.yml`** speaking that door's dialect,
-  `libtorch: auto`, `persist: true`, the token inside;
+  `persist: true`, the token inside, and `libtorch: auto` unless
+  `--libtorch` pins a variant (`rocm7.1` to match a ROCm 7.1 image's
+  runtime exactly, say). A pin is read back from the farm on later
+  runs, so a `--regen` without the flag keeps it; `--libtorch auto`
+  releases it;
 - **a publish recipe derived from the training crate's own manifest**:
   a path dep on flodl walks the `source:` up to the dep root with
   `cwd:` pointing back down (what stops the dep dangling outside the
@@ -531,7 +535,14 @@ itself, since it holds keys):
   the private key and the systemd recipe (`Restart=always`,
   `RestartPreventExitStatus=2`, `FailureAction=poweroff`), so an
   instance boots straight into `fdl join`. A SECRET artifact (key and
-  token inside), written 0600 and never printed.
+  token inside), written 0600 and never printed. The instance gets the
+  fdl that wrote the file: a release build hands out the published
+  release, any other build has the instance `cargo install` its exact
+  commit (`fdl --version` shows it), so push that commit before an
+  instance boots. A build with uncommitted fdl sources is refused,
+  since no instance could install them. `--cloud-init-user` (default
+  `ubuntu`) is read back from an existing farm's cloud-init, so a
+  regen of a root-login farm stays root without repeating the flag.
 
 The wizard also **offers to install** its `authorized_keys` line into
 the invoking user's own `~/.ssh/authorized_keys`, because the composed

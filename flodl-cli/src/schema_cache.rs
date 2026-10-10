@@ -16,8 +16,8 @@
 //! against every path that could change the schema — the command's config
 //! file AND, for a binary that declares its own surface, the sources that
 //! surface is compiled from (see
-//! [`schema_source_refs`](crate::schema_cache::schema_source_refs)). A cache
-//! older than any of them is stale. Users can also force-refresh.
+//! [`crate::schema_cache::schema_source_refs`]). A cache older than any of
+//! them is stale. Users can also force-refresh.
 
 use std::fs;
 use std::path::{Path, PathBuf};
