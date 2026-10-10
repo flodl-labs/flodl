@@ -1,7 +1,7 @@
 use super::authorized_keys::{
     UpsertOutcome, install_authorized_line, key_material, upsert_authorized_line,
 };
-use super::cloud_init::render_cloud_init;
+use super::cloud_init::{FdlInstall, fdl_install, render_cloud_init};
 use super::credentials::{find_token_line, recover_shape, replace_token_line, validate_label};
 use super::list::{enumerate_farms, render_farm_list};
 use super::publish_recipe::{
@@ -11,8 +11,9 @@ use super::publish_recipe::{
 use super::render::{
     authorized_keys_line, render_overlay_scaffold, render_sshd_conf, render_worker_yml,
 };
-use super::wizard::wizard_at;
+use super::wizard::{wizard_at, wizard_built};
 use super::*;
+use crate::build_info::BuildInfo;
 
 fn tempdir() -> PathBuf {
     // A process-global sequence, not a clock: two parallel tests can read
@@ -256,7 +257,7 @@ fn no_flags() -> JoinConfigArgs {
 fn cloud_init_embeds_the_artifacts_and_the_failure_taxonomy() {
     let yml = "join:\n  token: t\n  persist: true\n";
     let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
-    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key);
+    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key, &FdlInstall::Release);
     assert!(ci.starts_with("#cloud-config\n"));
     assert!(ci.contains("SECRET ARTIFACT"));
     // Both payloads land indented under their write_files entries.
@@ -283,7 +284,7 @@ fn cloud_init_embeds_the_artifacts_and_the_failure_taxonomy() {
 fn cloud_init_installs_what_the_instance_does_not_have() {
     let yml = "join:\n  token: t\n";
     let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
-    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key);
+    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key, &FdlInstall::Release);
     // fdl is not on a stock cloud image, and the unit starts in the same
     // boot: fetch it first, and let a baked-in one win.
     assert!(ci.contains("command -v fdl >/dev/null ||"), "got:\n{ci}");
@@ -300,7 +301,7 @@ fn cloud_init_installs_what_the_instance_does_not_have() {
 fn cloud_init_provisions_only_what_the_door_reaches_for() {
     let yml = "join:\n  token: t\n";
     let key = "k\n";
-    let b = render_cloud_init("b300", "ubuntu", Door::B, yml, key);
+    let b = render_cloud_init("b300", "ubuntu", Door::B, yml, key, &FdlInstall::Release);
     // Door `b` fetches a source tree and builds it on the box.
     assert!(b.contains("command -v cargo >/dev/null ||"), "got:\n{b}");
     assert!(b.contains(" - build-essential\n"), "got:\n{b}");
@@ -314,21 +315,151 @@ fn cloud_init_provisions_only_what_the_door_reaches_for() {
 
     // Door `a` mounts the data root instead; a missing sshfs is classed
     // permanent, which under this unit means exit 2 and a halt.
-    let a = render_cloud_init("b300", "ubuntu", Door::A, yml, key);
+    let a = render_cloud_init("b300", "ubuntu", Door::A, yml, key, &FdlInstall::Release);
     assert!(a.contains(" - sshfs\n"), "got:\n{a}");
     assert!(!a.contains("cargo"), "door `a` builds nothing");
 
-    let n = render_cloud_init("b300", "ubuntu", Door::Nologin, yml, key);
+    let n = render_cloud_init(
+        "b300",
+        "ubuntu",
+        Door::Nologin,
+        yml,
+        key,
+        &FdlInstall::Release,
+    );
     assert!(!n.contains("cargo"));
     assert!(!n.contains("sshfs"));
     assert!(n.contains(" - curl\n"), "every door still fetches fdl");
+}
+
+const REPO: &str = "https://github.com/flodl-labs/flodl";
+const SHA: &str = "bfde4316c0ffee00000000000000000000000000";
+
+fn build(commit: Option<&'static str>, dirty: bool, tag: Option<&'static str>) -> BuildInfo {
+    BuildInfo {
+        version: "0.9.0",
+        commit,
+        dirty,
+        tag,
+    }
+}
+
+fn pinned() -> FdlInstall {
+    FdlInstall::Commit {
+        repo: REPO.to_string(),
+        commit: SHA.to_string(),
+    }
+}
+
+/// The release can only serve a release build. A branch build hands out
+/// its own commit, and uncommitted sources cannot be handed out at all.
+#[test]
+fn the_instance_gets_the_configuring_fdl_or_nothing() {
+    assert_eq!(
+        fdl_install(&build(None, false, None), REPO),
+        Ok(FdlInstall::Release)
+    );
+    assert_eq!(
+        fdl_install(&build(Some(SHA), false, Some("0.9.0")), REPO),
+        Ok(FdlInstall::Release)
+    );
+    assert_eq!(
+        fdl_install(&build(Some(SHA), false, None), REPO),
+        Ok(pinned())
+    );
+    let why = fdl_install(&build(Some(SHA), true, None), REPO).unwrap_err();
+    assert!(why.contains("uncommitted"), "{why}");
+    assert!(why.contains("(bfde431, dirty)"), "{why}");
+    assert!(why.contains("Commit and push"), "{why}");
+    // Dirty on the release tag is still dirty: the release is not it.
+    assert!(fdl_install(&build(Some(SHA), true, Some("0.9.0")), REPO).is_err());
+}
+
+#[test]
+fn a_pinned_fdl_is_compiled_on_every_door_before_the_unit_starts() {
+    let yml = "join:\n  token: t\n";
+    let key = "k\n";
+    let install = format!("cargo install --locked --git {REPO} --rev {SHA} flodl-cli");
+    for door in [Door::B, Door::A, Door::Nologin] {
+        let ci = render_cloud_init("b300", "ubuntu", door, yml, key, &pinned());
+        assert!(
+            !ci.contains("flodl.dev/fdl"),
+            "{door:?}: the release would not match:\n{ci}"
+        );
+        // As the service user, from the toolchain it just installed, and
+        // never skipped for an fdl the image already carries.
+        assert!(
+            ci.contains(&format!(
+                "su -l ubuntu -c '/home/ubuntu/.cargo/bin/{install}'"
+            )),
+            "{door:?}:\n{ci}"
+        );
+        assert!(!ci.contains("command -v fdl"), "{door:?}:\n{ci}");
+        assert!(
+            ci.contains(" - build-essential\n"),
+            "{door:?}: needs a linker"
+        );
+        assert!(
+            ci.contains("Environment=PATH=/home/ubuntu/.cargo/bin:"),
+            "{door:?}:\n{ci}"
+        );
+        assert!(
+            ci.contains(&format!("# fdl: commit {SHA} of {REPO}")),
+            "{door:?}"
+        );
+        let rustup = ci.find("sh.rustup.rs").expect("a toolchain step");
+        let fdl = ci.find("cargo install --locked").unwrap();
+        let enable = ci.find("systemctl enable --now").unwrap();
+        assert!(rustup < fdl && fdl < enable, "{door:?}: order\n{ci}");
+    }
+    // The release keeps its bootstrap, ahead of everything else.
+    let r = render_cloud_init("b300", "ubuntu", Door::A, yml, key, &FdlInstall::Release);
+    assert!(r.contains("# fdl: the published release"));
+    assert!(!r.contains("cargo install"), "{r}");
+}
+
+/// `--regen --cloud-init` from a dirty build must fail before `--regen`
+/// rotates anything: the farm's live boxes would lose their credentials
+/// for a user-data file that is never written.
+#[test]
+fn a_dirty_build_refuses_cloud_init_before_writing_anything() {
+    let tmp = tempdir();
+    let mut cli = no_flags();
+    cli.label = Some("dirtyfarm".to_string());
+    cli.cloud_init = true;
+    cli.regen = true;
+    cli.yes = true;
+    let Err(why) = wizard_built(&cli, &tmp, &build(Some(SHA), true, None)) else {
+        panic!("a dirty build must refuse --cloud-init");
+    };
+    assert!(why.contains("uncommitted"), "{why}");
+    assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0, "nothing on disk");
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn the_report_names_the_fdl_an_instance_will_run() {
+    let tmp = tempdir();
+    let mut cli = no_flags();
+    cli.label = Some("pinfarm".to_string());
+    cli.cloud_init = true;
+    cli.dry_run = true;
+    let report = wizard_built(&cli, &tmp, &build(Some(SHA), false, None)).unwrap();
+    assert_eq!(report.cloud_init_fdl, Some(pinned()));
+    let human = report.render_human();
+    assert!(
+        human.contains(&format!("commit {SHA} from {REPO}")) && human.contains("push it"),
+        "{human}"
+    );
+    assert_eq!(report.to_json()["cloud_init_fdl"]["commit"], SHA);
+    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn a_root_instance_gets_root_s_actual_home() {
     let yml = "join:\n  token: t\n";
     let key = "k\n";
-    let ci = render_cloud_init("b300", "root", Door::B, yml, key);
+    let ci = render_cloud_init("b300", "root", Door::B, yml, key, &FdlInstall::Release);
     // /home/root exists on no image, so composing the path from the name
     // alone puts the key where sshd will never look for it.
     assert!(ci.contains("path: /root/.ssh/flodl-join"), "got:\n{ci}");

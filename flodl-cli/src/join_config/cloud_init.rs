@@ -8,7 +8,50 @@
 
 use std::path::Path;
 
+use crate::build_info::BuildInfo;
+
 use super::Door;
+
+/// How an instance gets its `fdl`.
+///
+/// It has to be the fdl the farm was configured with: a walk-in's fdl
+/// dials, pulls and reads the run manifest the controller's side
+/// produces, so the published release serves only a release build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum FdlInstall {
+    /// The published release, through the `flodl.dev/fdl` bootstrap.
+    Release,
+    /// `cargo install` of the configuring fdl's own commit.
+    Commit { repo: String, commit: String },
+}
+
+/// The install an instance gets, from the configuring fdl's identity.
+///
+/// A release build hands out the release. Any other build with a
+/// commit hands out that commit, which must be pushed to `repo` before
+/// an instance boots. A dirty build is refused: no remote can install
+/// uncommitted sources, so a pin would install a different fdl than the
+/// one that configured the farm, which is the mismatch this exists to
+/// prevent.
+pub(super) fn fdl_install(build: &BuildInfo, repo: &str) -> Result<FdlInstall, String> {
+    if build.is_release() {
+        return Ok(FdlInstall::Release);
+    }
+    let commit = build.commit.unwrap_or_default();
+    if build.dirty {
+        return Err(format!(
+            "this fdl was built from uncommitted sources ({}): an instance \
+             cannot install them, so cloud-init would boot a different fdl \
+             than the one configuring this farm. Commit and push, rebuild \
+             fdl, then re-run with --cloud-init.",
+            build.version_line()
+        ));
+    }
+    Ok(FdlInstall::Commit {
+        repo: repo.to_string(),
+        commit: commit.to_string(),
+    })
+}
 
 pub(super) fn home_of(user: &str) -> String {
     if user == "root" {
@@ -37,14 +80,16 @@ pub(super) fn home_of(user: &str) -> String {
 ///
 /// What the instance is assumed to have is only a shell, systemd and
 /// network: `fdl` is fetched here, and the door's own tooling with it.
-/// Anything already baked into the image wins, since every step is
-/// guarded by a `command -v`.
+/// Tooling already baked into the image wins, since those steps are
+/// guarded by a `command -v`. A commit-pinned fdl is not: an image's own
+/// fdl is exactly the one that would not match.
 pub(super) fn render_cloud_init(
     label: &str,
     user: &str,
     door: Door,
     worker_yml: &str,
     private_key: &str,
+    fdl: &FdlInstall,
 ) -> String {
     let indent = |s: &str| -> String {
         s.lines()
@@ -65,32 +110,62 @@ pub(super) fn render_cloud_init(
     // transports; door A mounts the data root over sshfs, and prepare
     // classes a missing sshfs as permanent — which under this very unit
     // means exit 2 and a halt, on a box that only lacked a package.
+    let pinned = matches!(fdl, FdlInstall::Commit { .. });
     let mut packages: Vec<&str> = vec!["curl"];
     match door {
         Door::B => packages.extend(["build-essential", "pkg-config", "unzip", "rsync", "git"]),
         Door::A => packages.push("sshfs"),
         Door::Nologin => {}
     }
+    // A pinned fdl is compiled here, whatever the door: it needs a linker.
+    if pinned && !packages.contains(&"build-essential") {
+        packages.push("build-essential");
+    }
     let packages = packages
         .iter()
         .map(|p| format!("\x20 - {p}\n"))
         .collect::<String>();
 
-    // Door B builds, so it needs a toolchain. Installed AS THE SERVICE
-    // USER: cargo writes its registry cache into CARGO_HOME, so a
-    // system-wide install root-owned and world-readable is a build that
-    // fails on its first fetch. The unit then carries the matching PATH
-    // rather than relying on a login shell it never gets.
-    let (rust_step, rust_path) = match door {
-        Door::B => (
+    // Door B builds, and so does a pinned fdl on any door, so both need a
+    // toolchain. Installed AS THE SERVICE USER: cargo writes its registry
+    // cache into CARGO_HOME, so a system-wide install root-owned and
+    // world-readable is a build that fails on its first fetch. The unit
+    // then carries the matching PATH rather than relying on a login shell
+    // it never gets, and a pinned fdl lands in that same bin, first on it.
+    let (rust_step, rust_path) = if door == Door::B || pinned {
+        (
             format!(
                 "\x20 - [ sh, -c, \"command -v cargo >/dev/null || \
                  su -l {user} -c 'curl -fsSL https://sh.rustup.rs | \
                  sh -s -- -y --profile minimal --no-modify-path'\" ]\n"
             ),
             format!("{home}/.cargo/bin:"),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
+    // The release is fetched before the toolchain (it needs none); a
+    // commit is compiled after it.
+    let (fdl_comment, fdl_step, setup_steps) = match fdl {
+        FdlInstall::Release => (
+            "# fdl: the published release (flodl.dev/fdl).\n".to_string(),
+            String::new(),
+            format!(
+                "\x20 - [ sh, -c, \"command -v fdl >/dev/null || \
+                 (curl -fsSL https://flodl.dev/fdl -o /usr/local/bin/fdl && \
+                 chmod 0755 /usr/local/bin/fdl)\" ]\n\
+                 {rust_step}"
+            ),
         ),
-        _ => (String::new(), String::new()),
+        FdlInstall::Commit { repo, commit } => (
+            format!("# fdl: commit {commit} of {repo}, the configuring fdl's own.\n"),
+            format!(
+                "\x20 - [ sh, -c, \"su -l {user} -c '{home}/.cargo/bin/cargo install \
+                 --locked --git {repo} --rev {commit} flodl-cli'\" ]\n"
+            ),
+            rust_step,
+        ),
     };
 
     format!(
@@ -100,6 +175,7 @@ pub(super) fn render_cloud_init(
          # On a provider that bills powered-off instances (DigitalOcean and\n\
          # the AMD Developer Cloud on top of it), the unit's poweroff stops\n\
          # the work but NOT the meter: destroy the instance to stop billing.\n\
+         {fdl_comment}\
          packages:\n{packages}\
          write_files:\n\
          \x20 - path: {home}/.ssh/flodl-join\n\
@@ -134,17 +210,17 @@ pub(super) fn render_cloud_init(
          \x20     [Install]\n\
          \x20     WantedBy=multi-user.target\n\
          runcmd:\n\
-         \x20 - [ sh, -c, \"command -v fdl >/dev/null || \
-         (curl -fsSL https://flodl.dev/fdl -o /usr/local/bin/fdl && \
-         chmod 0755 /usr/local/bin/fdl)\" ]\n\
-         {rust_step}\
+         {setup_steps}\
+         {fdl_step}\
          \x20 - systemctl daemon-reload\n\
          \x20 - systemctl enable --now flodl-join.service\n",
         label = label,
         user = user,
         home = home,
         packages = packages,
-        rust_step = rust_step,
+        fdl_comment = fdl_comment,
+        setup_steps = setup_steps,
+        fdl_step = fdl_step,
         rust_path = rust_path,
         key = indent(private_key),
         yml = indent(worker_yml),

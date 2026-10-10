@@ -124,6 +124,8 @@ struct Report {
     controller: Endpoint,
     install: InstallAction,
     cloud_init_path: Option<PathBuf>,
+    /// Which fdl the cloud-init installs, when one was written.
+    cloud_init_fdl: Option<cloud_init::FdlInstall>,
     /// What this box still needs for the chosen door to work.
     checks: Vec<Check>,
     /// The ready-to-install sshd drop-in written into the farm dir.

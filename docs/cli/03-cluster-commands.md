@@ -531,7 +531,12 @@ itself, since it holds keys):
   the private key and the systemd recipe (`Restart=always`,
   `RestartPreventExitStatus=2`, `FailureAction=poweroff`), so an
   instance boots straight into `fdl join`. A SECRET artifact (key and
-  token inside), written 0600 and never printed.
+  token inside), written 0600 and never printed. The instance gets the
+  fdl that wrote the file: a release build hands out the published
+  release, any other build has the instance `cargo install` its exact
+  commit (`fdl --version` shows it), so push that commit before an
+  instance boots. A build with uncommitted fdl sources is refused,
+  since no instance could install them.
 
 The wizard also **offers to install** its `authorized_keys` line into
 the invoking user's own `~/.ssh/authorized_keys`, because the composed

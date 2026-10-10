@@ -9,12 +9,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::build_info::{self, BuildInfo};
 use crate::builtins::JoinConfigArgs;
 use crate::context::home_dir;
 use crate::util::platform;
 
 use super::authorized_keys::{install_authorized_line, set_mode};
-use super::cloud_init::{docker_services, render_cloud_init};
+use super::cloud_init::{docker_services, fdl_install, render_cloud_init};
 use super::credentials::{
     command_hint, confirm, ensure_key, ensure_overlay, foreign_identity_warning, recover_shape,
     resolve_label, validate_label,
@@ -37,8 +38,26 @@ pub(super) fn wizard(cli: &JoinConfigArgs) -> Result<Report, String> {
 /// The whole pass from an explicit working directory — what [`wizard`]
 /// resolves for real invocations and what tests pin.
 pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, String> {
+    wizard_built(cli, cwd, &build_info::current())
+}
+
+/// [`wizard_at`] with the configuring fdl's identity given rather than
+/// read from this binary, so tests can pin a dirty or pinned build.
+pub(super) fn wizard_built(
+    cli: &JoinConfigArgs,
+    cwd: &Path,
+    build: &BuildInfo,
+) -> Result<Report, String> {
     let label = resolve_label(cli)?;
     validate_label(&label)?;
+    // Decided before anything is written: a refusal after `--regen` had
+    // rotated the farm's credentials would cut off its live boxes for a
+    // user-data file that never got written.
+    let fdl = if cli.cloud_init {
+        Some(fdl_install(build, env!("CARGO_PKG_REPOSITORY"))?)
+    } else {
+        None
+    };
     let mut changes = Changes::new(cli.dry_run);
     // Door and controller are resolved after the farm dir is known: an
     // existing farm's own answers are better defaults than the flag
@@ -200,7 +219,7 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
     let install = install_authorized_line(cli, &mut changes, &authorized_line, controller.port)?;
 
     // ── cloud-init (opt-in) ─────────────────────────────────────────────
-    let cloud_init_path = if cli.cloud_init {
+    let cloud_init_path = if let Some(fdl) = &fdl {
         let user = cli.cloud_init_user.as_deref().unwrap_or("ubuntu");
         let private_key =
             if cli.dry_run && matches!(key_action, KeyAction::Generated | KeyAction::Regenerated) {
@@ -209,7 +228,7 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
                 fs::read_to_string(&key_path)
                     .map_err(|e| format!("cannot read the private key for cloud-init: {e}"))?
             };
-        let content = render_cloud_init(&label, user, door, &worker_yml, &private_key);
+        let content = render_cloud_init(&label, user, door, &worker_yml, &private_key, fdl);
         let path = farm_dir.join("cloud-init.yml");
         let kind = changes.write(&path, &content, "cloud-init user-data (SECRET)")?;
         if !cli.dry_run && kind != ChangeKind::Unchanged {
@@ -241,6 +260,7 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
         controller,
         install,
         cloud_init_path,
+        cloud_init_fdl: fdl,
         checks,
         sshd_conf_path,
         plat,

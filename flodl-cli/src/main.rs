@@ -7,9 +7,9 @@
 //! is managed under `~/.flodl/` (override with `$FLODL_HOME`).
 
 use flodl_cli::{
-    add, api_ref, builtins, cli_error, cluster, completions, config, diagnose, gpus, init, join,
-    join_config, overlay, parse_or_schema_from, probe, publish, run, setup, skill, status, style,
-    ui, update_check,
+    add, api_ref, build_info, builtins, cli_error, cluster, completions, config, diagnose, gpus,
+    init, join, join_config, overlay, parse_or_schema_from, probe, publish, run, setup, skill,
+    status, style, ui, update_check,
 };
 
 use builtins::{
@@ -317,7 +317,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "version" | "--version" | "-V" => {
-            println!("flodl-cli {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", build_info::current().version_line());
             ExitCode::SUCCESS
         }
         other => dispatch_config(
@@ -624,7 +624,7 @@ use cli::schema::dispatch_schema;
 // ---------------------------------------------------------------------------
 
 pub(crate) fn print_usage() {
-    println!("flodl-cli {}", env!("CARGO_PKG_VERSION"));
+    println!("{}", build_info::current().version_line());
     println!();
     println!("The floDl companion tool: setup, libtorch, diagnostics, API reference.");
     println!("Works anywhere. Uses project root when available, ~/.flodl/ otherwise.");

@@ -50,6 +50,10 @@ pub mod api_ref;
 /// `#[derive(FdlArgs)]` implements.
 pub mod args;
 
+/// What this `fdl` binary was built from: version plus the git commit
+/// `build.rs` embedded, which identifies an unreleased build.
+pub mod build_info;
+
 /// Built-in `fdl` sub-commands (setup, install, completions, schema,
 /// config, libtorch, diagnose, init, skill, ...).
 pub mod builtins;

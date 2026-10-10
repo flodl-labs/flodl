@@ -15,6 +15,7 @@ use crate::style;
 use crate::util::platform;
 
 use super::authorized_keys::InstallAction;
+use super::cloud_init::FdlInstall;
 use super::preflight::Check;
 use super::{
     ChangeKind, Door, Endpoint, KEY_NAME, KeyAction, OverlayAction, Report, WORKER_KEY_PATH,
@@ -216,6 +217,17 @@ impl Report {
                     ci.display()
                 ),
             );
+            match &self.cloud_init_fdl {
+                Some(FdlInstall::Commit { repo, commit }) => push(
+                    &mut out,
+                    &format!(
+                        "  fdl:       commit {commit} from {repo}, built on the \
+                         instance; push it before one boots"
+                    ),
+                ),
+                Some(FdlInstall::Release) => push(&mut out, "  fdl:       the published release"),
+                None => {}
+            }
         }
         if let Some(w) = &self.reuse_warning {
             push(&mut out, "");
@@ -577,6 +589,13 @@ impl Report {
                 .cloud_init_path
                 .as_ref()
                 .map(|p| p.display().to_string()),
+            "cloud_init_fdl": match &self.cloud_init_fdl {
+                Some(FdlInstall::Commit { repo, commit }) => {
+                    serde_json::json!({"install": "commit", "repo": repo, "commit": commit})
+                }
+                Some(FdlInstall::Release) => serde_json::json!({"install": "release"}),
+                None => serde_json::Value::Null,
+            },
             "publish_block": self.publish_block,
             "bin_caveat": self.bin_caveat,
             "freshness": self.freshness,
