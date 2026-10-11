@@ -173,9 +173,12 @@ stack_lines() {
 # stamp: the roster as the controller admitted it (host, ranks, GPU count,
 # libtorch label -- the `rocm` label in that line IS the demo), the dials
 # with their credential redacted, the digest of the tree this box serves,
-# and each stamped host's kernel and GPU driver. The digest binds only
-# walk-ins that pulled source through the door; a `--bin` walk-in ran the
-# binary its dial names, and the stamp says which case each dial is.
+# each stamped host's kernel and GPU driver, and the uncommitted changes:
+# named, with the tracked ones saved as a patch beside the stamp, since a
+# bare count says a cell's source differs from HEAD without saying how.
+# The digest binds only walk-ins that pulled source through the door; a
+# `--bin` walk-in ran the binary its dial names, and the stamp says which
+# case each dial is.
 stamp() {
   # $1 label, $2 seed, $3 invocation, $4 walk-in count, $5 controller log
   d="$ABS_OUT/$1/$CELL"; mkdir -p "$d"
@@ -196,8 +199,15 @@ stamp() {
       echo "served_tree_sha256: $digest (binds source-pull walk-ins only; a --bin dial ran the binary it names)"
     fi
     echo "git_sha:        $(git rev-parse HEAD 2>/dev/null)"
-    echo "git_dirty:      $(git status --porcelain 2>/dev/null | wc -l) file(s) modified"
-    echo "utc:            $(date -u '+%F %T UTC')"
+    dirty=$(git status --porcelain 2>/dev/null)
+    if [ -z "$dirty" ]; then
+      echo "git_dirty:      clean"
+    else
+      git diff HEAD > "$d/git-diff.patch" 2>/dev/null
+      echo "git_dirty:      $(printf '%s\n' "$dirty" | wc -l | tr -d ' ') entr(ies); tracked changes in git-diff.patch (sha256 $(sha256sum < "$d/git-diff.patch" | cut -d' ' -f1)), untracked ones named only"
+      printf '%s\n' "$dirty" | sed 's/^/dirty:          /'
+    fi
+    echo "utc:           $(date -u '+%F %T UTC')"
     echo "host:           $(hostname)"
     echo "libtorch:       $(cat libtorch/.active 2>/dev/null || echo unknown)"
     stack_lines | sed 's/^/stack:          /'
