@@ -49,22 +49,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read the declared MSRV
+      # Two floors: the workspace's for the core crates, and flodl-hf's own
+      # higher one (its Hub client's dependency chain must not raise the
+      # core floor). flodl-hf falls back to the workspace value if it ever
+      # goes back to inheriting it.
+      - name: Read the declared MSRVs
         id: msrv
         run: |
-          V=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "Cargo.toml declares rust-version = $V"
+          V=$(grep -m1 '^rust-version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          H=$(grep -m1 '^rust-version = ' flodl-hf/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          H=${H:-$V}
+          echo "core=$V" >> "$GITHUB_OUTPUT"
+          echo "hf=$H" >> "$GITHUB_OUTPUT"
+          echo "workspace declares rust-version = $V, flodl-hf declares $H"
 
-      # Pinned to whatever Cargo.toml says, so the two can never disagree.
+      # Pinned to whatever the manifests say, so the two can never disagree.
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ steps.msrv.outputs.version }}
+          toolchain: ${{ steps.msrv.outputs.core }}
 
-      - name: cargo check on the declared floor
+      - name: Install flodl-hf's floor
+        run: rustup toolchain install ${{ steps.msrv.outputs.hf }} --profile minimal
+
+      - name: cargo check on the declared floors
         env:
           DOCS_RS: 1
-        run: cargo check --workspace --all-targets
+        run: |
+          cargo +${{ steps.msrv.outputs.core }} check --workspace --exclude flodl-hf --all-targets
+          cargo +${{ steps.msrv.outputs.hf }} check -p flodl-hf --all-targets
 
   # Supply chain: advisories, licenses, sources, duplicate versions.
   # Policy and the reasoning behind each choice live in deny.toml.

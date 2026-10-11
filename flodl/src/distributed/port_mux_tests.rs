@@ -108,8 +108,13 @@ fn unknown_magic_dropped_and_dispatcher_continues() {
     let (_mux, accept, port) = start_test_mux();
 
     // Hostile/garbage dial: unknown magic. The dispatcher must drop it
-    // (we observe EOF/reset) and keep serving honest peers.
-    let mut rogue = dial(port, 0xDEAD_BEEF, b"junk");
+    // (we observe EOF/reset) and keep serving honest peers. The drop can
+    // land before the rogue's payload does, so that write may already see
+    // the reset: only the honest peer's writes are required to succeed.
+    let mut rogue = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    rogue.set_nodelay(true).unwrap();
+    let _ = write_channel_magic(&mut rogue, 0xDEAD_BEEF);
+    let _ = rogue.write_all(b"junk");
     rogue
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();

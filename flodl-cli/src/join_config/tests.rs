@@ -1,8 +1,11 @@
 use super::authorized_keys::{
-    UpsertOutcome, install_authorized_line, key_material, upsert_authorized_line,
+    UpsertOutcome, install_authorized_line, key_material, retire_key_lines, upsert_authorized_line,
 };
-use super::cloud_init::render_cloud_init;
-use super::credentials::{find_token_line, recover_shape, replace_token_line, validate_label};
+use super::cloud_init::{FdlInstall, fdl_install, render_cloud_init};
+use super::credentials::{
+    find_token_line, recover_cloud_init_user, recover_libtorch, recover_shape, replace_token_line,
+    validate_label,
+};
 use super::list::{enumerate_farms, render_farm_list};
 use super::publish_recipe::{
     common_ancestor, declares_gpu_features, derive_publish, flodl_path_dep, freshness_report,
@@ -11,8 +14,9 @@ use super::publish_recipe::{
 use super::render::{
     authorized_keys_line, render_overlay_scaffold, render_sshd_conf, render_worker_yml,
 };
-use super::wizard::wizard_at;
+use super::wizard::{wizard_at, wizard_built};
 use super::*;
+use crate::build_info::BuildInfo;
 
 fn tempdir() -> PathBuf {
     // A process-global sequence, not a clock: two parallel tests can read
@@ -171,6 +175,23 @@ fn registry_dep_ships_the_crate_dir_alone() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
+/// A workspace root is the likeliest wrong guess, and the fix it prints
+/// must name a flag the wizard actually takes.
+#[test]
+fn a_workspace_root_points_at_the_crate_dir_flag() {
+    let tmp = tempdir();
+    fs::write(
+        tmp.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"train\"]\n",
+    )
+    .unwrap();
+    let Err(err) = derive_publish(&tmp) else {
+        panic!("a workspace root must not derive a recipe");
+    };
+    assert!(err.contains("--crate-dir "), "{err}");
+    let _ = fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn a_workspace_above_the_crate_earns_the_bin_caveat() {
     let tmp = tempdir();
@@ -239,6 +260,7 @@ fn no_flags() -> JoinConfigArgs {
         crate_dir: None,
         data_path: None,
         gpu_ram_share: None,
+        libtorch: None,
         regen: false,
         install_key: false,
         no_install_key: false,
@@ -256,7 +278,7 @@ fn no_flags() -> JoinConfigArgs {
 fn cloud_init_embeds_the_artifacts_and_the_failure_taxonomy() {
     let yml = "join:\n  token: t\n  persist: true\n";
     let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
-    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key);
+    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key, &FdlInstall::Release);
     assert!(ci.starts_with("#cloud-config\n"));
     assert!(ci.contains("SECRET ARTIFACT"));
     // Both payloads land indented under their write_files entries.
@@ -265,8 +287,19 @@ fn cloud_init_embeds_the_artifacts_and_the_failure_taxonomy() {
         "got:\n{ci}"
     );
     assert!(ci.contains("      join:"), "got:\n{ci}");
-    assert!(ci.contains("path: /home/ubuntu/.ssh/flodl-join"));
-    assert!(ci.contains("permissions: \"0600\""));
+    // Both carry a credential (the key, and the worker yml's token), so
+    // both land 0600, each checked on its own entry.
+    for path in [
+        "/home/ubuntu/.ssh/flodl-join",
+        "/home/ubuntu/training/fdl.yml",
+    ] {
+        assert!(
+            ci.contains(&format!(
+                "path: {path}\n    owner: ubuntu:ubuntu\n    permissions: \"0600\"\n"
+            )),
+            "{path}:\n{ci}"
+        );
+    }
     // The failure taxonomy rides the unit: re-dial transient, stop on
     // permanent, halt.
     assert!(ci.contains("Restart=always"));
@@ -283,7 +316,7 @@ fn cloud_init_embeds_the_artifacts_and_the_failure_taxonomy() {
 fn cloud_init_installs_what_the_instance_does_not_have() {
     let yml = "join:\n  token: t\n";
     let key = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
-    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key);
+    let ci = render_cloud_init("b300", "ubuntu", Door::B, yml, key, &FdlInstall::Release);
     // fdl is not on a stock cloud image, and the unit starts in the same
     // boot: fetch it first, and let a baked-in one win.
     assert!(ci.contains("command -v fdl >/dev/null ||"), "got:\n{ci}");
@@ -300,7 +333,7 @@ fn cloud_init_installs_what_the_instance_does_not_have() {
 fn cloud_init_provisions_only_what_the_door_reaches_for() {
     let yml = "join:\n  token: t\n";
     let key = "k\n";
-    let b = render_cloud_init("b300", "ubuntu", Door::B, yml, key);
+    let b = render_cloud_init("b300", "ubuntu", Door::B, yml, key, &FdlInstall::Release);
     // Door `b` fetches a source tree and builds it on the box.
     assert!(b.contains("command -v cargo >/dev/null ||"), "got:\n{b}");
     assert!(b.contains(" - build-essential\n"), "got:\n{b}");
@@ -314,21 +347,151 @@ fn cloud_init_provisions_only_what_the_door_reaches_for() {
 
     // Door `a` mounts the data root instead; a missing sshfs is classed
     // permanent, which under this unit means exit 2 and a halt.
-    let a = render_cloud_init("b300", "ubuntu", Door::A, yml, key);
+    let a = render_cloud_init("b300", "ubuntu", Door::A, yml, key, &FdlInstall::Release);
     assert!(a.contains(" - sshfs\n"), "got:\n{a}");
     assert!(!a.contains("cargo"), "door `a` builds nothing");
 
-    let n = render_cloud_init("b300", "ubuntu", Door::Nologin, yml, key);
+    let n = render_cloud_init(
+        "b300",
+        "ubuntu",
+        Door::Nologin,
+        yml,
+        key,
+        &FdlInstall::Release,
+    );
     assert!(!n.contains("cargo"));
     assert!(!n.contains("sshfs"));
     assert!(n.contains(" - curl\n"), "every door still fetches fdl");
+}
+
+const REPO: &str = "https://github.com/flodl-labs/flodl";
+const SHA: &str = "bfde4316c0ffee00000000000000000000000000";
+
+fn build(commit: Option<&'static str>, dirty: bool, tag: Option<&'static str>) -> BuildInfo {
+    BuildInfo {
+        version: "0.9.0",
+        commit,
+        dirty,
+        tag,
+    }
+}
+
+fn pinned() -> FdlInstall {
+    FdlInstall::Commit {
+        repo: REPO.to_string(),
+        commit: SHA.to_string(),
+    }
+}
+
+/// The release can only serve a release build. A branch build hands out
+/// its own commit, and uncommitted sources cannot be handed out at all.
+#[test]
+fn the_instance_gets_the_configuring_fdl_or_nothing() {
+    assert_eq!(
+        fdl_install(&build(None, false, None), REPO),
+        Ok(FdlInstall::Release)
+    );
+    assert_eq!(
+        fdl_install(&build(Some(SHA), false, Some("0.9.0")), REPO),
+        Ok(FdlInstall::Release)
+    );
+    assert_eq!(
+        fdl_install(&build(Some(SHA), false, None), REPO),
+        Ok(pinned())
+    );
+    let why = fdl_install(&build(Some(SHA), true, None), REPO).unwrap_err();
+    assert!(why.contains("uncommitted"), "{why}");
+    assert!(why.contains("(bfde431, dirty)"), "{why}");
+    assert!(why.contains("Commit and push"), "{why}");
+    // Dirty on the release tag is still dirty: the release is not it.
+    assert!(fdl_install(&build(Some(SHA), true, Some("0.9.0")), REPO).is_err());
+}
+
+#[test]
+fn a_pinned_fdl_is_compiled_on_every_door_before_the_unit_starts() {
+    let yml = "join:\n  token: t\n";
+    let key = "k\n";
+    let install = format!("cargo install --locked --git {REPO} --rev {SHA} flodl-cli");
+    for door in [Door::B, Door::A, Door::Nologin] {
+        let ci = render_cloud_init("b300", "ubuntu", door, yml, key, &pinned());
+        assert!(
+            !ci.contains("flodl.dev/fdl"),
+            "{door:?}: the release would not match:\n{ci}"
+        );
+        // As the service user, from the toolchain it just installed, and
+        // never skipped for an fdl the image already carries.
+        assert!(
+            ci.contains(&format!(
+                "su -l ubuntu -c '/home/ubuntu/.cargo/bin/{install}'"
+            )),
+            "{door:?}:\n{ci}"
+        );
+        assert!(!ci.contains("command -v fdl"), "{door:?}:\n{ci}");
+        assert!(
+            ci.contains(" - build-essential\n"),
+            "{door:?}: needs a linker"
+        );
+        assert!(
+            ci.contains("Environment=PATH=/home/ubuntu/.cargo/bin:"),
+            "{door:?}:\n{ci}"
+        );
+        assert!(
+            ci.contains(&format!("# fdl: commit {SHA} of {REPO}")),
+            "{door:?}"
+        );
+        let rustup = ci.find("sh.rustup.rs").expect("a toolchain step");
+        let fdl = ci.find("cargo install --locked").unwrap();
+        let enable = ci.find("systemctl enable --now").unwrap();
+        assert!(rustup < fdl && fdl < enable, "{door:?}: order\n{ci}");
+    }
+    // The release keeps its bootstrap, ahead of everything else.
+    let r = render_cloud_init("b300", "ubuntu", Door::A, yml, key, &FdlInstall::Release);
+    assert!(r.contains("# fdl: the published release"));
+    assert!(!r.contains("cargo install"), "{r}");
+}
+
+/// `--regen --cloud-init` from a dirty build must fail before `--regen`
+/// rotates anything: the farm's live boxes would lose their credentials
+/// for a user-data file that is never written.
+#[test]
+fn a_dirty_build_refuses_cloud_init_before_writing_anything() {
+    let tmp = tempdir();
+    let mut cli = no_flags();
+    cli.label = Some("dirtyfarm".to_string());
+    cli.cloud_init = true;
+    cli.regen = true;
+    cli.yes = true;
+    let Err(why) = wizard_built(&cli, &tmp, &build(Some(SHA), true, None)) else {
+        panic!("a dirty build must refuse --cloud-init");
+    };
+    assert!(why.contains("uncommitted"), "{why}");
+    assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0, "nothing on disk");
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn the_report_names_the_fdl_an_instance_will_run() {
+    let tmp = tempdir();
+    let mut cli = no_flags();
+    cli.label = Some("pinfarm".to_string());
+    cli.cloud_init = true;
+    cli.dry_run = true;
+    let report = wizard_built(&cli, &tmp, &build(Some(SHA), false, None)).unwrap();
+    assert_eq!(report.cloud_init_fdl, Some(pinned()));
+    let human = report.render_human();
+    assert!(
+        human.contains(&format!("commit {SHA} from {REPO}")) && human.contains("push it"),
+        "{human}"
+    );
+    assert_eq!(report.to_json()["cloud_init_fdl"]["commit"], SHA);
+    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
 fn a_root_instance_gets_root_s_actual_home() {
     let yml = "join:\n  token: t\n";
     let key = "k\n";
-    let ci = render_cloud_init("b300", "root", Door::B, yml, key);
+    let ci = render_cloud_init("b300", "root", Door::B, yml, key, &FdlInstall::Release);
     // /home/root exists on no image, so composing the path from the name
     // alone puts the key where sshd will never look for it.
     assert!(ci.contains("path: /root/.ssh/flodl-join"), "got:\n{ci}");
@@ -347,7 +510,7 @@ fn the_worker_yml_speaks_each_doors_dialect() {
     };
     let cli = no_flags();
 
-    let b = render_worker_yml("b300", &ep, "aa".repeat(16).as_str(), Door::B, &cli);
+    let b = render_worker_yml("b300", &ep, "aa".repeat(16).as_str(), Door::B, &cli, "auto");
     assert!(
         b.contains("from: rsync://flodl-join@ctrl:/tree"),
         "got:\n{b}"
@@ -358,20 +521,20 @@ fn the_worker_yml_speaks_each_doors_dialect() {
     assert!(b.contains("libtorch: auto"));
     assert!(b.contains("persist: true"));
 
-    let a = render_worker_yml("b300", &ep, "tok", Door::A, &cli);
+    let a = render_worker_yml("b300", &ep, "tok", Door::A, &cli, "auto");
     assert!(
         a.contains("data_source: sshfs://flodl-join@ctrl:/flodl/data"),
         "got:\n{a}"
     );
     assert!(!a.contains("from: rsync"), "door `a` cannot pull a source");
 
-    let n = render_worker_yml("b300", &ep, "tok", Door::Nologin, &cli);
+    let n = render_worker_yml("b300", &ep, "tok", Door::Nologin, &cli, "auto");
     assert!(!n.contains("data_source:"));
     assert!(!n.contains("from: rsync"));
 
     let mut cli = no_flags();
     cli.gpu_ram_share = Some(0.5);
-    let apu = render_worker_yml("b300", &ep, "tok", Door::B, &cli);
+    let apu = render_worker_yml("b300", &ep, "tok", Door::B, &cli, "auto");
     assert!(apu.contains("gpu_ram_share: 0.5"), "got:\n{apu}");
 }
 
@@ -500,7 +663,10 @@ fn install_needs_explicit_consent() {
     let mut cli = no_flags();
     cli.yes = true; // --yes is NOT consent for a security mutation
     let line = OUR_LINE;
-    match install_authorized_line(&cli, &mut changes, line, 1).unwrap() {
+    match install_authorized_line(&cli, &mut changes, line, None, 1)
+        .unwrap()
+        .0
+    {
         InstallAction::Skipped(why) => {
             assert!(why.contains("--install-key"), "got: {why}")
         }
@@ -509,15 +675,80 @@ fn install_needs_explicit_consent() {
     let mut cli = no_flags();
     cli.no_install_key = true;
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, line, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, line, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Skipped(_),
     ));
     let mut cli = no_flags();
     cli.install_key = true;
     cli.no_install_key = true;
-    assert!(install_authorized_line(&cli, &mut changes, line, 1).is_err());
+    assert!(install_authorized_line(&cli, &mut changes, line, None, 1).is_err());
     // Nothing above got as far as touching the file.
     assert!(changes.entries.is_empty());
+}
+
+const OLD_PUB: &str = "ssh-ed25519 AAAAold flodl-join-b300\n";
+
+#[test]
+fn retiring_a_key_drops_only_the_lines_that_carry_it() {
+    let content = "ssh-ed25519 AAAAforeign a@b\n\
+                   restrict,command=\"rrsync -ro /srv/run\" ssh-ed25519 AAAAold flodl-join-b300\n\
+                   # a comment\n\
+                   ssh-ed25519 AAAAold hand-installed\n\
+                   ssh-ed25519 AAAAtail c@d\n";
+    let (out, n) = retire_key_lines(content, OLD_PUB, OUR_LINE);
+    assert_eq!(n, 2, "both lines carrying the old material go");
+    assert_eq!(
+        out, "ssh-ed25519 AAAAforeign a@b\n# a comment\nssh-ed25519 AAAAtail c@d\n",
+        "everything else stays, in order"
+    );
+
+    // Nothing to drop: byte for byte, even without a trailing newline.
+    let foreign = "ssh-ed25519 AAAAforeign a@b";
+    assert_eq!(
+        retire_key_lines(foreign, OLD_PUB, OUR_LINE),
+        (foreign.to_string(), 0)
+    );
+    // A retired key that parses to nothing retires nothing.
+    assert_eq!(retire_key_lines(content, "garbage", OUR_LINE).1, 0);
+    // Never the material the install is about to write.
+    assert_eq!(
+        retire_key_lines(content, "ssh-ed25519 AAAAour x", OUR_LINE).1,
+        0
+    );
+}
+
+/// A regeneration is a revocation only if the old key's line goes with
+/// the new line's install, in the same rewrite.
+#[test]
+fn a_regenerated_key_replaces_its_predecessor_in_one_rewrite() {
+    let tmp = tempdir();
+    let ak = tmp.join("authorized_keys");
+    let old_line = "restrict,command=\"rrsync -ro /srv/run\" ssh-ed25519 AAAAold flodl-join-b300";
+    fs::write(&ak, format!("ssh-ed25519 AAAAforeign a@b\n{old_line}\n")).unwrap();
+    let mut cli = no_flags();
+    cli.install_key = true;
+    cli.authorized_keys = Some(ak.display().to_string());
+    let mut changes = Changes::new(false);
+
+    let (action, retired) =
+        install_authorized_line(&cli, &mut changes, OUR_LINE, Some(OLD_PUB), 1).unwrap();
+    assert_eq!(action, InstallAction::Installed);
+    assert_eq!(retired, 1);
+    let after = fs::read_to_string(&ak).unwrap();
+    assert_eq!(after, format!("ssh-ed25519 AAAAforeign a@b\n{OUR_LINE}\n"));
+    assert_eq!(after.matches("flodl-join-b300").count(), 1, "one farm line");
+
+    // The new line already present beside a stale old one (a regen that
+    // ran before revocation existed): the old one still goes.
+    fs::write(&ak, format!("{old_line}\n{OUR_LINE}\n")).unwrap();
+    let (action, retired) =
+        install_authorized_line(&cli, &mut changes, OUR_LINE, Some(OLD_PUB), 1).unwrap();
+    assert_eq!(action, InstallAction::AlreadyPresent);
+    assert_eq!(retired, 1);
+    assert_eq!(fs::read_to_string(&ak).unwrap(), format!("{OUR_LINE}\n"));
+    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
@@ -543,7 +774,7 @@ fn a_farms_door_and_controller_survive_a_flagless_rerun() {
         let farm = tempdir();
         fs::create_dir_all(&farm).unwrap();
         let ctrl = Endpoint::parse(Some("op@ctrl.example:2222")).unwrap();
-        let yml = render_worker_yml("f", &ctrl, "tok", door, &no_flags());
+        let yml = render_worker_yml("f", &ctrl, "tok", door, &no_flags(), "auto");
         fs::write(farm.join("worker.yml"), yml).unwrap();
 
         let (got_door, got_ctrl) = recover_shape(&farm).expect("the farm reads back");
@@ -554,6 +785,218 @@ fn a_farms_door_and_controller_survive_a_flagless_rerun() {
         assert_eq!(round.user, "op");
         let _ = fs::remove_dir_all(&farm);
     }
+}
+
+/// The flag's choices are exactly values a worker's `libtorch:` accepts:
+/// a choice prepare refused would render a farm whose every box halts.
+#[test]
+fn every_libtorch_choice_is_one_a_worker_accepts() {
+    use crate::FdlArgsTrait;
+    let schema = JoinConfigArgs::schema();
+    let choices = schema.options["libtorch"]
+        .choices
+        .clone()
+        .expect("--libtorch declares its choices");
+    assert!(!choices.is_empty());
+    for c in choices {
+        let c = c.as_str().expect("string choices");
+        assert!(
+            crate::prepare::parse_libtorch_token(c).is_ok(),
+            "`{c}` is offered but a worker would refuse it"
+        );
+    }
+}
+
+/// A pinned variant reaches the worker yml and survives a re-run that
+/// does not repeat the flag; `auto` keeps its original line.
+#[test]
+fn a_pinned_libtorch_is_rendered_and_recovered() {
+    let ctrl = Endpoint::parse(Some("op@ctrl:2322")).unwrap();
+    let farm = tempdir();
+    fs::create_dir_all(&farm).unwrap();
+    assert!(
+        recover_libtorch(&farm).is_none(),
+        "nothing before a first run"
+    );
+
+    let pinned = render_worker_yml("f", &ctrl, "tok", Door::B, &no_flags(), "rocm7.1");
+    assert!(pinned.contains("  libtorch: rocm7.1 "), "{pinned}");
+    assert!(!pinned.contains("libtorch: auto"), "{pinned}");
+    fs::write(farm.join("worker.yml"), &pinned).unwrap();
+    assert_eq!(recover_libtorch(&farm).as_deref(), Some("rocm7.1"));
+
+    let auto = render_worker_yml("f", &ctrl, "tok", Door::B, &no_flags(), "auto");
+    fs::write(farm.join("worker.yml"), &auto).unwrap();
+    assert_eq!(recover_libtorch(&farm).as_deref(), Some("auto"));
+    let _ = fs::remove_dir_all(&farm);
+}
+
+/// The wizard's order: a flag wins, a flagless re-run keeps what the
+/// farm already declares, and naming `auto` releases a pin. Dry passes
+/// over a seeded farm, so no key is minted.
+#[test]
+fn a_flagless_rerun_keeps_the_farms_libtorch() {
+    let tmp = tempdir();
+    let ctrl = Endpoint::parse(Some("op@ctrl:2322")).unwrap();
+    let mut cli = no_flags();
+    cli.label = Some("pinlt".to_string());
+    cli.dry_run = true;
+
+    cli.libtorch = Some("rocm7.1".to_string());
+    let flagged = wizard_at(&cli, &tmp).unwrap();
+    assert!(
+        flagged.worker_yml.contains("libtorch: rocm7.1"),
+        "{}",
+        flagged.worker_yml
+    );
+
+    let farm = tmp.join(".fdl").join("pinlt");
+    fs::create_dir_all(&farm).unwrap();
+    let prior = render_worker_yml("pinlt", &ctrl, "tok", Door::B, &no_flags(), "rocm7.1");
+    fs::write(farm.join("worker.yml"), prior).unwrap();
+
+    cli.libtorch = None;
+    let kept = wizard_at(&cli, &tmp).unwrap();
+    assert!(
+        kept.worker_yml.contains("libtorch: rocm7.1"),
+        "{}",
+        kept.worker_yml
+    );
+
+    cli.libtorch = Some("auto".to_string());
+    let released = wizard_at(&cli, &tmp).unwrap();
+    assert!(
+        released.worker_yml.contains("libtorch: auto"),
+        "{}",
+        released.worker_yml
+    );
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+/// A regen of a root-login farm without `--cloud-init-user` used to
+/// re-render the user-data for `ubuntu`, which on such an image owns
+/// nothing and has no home. The user now comes back from the farm.
+#[test]
+fn a_flagless_rerun_keeps_the_cloud_init_user() {
+    let farm = tempdir();
+    fs::create_dir_all(&farm).unwrap();
+    assert!(
+        recover_cloud_init_user(&farm).is_none(),
+        "nothing before a first run"
+    );
+    let ci = render_cloud_init("f", "root", Door::B, "join:\n", "k\n", &FdlInstall::Release);
+    fs::write(farm.join("cloud-init.yml"), ci).unwrap();
+    assert_eq!(recover_cloud_init_user(&farm).as_deref(), Some("root"));
+    let _ = fs::remove_dir_all(&farm);
+
+    // End to end, over a farm whose key already exists (so no
+    // ssh-keygen is needed): the second pass names no user and still
+    // renders for root.
+    let tmp = tempdir();
+    let keys = tmp.join(".fdl").join("rootfarm").join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    fs::write(keys.join(KEY_NAME), "PRIVATE\n").unwrap();
+    fs::write(
+        keys.join(KEY_NAME).with_extension("pub"),
+        "ssh-ed25519 AAAA test\n",
+    )
+    .unwrap();
+    let mut cli = no_flags();
+    cli.label = Some("rootfarm".to_string());
+    cli.controller = Some("op@ctrl:2322".to_string());
+    cli.cloud_init = true;
+    cli.yes = true;
+    cli.no_install_key = true;
+    let clean = build(Some(SHA), false, None);
+    cli.cloud_init_user = Some("root".to_string());
+    wizard_built(&cli, &tmp, &clean).unwrap();
+    cli.cloud_init_user = None;
+    let report = wizard_built(&cli, &tmp, &clean).unwrap();
+    let written = fs::read_to_string(report.cloud_init_path.unwrap()).unwrap();
+    assert!(written.contains("User=root"), "{written}");
+    assert!(!written.contains("/home/ubuntu"), "{written}");
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+/// A farm whose key already exists, so a pass needs no ssh-keygen.
+fn seeded_farm(label: &str) -> PathBuf {
+    let tmp = tempdir();
+    let keys = tmp.join(".fdl").join(label).join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    fs::write(keys.join(KEY_NAME), "PRIVATE\n").unwrap();
+    fs::write(keys.join(KEY_NAME).with_extension("pub"), OLD_PUB).unwrap();
+    tmp
+}
+
+/// The wiring half of revocation: the old public key is read before the
+/// regeneration replaces it, and the report says what became of it
+/// instead of asserting it. Dry, so no ssh-keygen and nothing written.
+#[test]
+fn a_dry_regen_names_the_old_keys_lines_it_would_remove() {
+    let tmp = seeded_farm("regenfarm");
+    let ak = tmp.join("authorized_keys");
+    let old_line = "restrict,command=\"rrsync -ro /srv/run\" ssh-ed25519 AAAAold flodl-join-b300";
+    fs::write(&ak, format!("{old_line}\n")).unwrap();
+    let mut cli = no_flags();
+    cli.label = Some("regenfarm".to_string());
+    cli.controller = Some("op@ctrl:2322".to_string());
+    cli.dry_run = true;
+    cli.regen = true;
+    cli.install_key = true;
+    cli.authorized_keys = Some(ak.display().to_string());
+
+    let report = wizard_at(&cli, &tmp).unwrap();
+    assert_eq!(report.key_action, KeyAction::Regenerated);
+    assert_eq!(report.retired_lines, 1);
+    let human = report.render_human();
+    assert!(
+        human.contains("old key:   would be removed from authorized_keys (1 line(s))"),
+        "{human}"
+    );
+    assert!(
+        !human.contains("no longer admits"),
+        "a dry run claims nothing: {human}"
+    );
+    assert_eq!(fs::read_to_string(&ak).unwrap(), format!("{old_line}\n"));
+
+    // Without the install, the report says the old key still admits.
+    cli.install_key = false;
+    let human = wizard_at(&cli, &tmp).unwrap().render_human();
+    assert!(human.contains("still admits until removed"), "{human}");
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+/// The token admits a worker as surely as the key, so every file holding
+/// it ends an apply at 0600, including one an earlier pass left lax.
+#[cfg(unix)]
+#[test]
+fn every_file_holding_the_token_ends_an_apply_at_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = seeded_farm("modefarm");
+    let mut cli = no_flags();
+    cli.label = Some("modefarm".to_string());
+    cli.controller = Some("op@ctrl:2322".to_string());
+    cli.cloud_init = true;
+    cli.yes = true;
+    cli.no_install_key = true;
+    let clean = build(Some(SHA), false, None);
+    let report = wizard_built(&cli, &tmp, &clean).unwrap();
+    let secrets = [
+        report.overlay_path.clone(),
+        report.worker_yml_path.clone(),
+        report.cloud_init_path.clone().unwrap(),
+    ];
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    for p in &secrets {
+        assert_eq!(mode(p), 0o600, "{}", p.display());
+        fs::set_permissions(p, fs::Permissions::from_mode(0o664)).unwrap();
+    }
+    // A flagless rerun changes no content and still tightens them.
+    wizard_built(&cli, &tmp, &clean).unwrap();
+    for p in &secrets {
+        assert_eq!(mode(p), 0o600, "{}", p.display());
+    }
+    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
@@ -575,12 +1018,14 @@ fn an_authorized_keys_path_under_etc_ssh_is_refused() {
     cli.install_key = true;
     cli.authorized_keys = Some("/etc/ssh/authorized_keys.d/op".to_string());
     let mut changes = Changes::new(false);
-    let err = install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", 22).unwrap_err();
+    let err =
+        install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", None, 22).unwrap_err();
     assert!(err.contains("system sshd configuration"), "got: {err}");
     assert!(err.contains("by hand"), "names the way out: {err}");
     // The dry half keeps the same promise.
     cli.dry_run = true;
-    let err = install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", 22).unwrap_err();
+    let err =
+        install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", None, 22).unwrap_err();
     assert!(err.contains("system sshd configuration"), "got: {err}");
 }
 
@@ -835,7 +1280,7 @@ fn a_dry_run_over_an_existing_farm_reports_reuse_and_keeps_content() {
     let ctrl = Endpoint::parse(Some("op@ctrl.example:2222")).unwrap();
     let mut cli = no_flags();
     cli.label = Some(label.to_string());
-    let worker = render_worker_yml(label, &ctrl, token, Door::B, &cli);
+    let worker = render_worker_yml(label, &ctrl, token, Door::B, &cli, "auto");
     fs::write(farm.join("worker.yml"), &worker).unwrap();
 
     cli.dry_run = true;
@@ -925,25 +1370,33 @@ fn a_dry_install_verdict_reads_the_file_and_never_writes_it() {
     let mut changes = Changes::new(true);
     // Identical line → already present.
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, OUR_LINE, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, OUR_LINE, None, 1)
+            .unwrap()
+            .0,
         InstallAction::AlreadyPresent,
     ));
     // Same key, different options → would replace.
     let other_opts = OUR_LINE.replace("restrict,", "");
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, &other_opts, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, &other_opts, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Replaced,
     ));
     // A placeholder key (an apply would mint it) → would append.
     let placeholder_line = format!("restrict {PLACEHOLDER_PUB}");
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, &placeholder_line, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, &placeholder_line, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Installed,
     ));
     // Without consent flags the dry verdict is the same skip as ever.
     cli.install_key = false;
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, OUR_LINE, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, OUR_LINE, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Skipped(_),
     ));
     assert_eq!(fs::read_to_string(&ak).unwrap(), before, "dry run wrote");
@@ -969,7 +1422,7 @@ fn farm_enumeration_unions_overlays_and_dirs_and_skips_non_farms() {
     let ctrl = Endpoint::parse(Some("op@ctrl.example:2222")).unwrap();
     fs::write(
         full.join("worker.yml"),
-        render_worker_yml("full", &ctrl, "tok", Door::A, &no_flags()),
+        render_worker_yml("full", &ctrl, "tok", Door::A, &no_flags(), "auto"),
     )
     .unwrap();
     fs::write(
@@ -1049,4 +1502,43 @@ fn the_self_test_probe_is_one_rrsync_does_not_whitelist() {
         "rrsync whitelists `true`: {probe}"
     );
     let _ = fs::remove_dir_all(&tmp);
+}
+
+/// An active host firewall is a stated obligation, never a pass: the
+/// allow rule is root-readable only and a self-dial rides the loopback
+/// exemption, so a green here would be the exact false comfort that
+/// hid a dropped door port behind an empty auth journal. The fix
+/// follows the detected firewall, not the platform family.
+#[test]
+fn an_active_host_firewall_is_an_obligation_with_its_own_managers_fix() {
+    let ufw = super::preflight::firewall_check("ufw", 2322);
+    assert!(!ufw.ok);
+    assert_eq!(ufw.fix.as_deref(), Some("sudo ufw allow 2322/tcp"));
+    assert!(ufw.what.contains("prove it from outside"), "{}", ufw.what);
+    assert!(ufw.what.contains("loopback"), "{}", ufw.what);
+
+    let fwd = super::preflight::firewall_check("firewalld", 2322);
+    assert!(!fwd.ok);
+    let fix = fwd.fix.as_deref().unwrap();
+    assert!(
+        fix.contains("firewall-cmd") && fix.contains("--add-port=2322/tcp"),
+        "{fix}"
+    );
+
+    // A raw ruleset service gets no fabricated one-liner: the rules are
+    // unknown, so the honest fix is none at all.
+    let nft = super::preflight::firewall_check("the nftables ruleset service", 2322);
+    assert!(!nft.ok);
+    assert!(nft.fix.is_none(), "{:?}", nft.fix);
+
+    // The layers that are not port-scoped still carry an honest fix:
+    // app-scoped on macOS, host-side PowerShell for a WSL2 guest.
+    let mac = super::preflight::firewall_check("the macOS application firewall", 2322);
+    assert!(mac.fix.as_deref().unwrap().contains("socketfilterfw"));
+    let wsl = super::preflight::firewall_check("the Windows host firewall (WSL2)", 2322);
+    let fix = wsl.fix.as_deref().unwrap();
+    assert!(
+        fix.contains("portproxy") && fix.contains("Windows host"),
+        "{fix}"
+    );
 }

@@ -9,15 +9,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::build_info::{self, BuildInfo};
 use crate::builtins::JoinConfigArgs;
 use crate::context::home_dir;
 use crate::util::platform;
 
 use super::authorized_keys::{install_authorized_line, set_mode};
-use super::cloud_init::{docker_services, render_cloud_init};
+use super::cloud_init::{docker_services, fdl_install, render_cloud_init};
 use super::credentials::{
-    command_hint, confirm, ensure_key, ensure_overlay, foreign_identity_warning, recover_shape,
-    resolve_label, validate_label,
+    command_hint, confirm, ensure_key, ensure_overlay, foreign_identity_warning,
+    recover_cloud_init_user, recover_libtorch, recover_shape, resolve_label, validate_label,
 };
 use super::preflight::preflight;
 use super::publish_recipe::{derive_publish, freshness_report, render_publish_block};
@@ -25,8 +26,8 @@ use super::render::{
     authorized_keys_line, render_notes, render_sshd_conf, render_worker_yml, sshd_match_block,
 };
 use super::{
-    ChangeKind, Changes, Door, Endpoint, KEY_NAME, KeyAction, PLACEHOLDER_PRIVATE, PLACEHOLDER_PUB,
-    Report, SERVED_SUBDIR,
+    ChangeKind, Changes, Door, Endpoint, KEY_NAME, KeyAction, OverlayAction, PLACEHOLDER_PRIVATE,
+    PLACEHOLDER_PUB, Report, SERVED_SUBDIR,
 };
 
 pub(super) fn wizard(cli: &JoinConfigArgs) -> Result<Report, String> {
@@ -37,8 +38,26 @@ pub(super) fn wizard(cli: &JoinConfigArgs) -> Result<Report, String> {
 /// The whole pass from an explicit working directory — what [`wizard`]
 /// resolves for real invocations and what tests pin.
 pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, String> {
+    wizard_built(cli, cwd, &build_info::current())
+}
+
+/// [`wizard_at`] with the configuring fdl's identity given rather than
+/// read from this binary, so tests can pin a dirty or pinned build.
+pub(super) fn wizard_built(
+    cli: &JoinConfigArgs,
+    cwd: &Path,
+    build: &BuildInfo,
+) -> Result<Report, String> {
     let label = resolve_label(cli)?;
     validate_label(&label)?;
+    // Decided before anything is written: a refusal after `--regen` had
+    // rotated the farm's credentials would cut off its live boxes for a
+    // user-data file that never got written.
+    let fdl = if cli.cloud_init {
+        Some(fdl_install(build, env!("CARGO_PKG_REPOSITORY"))?)
+    } else {
+        None
+    };
     let mut changes = Changes::new(cli.dry_run);
     // Door and controller are resolved after the farm dir is known: an
     // existing farm's own answers are better defaults than the flag
@@ -111,7 +130,14 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
 
     // ── Keys ────────────────────────────────────────────────────────────
     let key_path = keys_dir.join(KEY_NAME);
+    // Read before `ensure_key` can replace it: a regeneration retires the
+    // old key's authorized_keys line, and only its material identifies it.
+    let old_pub = fs::read_to_string(key_path.with_extension("pub")).ok();
     let key_action = ensure_key(cli, &mut changes, &key_path, &label)?;
+    let retire = match key_action {
+        KeyAction::Regenerated => old_pub.as_deref(),
+        KeyAction::Generated | KeyAction::Reused => None,
+    };
     // A dry run mints nothing, so wherever the (re)generated key would
     // appear, a placeholder appears instead.
     let pub_line =
@@ -145,6 +171,9 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
         &root,
         cmd_hint.as_deref(),
     )?;
+    if overlay_action != OverlayAction::SnippetPrinted {
+        secret_mode(cli, &overlay_path)?;
+    }
 
     // A yml-referenced identity outside the farm dir is a key shared
     // with something else — legal, but exactly the reuse a per-farm key
@@ -175,9 +204,15 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
     };
 
     // ── Worker yml ──────────────────────────────────────────────────────
-    let worker_yml = render_worker_yml(&label, &controller, &token, door, cli);
+    let libtorch = cli
+        .libtorch
+        .clone()
+        .or_else(|| recover_libtorch(&farm_dir))
+        .unwrap_or_else(|| "auto".to_string());
+    let worker_yml = render_worker_yml(&label, &controller, &token, door, cli, &libtorch);
     let worker_yml_path = farm_dir.join("worker.yml");
     changes.write(&worker_yml_path, &worker_yml, "worker fdl.yml")?;
+    secret_mode(cli, &worker_yml_path)?;
 
     // ── Install notes ───────────────────────────────────────────────────
     let notes_path = farm_dir.join("install-notes.md");
@@ -197,11 +232,17 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
     let services = docker_services(&root, &label);
 
     // ── The install offer ───────────────────────────────────────────────
-    let install = install_authorized_line(cli, &mut changes, &authorized_line, controller.port)?;
+    let (install, retired_lines) =
+        install_authorized_line(cli, &mut changes, &authorized_line, retire, controller.port)?;
 
     // ── cloud-init (opt-in) ─────────────────────────────────────────────
-    let cloud_init_path = if cli.cloud_init {
-        let user = cli.cloud_init_user.as_deref().unwrap_or("ubuntu");
+    let cloud_init_path = if let Some(fdl) = &fdl {
+        let user = cli
+            .cloud_init_user
+            .clone()
+            .or_else(|| recover_cloud_init_user(&farm_dir))
+            .unwrap_or_else(|| "ubuntu".to_string());
+        let user = user.as_str();
         let private_key =
             if cli.dry_run && matches!(key_action, KeyAction::Generated | KeyAction::Regenerated) {
                 PLACEHOLDER_PRIVATE.to_string()
@@ -209,12 +250,10 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
                 fs::read_to_string(&key_path)
                     .map_err(|e| format!("cannot read the private key for cloud-init: {e}"))?
             };
-        let content = render_cloud_init(&label, user, door, &worker_yml, &private_key);
+        let content = render_cloud_init(&label, user, door, &worker_yml, &private_key, fdl);
         let path = farm_dir.join("cloud-init.yml");
-        let kind = changes.write(&path, &content, "cloud-init user-data (SECRET)")?;
-        if !cli.dry_run && kind != ChangeKind::Unchanged {
-            set_mode(&path, 0o600)?;
-        }
+        changes.write(&path, &content, "cloud-init user-data (SECRET)")?;
+        secret_mode(cli, &path)?;
         Some(path)
     } else {
         None
@@ -240,7 +279,9 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
         notes_path,
         controller,
         install,
+        retired_lines,
         cloud_init_path,
+        cloud_init_fdl: fdl,
         checks,
         sshd_conf_path,
         plat,
@@ -249,4 +290,16 @@ pub(super) fn wizard_at(cli: &JoinConfigArgs, cwd: &Path) -> Result<Report, Stri
         dry_run: cli.dry_run,
         changes: changes.entries,
     })
+}
+
+/// Every file carrying the admission token leaves an apply at 0600,
+/// whatever an earlier pass or the umask made it: the token admits a
+/// worker as surely as the key does. Applied on every apply rather than
+/// only when the content changed, so a farm written before this rule
+/// is tightened by its next pass.
+fn secret_mode(cli: &JoinConfigArgs, path: &Path) -> Result<(), String> {
+    if cli.dry_run {
+        return Ok(());
+    }
+    set_mode(path, 0o600)
 }

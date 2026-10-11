@@ -14,8 +14,10 @@
 //! - `MultiheadAttention` carries projection biases (the reference has
 //!   none; ~37k params on ~190M, negligible);
 //! - train data = the leading slice of one olmo-mix books shard (see
-//!   `download::OLMO_TRAIN_BYTES`), eval = OLMo's C4-en validation
-//!   shard, so eval is a held-out-domain CE loss.
+//!   `download::OLMO_TRAIN_BYTES`); eval = `--olmo-eval out-of-domain`
+//!   (default): OLMo's C4-en validation shard, web text; or `in-domain`: a
+//!   held-out slice of the same books shard at a fixed offset (see
+//!   `download::OLMO_IN_DOMAIN_EVAL_OFFSET`). Either way eval is a CE loss.
 
 use std::sync::Arc;
 
@@ -28,9 +30,11 @@ use flodl::nn::{
 };
 use flodl::tensor::{DType, Device, Result, Tensor, TensorOptions};
 
-use super::{DatasetConfig, ModelDef};
+use super::{DatasetConfig, ModelDef, OlmoEval};
 use crate::config::ModelDefaults;
-use crate::download::{ensure_olmo_eval, ensure_olmo_train, OLMO_TRAIN_BYTES};
+use crate::download::{
+    ensure_olmo_in_domain_eval, ensure_olmo_eval, ensure_olmo_train, OLMO_TRAIN_BYTES,
+};
 
 // `pub(super)` so `olmo_graph` builds from the SAME numbers rather than its
 // own copy. A parity claim between the two arms is only worth anything if a
@@ -74,7 +78,8 @@ pub fn def() -> ModelDef {
             ))
         }),
         reference: "OLMo-150M tiny config, self-controlled vs the PyTorch arm \
-                    (no published tiny curves); eval = C4-en val CE loss \
+                    (no published tiny curves); eval = held-out CE loss, C4-en \
+                    by default or the training shard with --olmo-eval in-domain \
                     ([OLMo](https://github.com/allenai/OLMo), configs/tiny)",
         eval_higher_is_better: false,
         published_eval: None,
@@ -180,7 +185,14 @@ pub(super) fn make_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>>
 }
 
 pub(super) fn make_eval_dataset(cfg: &DatasetConfig) -> Result<Arc<dyn BatchDataSet>> {
-    let shard = ensure_olmo_eval(&cfg.data_dir)?;
+    let shard = match cfg.olmo_eval {
+        OlmoEval::OutOfDomain => ensure_olmo_eval(&cfg.data_dir)?,
+        // Disjointness is checked against the SAME corpus derivation the
+        // ranks stage from, so the check and the staging cannot disagree.
+        OlmoEval::InDomain => {
+            ensure_olmo_in_domain_eval(&cfg.data_dir, resolve_train_corpus(cfg).bytes)?
+        }
+    };
     Ok(Arc::new(TokenShards::open_raw(&[shard], TokenDtype::U16, SEQ_LEN)?))
 }
 
@@ -195,7 +207,8 @@ pub(super) fn train_step(model: &dyn Module, batch: &[Tensor]) -> Result<Variabl
     flodl::cross_entropy_loss(&flat_pred, &flat_target)
 }
 
-/// Held-out C4-en CE loss (lower is better; exp(this) = perplexity).
+/// Held-out CE loss on the selected eval text (lower is better; exp(this)
+/// = perplexity).
 pub(super) fn eval_loss(model: &dyn Module, batch: &[Tensor]) -> Result<f64> {
     train_step(model, batch)?.item()
 }
@@ -332,7 +345,7 @@ impl Module for Olmo {
 #[cfg(test)]
 mod corpus_tests {
     use super::*;
-    use crate::models::DataSource;
+    use crate::models::{DataSource, OlmoEval};
 
     fn cfg(train_tokens: Option<u64>, epoch_splits: usize, batch_size: usize) -> DatasetConfig {
         DatasetConfig {
@@ -342,6 +355,7 @@ mod corpus_tests {
             pool_size: 0,
             data_source: DataSource::Ram,
             train_tokens,
+            olmo_eval: OlmoEval::OutOfDomain,
             epoch_splits,
             batch_size,
         }

@@ -67,3 +67,27 @@ cluster:
 # across hosts). Tests want the topology as DATA, not as a dispatch
 # directive -- `discover_test_cluster()` reads
 # `FLODL_TESTING_CLUSTER_JSON` and constructs its own coord/workers.
+
+# Optional: an env-local NCCL smoke that SHADOWS the base `gpu-test-nccl`
+# under `fdl @cluster-test gpu-test-nccl` (same name = override for this
+# env). Build on the orchestrator, ssh-dispatch to the 2-GPU host so the
+# trainer auto-promotes to process-per-rank NCCL. Adjust host, libtorch
+# variant and paths to your rig.
+commands:
+  gpu-test-nccl:
+    description: 2-GPU process-per-rank NCCL smoke (ddp-bench mlp/nccl-sync)
+    run: |
+      set -eo pipefail
+      docker compose run --rm \
+        -e LIBTORCH_PATH=/workspace/libtorch/<variant> \
+        -e CARGO_TARGET_DIR=/workspace/target/cluster/<host> \
+        cuda bash -c 'cd ddp-bench && cargo build --release --features cuda' 2>&1 \
+        | grep -E "Compiling|Finished|error" | tail -15
+      BIN=target/cluster/<host>/release/ddp-bench
+      [ -f "$BIN" ] || { echo "ERROR: ddp-bench not built at $BIN"; exit 1; }
+      ssh <host> "cd /opt/flodl && \
+        LD_LIBRARY_PATH=/opt/flodl/libtorch/<variant>/lib \
+        timeout --signal=KILL 240 ./${BIN} \
+          --model mlp --mode nccl-sync --epochs 1 --batch-size 256 \
+          --gpus all --data-dir /opt/flodl/ddp-bench/data --output /tmp/ddp-smoke"
+    docker: ~          # ssh dispatch — no docker wrapping on the orchestrator side

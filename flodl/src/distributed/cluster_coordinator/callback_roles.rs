@@ -81,11 +81,14 @@ impl ClusterCoordinator {
     /// from any rank): lowest-index live rank.
     ///
     /// Sticky semantics: callers retain the previously-resolved value
-    /// across cadences and consult this method only on (a) initial
-    /// resolution and (b) re-resolution after a role rank dies. ElChe
-    /// drift between resolutions does not bounce the role around — by
-    /// design, since checkpoint / eval / epoch_fn want a stable
-    /// assignee (callbacks may stash thread-local state).
+    /// across cadences and consult this method only (a) once, when ElChe's
+    /// first calibration gives "fastest" a meaning
+    /// ([`Self::elect_callback_roles_on_calibration`]), and (b) after a
+    /// role rank dies. Before (a) the roles sit on the lowest rank, which is
+    /// whoever was admitted first. ElChe drift between resolutions does not
+    /// bounce the role around — by design, since checkpoint / eval /
+    /// epoch_fn want a stable assignee (callbacks may stash thread-local
+    /// state).
     pub(super) fn resolve_fastest_role(&self) -> usize {
         let mut best: Option<(usize, f64)> = None;
         for r in 0..self.world_size {
@@ -116,7 +119,8 @@ impl ClusterCoordinator {
     /// Re-resolve all three role-rank fields against the current live-
     /// rank set + ElChe state, marking the epoch role dirty if it
     /// changed so the next dispatch broadcasts the update. Called on
-    /// rank death + after the first calibrated ElChe sample. No-op for
+    /// rank death; the first-calibration election is
+    /// [`Self::elect_callback_roles_on_calibration`]. No-op for
     /// `Rank(n)` policy — the static rank stays put even after death
     /// (the rank-targeted dispatch to a dead rank will fail loudly
     /// rather than silently re-route, matching the user's "controller
@@ -140,6 +144,50 @@ impl ClusterCoordinator {
         }
         if self.epoch_callback_role != prev_epoch && self.epoch_callback_role != usize::MAX {
             self.epoch_role_dirty = true;
+        }
+    }
+
+    /// Elect the three callback roles on pace, once, when ElChe's first
+    /// calibration lands. Until then `Fastest` can only mean the lowest
+    /// rank, i.e. whoever was admitted first, and without this election it
+    /// stayed there for the whole run: a slow box that won the dial race
+    /// ran every eval and checkpoint at its own pace, and when it was also
+    /// the anchor rank every window stretched with it (measured 2026-09-20
+    /// on a 3-rank cohort: 3x per eval, +22% wall). No-op for `Rank(n)`,
+    /// which pins the roles by definition. The epoch role is marked dirty
+    /// when it moves so the next dispatch broadcasts it; the eval and
+    /// checkpoint roles are read at dispatch time and need no broadcast.
+    /// An eval armed for the previous role still fires there, once.
+    pub(super) fn elect_callback_roles_on_calibration(&mut self) {
+        if !matches!(
+            self.epoch_callback_policy,
+            crate::distributed::ddp_run::EpochCallbackPolicy::Fastest
+        ) {
+            return;
+        }
+        let fastest = self.resolve_fastest_role();
+        if fastest == usize::MAX {
+            return;
+        }
+        let prev = (
+            self.checkpoint_role,
+            self.eval_role,
+            self.epoch_callback_role,
+        );
+        self.checkpoint_role = fastest;
+        self.eval_role = fastest;
+        if self.epoch_callback_role != fastest {
+            self.epoch_callback_role = fastest;
+            self.epoch_role_dirty = true;
+        }
+        if prev != (fastest, fastest, fastest) {
+            crate::verbose!(
+                "  ddp: callback roles elected on pace: rank {fastest} \
+                 (checkpoint/eval/epoch_fn were ranks {}/{}/{})",
+                prev.0,
+                prev.1,
+                prev.2,
+            );
         }
     }
 
@@ -270,6 +318,21 @@ impl ClusterCoordinator {
             Some(prev) => alpha * elapsed_ms + (1.0 - alpha) * prev,
             None => elapsed_ms,
         });
+        // One line per eval at the verbose tier: which rank scored it, what
+        // it read, what it cost that rank, and the cohort's step count at
+        // the reduce it scored. The epoch tag is where the eval was ARMED;
+        // on the CPU path it fires at the next realized reduce, which can
+        // sit well inside the following epoch, so the step is the eval's
+        // true position on a curve and the tag is only its slot in the log.
+        crate::verbose!(
+            "  ddp: eval (epoch {epoch}) on rank {rank}: {} in {elapsed_ms:.0}ms at step {}",
+            if error.is_some() {
+                "error".to_string()
+            } else {
+                format!("{metric:.4}")
+            },
+            self.global_step,
+        );
         // User-facing dispatch: fire `eval_result_fn` on success; log
         // and continue on failure. Errors from the closure are logged
         // and training continues, matching `metrics_fn`'s

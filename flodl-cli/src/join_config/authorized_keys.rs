@@ -37,17 +37,25 @@ pub(super) enum InstallAction {
 /// notes). The friction this removes is real: the composed guardrail
 /// line is the artifact most likely to be mangled by hand, by exactly
 /// the audience least equipped to debug an sshd refusal.
+///
+/// `retire` is the farm's previous public key after a regeneration:
+/// every line carrying it goes in the same atomic rewrite, which is what
+/// makes a regeneration a revocation. Identity being the key material,
+/// the new line alone would be appended beside the old one, and the
+/// retired key would keep admitting. Returns the action and how many
+/// retired lines were (or, dry, would be) removed.
 pub(super) fn install_authorized_line(
     cli: &JoinConfigArgs,
     changes: &mut Changes,
     line: &str,
+    retire: Option<&str>,
     sshd_port: u16,
-) -> Result<InstallAction, String> {
+) -> Result<(InstallAction, usize), String> {
     if cli.install_key && cli.no_install_key {
         return Err("--install-key and --no-install-key contradict each other".into());
     }
     if cli.dry_run {
-        return dry_install_verdict(cli, changes, line);
+        return dry_install_verdict(cli, changes, line, retire);
     }
     // Consent to touch authorized_keys is EXPLICIT: the tty prompt or
     // `--install-key`. `--yes` deliberately does not count — it accepts
@@ -57,8 +65,11 @@ pub(super) fn install_authorized_line(
     } else if cli.no_install_key {
         false
     } else if cli.yes || !prompt::has_tty() {
-        return Ok(InstallAction::Skipped(
-            "installing needs explicit consent: the prompt, or --install-key".to_string(),
+        return Ok((
+            InstallAction::Skipped(
+                "installing needs explicit consent: the prompt, or --install-key".to_string(),
+            ),
+            0,
         ));
     } else {
         prompt::ask_yn(
@@ -69,7 +80,7 @@ pub(super) fn install_authorized_line(
         )
     };
     if !wanted {
-        return Ok(InstallAction::Skipped("declined".to_string()));
+        return Ok((InstallAction::Skipped("declined".to_string()), 0));
     }
 
     // Default: the invoking user's own file. `--authorized-keys` names a
@@ -144,14 +155,18 @@ pub(super) fn install_authorized_line(
         String::new()
     };
 
+    let (content, retired) = match retire {
+        Some(old) => retire_key_lines(&content, old, line),
+        None => (content, 0),
+    };
     let (new_content, outcome) = upsert_authorized_line(&content, line)?;
-    if outcome == UpsertOutcome::Identical {
+    if outcome == UpsertOutcome::Identical && retired == 0 {
         changes.note(
             &ak_path,
             ChangeKind::Unchanged,
             "authorized_keys (wizard's line)",
         );
-        return Ok(InstallAction::AlreadyPresent);
+        return Ok((InstallAction::AlreadyPresent, 0));
     }
     if outcome == UpsertOutcome::Replaced {
         let confirmed = cli.install_key
@@ -162,8 +177,11 @@ pub(super) fn install_authorized_line(
                     true,
                 ));
         if !confirmed {
-            return Ok(InstallAction::Skipped(
-                "the key is present with different options; left alone".to_string(),
+            return Ok((
+                InstallAction::Skipped(
+                    "the key is present with different options; left alone".to_string(),
+                ),
+                0,
             ));
         }
     }
@@ -204,11 +222,13 @@ pub(super) fn install_authorized_line(
         );
     }
 
-    Ok(match outcome {
+    let action = match outcome {
         UpsertOutcome::Appended => InstallAction::Installed,
         UpsertOutcome::Replaced => InstallAction::Replaced,
-        UpsertOutcome::Identical => unreachable!("handled above"),
-    })
+        // Reached only when retired lines changed the file around it.
+        UpsertOutcome::Identical => InstallAction::AlreadyPresent,
+    };
+    Ok((action, retired))
 }
 
 /// The `--dry-run` half of the install offer: decide consent from the
@@ -218,15 +238,21 @@ pub(super) fn dry_install_verdict(
     cli: &JoinConfigArgs,
     changes: &mut Changes,
     line: &str,
-) -> Result<InstallAction, String> {
+    retire: Option<&str>,
+) -> Result<(InstallAction, usize), String> {
     if cli.no_install_key {
-        return Ok(InstallAction::Skipped(
-            "declined (--no-install-key)".to_string(),
+        return Ok((
+            InstallAction::Skipped("declined (--no-install-key)".to_string()),
+            0,
         ));
     }
     if !cli.install_key {
-        return Ok(InstallAction::Skipped(
-            "installing needs explicit consent: the prompt on apply, or --install-key".to_string(),
+        return Ok((
+            InstallAction::Skipped(
+                "installing needs explicit consent: the prompt on apply, or --install-key"
+                    .to_string(),
+            ),
+            0,
         ));
     }
     let ak_path = match cli.authorized_keys.as_deref() {
@@ -253,24 +279,34 @@ pub(super) fn dry_install_verdict(
     } else {
         ChangeKind::Create
     };
-    // A key an apply would mint cannot be compared against the file
-    // yet; the apply would append its fresh line.
-    if line.contains(PLACEHOLDER_PUB) {
-        changes.note(&ak_path, kind, "authorized_keys (wizard's line)");
-        return Ok(InstallAction::Installed);
-    }
     let content = if exists {
         fs::read_to_string(&ak_path)
             .map_err(|e| format!("cannot read {}: {e}", ak_path.display()))?
     } else {
         String::new()
     };
+    // The retired key is on disk until an apply replaces it, so a dry run
+    // can count its lines exactly.
+    let (content, retired) = match retire {
+        Some(old) => retire_key_lines(&content, old, line),
+        None => (content, 0),
+    };
+    // A key an apply would mint cannot be compared against the file
+    // yet; the apply would append its fresh line.
+    if line.contains(PLACEHOLDER_PUB) {
+        changes.note(&ak_path, kind, "authorized_keys (wizard's line)");
+        return Ok((InstallAction::Installed, retired));
+    }
     let (_, outcome) = upsert_authorized_line(&content, line)?;
-    Ok(match outcome {
+    let action = match outcome {
         UpsertOutcome::Identical => {
             changes.note(
                 &ak_path,
-                ChangeKind::Unchanged,
+                if retired == 0 {
+                    ChangeKind::Unchanged
+                } else {
+                    ChangeKind::Update
+                },
                 "authorized_keys (wizard's line)",
             );
             InstallAction::AlreadyPresent
@@ -287,7 +323,35 @@ pub(super) fn dry_install_verdict(
             changes.note(&ak_path, kind, "authorized_keys (wizard's line)");
             InstallAction::Installed
         }
-    })
+    };
+    Ok((action, retired))
+}
+
+/// Drop every line carrying the key material of `retired_pub` (a `.pub`
+/// file's line), returning the rest and how many lines went. A key that
+/// parses to nothing, or to the material `keep` installs, retires
+/// nothing. With nothing to drop the content comes back byte for byte.
+pub(super) fn retire_key_lines(content: &str, retired_pub: &str, keep: &str) -> (String, usize) {
+    let Some(old) = key_material(retired_pub) else {
+        return (content.to_string(), 0);
+    };
+    if key_material(keep) == Some(old) {
+        return (content.to_string(), 0);
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut dropped = 0;
+    for existing in content.lines() {
+        if key_material(existing) == Some(old) {
+            dropped += 1;
+        } else {
+            out.push_str(existing);
+            out.push('\n');
+        }
+    }
+    if dropped == 0 {
+        return (content.to_string(), 0);
+    }
+    (out, dropped)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

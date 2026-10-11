@@ -274,6 +274,12 @@ pub struct JoinConfigArgs {
     /// (APU fleets; discrete GPUs ignore it).
     #[option]
     pub gpu_ram_share: Option<f64>,
+    /// libtorch variant the workers acquire (default: what the farm
+    /// already declares, else `auto`, which routes on each box's own
+    /// devices). Pin one to match a known image's runtime exactly, e.g.
+    /// `rocm7.1` on a ROCm 7.1 host.
+    #[option(choices = &["auto", "cpu", "cu126", "cu128", "rocm7.0", "rocm7.1"])]
+    pub libtorch: Option<String>,
     /// Regenerate credentials (key and token) without asking. Workers
     /// holding the old ones stop being admitted.
     #[option]
@@ -291,8 +297,9 @@ pub struct JoinConfigArgs {
     #[option]
     pub cloud_init: bool,
     /// The instance user the cloud-init variant provisions for
-    /// (default: ubuntu). Images that log in as root want `root`;
-    /// DigitalOcean and the AMD Developer Cloud are that shape.
+    /// (default: what the farm's cloud-init already uses, else ubuntu).
+    /// Images that log in as root want `root`; DigitalOcean and the AMD
+    /// Developer Cloud are that shape.
     #[option]
     pub cloud_init_user: Option<String>,
     /// Skip the authorized_keys install (print + notes only).

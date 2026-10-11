@@ -325,6 +325,17 @@ impl ClusterCoordinator {
         self.re_resolve_callback_roles_on_death(dead_rank);
     }
     #[cfg(test)]
+    pub(crate) fn elect_callback_roles_on_calibration_for_test(&mut self) {
+        self.elect_callback_roles_on_calibration();
+    }
+    /// Construction marks the epoch role dirty (the first dispatch must
+    /// broadcast it), so a test that wants to see an election flip the flag
+    /// clears it first.
+    #[cfg(test)]
+    pub(crate) fn clear_epoch_role_dirty_for_test(&mut self) {
+        self.epoch_role_dirty = false;
+    }
+    #[cfg(test)]
     pub(crate) fn set_callback_roles_for_test(
         &mut self,
         checkpoint: usize,

@@ -476,3 +476,57 @@ fn lr_update_frame_populates_last_lr_per_rank() {
         .unwrap()
         .expect("coord captures both LRs");
 }
+
+/// Pure unit test: under `Fastest`, ElChe's first calibration elects all
+/// three roles onto the rank that is actually fastest. Before it the roles
+/// sit on rank 0, which is whoever was admitted first; without this
+/// election they stayed there for the whole run, and a slow box that won a
+/// dial race ran every eval (measured on the rig 2026-09-20).
+#[test]
+fn fastest_roles_are_elected_on_pace_at_first_calibration() {
+    let world_size = 3usize;
+    let cfg = cfg_sync_cpu_with_policy(world_size, EpochCallbackPolicy::Fastest);
+    let mut coord = ClusterCoordinator::for_test(cfg);
+    assert_eq!(
+        coord.eval_role_for_test(),
+        0,
+        "construction seeds the roles on rank 0"
+    );
+    coord.clear_epoch_role_dirty_for_test();
+    // No pace known yet: the election has nothing to say and moves nothing.
+    coord.elect_callback_roles_on_calibration_for_test();
+    assert_eq!(coord.eval_role_for_test(), 0);
+    assert!(
+        !coord.epoch_role_dirty_for_test(),
+        "an election that moved nothing broadcasts nothing"
+    );
+    // wall=[4000, 4000, 1200] over 10 batches each: rank 2 is the fast box.
+    coord
+        .el_che_mut_for_test()
+        .report_timing(&[4000.0, 4000.0, 1200.0], &[10, 10, 10], 0.0);
+    coord.elect_callback_roles_on_calibration_for_test();
+    assert_eq!(coord.checkpoint_role(), 2);
+    assert_eq!(coord.eval_role_for_test(), 2);
+    assert_eq!(coord.epoch_callback_role_for_test(), 2);
+    assert!(
+        coord.epoch_role_dirty_for_test(),
+        "a moved epoch role must be broadcast"
+    );
+}
+
+/// Pure unit test: `Rank(n)` pins the roles by definition, so the
+/// calibration election leaves them alone even when another rank is faster.
+#[test]
+fn rank_policy_ignores_the_calibration_election() {
+    let world_size = 3usize;
+    let cfg = cfg_sync_cpu_with_policy(world_size, EpochCallbackPolicy::Rank(1));
+    let mut coord = ClusterCoordinator::for_test(cfg);
+    coord.set_callback_roles_for_test(1, 1, 1);
+    coord
+        .el_che_mut_for_test()
+        .report_timing(&[4000.0, 4000.0, 1200.0], &[10, 10, 10], 0.0);
+    coord.elect_callback_roles_on_calibration_for_test();
+    assert_eq!(coord.checkpoint_role(), 1);
+    assert_eq!(coord.eval_role_for_test(), 1);
+    assert_eq!(coord.epoch_callback_role_for_test(), 1);
+}
