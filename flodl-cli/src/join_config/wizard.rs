@@ -26,8 +26,8 @@ use super::render::{
     authorized_keys_line, render_notes, render_sshd_conf, render_worker_yml, sshd_match_block,
 };
 use super::{
-    ChangeKind, Changes, Door, Endpoint, KEY_NAME, KeyAction, PLACEHOLDER_PRIVATE, PLACEHOLDER_PUB,
-    Report, SERVED_SUBDIR,
+    ChangeKind, Changes, Door, Endpoint, KEY_NAME, KeyAction, OverlayAction, PLACEHOLDER_PRIVATE,
+    PLACEHOLDER_PUB, Report, SERVED_SUBDIR,
 };
 
 pub(super) fn wizard(cli: &JoinConfigArgs) -> Result<Report, String> {
@@ -130,7 +130,14 @@ pub(super) fn wizard_built(
 
     // ── Keys ────────────────────────────────────────────────────────────
     let key_path = keys_dir.join(KEY_NAME);
+    // Read before `ensure_key` can replace it: a regeneration retires the
+    // old key's authorized_keys line, and only its material identifies it.
+    let old_pub = fs::read_to_string(key_path.with_extension("pub")).ok();
     let key_action = ensure_key(cli, &mut changes, &key_path, &label)?;
+    let retire = match key_action {
+        KeyAction::Regenerated => old_pub.as_deref(),
+        KeyAction::Generated | KeyAction::Reused => None,
+    };
     // A dry run mints nothing, so wherever the (re)generated key would
     // appear, a placeholder appears instead.
     let pub_line =
@@ -164,6 +171,9 @@ pub(super) fn wizard_built(
         &root,
         cmd_hint.as_deref(),
     )?;
+    if overlay_action != OverlayAction::SnippetPrinted {
+        secret_mode(cli, &overlay_path)?;
+    }
 
     // A yml-referenced identity outside the farm dir is a key shared
     // with something else — legal, but exactly the reuse a per-farm key
@@ -202,6 +212,7 @@ pub(super) fn wizard_built(
     let worker_yml = render_worker_yml(&label, &controller, &token, door, cli, &libtorch);
     let worker_yml_path = farm_dir.join("worker.yml");
     changes.write(&worker_yml_path, &worker_yml, "worker fdl.yml")?;
+    secret_mode(cli, &worker_yml_path)?;
 
     // ── Install notes ───────────────────────────────────────────────────
     let notes_path = farm_dir.join("install-notes.md");
@@ -221,7 +232,8 @@ pub(super) fn wizard_built(
     let services = docker_services(&root, &label);
 
     // ── The install offer ───────────────────────────────────────────────
-    let install = install_authorized_line(cli, &mut changes, &authorized_line, controller.port)?;
+    let (install, retired_lines) =
+        install_authorized_line(cli, &mut changes, &authorized_line, retire, controller.port)?;
 
     // ── cloud-init (opt-in) ─────────────────────────────────────────────
     let cloud_init_path = if let Some(fdl) = &fdl {
@@ -240,10 +252,8 @@ pub(super) fn wizard_built(
             };
         let content = render_cloud_init(&label, user, door, &worker_yml, &private_key, fdl);
         let path = farm_dir.join("cloud-init.yml");
-        let kind = changes.write(&path, &content, "cloud-init user-data (SECRET)")?;
-        if !cli.dry_run && kind != ChangeKind::Unchanged {
-            set_mode(&path, 0o600)?;
-        }
+        changes.write(&path, &content, "cloud-init user-data (SECRET)")?;
+        secret_mode(cli, &path)?;
         Some(path)
     } else {
         None
@@ -269,6 +279,7 @@ pub(super) fn wizard_built(
         notes_path,
         controller,
         install,
+        retired_lines,
         cloud_init_path,
         cloud_init_fdl: fdl,
         checks,
@@ -279,4 +290,16 @@ pub(super) fn wizard_built(
         dry_run: cli.dry_run,
         changes: changes.entries,
     })
+}
+
+/// Every file carrying the admission token leaves an apply at 0600,
+/// whatever an earlier pass or the umask made it: the token admits a
+/// worker as surely as the key does. Applied on every apply rather than
+/// only when the content changed, so a farm written before this rule
+/// is tightened by its next pass.
+fn secret_mode(cli: &JoinConfigArgs, path: &Path) -> Result<(), String> {
+    if cli.dry_run {
+        return Ok(());
+    }
+    set_mode(path, 0o600)
 }

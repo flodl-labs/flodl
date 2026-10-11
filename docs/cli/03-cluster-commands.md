@@ -611,8 +611,13 @@ without `--door` or `--controller` recovers both from the farm's own
 worker yml rather than falling back to flag defaults, so reprinting the
 `authorized_keys` line cannot silently re-render the farm around it.
 Naming either flag is how you intend a change. `--regen` (or the
-prompt) rotates key and token together for a new farm instantiation,
-after which workers holding the old ones stop being admitted. `--json`
+prompt) rotates key and token together for a new farm instantiation.
+The old key stops being admitted through the install: writing the new
+`authorized_keys` line removes every line carrying the old key in the
+same rewrite. Skip the install and the old line stays, which the report
+says rather than hides. Every file holding the token (the overlay, the
+worker yml, the cloud-init) leaves each apply at mode 0600, and so does
+the worker's copy cloud-init writes on the instance. `--json`
 emits the machine twin; secrets appear as file paths, never payloads.
 
 Two read-only companions serve scripts and interfaces built on the

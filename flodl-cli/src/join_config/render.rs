@@ -182,8 +182,8 @@ impl Report {
         let key = match (self.key_action, self.dry_run) {
             (KeyAction::Generated, false) => "generated",
             (KeyAction::Generated, true) => "would be generated",
-            (KeyAction::Regenerated, false) => "REGENERATED (old key no longer admits)",
-            (KeyAction::Regenerated, true) => "would be REGENERATED (old key would stop admitting)",
+            (KeyAction::Regenerated, false) => "REGENERATED",
+            (KeyAction::Regenerated, true) => "would be REGENERATED",
             (KeyAction::Reused, _) => "reused",
         };
         push(
@@ -215,6 +215,26 @@ impl Report {
             (InstallAction::Skipped(why), _) => format!("NOT installed ({why}) — see notes"),
         };
         push(&mut out, &format!("  sshd:      {install}"));
+        // A regeneration revokes only through the install: the old key
+        // keeps admitting wherever a line still carries it.
+        if self.key_action == KeyAction::Regenerated {
+            let installed = matches!(
+                self.install,
+                InstallAction::Installed | InstallAction::Replaced | InstallAction::AlreadyPresent
+            );
+            let n = self.retired_lines;
+            let old = match (installed, n, self.dry_run) {
+                (false, _, _) => "authorized_keys NOT touched: a line carrying it still \
+                                  admits until removed"
+                    .to_string(),
+                (true, 0, _) => "no authorized_keys line carried it".to_string(),
+                (true, n, false) => {
+                    format!("removed from authorized_keys ({n} line(s)); it no longer admits")
+                }
+                (true, n, true) => format!("would be removed from authorized_keys ({n} line(s))"),
+            };
+            push(&mut out, &format!("  old key:   {old}"));
+        }
         if let Some(ci) = &self.cloud_init_path {
             push(
                 &mut out,
@@ -555,6 +575,7 @@ impl Report {
                     KeyAction::Regenerated => "regenerated",
                     KeyAction::Reused => "reused",
                 },
+                "retired_authorized_lines": self.retired_lines,
             },
             "door": door_key(self.door),
             "dry_run": self.dry_run,

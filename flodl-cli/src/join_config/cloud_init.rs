@@ -185,7 +185,7 @@ pub(super) fn render_cloud_init(
          \x20   content: |\n{key}\n\
          \x20 - path: {home}/training/fdl.yml\n\
          \x20   owner: {user}:{user}\n\
-         \x20   permissions: \"0644\"\n\
+         \x20   permissions: \"0600\"\n\
          \x20   defer: true\n\
          \x20   content: |\n{yml}\n\
          \x20 - path: /etc/systemd/system/flodl-join.service\n\

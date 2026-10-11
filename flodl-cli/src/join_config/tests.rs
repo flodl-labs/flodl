@@ -1,5 +1,5 @@
 use super::authorized_keys::{
-    UpsertOutcome, install_authorized_line, key_material, upsert_authorized_line,
+    UpsertOutcome, install_authorized_line, key_material, retire_key_lines, upsert_authorized_line,
 };
 use super::cloud_init::{FdlInstall, fdl_install, render_cloud_init};
 use super::credentials::{
@@ -175,6 +175,23 @@ fn registry_dep_ships_the_crate_dir_alone() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
+/// A workspace root is the likeliest wrong guess, and the fix it prints
+/// must name a flag the wizard actually takes.
+#[test]
+fn a_workspace_root_points_at_the_crate_dir_flag() {
+    let tmp = tempdir();
+    fs::write(
+        tmp.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"train\"]\n",
+    )
+    .unwrap();
+    let Err(err) = derive_publish(&tmp) else {
+        panic!("a workspace root must not derive a recipe");
+    };
+    assert!(err.contains("--crate-dir "), "{err}");
+    let _ = fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn a_workspace_above_the_crate_earns_the_bin_caveat() {
     let tmp = tempdir();
@@ -270,8 +287,19 @@ fn cloud_init_embeds_the_artifacts_and_the_failure_taxonomy() {
         "got:\n{ci}"
     );
     assert!(ci.contains("      join:"), "got:\n{ci}");
-    assert!(ci.contains("path: /home/ubuntu/.ssh/flodl-join"));
-    assert!(ci.contains("permissions: \"0600\""));
+    // Both carry a credential (the key, and the worker yml's token), so
+    // both land 0600, each checked on its own entry.
+    for path in [
+        "/home/ubuntu/.ssh/flodl-join",
+        "/home/ubuntu/training/fdl.yml",
+    ] {
+        assert!(
+            ci.contains(&format!(
+                "path: {path}\n    owner: ubuntu:ubuntu\n    permissions: \"0600\"\n"
+            )),
+            "{path}:\n{ci}"
+        );
+    }
     // The failure taxonomy rides the unit: re-dial transient, stop on
     // permanent, halt.
     assert!(ci.contains("Restart=always"));
@@ -635,7 +663,10 @@ fn install_needs_explicit_consent() {
     let mut cli = no_flags();
     cli.yes = true; // --yes is NOT consent for a security mutation
     let line = OUR_LINE;
-    match install_authorized_line(&cli, &mut changes, line, 1).unwrap() {
+    match install_authorized_line(&cli, &mut changes, line, None, 1)
+        .unwrap()
+        .0
+    {
         InstallAction::Skipped(why) => {
             assert!(why.contains("--install-key"), "got: {why}")
         }
@@ -644,15 +675,80 @@ fn install_needs_explicit_consent() {
     let mut cli = no_flags();
     cli.no_install_key = true;
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, line, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, line, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Skipped(_),
     ));
     let mut cli = no_flags();
     cli.install_key = true;
     cli.no_install_key = true;
-    assert!(install_authorized_line(&cli, &mut changes, line, 1).is_err());
+    assert!(install_authorized_line(&cli, &mut changes, line, None, 1).is_err());
     // Nothing above got as far as touching the file.
     assert!(changes.entries.is_empty());
+}
+
+const OLD_PUB: &str = "ssh-ed25519 AAAAold flodl-join-b300\n";
+
+#[test]
+fn retiring_a_key_drops_only_the_lines_that_carry_it() {
+    let content = "ssh-ed25519 AAAAforeign a@b\n\
+                   restrict,command=\"rrsync -ro /srv/run\" ssh-ed25519 AAAAold flodl-join-b300\n\
+                   # a comment\n\
+                   ssh-ed25519 AAAAold hand-installed\n\
+                   ssh-ed25519 AAAAtail c@d\n";
+    let (out, n) = retire_key_lines(content, OLD_PUB, OUR_LINE);
+    assert_eq!(n, 2, "both lines carrying the old material go");
+    assert_eq!(
+        out, "ssh-ed25519 AAAAforeign a@b\n# a comment\nssh-ed25519 AAAAtail c@d\n",
+        "everything else stays, in order"
+    );
+
+    // Nothing to drop: byte for byte, even without a trailing newline.
+    let foreign = "ssh-ed25519 AAAAforeign a@b";
+    assert_eq!(
+        retire_key_lines(foreign, OLD_PUB, OUR_LINE),
+        (foreign.to_string(), 0)
+    );
+    // A retired key that parses to nothing retires nothing.
+    assert_eq!(retire_key_lines(content, "garbage", OUR_LINE).1, 0);
+    // Never the material the install is about to write.
+    assert_eq!(
+        retire_key_lines(content, "ssh-ed25519 AAAAour x", OUR_LINE).1,
+        0
+    );
+}
+
+/// A regeneration is a revocation only if the old key's line goes with
+/// the new line's install, in the same rewrite.
+#[test]
+fn a_regenerated_key_replaces_its_predecessor_in_one_rewrite() {
+    let tmp = tempdir();
+    let ak = tmp.join("authorized_keys");
+    let old_line = "restrict,command=\"rrsync -ro /srv/run\" ssh-ed25519 AAAAold flodl-join-b300";
+    fs::write(&ak, format!("ssh-ed25519 AAAAforeign a@b\n{old_line}\n")).unwrap();
+    let mut cli = no_flags();
+    cli.install_key = true;
+    cli.authorized_keys = Some(ak.display().to_string());
+    let mut changes = Changes::new(false);
+
+    let (action, retired) =
+        install_authorized_line(&cli, &mut changes, OUR_LINE, Some(OLD_PUB), 1).unwrap();
+    assert_eq!(action, InstallAction::Installed);
+    assert_eq!(retired, 1);
+    let after = fs::read_to_string(&ak).unwrap();
+    assert_eq!(after, format!("ssh-ed25519 AAAAforeign a@b\n{OUR_LINE}\n"));
+    assert_eq!(after.matches("flodl-join-b300").count(), 1, "one farm line");
+
+    // The new line already present beside a stale old one (a regen that
+    // ran before revocation existed): the old one still goes.
+    fs::write(&ak, format!("{old_line}\n{OUR_LINE}\n")).unwrap();
+    let (action, retired) =
+        install_authorized_line(&cli, &mut changes, OUR_LINE, Some(OLD_PUB), 1).unwrap();
+    assert_eq!(action, InstallAction::AlreadyPresent);
+    assert_eq!(retired, 1);
+    assert_eq!(fs::read_to_string(&ak).unwrap(), format!("{OUR_LINE}\n"));
+    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
@@ -822,6 +918,87 @@ fn a_flagless_rerun_keeps_the_cloud_init_user() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
+/// A farm whose key already exists, so a pass needs no ssh-keygen.
+fn seeded_farm(label: &str) -> PathBuf {
+    let tmp = tempdir();
+    let keys = tmp.join(".fdl").join(label).join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    fs::write(keys.join(KEY_NAME), "PRIVATE\n").unwrap();
+    fs::write(keys.join(KEY_NAME).with_extension("pub"), OLD_PUB).unwrap();
+    tmp
+}
+
+/// The wiring half of revocation: the old public key is read before the
+/// regeneration replaces it, and the report says what became of it
+/// instead of asserting it. Dry, so no ssh-keygen and nothing written.
+#[test]
+fn a_dry_regen_names_the_old_keys_lines_it_would_remove() {
+    let tmp = seeded_farm("regenfarm");
+    let ak = tmp.join("authorized_keys");
+    let old_line = "restrict,command=\"rrsync -ro /srv/run\" ssh-ed25519 AAAAold flodl-join-b300";
+    fs::write(&ak, format!("{old_line}\n")).unwrap();
+    let mut cli = no_flags();
+    cli.label = Some("regenfarm".to_string());
+    cli.controller = Some("op@ctrl:2322".to_string());
+    cli.dry_run = true;
+    cli.regen = true;
+    cli.install_key = true;
+    cli.authorized_keys = Some(ak.display().to_string());
+
+    let report = wizard_at(&cli, &tmp).unwrap();
+    assert_eq!(report.key_action, KeyAction::Regenerated);
+    assert_eq!(report.retired_lines, 1);
+    let human = report.render_human();
+    assert!(
+        human.contains("old key:   would be removed from authorized_keys (1 line(s))"),
+        "{human}"
+    );
+    assert!(
+        !human.contains("no longer admits"),
+        "a dry run claims nothing: {human}"
+    );
+    assert_eq!(fs::read_to_string(&ak).unwrap(), format!("{old_line}\n"));
+
+    // Without the install, the report says the old key still admits.
+    cli.install_key = false;
+    let human = wizard_at(&cli, &tmp).unwrap().render_human();
+    assert!(human.contains("still admits until removed"), "{human}");
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+/// The token admits a worker as surely as the key, so every file holding
+/// it ends an apply at 0600, including one an earlier pass left lax.
+#[cfg(unix)]
+#[test]
+fn every_file_holding_the_token_ends_an_apply_at_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = seeded_farm("modefarm");
+    let mut cli = no_flags();
+    cli.label = Some("modefarm".to_string());
+    cli.controller = Some("op@ctrl:2322".to_string());
+    cli.cloud_init = true;
+    cli.yes = true;
+    cli.no_install_key = true;
+    let clean = build(Some(SHA), false, None);
+    let report = wizard_built(&cli, &tmp, &clean).unwrap();
+    let secrets = [
+        report.overlay_path.clone(),
+        report.worker_yml_path.clone(),
+        report.cloud_init_path.clone().unwrap(),
+    ];
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    for p in &secrets {
+        assert_eq!(mode(p), 0o600, "{}", p.display());
+        fs::set_permissions(p, fs::Permissions::from_mode(0o664)).unwrap();
+    }
+    // A flagless rerun changes no content and still tightens them.
+    wizard_built(&cli, &tmp, &clean).unwrap();
+    for p in &secrets {
+        assert_eq!(mode(p), 0o600, "{}", p.display());
+    }
+    let _ = fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn a_farm_dir_without_a_worker_yml_recovers_nothing() {
     // Nothing to recover must stay None rather than a guess: a first run
@@ -841,12 +1018,14 @@ fn an_authorized_keys_path_under_etc_ssh_is_refused() {
     cli.install_key = true;
     cli.authorized_keys = Some("/etc/ssh/authorized_keys.d/op".to_string());
     let mut changes = Changes::new(false);
-    let err = install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", 22).unwrap_err();
+    let err =
+        install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", None, 22).unwrap_err();
     assert!(err.contains("system sshd configuration"), "got: {err}");
     assert!(err.contains("by hand"), "names the way out: {err}");
     // The dry half keeps the same promise.
     cli.dry_run = true;
-    let err = install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", 22).unwrap_err();
+    let err =
+        install_authorized_line(&cli, &mut changes, "ssh-ed25519 AAAA test", None, 22).unwrap_err();
     assert!(err.contains("system sshd configuration"), "got: {err}");
 }
 
@@ -1191,25 +1370,33 @@ fn a_dry_install_verdict_reads_the_file_and_never_writes_it() {
     let mut changes = Changes::new(true);
     // Identical line → already present.
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, OUR_LINE, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, OUR_LINE, None, 1)
+            .unwrap()
+            .0,
         InstallAction::AlreadyPresent,
     ));
     // Same key, different options → would replace.
     let other_opts = OUR_LINE.replace("restrict,", "");
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, &other_opts, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, &other_opts, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Replaced,
     ));
     // A placeholder key (an apply would mint it) → would append.
     let placeholder_line = format!("restrict {PLACEHOLDER_PUB}");
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, &placeholder_line, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, &placeholder_line, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Installed,
     ));
     // Without consent flags the dry verdict is the same skip as ever.
     cli.install_key = false;
     assert!(matches!(
-        install_authorized_line(&cli, &mut changes, OUR_LINE, 1).unwrap(),
+        install_authorized_line(&cli, &mut changes, OUR_LINE, None, 1)
+            .unwrap()
+            .0,
         InstallAction::Skipped(_),
     ));
     assert_eq!(fs::read_to_string(&ak).unwrap(), before, "dry run wrote");
