@@ -169,6 +169,19 @@ stack_lines() {
   done
 }
 
+# The tree a cell's controller is built from: HEAD and the uncommitted
+# entries, with the tracked diff and the untracked files' digests beside
+# them (an untracked file edited in place keeps its status line and never
+# shows in the diff). Taken right before the launch (the controller
+# compiles then) and again at stamp time, so a tree that moved during a
+# cell is flagged instead of attributed to it.
+snap_tree() {
+  { git rev-parse HEAD 2>/dev/null; git status --porcelain 2>/dev/null; } > "$1.tree"
+  git diff HEAD > "$1.patch" 2>/dev/null
+  git ls-files --others --exclude-standard 2>/dev/null \
+    | while IFS= read -r f; do sha256sum "$f"; done > "$1.untracked"
+}
+
 # Provenance, written from the success path only. Beyond the sweep's
 # stamp: the roster as the controller admitted it (host, ranks, GPU count,
 # libtorch label -- the `rocm` label in that line IS the demo), the dials
@@ -176,6 +189,8 @@ stack_lines() {
 # each stamped host's kernel and GPU driver, and the uncommitted changes:
 # named, with the tracked ones saved as a patch beside the stamp, since a
 # bare count says a cell's source differs from HEAD without saying how.
+# The source lines describe the tree at LAUNCH, and `tree_moved` says
+# whether it still matched when the cell finished.
 # The digest binds only walk-ins that pulled source through the door; a
 # `--bin` walk-in ran the binary its dial names, and the stamp says which
 # case each dial is.
@@ -184,6 +199,11 @@ stamp() {
   d="$ABS_OUT/$1/$CELL"; mkdir -p "$d"
   run_tree="${FLODL_HOME:-$HOME/.flodl}/run/tree"
   digest=$(sed -n 's/^ *sha256: *//p' "$run_tree/.fdl-run.yml" 2>/dev/null | head -1)
+  start="$LOGDIR/$1-start"; end="$LOGDIR/$1-end"
+  snap_tree "$end"
+  moved=0
+  cmp -s "$start.tree" "$end.tree" && cmp -s "$start.patch" "$end.patch" \
+    && cmp -s "$start.untracked" "$end.untracked" || moved=1
   { echo "cohort:         $COHORT"
     echo "seed:           $2"
     echo "ranks:          $MV_RANKS"
@@ -198,20 +218,29 @@ stamp() {
     if [ -n "$digest" ]; then
       echo "served_tree_sha256: $digest (binds source-pull walk-ins only; a --bin dial ran the binary it names)"
     fi
-    echo "git_sha:        $(git rev-parse HEAD 2>/dev/null)"
-    dirty=$(git status --porcelain 2>/dev/null)
+    echo "git_sha:        $(head -1 "$start.tree")"
+    dirty=$(tail -n +2 "$start.tree")
     if [ -z "$dirty" ]; then
       echo "git_dirty:      clean"
     else
-      git diff HEAD > "$d/git-diff.patch" 2>/dev/null
-      echo "git_dirty:      $(printf '%s\n' "$dirty" | wc -l | tr -d ' ') entr(ies); tracked changes in git-diff.patch (sha256 $(sha256sum < "$d/git-diff.patch" | cut -d' ' -f1)), untracked ones named only"
+      cp "$start.patch" "$d/git-diff.patch"
+      echo "git_dirty:      $(printf '%s\n' "$dirty" | wc -l | tr -d ' ') entr(ies); tracked changes in git-diff.patch (sha256 $(sha256sum < "$d/git-diff.patch" | cut -d' ' -f1)), untracked ones named, contents digested only (sha256 $(sha256sum < "$start.untracked" | cut -d' ' -f1))"
       printf '%s\n' "$dirty" | sed 's/^/dirty:          /'
+    fi
+    if [ "$moved" -eq 0 ]; then
+      echo "tree_moved:     no"
+    else
+      echo "tree_moved:     YES: the tree changed during the cell; the source lines above are the tree at launch, which the controller was built from"
+      echo "tree_at_end:    $(head -1 "$end.tree"), $(tail -n +2 "$end.tree" | wc -l | tr -d ' ') uncommitted entr(ies)"
     fi
     echo "utc:           $(date -u '+%F %T UTC')"
     echo "host:           $(hostname)"
     echo "libtorch:       $(cat libtorch/.active 2>/dev/null || echo unknown)"
     stack_lines | sed 's/^/stack:          /'
   } > "$d/provenance.txt"
+  if [ "$moved" -eq 1 ]; then
+    echo "$(ts) WARN $COHORT/$1: the tree moved during the cell (tree_moved in its provenance)"
+  fi
 }
 
 if [ ! -f "fdl.$FARM.yml" ]; then
@@ -246,6 +275,7 @@ for seed in $SEEDS; do
   # rank child never binds it).
   monitor_arg=""
   [ -n "$MV_MONITOR" ] && monitor_arg="--monitor $MV_MONITOR"
+  snap_tree "$LOGDIR/$label-start"
   # shellcheck disable=SC2086
   ./fdl $MV_FDL_FLAGS "@$FARM" ddp-bench $CORE_ARGS $monitor_arg --output "$OUT/$label" > "$clog" 2>&1 &
   cpid=$!
