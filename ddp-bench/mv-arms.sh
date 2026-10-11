@@ -56,6 +56,11 @@
 #   MV_BAND      band root the verdict compares against (default runs/mv/band)
 #   MV_STOP_ON   stop (default) exits 3 after a STOP verdict; continue runs on
 #   MV_OUT       output root (default runs/mv/$COHORT)
+#   MV_STACK_HOSTS  ssh targets whose kernel and GPU driver go into each
+#                cell's provenance beside this box's own (default none:
+#                this box only). The band is a yardstick for the stack it
+#                ran on, so a cell that does not record its stack cannot
+#                show it was measured on the same one.
 #
 # Cells land at ddp-bench/runs/mv/<COHORT>/s<seed>/olmo-graph/cpu-async-diloco/
 # with controller.log, walkin-N.log, elche-config.txt, provenance.txt and
@@ -144,13 +149,33 @@ reap_controller() {
   fi
 }
 
+# One line per host: kernel and whichever GPU stack it carries. Runs here
+# and over ssh, so it is plain POSIX sh, and `-n` keeps a remote probe off
+# this script's stdin. The trailing `echo` makes the probe exit 0 on a box
+# without ROCm, so a failed ssh is the only thing reported as unreachable.
+STACK_PROBE='printf "%s: kernel %s" "$(hostname)" "$(uname -r)"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  printf ", nvidia %s" "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"
+fi
+[ -r /opt/rocm/.info/version ] && printf ", rocm %s" "$(cat /opt/rocm/.info/version)"
+[ -r /sys/module/amdgpu/version ] && printf ", amdgpu %s" "$(cat /sys/module/amdgpu/version)"
+echo'
+
+stack_lines() {
+  sh -c "$STACK_PROBE"
+  for h in ${MV_STACK_HOSTS:-}; do
+    ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$h" "$STACK_PROBE" 2>/dev/null \
+      || echo "$h: unreachable when the cell was stamped"
+  done
+}
+
 # Provenance, written from the success path only. Beyond the sweep's
 # stamp: the roster as the controller admitted it (host, ranks, GPU count,
 # libtorch label -- the `rocm` label in that line IS the demo), the dials
-# with their credential redacted, and the digest of the tree this box
-# serves. The digest binds only walk-ins that pulled source through the
-# door; a `--bin` walk-in ran the binary its dial names, and the stamp says
-# which case each dial is.
+# with their credential redacted, the digest of the tree this box serves,
+# and each stamped host's kernel and GPU driver. The digest binds only
+# walk-ins that pulled source through the door; a `--bin` walk-in ran the
+# binary its dial names, and the stamp says which case each dial is.
 stamp() {
   # $1 label, $2 seed, $3 invocation, $4 walk-in count, $5 controller log
   d="$ABS_OUT/$1/$CELL"; mkdir -p "$d"
@@ -159,7 +184,7 @@ stamp() {
   { echo "cohort:         $COHORT"
     echo "seed:           $2"
     echo "ranks:          $MV_RANKS"
-    echo "rank0:          by dial order, not by pace (the controller's Fastest role election is rank 0 in practice; TODO.md)"
+    echo "rank0:          by dial order; the callback roles (eval, checkpoint, epoch_fn) are elected on pace at the first calibration"
     echo "model:          $MODEL"
     echo "spec:           $FIXED"
     echo "topology:       walk-in (farm=$FARM), rental-parity"
@@ -175,6 +200,7 @@ stamp() {
     echo "utc:            $(date -u '+%F %T UTC')"
     echo "host:           $(hostname)"
     echo "libtorch:       $(cat libtorch/.active 2>/dev/null || echo unknown)"
+    stack_lines | sed 's/^/stack:          /'
   } > "$d/provenance.txt"
 }
 
