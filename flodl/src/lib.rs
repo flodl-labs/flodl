@@ -128,7 +128,7 @@ pub use tensor::{
     gpu_memory_info_idx, gpu_peak_active_bytes, gpu_peak_active_bytes_idx, gpu_peak_reserved_bytes,
     gpu_peak_reserved_bytes_idx, gpu_reset_peak_stats, gpu_reset_peak_stats_idx,
     gpu_smi_memory_info_idx, gpu_synchronize, gpu_utilization, gpu_utilization_idx,
-    hardware_summary, live_tensor_count, malloc_trim, manual_seed, mps_available, probe_device,
-    rss_kb, set_cudnn_benchmark, set_current_gpu_device, usable_gpu_devices,
+    hardware_summary, live_tensor_count, malloc_trim, manual_seed, mps_available, mps_synchronize,
+    probe_device, rss_kb, set_cudnn_benchmark, set_current_gpu_device, usable_gpu_devices,
 };
 pub use worker::CpuWorker;

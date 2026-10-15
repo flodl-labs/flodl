@@ -62,7 +62,7 @@ Model loading and tokenization are outside the timed region.
 Run it from the repository root on an Apple Silicon Mac:
 
 ```bash
-export LIBTORCH_PATH="$PWD/libtorch/precompiled/cpu"
+export LIBTORCH_PATH="$PWD/libtorch/precompiled/cpu-macos"
 export DYLD_LIBRARY_PATH="$LIBTORCH_PATH/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 cargo run --release -p flodl-hf --example bert_mps_bench --features flodl/mps
 ```
@@ -72,6 +72,10 @@ The example prints CSV to stdout. The measurements below were collected on an
 M5 Pro Mac running macOS 26.5.1; the raw rows are in
 [`benchmarks/mps-tinybert.csv`](../benchmarks/mps-tinybert.csv), and
 [`benchmarks/plot_mps.py`](../benchmarks/plot_mps.py) regenerates the chart.
+
+These measurements predate explicit MPS synchronization in the benchmark.
+Treat them as preliminary only: rerun on an MPS-enabled LibTorch before
+using these values as performance evidence.
 
 ![CPU and Apple MPS TinyBERT training throughput and step time](charts/mps-tinybert.svg)
 

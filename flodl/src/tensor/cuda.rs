@@ -14,6 +14,11 @@ pub fn mps_available() -> bool {
     unsafe { ffi::flodl_mps_is_available() != 0 }
 }
 
+/// Wait for all pending work on the Apple MPS device to complete.
+pub fn mps_synchronize() {
+    unsafe { ffi::flodl_mps_synchronize() };
+}
+
 /// Returns true if a GPU is available.
 ///
 /// On Linux, this also ensures CUDA libraries are loaded (they can be

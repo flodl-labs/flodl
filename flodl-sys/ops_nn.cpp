@@ -506,6 +506,18 @@ extern "C" int flodl_mps_is_available(void) {
 #endif
 }
 
+extern "C" void flodl_mps_synchronize(void) {
+#ifdef FLODL_BUILD_MPS
+    try {
+        torch::mps::synchronize();
+    } catch (const std::exception& e) {
+        flodl_fatal("flodl_mps_synchronize", e.what());
+    } catch (...) {
+        flodl_fatal("flodl_mps_synchronize", nullptr);
+    }
+#endif
+}
+
 extern "C" int flodl_gpu_device_count(void) {
     try {
     return (int)torch::cuda::device_count();

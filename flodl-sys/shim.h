@@ -501,6 +501,7 @@ char* flodl_to_device_async(FlodlTensor t, int device_type, int device_index,
 
 int flodl_gpu_is_available(void);
 int flodl_mps_is_available(void);
+void flodl_mps_synchronize(void);
 int flodl_gpu_device_count(void);
 int flodl_force_gpu_link(void);
 void flodl_set_cudnn_benchmark(int enable);

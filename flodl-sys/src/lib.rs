@@ -715,6 +715,7 @@ unsafe extern "C" {
 
     pub fn flodl_gpu_is_available() -> i32;
     pub fn flodl_mps_is_available() -> i32;
+    pub fn flodl_mps_synchronize();
     pub fn flodl_gpu_device_count() -> i32;
     pub fn flodl_force_gpu_link() -> i32;
     pub fn flodl_set_current_device(device_index: i32);

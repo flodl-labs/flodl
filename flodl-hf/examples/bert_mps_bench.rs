@@ -7,7 +7,10 @@
 
 use std::time::Instant;
 
-use flodl::{AdamW, Device, Module, Result, Tensor, Variable, gpu_synchronize, mps_available};
+use flodl::{
+    AdamW, Device, Module, Result, Tensor, Variable, gpu_synchronize, mps_available,
+    mps_synchronize,
+};
 use flodl_hf::models::bert::BertForSequenceClassification;
 use flodl_hf::tokenizer::HfTokenizer;
 
@@ -71,14 +74,14 @@ fn main() -> Result<()> {
 
             let mut samples = Vec::with_capacity(ROUNDS);
             for _ in 0..ROUNDS {
-                gpu_synchronize(device.index());
+                synchronize(device);
                 let start = Instant::now();
                 for _ in 0..MEASURED_STEPS {
                     let loss = head.compute_loss(&enc, &labels)?;
                     loss.backward()?;
                     head.graph().step()?;
                 }
-                gpu_synchronize(device.index());
+                synchronize(device);
                 samples.push(start.elapsed() / MEASURED_STEPS as u32);
             }
             samples.sort_unstable();
@@ -97,6 +100,14 @@ fn main() -> Result<()> {
         return Err(flodl_error("benchmark did not produce all CPU/MPS rows"));
     }
     Ok(())
+}
+
+fn synchronize(device: Device) {
+    match device {
+        Device::CPU => {}
+        Device::CUDA(index) => gpu_synchronize(index),
+        Device::MPS => mps_synchronize(),
+    }
 }
 
 fn flodl_error(message: &str) -> flodl::TensorError {
