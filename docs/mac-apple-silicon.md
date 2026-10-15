@@ -50,6 +50,44 @@ remain CUDA-only; unsupported PyTorch MPS operators may fail at runtime.
 `fdl` does not yet select the `mps` Cargo feature automatically, so enable it
 in your Cargo command or dependency configuration.
 
+### CPU vs MPS training benchmark
+
+The checked-in benchmark runs full forward, loss, backward, and AdamW steps
+for a 4.39-million-parameter TinyBERT sequence classifier on CPU and MPS. It
+uses batch sizes 16, 64, 256, and 512 at sequence length 128. Each device gets
+two warmup steps and three timed rounds of ten steps; the reported step time
+is the median round, with device synchronization around each timed round.
+Model loading and tokenization are outside the timed region.
+
+Run it from the repository root on an Apple Silicon Mac:
+
+```bash
+export LIBTORCH_PATH="$PWD/libtorch/precompiled/cpu"
+export DYLD_LIBRARY_PATH="$LIBTORCH_PATH/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+cargo run --release -p flodl-hf --example bert_mps_bench --features flodl/mps
+```
+
+The first run downloads the [17.5 MB `jason-zhoou/tiny-bert-sst2` checkpoint](https://huggingface.co/jason-zhoou/tiny-bert-sst2).
+The example prints CSV to stdout. The measurements below were collected on an
+M5 Pro Mac running macOS 26.5.1; the raw rows are in
+[`benchmarks/mps-tinybert.csv`](../benchmarks/mps-tinybert.csv), and
+[`benchmarks/plot_mps.py`](../benchmarks/plot_mps.py) regenerates the chart.
+
+![CPU and Apple MPS TinyBERT training throughput and step time](charts/mps-tinybert.svg)
+
+| Batch | CPU ms / step | MPS ms / step | MPS speedup | CPU examples / s | MPS examples / s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 17.197 | 7.705 | 2.23× | 930 | 2,077 |
+| 64 | 51.645 | 10.417 | 4.96× | 1,239 | 6,144 |
+| 256 | 207.039 | 40.751 | 5.08× | 1,237 | 6,282 |
+| 512 | 416.302 | 87.869 | 4.74× | 1,230 | 5,827 |
+
+This is a controlled throughput test, not an accuracy result: each batch
+repeats two short positive/negative token sequences, with alternating labels.
+It demonstrates that the full fine-tuning path executes on MPS and measures
+this model and workload on this Mac; real-world speedups depend on model,
+sequence length, batch size, and MPS operator coverage.
+
 ## Docker CPU path
 
 The setup below keeps using Linux arm64 LibTorch and CPU execution. It remains

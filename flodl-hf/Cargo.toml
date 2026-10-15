@@ -52,6 +52,10 @@ name = "bert_classify"
 required-features = ["hub", "tokenizer"]
 
 [[example]]
+name = "bert_mps_bench"
+required-features = ["hub", "tokenizer"]
+
+[[example]]
 name = "bert_ner"
 required-features = ["hub", "tokenizer"]
 
