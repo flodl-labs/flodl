@@ -27,6 +27,7 @@ pub const FLODL_INT64: i32 = 4;
 // --- Device constants (must match shim.h) ---
 pub const FLODL_CPU: i32 = 0;
 pub const FLODL_CUDA: i32 = 1;
+pub const FLODL_MPS: i32 = 2;
 
 unsafe extern "C" {
     // --- Tensor creation ---
@@ -713,6 +714,8 @@ unsafe extern "C" {
     ) -> *mut c_char;
 
     pub fn flodl_gpu_is_available() -> i32;
+    pub fn flodl_mps_is_available() -> i32;
+    pub fn flodl_mps_synchronize();
     pub fn flodl_gpu_device_count() -> i32;
     pub fn flodl_force_gpu_link() -> i32;
     pub fn flodl_set_current_device(device_index: i32);

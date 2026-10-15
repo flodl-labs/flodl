@@ -27,6 +27,22 @@ fn test_simple_gradient() {
     assert!((grad.item().unwrap() - 2.0).abs() < 1e-5);
 }
 
+#[cfg(feature = "mps")]
+#[test]
+fn test_mps_forward_backward() {
+    assert!(
+        crate::tensor::mps_available(),
+        "the mps feature requires an available Apple MPS device"
+    );
+
+    let x = Variable::new(Tensor::from_f32(&[3.0], &[1], Device::MPS).unwrap(), true);
+    let two = Variable::new(Tensor::from_f32(&[2.0], &[1], Device::MPS).unwrap(), false);
+    let y = x.mul(&two).unwrap().sum().unwrap();
+    assert_eq!(y.device(), Device::MPS);
+    y.backward().unwrap();
+    assert!((x.grad().unwrap().item().unwrap() - 2.0).abs() < 1e-5);
+}
+
 #[test]
 fn test_add_gradient() {
     let a = Variable::new(from_f32(&[1.0, 2.0, 3.0], &[3]), true);

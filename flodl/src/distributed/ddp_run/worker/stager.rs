@@ -337,7 +337,7 @@ impl StagerHandle {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn staged_count(&self) -> usize {
         self.staged.load(Ordering::Relaxed)
     }
@@ -943,6 +943,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 3);
     }
 
+    // This integration test relies on the live `/proc/meminfo` probe used
+    // to size the staging tiers. Non-Linux hosts intentionally return no
+    // MemAvailable estimate, so the stager correctly declines to stage.
+    #[cfg(target_os = "linux")]
     #[test]
     fn stager_walks_advisory_and_warms_shared_tier() {
         let (staged, cache, stream, calls) = staged_setup(12);

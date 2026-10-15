@@ -736,6 +736,7 @@ impl<M: Module> GpuWorker<M> {
             Device::CUDA(idx) => crate::tensor::gpu_device_name_idx(i32::from(idx))
                 .unwrap_or_else(|| "gpu".to_string()),
             Device::CPU => "cpu".to_string(),
+            Device::MPS => "Apple MPS".to_string(),
         };
         let profile = crate::distributed::wire::GraphProfileWire {
             hash: stats.structural_hash,

@@ -57,6 +57,9 @@ fn main() {
     // both vendors) is unaffected.
     let want_cuda = cfg!(feature = "cuda");
     let want_rocm = cfg!(feature = "rocm");
+    let want_mps = cfg!(feature = "mps");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     if want_cuda && want_rocm {
         eprintln!(
             "\nflodl-sys: features `cuda` and `rocm` are mutually exclusive.\n\
@@ -71,6 +74,14 @@ fn main() {
              `gpu` marks the vendor-neutral GPU code paths; it does not say\n\
              what to link. Enable `cuda` or `rocm` instead -- both imply it.\n"
         );
+        std::process::exit(1);
+    }
+    if want_mps && (target_os != "macos" || target_arch != "aarch64") {
+        eprintln!("\nflodl-sys: feature `mps` is only supported on Apple Silicon macOS.\n");
+        std::process::exit(1);
+    }
+    if want_mps && (want_cuda || want_rocm) {
+        eprintln!("\nflodl-sys: feature `mps` cannot be combined with `cuda` or `rocm`.\n");
         std::process::exit(1);
     }
     let libtorch = env::var("LIBTORCH_PATH").unwrap_or_else(|_| "/usr/local/libtorch".to_string());
@@ -277,6 +288,9 @@ fn main() {
     // same blocks serve both backends. Named for what it means.
     if cfg!(feature = "gpu") {
         build.define("FLODL_BUILD_GPU", "1");
+    }
+    if want_mps {
+        build.define("FLODL_BUILD_MPS", "1");
     }
     if want_cuda {
         // CUDA toolkit headers (the one genuinely vendor-specific part

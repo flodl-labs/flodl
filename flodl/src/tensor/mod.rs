@@ -100,12 +100,13 @@ impl DType {
 
 /// Device represents where a tensor's data lives.
 ///
-/// `Device::CPU` is the host. `Device::CUDA(n)` is GPU index `n`.
-/// Most single-GPU code uses `Device::CUDA(0)`.
+/// `Device::CPU` is the host. `Device::CUDA(n)` is GPU index `n`, and
+/// `Device::MPS` is the Apple Silicon GPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     CPU,
     CUDA(u8),
+    MPS,
 }
 
 impl Device {
@@ -114,6 +115,7 @@ impl Device {
         match self {
             Device::CPU => (ffi::FLODL_CPU, 0),
             Device::CUDA(idx) => (ffi::FLODL_CUDA, idx as i32),
+            Device::MPS => (ffi::FLODL_MPS, 0),
         }
     }
 
@@ -121,6 +123,7 @@ impl Device {
     pub(crate) fn from_ffi(device_type: i32, device_index: i32) -> Self {
         match device_type {
             ffi::FLODL_CUDA => Device::CUDA(device_index as u8),
+            ffi::FLODL_MPS => Device::MPS,
             _ => Device::CPU,
         }
     }
@@ -130,11 +133,17 @@ impl Device {
         matches!(self, Device::CUDA(_))
     }
 
-    /// Device index (0 for CPU, GPU index for CUDA).
+    /// Whether this is the Apple MPS device.
+    pub fn is_mps(&self) -> bool {
+        matches!(self, Device::MPS)
+    }
+
+    /// Device index (0 for CPU and MPS, GPU index for CUDA).
     pub fn index(&self) -> u8 {
         match self {
             Device::CPU => 0,
             Device::CUDA(idx) => *idx,
+            Device::MPS => 0,
         }
     }
 }
@@ -145,6 +154,7 @@ impl fmt::Display for Device {
             Device::CPU => write!(f, "cpu"),
             Device::CUDA(0) => write!(f, "cuda"),
             Device::CUDA(idx) => write!(f, "cuda:{}", idx),
+            Device::MPS => write!(f, "mps"),
         }
     }
 }
@@ -767,11 +777,18 @@ impl Tensor {
     }
 
     /// Copy tensor data to a `Vec<f64>`. Moves to CPU if needed.
-    /// Non-Float64 dtypes are cast to f64 on device first: exact for
-    /// f16/bf16/f32/i32, and exact up to 2^53 for Int64 (the f64
-    /// mantissa limit).
+    /// Non-Float64 dtypes are cast to f64 first: on CPU for MPS tensors,
+    /// whose backend does not support Float64, and on-device otherwise.
+    /// The cast is exact for f16/bf16/f32/i32, and exact up to 2^53 for
+    /// Int64 (the f64 mantissa limit).
     pub fn to_f64_vec(&self) -> Result<Vec<f64>> {
         if self.dtype() != DType::Float64 {
+            if self.device().is_mps() {
+                return self
+                    .to_device(Device::CPU)?
+                    .to_dtype(DType::Float64)?
+                    .to_f64_vec();
+            }
             return self.to_dtype(DType::Float64)?.to_f64_vec();
         }
         let n = self.numel() as usize;
@@ -817,6 +834,9 @@ impl Tensor {
                 self.numel(),
                 self.shape()
             )));
+        }
+        if self.device().is_mps() {
+            return self.to_device(Device::CPU)?.item();
         }
         if self.dtype() != DType::Float64 {
             // Cast on device first: flodl_copy_data copies NATIVE bytes, so

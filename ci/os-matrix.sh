@@ -188,7 +188,7 @@ HOST="$HOST_OS-$HOST_ARCH"
 # *_ADVISORY   this path has never run anywhere; report, do not block
 LT_FLAG=""; LT_DIR=""; LT_LIB=""
 REFUSE_FLAG=""; REFUSE_MSG=""
-COMPILE=0; GPU=0; ALL_VARIANTS=0; RUN_SETUP=0; CPU_TESTS=0
+COMPILE=0; GPU=0; MPS=0; ALL_VARIANTS=0; RUN_SETUP=0; CPU_TESTS=0
 # INSTALL_ADVISORY is live (windows installs but does not compile).
 # COMPILE_ADVISORY is set by NO host now that macOS is green; it stays as
 # the mechanism for the next host added before it has ever run, which is
@@ -248,9 +248,9 @@ case "$HOST" in
         REFUSE_FLAG="--cuda 12.8"; REFUSE_MSG="not available for Linux aarch64"
         ;;
     macos-aarch64)
-        # CPU only, and not a gap to fill later: upstream publishes no
-        # CUDA or ROCm libtorch for macOS at all, which the refusal
-        # below asserts.
+        # The macOS CPU archive carries the native MPS backend when
+        # available. NVIDIA CUDA and ROCm libtorch are not published for
+        # macOS, which the refusal below asserts.
         #
         # No longer advisory. It went green on 2026-08-07 -- clang builds
         # the shim, and a scaffolded project trains -- so it is a gate
@@ -265,7 +265,8 @@ case "$HOST" in
         # a Mach-O host build and a Linux container build can share one
         # checkout (bare `cpu` stays the Linux x86_64 reference).
         LT_FLAG="--cpu"; LT_DIR=cpu-macos; LT_LIB="lib/libtorch.dylib"
-        COMPILE=1
+        COMPILE=1; CPU_TESTS=1
+        MPS=1
         REFUSE_FLAG="--cuda 12.8"; REFUSE_MSG="macOS only supports CPU libtorch"
         ;;
     windows-x86_64)
@@ -748,8 +749,13 @@ if [ "$GPU" = 1 ]; then
     CLIPPY_CMD="cargo clippy --features $FEATURE --all-targets -- -D warnings"
     LINK_CMD="cargo build --features $FEATURE -p flodl-hf --test bert_cuda_smoke"
 else
-    BUILD_CMD="cargo build -p flodl-sys -p flodl"
-    CLIPPY_CMD="cargo clippy -p flodl-sys -p flodl --all-targets -- -D warnings"
+    if [ "$MPS" = 1 ]; then
+        BUILD_CMD="cargo build -p flodl-sys -p flodl --features flodl/mps,flodl-sys/mps"
+        CLIPPY_CMD="cargo clippy -p flodl-sys -p flodl --features flodl/mps,flodl-sys/mps --all-targets -- -D warnings"
+    else
+        BUILD_CMD="cargo build -p flodl-sys -p flodl"
+        CLIPPY_CMD="cargo clippy -p flodl-sys -p flodl --all-targets -- -D warnings"
+    fi
     # No separate link command on the CPU legs: the two commands above
     # stop at rlib and at metadata, and the OS-specific link + load +
     # run now happens in the scaffold smoke below, which builds a real
@@ -783,9 +789,15 @@ group "flodl CPU test suite"
 # note above) -- and `--skip leakcheck` mirrors `fdl test` (serial
 # global-counter tests that fail under the parallel runner). The
 # libtorch env is already exported from the variant this leg installed.
-cargo test -p flodl-sys -p flodl --lib -- --skip leakcheck \
-    || fail "$HOST: flodl CPU test suite"
-pass "$HOST ran the flodl CPU suite natively"
+MPS_FEATURE=""
+[ "$MPS" = 1 ] && MPS_FEATURE="--features flodl/mps,flodl-sys/mps"
+cargo test -p flodl-sys -p flodl $MPS_FEATURE --lib -- --skip leakcheck \
+    || fail "$HOST: flodl test suite"
+if [ "$MPS" = 1 ]; then
+    pass "$HOST ran the flodl test suite with MPS enabled"
+else
+    pass "$HOST ran the flodl CPU suite natively"
+fi
 endgroup
 fi
 

@@ -258,6 +258,7 @@ struct FlodlAutocastGuard {
 
 static c10::DeviceType to_device_type_enum(int device_type) {
     if (device_type == FLODL_CUDA) return c10::DeviceType::CUDA;
+    if (device_type == FLODL_MPS) return c10::DeviceType::MPS;
     return c10::DeviceType::CPU;
 }
 

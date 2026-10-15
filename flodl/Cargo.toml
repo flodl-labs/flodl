@@ -24,6 +24,7 @@ default = ["rng"]
 gpu = ["flodl-sys/gpu"]
 cuda = ["gpu", "flodl-sys/cuda"]
 rocm = ["gpu", "flodl-sys/rocm"]
+mps = ["flodl-sys/mps"]
 rng = ["rand"]
 
 [dependencies]

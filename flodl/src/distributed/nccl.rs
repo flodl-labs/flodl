@@ -74,8 +74,8 @@ impl NcclComms {
         for &dev in devices {
             match dev {
                 Device::CUDA(idx) => devlist.push(idx as i32),
-                Device::CPU => {
-                    return Err(TensorError::new("NcclComms requires CUDA devices, got CPU"));
+                Device::CPU | Device::MPS => {
+                    return Err(TensorError::new("NcclComms requires CUDA devices"));
                 }
             }
         }

@@ -1,8 +1,8 @@
 # Apple Silicon (Mac M1 / M2 / M3 / M4 / M5)
 
-flodl runs on Apple Silicon Macs through Docker (Linux arm64). CUDA is not
-available on macOS, and neither is ROCm. The supported path on these
-machines is **CPU via the `dev` Docker service**.
+flodl supports native macOS execution through PyTorch's MPS backend, as well
+as CPU execution in Docker (Linux arm64). CUDA and ROCm are not available on
+macOS.
 
 Two halves to keep apart, because `fdl` handles them differently:
 
@@ -15,10 +15,87 @@ Two halves to keep apart, because `fdl` handles them differently:
   (the macOS leg asserts the `.dylib` install and the `--cuda` / `--rocm`
   refusals; the Linux arm leg drives the wheel repackage through
   `fdl setup` itself).
-- **Building flodl** is Docker-only. `flodl-sys`'s C++ shim has never been
-  compiled green by clang-on-macOS (the CI matrix runs that step
-  advisory), so `fdl build` / `fdl test` / `fdl clippy` go through the
-  bind-mounted `dev` container.
+- **Native MPS builds** use the macOS arm64 LibTorch archive and Cargo's
+  `mps` feature. Use this path for Apple GPU execution.
+- **Docker builds** use Linux arm64 LibTorch and CPU execution. Keep using this
+  path for workflows that need Linux parity or CUDA/NCCL clusters.
+
+## Native macOS with MPS
+
+Use an Apple Silicon Mac with macOS 13 or newer, Xcode Command Line Tools,
+Rust, and the native macOS arm64 LibTorch archive. From the project root:
+
+```bash
+./fdl libtorch download --cpu
+export LIBTORCH_PATH="$PWD/libtorch/precompiled/cpu-macos"
+export DYLD_LIBRARY_PATH="$LIBTORCH_PATH/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+cargo test -p flodl --features mps test_mps_forward_backward
+```
+
+Applications that depend on floDl should enable the feature and select
+`Device::MPS` when `mps_available()` returns `true`:
+
+```rust
+use flodl::{mps_available, Device, Tensor};
+
+if mps_available() {
+    let x = Tensor::from_f32(&[1.0, 2.0], &[2], Device::MPS)?;
+}
+```
+
+The `mps` feature is supported only on Apple Silicon macOS and cannot be
+combined with the `cuda` or `rocm` Cargo features. MPS has one device, exposed
+as `Device::MPS` (index 0). CUDA streams, CUDA graphs, and NCCL collectives
+remain CUDA-only; unsupported PyTorch MPS operators may fail at runtime.
+`fdl` does not yet select the `mps` Cargo feature automatically, so enable it
+in your Cargo command or dependency configuration.
+
+### CPU vs MPS training benchmark
+
+The checked-in benchmark runs full forward, loss, backward, and AdamW steps
+for a 4.39-million-parameter TinyBERT sequence classifier on CPU and MPS. It
+uses batch sizes 16, 64, 256, and 512 at sequence length 128. Each device gets
+two warmup steps and three timed rounds of ten steps; the reported step time
+is the median round, with device synchronization around each timed round.
+Model loading and tokenization are outside the timed region.
+
+Run it from the repository root on an Apple Silicon Mac:
+
+```bash
+export LIBTORCH_PATH="$PWD/libtorch/precompiled/cpu-macos"
+export DYLD_LIBRARY_PATH="$LIBTORCH_PATH/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+cargo run --release -p flodl-hf --example bert_mps_bench --features flodl/mps
+```
+
+The first run downloads the [17.5 MB `jason-zhoou/tiny-bert-sst2` checkpoint](https://huggingface.co/jason-zhoou/tiny-bert-sst2).
+The example prints CSV to stdout. The measurements below were collected on an
+M5 Pro Mac running macOS 26.5.1; the raw rows are in
+[`benchmarks/mps-tinybert.csv`](../benchmarks/mps-tinybert.csv), and
+[`benchmarks/plot_mps.py`](../benchmarks/plot_mps.py) regenerates the chart.
+
+These measurements predate explicit MPS synchronization in the benchmark.
+Treat them as preliminary only: rerun on an MPS-enabled LibTorch before
+using these values as performance evidence.
+
+![CPU and Apple MPS TinyBERT training throughput and step time](charts/mps-tinybert.svg)
+
+| Batch | CPU ms / step | MPS ms / step | MPS speedup | CPU examples / s | MPS examples / s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 17.197 | 7.705 | 2.23× | 930 | 2,077 |
+| 64 | 51.645 | 10.417 | 4.96× | 1,239 | 6,144 |
+| 256 | 207.039 | 40.751 | 5.08× | 1,237 | 6,282 |
+| 512 | 416.302 | 87.869 | 4.74× | 1,230 | 5,827 |
+
+This is a controlled throughput test, not an accuracy result: each batch
+repeats two short positive/negative token sequences, with alternating labels.
+It demonstrates that the full fine-tuning path executes on MPS and measures
+this model and workload on this Mac; real-world speedups depend on model,
+sequence length, batch size, and MPS operator coverage.
+
+## Docker CPU path
+
+The setup below keeps using Linux arm64 LibTorch and CPU execution. It remains
+useful when a Linux build environment is required.
 
 ## Prerequisites
 
@@ -29,9 +106,10 @@ Two halves to keep apart, because `fdl` handles them differently:
 - ~2 GB free disk for libtorch + dependency caches, plus the usual cargo
   target directory.
 
-You do **not** need Rust installed on the host: the dev container ships its
-own toolchain. A native `fdl` binary on the host is convenient for
-`fdl -h` / `fdl api-ref`, and is auto-downloaded on first `./fdl` invocation.
+For the Docker path, you do **not** need Rust installed on the host: the dev
+container ships its own toolchain. Native builds need Rust and Xcode Command
+Line Tools. A native `fdl` binary is auto-downloaded on first `./fdl`
+invocation.
 
 ## One-time setup
 

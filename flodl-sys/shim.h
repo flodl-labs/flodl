@@ -500,6 +500,8 @@ char* flodl_to_device_async(FlodlTensor t, int device_type, int device_index,
                            FlodlTensor* result);
 
 int flodl_gpu_is_available(void);
+int flodl_mps_is_available(void);
+void flodl_mps_synchronize(void);
 int flodl_gpu_device_count(void);
 int flodl_force_gpu_link(void);
 void flodl_set_cudnn_benchmark(int enable);
@@ -988,6 +990,7 @@ void flodl_free_string(char* s);
 // --- Device constants ---
 #define FLODL_CPU  0
 #define FLODL_CUDA 1
+#define FLODL_MPS  2
 
 #ifdef __cplusplus
 }
