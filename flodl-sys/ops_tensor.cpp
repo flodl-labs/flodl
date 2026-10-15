@@ -81,7 +81,7 @@ extern "C" char* flodl_from_blob(void* data, int64_t* shape, int ndim,
         auto options = torch::TensorOptions().dtype(to_scalar_type(dtype));
         // from_blob does not take ownership — clone to get an independent copy.
         auto t = torch::from_blob(data, make_shape(shape, ndim), options).clone();
-        if (device_type == FLODL_CUDA) {
+        if (device_type != FLODL_CPU) {
             t = t.to(to_device(device_type, device_index));
         }
         *result = wrap(std::move(t));
@@ -99,7 +99,7 @@ extern "C" char* flodl_linspace(double start, double end, int64_t steps,
     try {
         auto options = torch::TensorOptions().dtype(to_scalar_type(dtype));
         auto t = torch::linspace(start, end, steps, options);
-        if (device_type == FLODL_CUDA) {
+        if (device_type != FLODL_CPU) {
             t = t.to(to_device(device_type, device_index));
         }
         *result = wrap(std::move(t));

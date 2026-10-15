@@ -47,7 +47,7 @@ impl GpuStream {
     pub fn new(device: Device, high_priority: bool) -> Result<Self> {
         let device_index = match device {
             Device::CUDA(idx) => idx as i32,
-            Device::CPU => return Err(TensorError::new("GpuStream requires a CUDA device")),
+            _ => return Err(TensorError::new("GpuStream requires a CUDA device")),
         };
         let mut ptr: *mut c_void = ptr::null_mut();
         let err =
@@ -81,7 +81,7 @@ impl GpuStream {
     pub fn current(device: Device) -> Result<Self> {
         let device_index = match device {
             Device::CUDA(idx) => idx as i32,
-            Device::CPU => return Err(TensorError::new("GpuStream requires a CUDA device")),
+            _ => return Err(TensorError::new("GpuStream requires a CUDA device")),
         };
         let ptr = unsafe { ffi::flodl_gpu_stream_get_current(device_index) };
         if ptr.is_null() {

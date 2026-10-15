@@ -21,6 +21,7 @@ default = []
 gpu = []
 cuda = ["gpu"]
 rocm = ["gpu"]
+mps = []
 
 [package.metadata.docs.rs]
 rustc-args = ["--cfg", "docsrs"]

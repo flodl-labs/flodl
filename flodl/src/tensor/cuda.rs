@@ -9,6 +9,11 @@ use super::{
 };
 use std::sync::atomic::Ordering;
 
+/// Returns true when LibTorch was built with MPS support and an Apple GPU is available.
+pub fn mps_available() -> bool {
+    unsafe { ffi::flodl_mps_is_available() != 0 }
+}
+
 /// Returns true if a GPU is available.
 ///
 /// On Linux, this also ensures CUDA libraries are loaded (they can be
@@ -331,6 +336,11 @@ pub fn probe_device(device: Device) -> Result<()> {
     let idx = match device {
         Device::CUDA(i) => i,
         Device::CPU => return Ok(()),
+        Device::MPS => {
+            return Err(TensorError::new(
+                "probe_device supports CUDA devices only; use mps_available for MPS",
+            ));
+        }
     };
     let opts = TensorOptions {
         dtype: DType::Float32,

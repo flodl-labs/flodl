@@ -6,6 +6,9 @@
 // CUDA memory/utilization/device-info utilities.
 
 #include "helpers.h"
+#ifdef FLODL_BUILD_MPS
+#include <torch/mps.h>
+#endif
 
 #ifdef FLODL_BUILD_GPU
 #include "gpu_compat.h"
@@ -489,6 +492,18 @@ extern "C" int flodl_gpu_is_available(void) {
     } catch (...) {
         flodl_fatal("flodl_gpu_is_available", nullptr);
     }
+}
+
+extern "C" int flodl_mps_is_available(void) {
+#ifdef FLODL_BUILD_MPS
+    try {
+        return torch::mps::is_available() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+#else
+    return 0;
+#endif
 }
 
 extern "C" int flodl_gpu_device_count(void) {
