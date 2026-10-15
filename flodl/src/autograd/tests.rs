@@ -35,14 +35,8 @@ fn test_mps_forward_backward() {
         "the mps feature requires an available Apple MPS device"
     );
 
-    let x = Variable::new(
-        Tensor::from_f32(&[3.0], &[1], Device::MPS).unwrap(),
-        true,
-    );
-    let two = Variable::new(
-        Tensor::from_f32(&[2.0], &[1], Device::MPS).unwrap(),
-        false,
-    );
+    let x = Variable::new(Tensor::from_f32(&[3.0], &[1], Device::MPS).unwrap(), true);
+    let two = Variable::new(Tensor::from_f32(&[2.0], &[1], Device::MPS).unwrap(), false);
     let y = x.mul(&two).unwrap().sum().unwrap();
     assert_eq!(y.device(), Device::MPS);
     y.backward().unwrap();
