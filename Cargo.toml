@@ -10,7 +10,7 @@ edition = "2024"
 # exactly this toolchain, so a wrong value here is a failing build rather
 # than a promise nobody tests.
 #
-# Three floors stack here, and the highest one wins:
+# Four floors stack here, and the highest one wins:
 #   1.88  our own source -- let-chains, used across graph/, monitor/ and
 #         distributed/ (rewriting them to go lower would be a large and
 #         gratuitous refactor)
@@ -19,8 +19,11 @@ edition = "2024"
 #         `hf-xet` dependency (no feature gates it). It calls
 #         `str::floor_char_boundary`, stable only from 1.91 -- verified
 #         by compiling a one-line probe on both 1.90.0 and 1.91.0.
+#   1.95  `sysinfo`, now resolved through hf-hub's `hf-xet` dependency.
+#         With no committed lockfile, its release raising the floor raises
+#         ours too; the MSRV job reported this exact boundary.
 #
-# That third floor is worth reading twice, because nothing warned about
+# That third floor was worth reading twice, because nothing warned about
 # it: `xet-core-structures` declares NO `rust-version` of its own, so
 # cargo cannot report the conflict and MSRV-aware resolution has nothing
 # to act on. It simply fails to compile, in a transitive crate, on the
@@ -30,7 +33,7 @@ edition = "2024"
 # resolve fresh, so a transitive dep raising its own rust-version raises
 # ours, and pinning it back in a lockfile nobody ships would not help.
 # Expect to bump it; the job says when — this is the job having said so.
-rust-version = "1.91"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/flodl-labs/flodl"
 homepage = "https://flodl.dev"

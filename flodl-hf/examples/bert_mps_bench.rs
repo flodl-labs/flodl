@@ -44,8 +44,8 @@ fn main() -> Result<()> {
             // Repeated one-token words create a fixed 128-token input. Labels
             // alternate, making this a controlled throughput workload rather
             // than an accuracy or convergence benchmark.
-            let positive = format!("{}", "good ".repeat(126));
-            let negative = format!("{}", "bad ".repeat(126));
+            let positive = "good ".repeat(126);
+            let negative = "bad ".repeat(126);
             let texts: Vec<&str> = (0..batch_size)
                 .map(|i| {
                     if i % 2 == 0 {

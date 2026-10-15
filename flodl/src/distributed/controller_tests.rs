@@ -944,7 +944,10 @@ fn reduce_realized_work_bf16_normalizes() {
 #[test]
 fn bf16_reduce_tracks_f32_reduce_within_wire_precision() {
     let a = [0.123_456_7f32, -1.234_567_8, 3.317_742_9];
-    let b = [2.941_385_2f32, -0.577_215_7, 1.489_306_4];
+    // Keep the measured f32 fixture value exact; this is not a named constant.
+    #[allow(clippy::approx_constant)]
+    let gamma_fixture = -0.577_215_7f32;
+    let b = [2.941_385_2f32, gamma_fixture, 1.489_306_4];
     let f32_frames = vec![
         Some(RoundFrame {
             tensors: vec![TensorPayload {
