@@ -333,6 +333,13 @@ fn download_large_to_file(url: &str, dest: &Path) -> Result<()> {
 /// 50,280, raw little-endian u16). Full file is ~1.46 GB; the bench
 /// stages only the leading [`OLMO_TRAIN_BYTES`] — a prefix of a raw
 /// dump is itself a valid shard.
+///
+/// Single-source: the whole file is the books source of Dolma (Project
+/// Gutenberg derived), which is what makes the `in-domain` eval slice at
+/// [`OLMO_IN_DOMAIN_EVAL_OFFSET`] a genuine same-distribution claim. That
+/// slice follows THIS file, so pointing the constant at another shard keeps
+/// `--olmo-eval in-domain` true by construction, while any prose here that
+/// says "books" would have to change with it.
 const OLMO_TRAIN_URL: &str = "https://olmo-data.org/preprocessed/olmo-mix/v1_6-decontaminated/books/gpt-neox-olmo-dolma-v1_5/part-0-00000.npy";
 
 /// Default bytes of the train shard to stage, when `--train-tokens` is
@@ -351,6 +358,25 @@ const OLMO_EVAL_URL: &str = "https://olmo-data.org/eval-data/perplexity/v3_small
 /// Bytes of the eval shard to stage: 512 KiB = ~262k tokens.
 pub const OLMO_EVAL_BYTES: u64 = 512 * 1024;
 
+/// In-domain held-out eval: a slice of the SAME books shard the model
+/// trains on, taken at a fixed offset deep inside the file. C4-en is a
+/// held-out DOMAIN, and at bench scale a 150M model on ~20M books tokens
+/// barely moves it, so it detects almost nothing. A held-out slice of the
+/// training domain moves with training and still catches memorisation: a
+/// model that memorises its train prefix degrades on unseen text of the
+/// same kind.
+///
+/// The offset is fixed rather than "the tail of the file" so it needs no
+/// HEAD request and does not move if upstream re-cuts the shard. 1 GiB is
+/// 512M tokens into a 1.46 GB file, far past any prefix this bench stages;
+/// [`in_domain_eval_range`] refuses loudly if a train prefix ever reaches it.
+pub const OLMO_IN_DOMAIN_EVAL_OFFSET: u64 = 1 << 30;
+/// 256 KiB = ~131k tokens = 511 windows at seq 256, half the C4 slice: the
+/// elected rank pays ~10 s per 512 KiB eval on a 5060 Ti and a 20-split run
+/// evals 20 times, while the CE mean over 131k tokens sits well under the
+/// run-to-run spread being measured.
+pub const OLMO_IN_DOMAIN_EVAL_BYTES: u64 = 256 * 1024;
+
 /// Download the leading `bytes` of the olmo-mix books shard (if not
 /// cached at that exact size) and return its path. Cached in
 /// `{data_dir}/olmo/`.
@@ -363,8 +389,37 @@ pub fn ensure_olmo_train(data_dir: &Path, bytes: u64) -> Result<std::path::PathB
         data_dir,
         OLMO_TRAIN_URL,
         "books-part-0-00000.head.npy",
-        Some(bytes),
+        Some((0, bytes)),
         bytes,
+    )
+}
+
+/// The byte range of the in-domain held-out slice, refusing a train prefix
+/// that reaches it. The two must be disjoint by construction, and this is
+/// the one place that construction is checked.
+pub fn in_domain_eval_range(train_bytes: u64) -> Result<(u64, u64)> {
+    if train_bytes > OLMO_IN_DOMAIN_EVAL_OFFSET {
+        return Err(TensorError::new(&format!(
+            "the staged train prefix ({train_bytes} bytes) reaches the in-domain \
+             held-out slice at byte {OLMO_IN_DOMAIN_EVAL_OFFSET}, so eval would score \
+             training data. Stage fewer tokens (--train-tokens) or eval on C4 \
+             (--olmo-eval out-of-domain)."
+        )));
+    }
+    Ok((OLMO_IN_DOMAIN_EVAL_OFFSET, OLMO_IN_DOMAIN_EVAL_BYTES))
+}
+
+/// Download the in-domain held-out slice (if not cached) and return its
+/// path. The file name carries the offset because the cache validates by
+/// length alone, so a moved offset must land in a new file.
+pub fn ensure_olmo_in_domain_eval(data_dir: &Path, train_bytes: u64) -> Result<std::path::PathBuf> {
+    let (start, len) = in_domain_eval_range(train_bytes)?;
+    ensure_olmo_shard(
+        data_dir,
+        OLMO_TRAIN_URL,
+        &format!("books-part-0-00000.at-{start}.npy"),
+        Some((start, len)),
+        len,
     )
 }
 
@@ -375,7 +430,7 @@ pub fn ensure_olmo_eval(data_dir: &Path) -> Result<std::path::PathBuf> {
         data_dir,
         OLMO_EVAL_URL,
         "c4-val-part-0-00000.head.npy",
-        Some(OLMO_EVAL_BYTES),
+        Some((0, OLMO_EVAL_BYTES)),
         OLMO_EVAL_BYTES,
     )
 }
@@ -384,7 +439,7 @@ fn ensure_olmo_shard(
     data_dir: &Path,
     url: &str,
     file_name: &str,
-    range_bytes: Option<u64>,
+    range: Option<(u64, u64)>,
     expected_bytes: u64,
 ) -> Result<std::path::PathBuf> {
     // Exact-length validity, not mere existence: changing the staged
@@ -395,7 +450,7 @@ fn ensure_olmo_shard(
         |p: &Path| fs::metadata(p).map(|m| m.len() == expected_bytes).unwrap_or(false);
 
     let path = resolve_cached(data_dir, "olmo", file_name, right_size, |dst| {
-        download_range_to_file(url, dst, range_bytes)?;
+        download_range_to_file(url, dst, range)?;
         let got = fs::metadata(dst)
             .map_err(|e| TensorError::new(&format!("stat {}: {e}", dst.display())))?
             .len();
@@ -411,15 +466,17 @@ fn ensure_olmo_shard(
     Ok(path)
 }
 
-/// Stream a download to a file, optionally requesting only the leading
-/// `bytes` via an HTTP Range header.
-fn download_range_to_file(url: &str, dest: &Path, bytes: Option<u64>) -> Result<()> {
-    match bytes {
+/// Stream a download to a file, optionally requesting only `(start, len)`
+/// bytes of it via an HTTP Range header.
+fn download_range_to_file(url: &str, dest: &Path, range: Option<(u64, u64)>) -> Result<()> {
+    match range {
         None => download_large_to_file(url, dest),
-        Some(n) => {
-            eprintln!("    downloading first {n} bytes of {url}...");
+        Some((_, 0)) => Err(TensorError::new(&format!("GET {url}: empty byte range requested"))),
+        Some((start, len)) => {
+            let end = start + len - 1;
+            eprintln!("    downloading bytes {start}..={end} of {url}...");
             let resp = ureq::get(url)
-                .header("Range", &format!("bytes=0-{}", n - 1))
+                .header("Range", &format!("bytes={start}-{end}"))
                 .call()
                 .map_err(|e| TensorError::new(&format!("GET {url}: {e}")))?;
             if resp.status() != 206 {
@@ -445,5 +502,28 @@ fn download_range_to_file(url: &str, dest: &Path, bytes: Option<u64>) -> Result<
             eprintln!("    {total} bytes");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{in_domain_eval_range, OLMO_IN_DOMAIN_EVAL_BYTES, OLMO_IN_DOMAIN_EVAL_OFFSET};
+
+    #[test]
+    fn the_bench_scale_prefix_leaves_the_held_out_slice_untouched() {
+        // 20M tokens is 40 MB; the slice sits 1 GiB in.
+        assert_eq!(
+            in_domain_eval_range(40_000_000).unwrap(),
+            (OLMO_IN_DOMAIN_EVAL_OFFSET, OLMO_IN_DOMAIN_EVAL_BYTES)
+        );
+        // A prefix ending exactly at the slice is still disjoint from it.
+        assert!(in_domain_eval_range(OLMO_IN_DOMAIN_EVAL_OFFSET).is_ok());
+    }
+
+    #[test]
+    fn a_prefix_reaching_the_slice_is_refused_and_names_the_way_out() {
+        let err = in_domain_eval_range(OLMO_IN_DOMAIN_EVAL_OFFSET + 1).unwrap_err().to_string();
+        assert!(err.contains("training data"), "{err}");
+        assert!(err.contains("--olmo-eval out-of-domain"), "{err}");
     }
 }

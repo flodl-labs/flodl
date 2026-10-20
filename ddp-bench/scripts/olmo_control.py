@@ -11,8 +11,10 @@ Run after ddp-bench has staged the shards (any `--model olmo` run):
 
     python scripts/olmo_control.py [--data-dir data] [--epochs 3]
 
-Prints per-epoch mean train CE and held-out C4-en eval CE (same eval
-data as the Rust side).
+Prints per-epoch mean train CE and held-out eval CE on the same eval
+data as the Rust side: `--eval out-of-domain` (C4-en web text, the
+default) or `--eval in-domain` (a held-out slice of the training shard),
+mirroring ddp-bench's `--olmo-eval`.
 """
 
 import argparse
@@ -109,6 +111,40 @@ class Olmo(nn.Module):
         return self.head(self.final_norm(x))
 
 
+# (url, byte offset, byte length, file name), mirroring download.rs:
+# out-of-domain = the leading 512 KiB of OLMo's C4-en validation shard (web
+# text); in-domain = 256 KiB of the training shard at a fixed 1 GiB offset
+# (OLMO_IN_DOMAIN_EVAL_OFFSET).
+EVAL_SLICES = {
+    "out-of-domain": (
+        "https://olmo-data.org/eval-data/perplexity/v3_small_gptneox20b/c4_en/val/part-0-00000.npy",
+        0, 512 * 1024, "c4-val-part-0-00000.head.npy",
+    ),
+    "in-domain": (
+        "https://olmo-data.org/preprocessed/olmo-mix/v1_6-decontaminated/books/gpt-neox-olmo-dolma-v1_5/part-0-00000.npy",
+        1 << 30, 256 * 1024, "books-part-0-00000.at-1073741824.npy",
+    ),
+}
+
+
+def fetch_range(url, start, length, dest):
+    """Download `length` bytes at `start` of `url` into `dest` (atomic rename)."""
+    import urllib.request
+    end = start + length - 1
+    print(f"downloading bytes {start}..={end} of {url}", file=sys.stderr)
+    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+    with urllib.request.urlopen(req) as resp:
+        if resp.status != 206:
+            sys.exit(f"GET {url}: server ignored the Range request (status {resp.status})")
+        data = resp.read()
+    if len(data) != length:
+        sys.exit(f"GET {url}: got {len(data)} bytes, expected {length}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+
+
 def windows(path):
     """Non-overlapping SEQ_LEN windows with shift-by-one targets, like TokenShards."""
     tokens = np.memmap(path, dtype=np.uint16, mode="r")
@@ -128,13 +164,23 @@ def main():
     ap.add_argument("--data-dir", default="data", help="ddp-bench data dir (holds olmo/)")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--eval", choices=("out-of-domain", "in-domain"), default="out-of-domain",
+                    help="held-out text to score, mirroring ddp-bench --olmo-eval")
     args = ap.parse_args()
 
+    # The train prefix is whatever ddp-bench staged: its size encodes the
+    # --train-tokens snapping, so it is read, never re-derived here.
     train_path = Path(args.data_dir) / "olmo" / "books-part-0-00000.head.npy"
-    eval_path = Path(args.data_dir) / "olmo" / "c4-val-part-0-00000.head.npy"
-    for p in (train_path, eval_path):
-        if not p.exists():
-            sys.exit(f"missing {p} — run any `ddp-bench --model olmo` first to stage the shards")
+    if not train_path.exists():
+        sys.exit(f"missing {train_path} — run any `ddp-bench --model olmo` first to stage the shard")
+    # The eval slices are fixed byte ranges, so they are fetched here when
+    # absent: ddp-bench's two-tier cache may have put its copy in a
+    # container-local cache rather than the source root. Names and ranges
+    # mirror ddp-bench/src/download.rs (kept in sync by hand).
+    url, start, length, eval_file = EVAL_SLICES[args.eval]
+    eval_path = Path(args.data_dir) / "olmo" / eval_file
+    if not eval_path.exists():
+        fetch_range(url, start, length, eval_path)
 
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -294,6 +294,9 @@ impl ClusterCoordinator {
         self.el_che.report_window(&report_window);
         if !self.calibrated && self.el_che.is_calibrated() {
             self.calibrated = true;
+            // The first pace measurement is the first moment "fastest"
+            // means anything; until now the roles sat on the lowest rank.
+            self.elect_callback_roles_on_calibration();
         }
         self.dump_delivered_timing(prev_sync_ms);
 

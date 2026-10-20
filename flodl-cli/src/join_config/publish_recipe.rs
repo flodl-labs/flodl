@@ -33,8 +33,8 @@ pub(super) fn derive_publish(crate_dir: &Path) -> Result<Option<PublishDerivatio
         .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
     let name = package_name(&manifest).ok_or_else(|| {
         format!(
-            "{} has no [package] name — a workspace root? Point --crate at \
-             the training crate itself",
+            "{} has no [package] name — a workspace root? Point --crate-dir \
+             at the training crate itself",
             manifest_path.display()
         )
     })?;

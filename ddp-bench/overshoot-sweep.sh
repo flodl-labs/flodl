@@ -68,7 +68,7 @@
 # OVS_WALKINS example for this rig (one dial per box, newline-separated;
 # exa's GPU over loopback, pascal through the join sshd):
 #
-#   export OVS_WALKINS="docker exec -w /workspace rdl-cuda-rank-1 fdl join 127.0.0.1:1337 --token \$TOK --host exa-cuda --devices 0 --bin /workspace/target/cluster/exa-cuda/precompiled-cu128/release/ddp-bench
+#   export OVS_WALKINS="docker exec -w /workspace/ddp-bench rdl-cuda-rank-1 fdl join 127.0.0.1:1337 --token \$TOK --host exa-cuda --devices 0 --bin /workspace/target/cluster/exa-cuda/precompiled-cu128/release/ddp-bench
 #   ssh -o BatchMode=yes flodl-pascal 'cd /mnt/rdl && FDL_LIBTORCH_CASE=pascal fdl join 127.0.0.1:1337 --ssh ubuntu@192.168.122.1:2222 --identity ~/.ssh/flodl-join --token '\$TOK' --bin /mnt/rdl/target/cluster/flodl-pascal/builds-sm61-sm120/release/ddp-bench'"
 #
 # That pair is what `ci/rig-ladder.sh 4` was proven with on 2026-08-14,
@@ -84,21 +84,26 @@
 # For the AMD leg the droplet's entry uses --source instead of --bin (no
 # shared mount), which changes nothing here: the args still append.
 #
-# ── WHY --output IS THE ONE ARG THAT DOES *NOT* TRAVEL ─────────────────
-# It is per-side on purpose, which is the exact opposite of the rule above
-# and for a reason worth stating. A relative --output resolves against
-# wherever each dial left the agent, and the two boxes punish that
-# differently: the exa walk-in goes through `docker exec` on cuda-rank,
-# compose's ONE deliberate non-`user:` service (its sshd must start as
-# root), so a relative path lands ROOT-OWNED inside the repo bind mount;
-# pascal's /mnt/rdl is read-only, so the same path simply fails. One line,
-# two hazards, both observed on 2026-08-14.
-# Rung 4 also showed the divergence is harmless: its controller wrote
-# `runs/` while its walk-ins wrote an absolute /tmp path, and the cohort
-# finished clean. --output is an ARTIFACT path, not training semantics,
-# and rank telemetry ships to the controller regardless. So the identity
-# guarantee covers CORE_ARGS (model, mode, hyperparameters -- the arm) and
-# deliberately stops short of the output dir.
+# ── --output TRAVELS TOO, SINCE RUN-IN-ACCEPT (2026-08-29) ─────────────
+# This block used to say the opposite: that --output was the one argument
+# kept per side, with each walk-in given an absolute /tmp path. That was
+# true when a walk-in ran the arguments its dial carried. Since the
+# controller hands every admitted box its OWN argument list at admission,
+# a walk-in runs the controller's `--output runs/...` and resolves that
+# RELATIVE path against its own cwd. The two boxes punish that differently
+# (both observed again 2026-09-20): the exa walk-in goes through `docker
+# exec` on cuda-rank, compose's ONE deliberate non-`user:` service (its
+# sshd must start as root), so the path lands ROOT-OWNED wherever the
+# dial's `-w` left the agent, and a `-w /workspace` dial writes a stray
+# `runs/` at the repo root; pascal's /mnt/rdl is read-only, so the same
+# path only warns. The answer is in the dial, not the args: run the
+# container walk-in from the controller's project dir (`-w
+# /workspace/ddp-bench`, the same bind mount, so its artifacts land in the
+# cell and are rotated aside like a fan-out rank's) and hand the cell back
+# through the container afterwards (`docker exec rdl-cuda-rank-1 chown`).
+# The dials below still append CORE_ARGS; that copy now only feeds the
+# pre-dial model-signature probe. --output stays an ARTIFACT path, not
+# training semantics, and rank telemetry reaches the controller regardless.
 #
 # ── WHAT MOTIVATES THE ARMS ────────────────────────────────────────────
 # Measured on runs/olmo-graph/cpu-async-diloco (the 2026-08-13 baseline,
@@ -489,7 +494,6 @@ for arm_seed in $(for a in $ARMS; do for s in $SEEDS; do echo "$a:$s"; done; don
   # node-local so it can be neither root-owned repo pollution nor a write
   # into a read-only mount.
   CORE_ARGS="$FIXED --seed $seed$(arm_flags "$n" "$alpha")"
-  WALKIN_OUT="/tmp/ovs-$label"
   clog="$LOGDIR/$label-controller.log"
 
   # shellcheck disable=SC2086
@@ -521,7 +525,10 @@ for arm_seed in $(for a in $ARMS; do for s in $SEEDS; do echo "$a:$s"; done; don
     esac
     nw=$((nw+1))
     wlog="$LOGDIR/$label-walkin-$nw.log"
-    sh -c "$cmd -- $CORE_ARGS --output $WALKIN_OUT" > "$wlog" 2>&1 &
+    # stdin from /dev/null, or a backgrounded ssh dial inherits the heredoc
+    # feeding this loop and swallows the dial lines after it (only ever
+    # invisible here because the ssh dial is listed last).
+    sh -c "$cmd -- $CORE_ARGS" < /dev/null > "$wlog" 2>&1 &
     wpids="$wpids $!"
     wlogs="$wlogs $wlog"
   done <<EOF

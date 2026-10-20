@@ -226,9 +226,10 @@ CI runs two gates that need no libtorch and are not part of `fdl ci`:
   runs as its own job so it never masks the test signal. Duplicate-version
   warnings are expected and deliberate (`multiple-versions = "warn"`);
   they are almost all transitive and not ours to fix.
-- **MSRV** — the workspace is checked on exactly the `rust-version` in
-  `Cargo.toml`, so a wrong value there is a failing build rather than a
-  promise nobody tests.
+- **MSRV** — the core crates are checked on exactly the workspace
+  `rust-version` in `Cargo.toml`, and `flodl-hf` on the higher one its
+  own manifest declares, so a wrong value in either is a failing build
+  rather than a promise nobody tests.
 
 Both can go red without anyone touching the code, when an advisory lands
 or a dependency moves. That is the no-lockfile trade-off working as

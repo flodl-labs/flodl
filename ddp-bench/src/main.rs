@@ -61,6 +61,18 @@ struct Cli {
     #[option]
     train_tokens: Option<String>,
 
+    /// Held-out text the token models (olmo, olmo-graph) score, named by its
+    /// relation to the training domain. "out-of-domain" is OLMo's C4-en
+    /// validation slice, web text a books-trained model barely moves at
+    /// bench scale; it is the historical metric and stays the default so
+    /// existing invocations keep their meaning. "in-domain" is a slice of the
+    /// training shard itself at a fixed 1 GiB offset, disjoint from any
+    /// staged prefix by construction (refused loudly otherwise), so the eval
+    /// curve moves with training and still catches memorisation. Recorded
+    /// in the run's log header and metadata. Other models error.
+    #[option(default = "out-of-domain", choices = &["out-of-domain", "in-domain"])]
+    olmo_eval: String,
+
     /// Override batch size.
     #[option]
     batch_size: Option<usize>,
@@ -339,9 +351,13 @@ struct Cli {
     /// `eval=X.XXXX` into `training.log`. Required to correlate the
     /// divergence growth rate `λ̂` against held-out accuracy. Default off.
     ///
-    /// Adds an eval pass per epoch on rank 0 (Sync: consensus params;
-    /// Cadence/Async: rank-local at start of next epoch — near-consensus,
-    /// trend-preserving for correlation analyses).
+    /// Cluster modes: one consensus eval per epoch, run by the rank the
+    /// controller elects (fastest) on the round's averaged parameters, with
+    /// its own state restored verbatim afterwards, so the eval never changes
+    /// what a rank trains. Under `--epoch-splits` every split is an epoch, so
+    /// a single-pass run gets a trajectory. CPU modes score at the first
+    /// realized reduce after the epoch boundary, so an epoch with no reduce
+    /// carries no point. Solo modes eval in-process.
     #[option]
     per_epoch_eval: bool,
 
@@ -811,6 +827,29 @@ fn run() -> flodl::tensor::Result<()> {
     let baseline_path = cli.baseline.clone();
     let tolerance = cli.tolerance;
     let seed = cli.seed;
+    // Same gate as --train-tokens: a metric choice a model cannot honor must
+    // not be recorded as if it had been.
+    let olmo_eval = match cli.olmo_eval.as_str() {
+        "out-of-domain" => models::OlmoEval::OutOfDomain,
+        "in-domain" => {
+            let target = cli.model.as_deref().unwrap_or("all");
+            if !matches!(target, "olmo" | "olmo-graph") {
+                return Err(flodl::tensor::TensorError::new(&format!(
+                    "--olmo-eval in-domain selects a held-out slice of the token \
+                     models' training shard and only they honor it (olmo, olmo-graph); \
+                     --model {target} scores its own eval set and would silently ignore \
+                     it. Pass --model olmo or --model olmo-graph.",
+                )));
+            }
+            models::OlmoEval::InDomain
+        }
+        other => {
+            return Err(flodl::tensor::TensorError::new(&format!(
+                "--olmo-eval must be \"out-of-domain\" or \"in-domain\", got \"{other}\""
+            )))
+        }
+    };
+
     let lr_scale = cli.lr_scale;
     let list = cli.list;
 
@@ -1136,6 +1175,7 @@ fn run() -> flodl::tensor::Result<()> {
                 augment_noise: cli.augment_noise.unwrap_or(0.0),
                 epoch_splits: epoch_splits.unwrap_or(1).max(1),
                 train_tokens,
+                olmo_eval,
                 vram_max_usage: cli.vram_max_usage,
                 ram_max_usage: cli.ram_max_usage,
                 sample_cache: cli.sample_cache,

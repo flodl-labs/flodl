@@ -306,7 +306,9 @@ fn acquire_libtorch(token: &str, notes: &mut Vec<String>) -> Result<(PathBuf, St
 /// Map a `libtorch:` value onto a downloadable variant. The accepted
 /// values are `fdl libtorch download`'s own flags spelled as one token,
 /// so the two surfaces cannot drift into naming different things.
-fn parse_libtorch_token(token: &str) -> Result<crate::libtorch::download::Variant, Fail> {
+pub(crate) fn parse_libtorch_token(
+    token: &str,
+) -> Result<crate::libtorch::download::Variant, Fail> {
     use crate::libtorch::download::Variant;
     match token.trim() {
         "auto" => Ok(Variant::Auto),

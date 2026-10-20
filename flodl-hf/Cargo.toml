@@ -2,7 +2,18 @@
 name = "flodl-hf"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Not the workspace floor: the Hub client's dependency chain sets a higher
+# one, and the core crates must not inherit it (see the workspace
+# Cargo.toml). Checked by `ci.yml`'s msrv job on exactly this toolchain.
+#   1.91  `xet-core-structures`, reached through hf-hub 1.0's MANDATORY
+#         `hf-xet` dependency. It calls `str::floor_char_boundary`, stable
+#         only from 1.91, and declares no `rust-version`, so nothing warns:
+#         it simply fails to compile on a lower floor.
+#   1.95  `sysinfo` 0.39 through the same chain: `xet-runtime` 1.7
+#         requires `sysinfo ^0.39` and declares no floor of its own, so
+#         MSRV-aware resolution cannot step back to 1.6 and its 0.38.
+#         `sysinfo` 0.39.6 declares 1.95. Raised 2026-10-10.
+rust-version = "1.95"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

@@ -126,7 +126,7 @@ cd my-project
 ./fdl run     # train the model
 ```
 
-**Native** - [Rust](https://rustup.rs/) 1.91+ and libtorch:
+**Native** - [Rust](https://rustup.rs/) 1.90+ (1.95+ for `flodl-hf`) and libtorch:
 
 ```bash
 ./fdl libtorch download    # auto-detects CPU, CUDA or ROCm

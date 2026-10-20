@@ -25,7 +25,8 @@ structs and one worker API.
 | New pub fields on config / data structs | Struct **literals** need the new field (or `..Default::default()`); builder and setter users are untouched. |
 | `TrendGuard` → `LevelGuard`, `MsfGuard` → `GrowthGuard` | Nothing now: deprecated aliases keep the old names compiling. The deep `ddp_run::convergence::` paths are gone; ddp-bench's `--guard trend\|msf` spellings fail fast — use `level` / `growth`. |
 | Managed-tier `TrainedState` comes back empty | Set `.save_path(stem)` and read the bundle; the cooperative tier's `finish()` is unchanged. |
-| Cluster wire version bumped (4 → 5) | Every box in one cohort must run the same flodl. |
+| Cluster wire version bumped (4 → 6) | Every box in one cohort must run the same flodl. |
+| MSRV: flodl **1.90**, flodl-hf **1.95** | flodl-hf users: `rustup update`. Core flodl's floor went down. |
 
 ### The consensus bundle is the run's canonical persist form
 
@@ -103,12 +104,24 @@ paths; the deep `flodl::distributed::ddp_run::convergence::TrendGuard`
   (device-side events; readings resolve one pass behind). If you pinned
   profile numbers anywhere, expect them to grow to the true cost.
 
+### Minimum Rust: flodl 1.90, flodl-hf 1.95
+
+The crates no longer share one floor. In 0.8.0 every crate declared
+1.91, but that floor came from `flodl-hf`'s Hub client alone (its
+`hf-hub` → `hf-xet` chain), which no core crate compiles. Core flodl
+now declares its own floor, **1.90** (`bincode-next`), and `flodl-hf`
+declares **1.95**: `xet-runtime` 1.7 requires `sysinfo` 0.39, whose
+0.39.6 declares 1.95, and `xet-runtime` declares no floor of its own, so
+cargo's MSRV-aware resolution has no older version to step back to. The
+`flodl-hf` floor tracks that ecosystem and will move again; core
+flodl's moves only with its own dependencies.
+
 ### Cluster cohorts must be same-version
 
-`CONTROL_PROTOCOL_VERSION` went 4 → 5 (the graph-timings frame and the
-consensus-eval arm ride the control wire). As always, a mixed cohort
-refuses at the handshake, named. **Upgrade every box in a cohort
-together.**
+`CONTROL_PROTOCOL_VERSION` went 4 → 6 (the graph-timings frame and the
+consensus-eval arm ride the control wire, and the accept reply carries
+the run's arguments). As always, a mixed cohort refuses at the
+handshake, named. **Upgrade every box in a cohort together.**
 
 ---
 

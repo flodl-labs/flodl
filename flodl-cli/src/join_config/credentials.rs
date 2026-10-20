@@ -317,6 +317,29 @@ pub(super) fn recover_shape(farm_dir: &Path) -> Option<(Door, String)> {
     Some((door, spec))
 }
 
+/// The `libtorch:` an existing farm's worker yml declares, so a re-run
+/// keeps a pinned variant instead of falling back to `auto`.
+pub(super) fn recover_libtorch(farm_dir: &Path) -> Option<String> {
+    let yml = fs::read_to_string(farm_dir.join("worker.yml")).ok()?;
+    yml.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("libtorch:"))
+        .map(|v| v.split('#').next().unwrap_or("").trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The instance user an existing farm's cloud-init provisions for (its
+/// unit's `User=`), so a re-run does not silently re-render it for the
+/// default user on an image that logs in as someone else.
+pub(super) fn recover_cloud_init_user(farm_dir: &Path) -> Option<String> {
+    let ci = fs::read_to_string(farm_dir.join("cloud-init.yml")).ok()?;
+    ci.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("User="))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 /// The command name the scaffold should wire for launcher mode: the
 /// training crate's package name, by the convention that a run command
 /// carries its binary's name. `None` when there is no crate here, which
