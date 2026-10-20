@@ -454,8 +454,8 @@ fn recommended_cuda_variant(sm_major: u32) -> &'static str {
 /// no-CUDA-before-`Trainer::run` invariant in every user binary that
 /// constructs a monitor at the top of its training code.
 pub fn hardware_summary() -> String {
-    let cpu = cpu_model_name().unwrap_or_else(|| "Unknown CPU".into());
-    let threads = cpu_thread_count();
+    let cpu = crate::sys::cpu_model().unwrap_or_else(|| "Unknown CPU".into());
+    let threads = crate::sys::cpu_threads();
     let ram = crate::sys::mem_info().map_or(0, |m| m.total_gb());
     let mut s = format!("{} ({} threads, {}GB)", cpu, threads, ram);
 
@@ -468,27 +468,6 @@ pub fn hardware_summary() -> String {
         }
     }
     s
-}
-
-/// Count logical CPU threads from /proc/cpuinfo (Linux).
-fn cpu_thread_count() -> usize {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .map(|s| s.lines().filter(|l| l.starts_with("processor")).count())
-        .unwrap_or(1)
-}
-
-/// Read CPU model name from /proc/cpuinfo (Linux).
-fn cpu_model_name() -> Option<String> {
-    let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-    for line in info.lines() {
-        if line.starts_with("model name")
-            && let Some(val) = line.split(':').nth(1)
-        {
-            return Some(val.trim().to_string());
-        }
-    }
-    None
 }
 
 /// Enable or disable cuDNN benchmark mode.

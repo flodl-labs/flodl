@@ -78,7 +78,7 @@ fn macos_mem_from_pages(
 #[cfg(target_os = "macos")]
 mod macos {
     use super::MemInfo;
-    use std::ffi::{c_char, c_int, c_void};
+    use std::ffi::c_int;
     use std::sync::OnceLock;
 
     /// `struct vm_statistics64` from `<mach/vm_statistics.h>`
@@ -121,13 +121,6 @@ mod macos {
         fn mach_host_self() -> u32;
         fn host_page_size(host: u32, page_size: *mut usize) -> c_int;
         fn host_statistics64(host: u32, flavor: c_int, info: *mut c_int, count: *mut u32) -> c_int;
-        fn sysctlbyname(
-            name: *const c_char,
-            oldp: *mut c_void,
-            oldlenp: *mut usize,
-            newp: *mut c_void,
-            newlen: usize,
-        ) -> c_int;
     }
 
     /// The host port, fetched once: each `mach_host_self` call adds a
@@ -139,22 +132,7 @@ mod macos {
     }
 
     pub(super) fn mem_info() -> Option<MemInfo> {
-        let mut total: u64 = 0;
-        let mut len = size_of::<u64>();
-        // SAFETY: `hw.memsize` is a u64, `len` says so, and nothing is
-        // written back to the kernel.
-        let rc = unsafe {
-            sysctlbyname(
-                c"hw.memsize".as_ptr(),
-                (&raw mut total).cast(),
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if rc != 0 || len != size_of::<u64>() || total == 0 {
-            return None;
-        }
+        let total = crate::darwin::sysctl_u64(c"hw.memsize").filter(|&t| t > 0)?;
 
         let mut page_size: usize = 0;
         // SAFETY: a single out-parameter of type `vm_size_t`.
@@ -251,67 +229,6 @@ fn parse_meminfo(text: &str) -> Option<MemInfo> {
 #[cfg(any(not(any(target_os = "macos", windows)), test))]
 fn parse_meminfo_kb(rest: &str) -> Option<u64> {
     rest.trim().strip_suffix("kB")?.trim().parse().ok()
-}
-
-/// How many CPU packages (sockets) the kernel reports, or `None` off
-/// Linux / when the topology is not exposed.
-///
-/// Matters for one specific case: a **multi-package APU**. Each package
-/// carries its own memory and its own GPU aperture, while [`mem_info`]
-/// reads `/proc/meminfo`, which is SYSTEM-WIDE. So on such a machine
-/// "subtract this GPU's memory from host RAM" is wrong in both
-/// directions — every rank would either subtract its own package's share
-/// from the whole-system total (collapsing the budget to nothing) or
-/// treat the whole-system total as its own (over-committing by the
-/// package count).
-///
-/// There is no per-package `MemAvailable` to fall back on: the kernel
-/// only computes that estimate system-wide, so
-/// `/sys/devices/system/node/N/` offers `MemFree` and nothing
-/// equivalent. Hence detect-and-refuse rather than
-/// detect-and-approximate.
-///
-/// # Why packages and not NUMA nodes
-///
-/// They are not the same count, and reading nodes here refuses runs that
-/// are perfectly sizeable. AMD's NPS and Intel's Sub-NUMA Clustering
-/// partition **one** package's memory controllers into several NUMA
-/// nodes: an MI300A node booted NPS4 reports four nodes on a single
-/// socket. The memory is still one physical pool with one aperture
-/// carved out of it, so the subtraction is exact — but a node-count test
-/// sees 4 > 1 and refuses. Packages are what actually multiply the
-/// aperture, and unlike a NUMA layout the count does not move with a
-/// firmware setting.
-///
-/// A count of 1 (the overwhelmingly common case, including every
-/// consumer APU) means the system-wide figures ARE this package's
-/// figures and the budget math is sound.
-pub fn cpu_package_count() -> Option<usize> {
-    let dir = std::fs::read_dir("/sys/devices/system/cpu").ok()?;
-    let mut ids: Vec<u32> = Vec::new();
-    for entry in dir.flatten() {
-        let name = entry.file_name();
-        let Some(rest) = name.to_str().and_then(|s| s.strip_prefix("cpu")) else {
-            continue;
-        };
-        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        // Offline CPUs and the `cpuidle` / `cpufreq` pseudo-entries have
-        // no topology dir; skipping them is correct, since a package
-        // with no online CPU holds no rank either.
-        let Ok(id) = std::fs::read_to_string(entry.path().join("topology/physical_package_id"))
-        else {
-            continue;
-        };
-        let Ok(id) = id.trim().parse::<u32>() else {
-            continue;
-        };
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
-    }
-    (!ids.is_empty()).then_some(ids.len())
 }
 
 #[cfg(test)]
@@ -457,16 +374,6 @@ mod tests {
             assert!(m.available_bytes <= m.total_bytes);
         } else {
             assert!(m.is_none());
-        }
-    }
-
-    #[test]
-    fn package_count_is_at_least_one_where_topology_is_exposed() {
-        // Every machine that answers at all has one socket or more. The
-        // value gates a hard refusal in the data-plane budget, so a
-        // bogus 0 would be worse than no answer.
-        if let Some(n) = cpu_package_count() {
-            assert!(n >= 1);
         }
     }
 }
