@@ -13,7 +13,8 @@ categories = ["hardware-support", "science"]
 
 # No libtorch, no CUDA toolkit, no build script: this crate must build
 # and run on a host that has none of that. Every probe is a std-only
-# filesystem read or a bounded subprocess.
+# filesystem read, a bounded subprocess, or (host RAM on macOS and
+# Windows) a call into the OS's own C library, which std links anyway.
 #
 # serde_json is the single dependency, and it is free in practice: it is
 # already a direct dependency of `flodl`, `flodl-cli` and `flodl-hf`, so

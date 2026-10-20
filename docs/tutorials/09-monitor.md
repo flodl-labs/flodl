@@ -370,7 +370,7 @@ The monitor samples system resources on every `log` call:
 | Metric | Source | When available |
 |--------|--------|----------------|
 | CPU % | `/proc/stat` (delta) | Linux |
-| RAM used/total | `/proc/meminfo` | Linux |
+| RAM used/total | `/proc/meminfo` (Linux), kernel page counters (macOS), `GlobalMemoryStatusEx` (Windows) | Linux, macOS, Windows |
 | GPU utilization % | NVML (NVIDIA, dynamic load) / amdgpu sysfs (AMD) | GPU + driver |
 | VRAM allocated / spill | libtorch caching allocator (`reserved_bytes`) | GPU feature enabled |
 

@@ -73,10 +73,12 @@
 //!
 //! # Contract
 //!
-//! No thread is spawned and no GPU runtime is initialized. Every probe
-//! is a filesystem read or a bounded subprocess, and each vendor's
+//! No thread is spawned and no GPU runtime is initialized. Every GPU
+//! probe is a filesystem read or a bounded subprocess, and each vendor's
 //! subprocess is gated behind cheap filesystem checks, so a CPU-only
-//! box spawns nothing at all. Absent hardware is never an error, so
+//! box spawns nothing at all. Host RAM is a file read on Linux and a
+//! system call into the OS's own C library on macOS and Windows, cheap
+//! enough to poll. Absent hardware is never an error, so
 //! callers need no "did we have a driver" branch. The one panic is a
 //! malformed [`ENV_TESTING_GPU_JSON`], which is a developer error in a
 //! deliberately-set variable.
