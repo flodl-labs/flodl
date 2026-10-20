@@ -84,6 +84,9 @@
 //! deliberately-set variable.
 
 mod amd;
+mod cpu;
+#[cfg(target_os = "macos")]
+mod darwin;
 mod gpu;
 mod mem;
 mod metrics;
@@ -93,11 +96,12 @@ pub mod testing;
 mod vendor;
 
 pub use amd::{rocm_runtime_lib_dir, rocm_runtime_root};
+pub use cpu::{cpu_model, cpu_package_count, cpu_threads};
 pub use gpu::{
     GpuInfo, detect_gpus, detect_gpus_for, detect_gpus_physical, survey, survey_visible,
     survey_visible_for,
 };
-pub use mem::{MemInfo, cpu_package_count, mem_info};
+pub use mem::{MemInfo, mem_info};
 pub use metrics::{AmdMetricsProbe, GpuMetrics, amd_metrics_probes};
 pub use nvidia::nvidia_driver_version;
 pub use report::{GpuSurvey, NoteKind, SurveyNote};

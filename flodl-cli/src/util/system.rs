@@ -1,7 +1,5 @@
 //! Cross-platform system detection (CPU, RAM, OS, Docker, GPU).
 
-#[cfg(target_os = "linux")]
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -22,82 +20,9 @@ use std::process::Command;
 // mask-honoring runtime view, used by `flodl`.
 
 pub use flodl_hw::{
-    GpuInfo, GpuVendor, detect_gpus_physical as detect_gpus, nvidia_driver_version,
+    GpuInfo, GpuVendor, cpu_model, cpu_threads, detect_gpus_physical as detect_gpus,
+    nvidia_driver_version,
 };
-
-// ---------------------------------------------------------------------------
-// CPU
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "linux")]
-pub fn cpu_model() -> Option<String> {
-    let info = fs::read_to_string("/proc/cpuinfo").ok()?;
-    for line in info.lines() {
-        if let Some(rest) = line.strip_prefix("model name")
-            && let Some(val) = rest.split(':').nth(1)
-        {
-            return Some(val.trim().to_string());
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "macos")]
-pub fn cpu_model() -> Option<String> {
-    let out = Command::new("sysctl")
-        .args(["-n", "machdep.cpu.brand_string"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
-#[cfg(target_os = "windows")]
-pub fn cpu_model() -> Option<String> {
-    let out = Command::new("wmic")
-        .args(["cpu", "get", "Name", "/value"])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    for line in s.lines() {
-        if let Some(val) = line.strip_prefix("Name=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-pub fn cpu_threads() -> usize {
-    fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .map(|s| s.lines().filter(|l| l.starts_with("processor")).count())
-        .unwrap_or(1)
-}
-
-#[cfg(target_os = "macos")]
-pub fn cpu_threads() -> usize {
-    Command::new("sysctl")
-        .args(["-n", "hw.logicalcpu"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(1)
-}
-
-#[cfg(target_os = "windows")]
-pub fn cpu_threads() -> usize {
-    std::env::var("NUMBER_OF_PROCESSORS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1)
-}
 
 // ---------------------------------------------------------------------------
 // RAM
