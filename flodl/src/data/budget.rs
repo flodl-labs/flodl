@@ -326,9 +326,10 @@ pub(crate) fn split_stager_budget(total: usize) -> (usize, usize) {
     (total - stream, stream)
 }
 
-/// Reader-ring size when host RAM cannot be measured (non-Linux) or
-/// batches cannot be priced: small enough to be safe anywhere, still
-/// enough to pipeline reads against transfers and absorb some jitter.
+/// Reader-ring size when host RAM cannot be measured (neither Linux
+/// nor macOS) or batches cannot be priced: small enough to be safe
+/// anywhere, still enough to pipeline reads against transfers and
+/// absorb some jitter.
 pub(crate) const RING_SLOTS_FALLBACK: usize = 4;
 
 /// Reader-ring ceiling while the sample cache is active. The ring is a

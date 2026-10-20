@@ -1,6 +1,7 @@
 //! System resource sampling: CPU, RAM, GPU memory, GPU utilization.
 //!
-//! CPU and RAM are read from `/proc/stat` and `/proc/meminfo` (Linux only).
+//! CPU is read from `/proc/stat` (Linux only), RAM from
+//! [`crate::sys::mem_info`] (Linux, macOS and Windows).
 //! GPU identity (count, names, VRAM totals) comes from
 //! [`crate::sys::detect_gpus`]. Live metrics have no single source: NVML
 //! for NVIDIA, amdgpu sysfs for AMD (NVIDIA publishes no utilization
@@ -371,8 +372,7 @@ impl ResourceSampler {
             self.prev_cpu = Some(current);
         }
 
-        // RAM from /proc/meminfo
-        if let Some((used, total)) = read_meminfo() {
+        if let Some((used, total)) = read_ram() {
             s.ram_used_bytes = Some(used);
             s.ram_total_bytes = Some(total);
         }
@@ -471,33 +471,15 @@ pub(super) fn read_cpu_times() -> Option<CpuTimes> {
     Some(CpuTimes { total, idle })
 }
 
-/// Parse `/proc/meminfo` for total and available memory.
-pub(super) fn read_meminfo() -> Option<(u64, u64)> {
-    let content = fs::read_to_string("/proc/meminfo").ok()?;
-    let mut total: Option<u64> = None;
-    let mut available: Option<u64> = None;
-
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            total = parse_kb_value(rest);
-        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            available = parse_kb_value(rest);
-        }
-        if total.is_some() && available.is_some() {
-            break;
-        }
-    }
-
-    match (total, available) {
-        (Some(t), Some(a)) => Some((t.saturating_sub(a), t)),
-        _ => None,
-    }
-}
-
-/// Parse a value like "  16384000 kB" into bytes.
-pub(super) fn parse_kb_value(s: &str) -> Option<u64> {
-    let val: u64 = s.split_whitespace().next()?.parse().ok()?;
-    Some(val * 1024) // kB to bytes
+/// Host RAM as `(used, total)` bytes, where used is what is not
+/// available to a new workload.
+pub(super) fn read_ram() -> Option<(u64, u64)> {
+    crate::sys::mem_info().map(|m| {
+        (
+            m.total_bytes.saturating_sub(m.available_bytes),
+            m.total_bytes,
+        )
+    })
 }
 
 #[cfg(test)]

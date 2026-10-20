@@ -103,52 +103,9 @@ pub fn cpu_threads() -> usize {
 // RAM
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+/// Total physical RAM in whole GiB, `0` when the host cannot be read.
 pub fn ram_total_gb() -> u64 {
-    fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|s| {
-            for line in s.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-                    return Some(kb / (1024 * 1024));
-                }
-            }
-            None
-        })
-        .unwrap_or(0)
-}
-
-#[cfg(target_os = "macos")]
-pub fn ram_total_gb() -> u64 {
-    Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            let bytes: u64 = String::from_utf8_lossy(&o.stdout).trim().parse().ok()?;
-            Some(bytes / (1024 * 1024 * 1024))
-        })
-        .unwrap_or(0)
-}
-
-#[cfg(target_os = "windows")]
-pub fn ram_total_gb() -> u64 {
-    Command::new("wmic")
-        .args(["os", "get", "TotalVisibleMemorySize", "/value"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout);
-            for line in s.lines() {
-                if let Some(val) = line.strip_prefix("TotalVisibleMemorySize=") {
-                    let kb: u64 = val.trim().parse().ok()?;
-                    return Some(kb / (1024 * 1024));
-                }
-            }
-            None
-        })
-        .unwrap_or(0)
+    flodl_hw::mem_info().map_or(0, |m| m.total_gb())
 }
 
 // ---------------------------------------------------------------------------

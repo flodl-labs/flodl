@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::resources::{CpuTimes, read_cpu_times, read_meminfo};
+use super::resources::{CpuTimes, read_cpu_times, read_ram};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -821,7 +821,7 @@ impl Timeline {
             prev_cpu = cur_cpu;
 
             // RAM
-            let (ram_used, ram_total) = read_meminfo().unwrap_or((0, 0));
+            let (ram_used, ram_total) = read_ram().unwrap_or((0, 0));
 
             // Per-GPU — skipped entirely for a dedicated controller
             // (owns no local ranks): its GPU columns would describe

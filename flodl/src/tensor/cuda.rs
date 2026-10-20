@@ -456,7 +456,7 @@ fn recommended_cuda_variant(sm_major: u32) -> &'static str {
 pub fn hardware_summary() -> String {
     let cpu = cpu_model_name().unwrap_or_else(|| "Unknown CPU".into());
     let threads = cpu_thread_count();
-    let ram = total_ram_gb();
+    let ram = crate::sys::mem_info().map_or(0, |m| m.total_gb());
     let mut s = format!("{} ({} threads, {}GB)", cpu, threads, ram);
 
     if cfg!(feature = "gpu") {
@@ -489,22 +489,6 @@ fn cpu_model_name() -> Option<String> {
         }
     }
     None
-}
-
-/// Total physical RAM in GB (Linux).
-fn total_ram_gb() -> u64 {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|s| {
-            for line in s.lines() {
-                if line.starts_with("MemTotal:") {
-                    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-                    return Some(kb / (1024 * 1024));
-                }
-            }
-            None
-        })
-        .unwrap_or(0)
 }
 
 /// Enable or disable cuDNN benchmark mode.
