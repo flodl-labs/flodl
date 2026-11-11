@@ -53,16 +53,14 @@ pub struct ChunkPool {
     /// BEFORE the cursor advances, so a dead rank's samples are
     /// re-dispatched to survivors instead of silently dropped.
     reclaimed: VecDeque<(usize, usize)>,
-    /// Per-rank `(offset, size)` ranges reported complete whose effect has
-    /// not yet reached a consensus: the rank trained them, but no reduce
-    /// that includes them has finalized. Until one does they exist only in
-    /// that rank's parameters, so [`Self::forfeit`] hands them back along
-    /// with the unfinished ones when the rank dies.
-    unrealized: Vec<VecDeque<(usize, usize)>>,
-    /// Per-rank: how many leading `unrealized` entries were already
-    /// reported when the reduce in flight was triggered (see
-    /// [`Self::mark_reduce_trigger`]).
-    marked: Vec<usize>,
+    /// Per-rank `(offset, size, step)` ranges reported complete whose
+    /// effect has not yet reached a consensus: the rank trained them, but
+    /// no reduce that includes them has finalized. Until one does they
+    /// exist only in that rank's parameters, so [`Self::forfeit`] hands
+    /// them back along with the unfinished ones when the rank dies.
+    /// `step` is an upper bound of the rank's step count when it finished
+    /// the range (see [`Self::mark_completed`]); entries are in step order.
+    unrealized: Vec<VecDeque<(usize, usize, usize)>>,
     /// Wall-clock start of this epoch (for EpochMetrics).
     pub epoch_start: Instant,
 }
@@ -103,7 +101,6 @@ impl ChunkPool {
             outstanding: vec![VecDeque::new(); world_size],
             reclaimed: VecDeque::new(),
             unrealized: vec![VecDeque::new(); world_size],
-            marked: vec![0; world_size],
             epoch_start: Instant::now(),
         }
     }
@@ -271,45 +268,39 @@ impl ChunkPool {
             self.reclaimed.push_back(range);
         }
         let mut unrealized = 0;
-        while let Some(range) = self.unrealized[rank].pop_front() {
-            unrealized += range.1;
-            self.reclaimed.push_back(range);
+        while let Some((off, size, _)) = self.unrealized[rank].pop_front() {
+            unrealized += size;
+            self.reclaimed.push_back((off, size));
         }
-        self.marked[rank] = 0;
         self.completed[rank] = self.completed[rank].saturating_sub(unrealized);
         self.dispatched[rank] = self.dispatched[rank].saturating_sub(in_flight + unrealized);
         (in_flight, unrealized)
     }
 
-    /// A reduce is being triggered: everything each rank has reported
-    /// complete so far was trained before the parameter snapshot this
-    /// reduce takes, so it will be in the consensus once the reduce
-    /// finalizes. Later completions are not covered by it, since a rank may
-    /// keep training while the round trip runs.
-    pub fn mark_reduce_trigger(&mut self) {
-        for (m, q) in self.marked.iter_mut().zip(&self.unrealized) {
-            *m = q.len();
+    /// A reduce that `rank` took part in has finalized: the work in its
+    /// parameter snapshot is in the consensus and no longer depends on the
+    /// rank surviving. `snapshot_step` is a LOWER bound of the rank's step
+    /// count at that snapshot; a range whose completion step is at or below
+    /// it was trained before the snapshot and is settled. A rank may keep
+    /// training while the round trip runs, so later ranges wait for the
+    /// next reduce. `None` settles every reported range: the caller knows
+    /// the rank could not train between its snapshot and now (a
+    /// barrier-paced policy holds it there).
+    pub fn commit_realized(&mut self, rank: usize, snapshot_step: Option<usize>) {
+        let q = &mut self.unrealized[rank];
+        match snapshot_step {
+            None => q.clear(),
+            Some(step) => {
+                while q.front().is_some_and(|&(_, _, done_at)| done_at <= step) {
+                    q.pop_front();
+                }
+            }
         }
-    }
-
-    /// A reduce that `rank` took part in has finalized: its work is in the
-    /// consensus and no longer depends on the rank surviving. Settles the
-    /// ranges marked at the trigger, or every reported range when
-    /// `held_at_barrier` says the rank could not train between its snapshot
-    /// and this finalize (barrier-paced policies hold it there).
-    pub fn commit_realized(&mut self, rank: usize, held_at_barrier: bool) {
-        let n = if held_at_barrier {
-            self.unrealized[rank].len()
-        } else {
-            self.marked[rank].min(self.unrealized[rank].len())
-        };
-        self.unrealized[rank].drain(..n);
-        self.marked[rank] = 0;
     }
 
     /// Samples `rank` completed whose effect has not reached a consensus.
     pub fn unrealized(&self, rank: usize) -> usize {
-        self.unrealized[rank].iter().map(|&(_, s)| s).sum()
+        self.unrealized[rank].iter().map(|&(_, s, _)| s).sum()
     }
 
     /// Samples not yet assigned to any rank (every span's residue plus
@@ -328,7 +319,13 @@ impl ChunkPool {
     /// were forfeited and re-dispatched — and then it reported anyway.
     /// The samples get double-trained (harmless); the books must not
     /// underflow.
-    pub fn mark_completed(&mut self, rank: usize, samples: usize) {
+    ///
+    /// `step` must be an UPPER bound of the rank's step count when it
+    /// finished these samples (its latest known step count at the time the
+    /// report is read qualifies, since the batches precede the report on
+    /// the rank's stream). It decides which reduce settles them, see
+    /// [`Self::commit_realized`].
+    pub fn mark_completed(&mut self, rank: usize, samples: usize, step: usize) {
         self.completed[rank] += samples;
         if self.completed[rank] > self.dispatched[rank] {
             crate::verbose!(
@@ -348,10 +345,10 @@ impl ChunkPool {
                     left -= front.1;
                     let done = *front;
                     self.outstanding[rank].pop_front();
-                    self.unrealized[rank].push_back(done);
+                    self.unrealized[rank].push_back((done.0, done.1, step));
                 }
                 Some(front) => {
-                    self.unrealized[rank].push_back((front.0, left));
+                    self.unrealized[rank].push_back((front.0, left, step));
                     front.0 += left;
                     front.1 -= left;
                     left = 0;
@@ -448,6 +445,15 @@ impl ChunkPool {
                 .all(|(d, c)| c >= d)
     }
 
+    /// True when the epoch is done AND every sample of it has reached a
+    /// consensus: nothing in it depends on a single rank's parameters any
+    /// more. This, not [`Self::is_epoch_done`], is when the pool may be
+    /// dropped, since a rank that dies before then still has work to hand
+    /// back to it.
+    pub fn is_realized(&self) -> bool {
+        self.is_epoch_done() && self.unrealized.iter().all(|q| q.is_empty())
+    }
+
     /// Epoch wall-clock time in milliseconds.
     pub fn epoch_elapsed_ms(&self) -> f64 {
         self.epoch_start.elapsed().as_secs_f64() * 1000.0
@@ -523,8 +529,8 @@ mod tests {
         // Everything dispatched exactly once.
         assert!(pool.take_chunk(10, 0).is_none());
         assert_eq!(pool.remaining(), 0);
-        pool.mark_completed(0, 50);
-        pool.mark_completed(1, 50);
+        pool.mark_completed(0, 50, 0);
+        pool.mark_completed(1, 50, 0);
         assert!(pool.is_epoch_done());
     }
 
@@ -540,11 +546,11 @@ mod tests {
         assert!(!pool.is_epoch_done());
 
         // Rank 0 completes
-        pool.mark_completed(0, 50);
+        pool.mark_completed(0, 50, 0);
         assert!(!pool.is_epoch_done()); // rank 1 still pending
 
         // Rank 1 completes
-        pool.mark_completed(1, 50);
+        pool.mark_completed(1, 50, 0);
         assert!(pool.is_epoch_done());
     }
 
@@ -561,12 +567,12 @@ mod tests {
         assert_eq!(pool.remaining(), 0);
 
         // Complete in stages
-        pool.mark_completed(0, 50); // first chunk
-        pool.mark_completed(1, 50);
+        pool.mark_completed(0, 50, 0); // first chunk
+        pool.mark_completed(1, 50, 0);
         assert!(!pool.is_epoch_done()); // rank 0 dispatched 100, only 50 done
 
-        pool.mark_completed(0, 50); // second chunk
-        pool.mark_completed(1, 50);
+        pool.mark_completed(0, 50, 0); // second chunk
+        pool.mark_completed(1, 50, 0);
         assert!(pool.is_epoch_done());
     }
 
@@ -626,7 +632,7 @@ mod tests {
         assert_eq!((off, size), (0, 50));
         assert_eq!(pool.remaining(), 0);
         assert!(!pool.is_epoch_done());
-        pool.mark_completed(0, 50);
+        pool.mark_completed(0, 50, 0);
         assert!(pool.is_epoch_done());
     }
 
@@ -654,9 +660,8 @@ mod tests {
         // Rank 1 completes its first chunk and a reduce realizes it... then
         // it dies with nothing in flight, while rank 0 dies with its whole
         // chunk in flight.
-        pool.mark_completed(1, 50);
-        pool.mark_reduce_trigger();
-        pool.commit_realized(1, false);
+        pool.mark_completed(1, 50, 0);
+        pool.commit_realized(1, Some(0));
         assert_eq!(pool.forfeit(1), (0, 0)); // nothing left to lose
         assert_eq!(pool.forfeit(0), (50, 0));
 
@@ -668,7 +673,7 @@ mod tests {
         // Survivor re-takes the exact forfeited range.
         let (off, size) = pool.take_chunk(50, 1).unwrap();
         assert_eq!((off, size), (0, 50));
-        pool.mark_completed(1, 50);
+        pool.mark_completed(1, 50, 0);
         assert!(pool.is_epoch_done());
     }
 
@@ -681,8 +686,8 @@ mod tests {
         pool.take_chunk(30, 0).unwrap(); // (0, 30)
         pool.take_chunk(20, 0).unwrap(); // (30, 20)
         pool.take_chunk(50, 1).unwrap();
-        pool.mark_completed(0, 30);
-        pool.mark_completed(1, 50);
+        pool.mark_completed(0, 30, 0);
+        pool.mark_completed(1, 50, 0);
         assert_eq!(pool.unrealized(0), 30);
 
         // Rank 0 dies: 20 never completed, 30 trained but never averaged.
@@ -699,24 +704,24 @@ mod tests {
         ];
         got.sort_unstable();
         assert_eq!(got, vec![(0, 30), (30, 20)]);
-        pool.mark_completed(1, 50);
+        pool.mark_completed(1, 50, 0);
         assert!(pool.is_epoch_done());
     }
 
-    /// A reduce only settles what was reported before it was triggered: a
+    /// A reduce only settles what the rank had trained at its snapshot: a
     /// rank that keeps training during the round trip can report a chunk
     /// before the reduce finalizes, and that chunk is not in the consensus.
     #[test]
-    fn chunk_pool_commit_settles_only_work_reported_before_the_trigger() {
+    fn chunk_pool_commit_settles_only_work_trained_before_the_snapshot() {
         let mut pool = ChunkPool::new(0, 100, 1);
         pool.take_chunk(30, 0).unwrap();
         pool.take_chunk(30, 0).unwrap();
-        pool.mark_completed(0, 30);
-        pool.mark_reduce_trigger();
-        // Reported during the round trip.
-        pool.mark_completed(0, 30);
+        pool.mark_completed(0, 30, 3); // finished at step 3
+        // The reduce is triggered with the rank known at step 3; it then
+        // trains the second chunk during the round trip.
+        pool.mark_completed(0, 30, 6);
 
-        pool.commit_realized(0, false);
+        pool.commit_realized(0, Some(3));
         assert_eq!(
             pool.unrealized(0),
             30,
@@ -725,16 +730,30 @@ mod tests {
         assert_eq!(pool.forfeit(0), (0, 30));
     }
 
+    /// A report read after the trigger still settles when the rank took no
+    /// step in between: the work was in the snapshot, only its report was
+    /// late. Without this the epoch's last chunk needs a sync of its own.
+    #[test]
+    fn chunk_pool_commit_settles_a_late_report_of_work_before_the_snapshot() {
+        let mut pool = ChunkPool::new(0, 30, 1);
+        pool.take_chunk(30, 0).unwrap();
+        // Trigger at step 3, report read afterwards, still at step 3.
+        pool.mark_completed(0, 30, 3);
+        pool.commit_realized(0, Some(3));
+        assert!(pool.is_realized());
+    }
+
     /// A barrier-paced rank is held between its snapshot and the finalize,
     /// so everything it has reported by then is in the consensus.
     #[test]
     fn chunk_pool_commit_settles_everything_for_a_rank_held_at_the_barrier() {
-        let mut pool = ChunkPool::new(0, 100, 1);
+        let mut pool = ChunkPool::new(0, 30, 1);
         pool.take_chunk(30, 0).unwrap();
-        pool.mark_reduce_trigger();
-        pool.mark_completed(0, 30); // report raced the trigger
-        pool.commit_realized(0, true);
-        assert_eq!(pool.unrealized(0), 0);
+        pool.mark_completed(0, 30, 9);
+        assert!(pool.is_epoch_done());
+        assert!(!pool.is_realized(), "reported is not yet realized");
+        pool.commit_realized(0, None);
+        assert!(pool.is_realized());
         assert_eq!(pool.forfeit(0), (0, 0));
     }
 
@@ -743,7 +762,7 @@ mod tests {
     fn chunk_pool_partial_completion_tracks_the_reported_front() {
         let mut pool = ChunkPool::new(0, 100, 1);
         pool.take_chunk(40, 0).unwrap();
-        pool.mark_completed(0, 10);
+        pool.mark_completed(0, 10, 0);
         assert_eq!(pool.unrealized(0), 10);
         assert_eq!(pool.forfeit(0), (30, 10));
         assert_eq!(pool.remaining(), 100);
@@ -855,7 +874,7 @@ mod tests {
                     for slot in covered.iter_mut().skip(o).take(s) {
                         *slot += 1;
                     }
-                    pool.mark_completed(1, s);
+                    pool.mark_completed(1, s, 0);
                 }
                 _ => break,
             }
@@ -881,19 +900,19 @@ mod tests {
         pool.forfeit(0);
         // Falsely-declared-dead rank reports anyway: books must not
         // underflow and the epoch must still complete.
-        pool.mark_completed(0, 40);
+        pool.mark_completed(0, 40, 0);
         assert_eq!(pool.in_flight(0), 0);
         // Survivor drains: reclaimed range, own span, then the dead
         // rank's span residue via the tail-steal.
         let (off, size) = pool.take_chunk(40, 1).unwrap();
         assert_eq!((off, size), (0, 40));
-        pool.mark_completed(1, 40);
+        pool.mark_completed(1, 40, 0);
         let (off, size) = pool.take_chunk(60, 1).unwrap();
         assert_eq!((off, size), (50, 50));
-        pool.mark_completed(1, 50);
+        pool.mark_completed(1, 50, 0);
         let (off, size) = pool.take_chunk(60, 1).unwrap();
         assert_eq!((off, size), (40, 10));
-        pool.mark_completed(1, 10);
+        pool.mark_completed(1, 10, 0);
         assert!(pool.is_epoch_done());
     }
 
@@ -909,7 +928,7 @@ mod tests {
         let mut pool = ChunkPool::new(0, 100, 2);
         pool.take_chunk(30, 0).unwrap(); // (0,30) -> rank 0
         pool.take_chunk(20, 1).unwrap(); // (30,20) -> rank 1, in-flight
-        pool.mark_completed(0, 30); // rank 0's chunk now COVERED
+        pool.mark_completed(0, 30, 0); // rank 0's chunk now COVERED
         // Covered: [0,30). Uncovered: rank 1's in-flight (30,20) + tail [50,100).
         // (30,20) abuts (50,50) -> coalesced to (30,70).
         assert_eq!(pool.uncovered_ranges(), vec![(30, 70)]);
@@ -921,7 +940,7 @@ mod tests {
         let mut pool = ChunkPool::new(0, 100, 2);
         pool.take_chunk(40, 0).unwrap(); // (0,40)
         pool.take_chunk(20, 1).unwrap(); // (50,20)
-        pool.mark_completed(1, 20); // [50,70) covered
+        pool.mark_completed(1, 20, 0); // [50,70) covered
         pool.forfeit(0); // (0,40) back to reclaimed (uncovered)
         // Uncovered: reclaimed (0,40) + rank 0 span residue (40,10) —
         // coalesced (0,50) — and rank 1 span residue (70,30). The gap is
@@ -938,8 +957,8 @@ mod tests {
         orig.take_chunk(30, 0).unwrap(); // (0,30)
         orig.take_chunk(20, 1).unwrap(); // (33,20)
         orig.take_chunk(10, 2).unwrap(); // (66,10)
-        orig.mark_completed(0, 30); // (0,30) covered
-        orig.mark_completed(2, 10); // (66,10) covered
+        orig.mark_completed(0, 30, 0); // (0,30) covered
+        orig.mark_completed(2, 10, 0); // (66,10) covered
         // Uncovered: rank 0 residue (30,3) + rank 1 in-flight (33,20) +
         // rank 1 residue (53,13) — coalesced (30,36) — and rank 2 residue
         // (76,24).
@@ -960,7 +979,7 @@ mod tests {
                     for slot in covered.iter_mut().skip(o).take(s) {
                         *slot += 1;
                     }
-                    resumed.mark_completed(rank, s);
+                    resumed.mark_completed(rank, s, 0);
                 }
             }
         }
@@ -990,11 +1009,11 @@ mod tests {
         assert_eq!(pool.in_flight(0), 40);
         assert_eq!(pool.in_flight(1), 30);
 
-        pool.mark_completed(0, 20);
+        pool.mark_completed(0, 20, 0);
         assert_eq!(pool.in_flight(0), 20);
         assert_eq!(pool.in_flight(1), 30);
 
-        pool.mark_completed(0, 20);
+        pool.mark_completed(0, 20, 0);
         assert_eq!(pool.in_flight(0), 0);
     }
 }

@@ -172,6 +172,7 @@ impl ClusterCoordinator {
             last_step_count: vec![0; world_size],
             cycle: AvgCycleState::new(config.backend, world_size),
             dispatch_hold_logged: vec![false; world_size],
+            deferred_completions: Vec::new(),
             epoch_d_min: f64::INFINITY,
             epoch_d_max: f64::NEG_INFINITY,
             epoch_d_sum: 0.0,

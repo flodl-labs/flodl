@@ -590,6 +590,7 @@ fn test_worker_channels_create() {
             params: vec![],
             buffers: vec![],
             batch_count: 0,
+            step: 0,
         })
         .unwrap();
     let snap = ch.param_rx.recv().unwrap();
