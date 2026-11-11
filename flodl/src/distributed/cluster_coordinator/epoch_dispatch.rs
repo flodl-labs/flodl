@@ -348,7 +348,16 @@ impl ClusterCoordinator {
     /// back into motion by [`Self::wake_idle_ranks_in_progressive`]
     /// after the next averaging cycle.
     pub(super) fn dispatch_next_chunk(&mut self, rank: usize) {
-        let epoch = self.rank_epoch[rank];
+        // Oldest open epoch with work left wins over the rank's current
+        // one. Work only reappears in an older pool when a dead rank's
+        // samples are handed back; a rank that has already streamed ahead
+        // must come back for them, or that pool never completes and, since
+        // epochs close in order, neither does any later one.
+        let epoch = self
+            .chunk_pools
+            .iter()
+            .find(|&(&e, p)| e < self.rank_epoch[rank] && p.remaining() > 0)
+            .map_or(self.rank_epoch[rank], |(&e, _)| e);
         // Plan the epoch's final reduce window before sizing (no-op until the
         // pool is within one window of empty). The first rank dispatched this
         // window sees the window-start remainder and pins the split.
@@ -461,6 +470,21 @@ impl ClusterCoordinator {
                 self.dispatch_hold_logged[rank] = true;
                 crate::debug!(
                     "  ddp: epoch barrier HOLD rank {rank} | epoch={epoch} first_live={first_live}"
+                );
+            }
+            return;
+        }
+
+        // ONE EPOCH AHEAD AT MOST (async). An epoch closes at the first
+        // sync that covers it; a rank two epochs past the oldest open one
+        // would let a single sync cover two of them, and their events would
+        // then describe the same consensus. Holding it here leaves it
+        // quiesced, which lets the reduce gate fire and close the oldest.
+        if next_epoch > first_live + 1 {
+            if !self.dispatch_hold_logged[rank] {
+                self.dispatch_hold_logged[rank] = true;
+                crate::debug!(
+                    "  ddp: epoch-ahead HOLD rank {rank} | next={next_epoch} first_live={first_live}"
                 );
             }
             return;

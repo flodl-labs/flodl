@@ -316,6 +316,7 @@ impl<M: Module> GpuWorker<M> {
             // The averaging weights by this count and excludes zero-step
             // ranks (sum-and-count: scale by `batch_count`, divide once).
             batch_count: self.steps_since_avg,
+            step: self.local_step,
         }
     }
 
@@ -389,6 +390,7 @@ impl<M: Module> GpuWorker<M> {
             params,
             buffers,
             batch_count: self.steps_since_avg,
+            step: self.local_step,
         }
     }
 
