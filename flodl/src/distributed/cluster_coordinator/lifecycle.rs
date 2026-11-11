@@ -508,30 +508,39 @@ impl ClusterCoordinator {
                  (headless coord, or rank not announced by any relay)"
             )));
         };
-        if self.conn_closed.get(conn_idx).copied().unwrap_or(false) {
-            return Err(TensorError::new(&format!(
-                "cluster_coordinator: send_control(rank={rank}): connection closed \
-                 after an earlier write failure"
-            )));
-        }
         // Encode the control frame, then wrap it as a rank-tagged mux
         // record on the per-host connection (the relay demuxes it to the
         // local rank).
         let frame = ControlFrame::encode(&self.salt, MsgKind::Control, msg)?;
         let mut buf = Vec::new();
         frame.write_to(&mut buf)?;
-        if let Err(e) = MuxRecord::data(rank as u32, buf)
-            .write_to(&mut self.control_streams[conn_idx], &self.salt)
-        {
-            // A failed write ends the connection. A stall that tripped the
-            // write timeout may have left half a record on the stream, so
-            // nothing after it would parse; and a peer that stopped reading
-            // (a host that died without closing) makes every later write
-            // block for the full timeout on this thread, which is also the
-            // thread that keeps the healthy ranks' liveness beacon going.
-            // Shutting the socket ends the host's reader too: its ranks go
-            // heartbeat-silent and are reaped by staleness if they were not
-            // declared dead already.
+        self.write_control_record(conn_idx, rank, MuxRecord::data(rank as u32, buf))
+    }
+
+    /// Write one mux record to a host's control connection. `rank` only
+    /// names the record's subject in errors.
+    ///
+    /// A failed write ends the connection. A stall that tripped the write
+    /// timeout may have left half a record on the stream, so nothing after
+    /// it would parse; and a peer that stopped reading (a host that died
+    /// without closing) makes every later write block for the full timeout
+    /// on this thread, which is also the thread that keeps the healthy
+    /// ranks' liveness beacon going. Shutting the socket ends the host's
+    /// reader too: its ranks go heartbeat-silent and are reaped by
+    /// staleness if they were not declared dead already.
+    fn write_control_record(
+        &mut self,
+        conn_idx: usize,
+        rank: usize,
+        record: MuxRecord,
+    ) -> Result<()> {
+        if self.conn_closed.get(conn_idx).copied().unwrap_or(false) {
+            return Err(TensorError::new(&format!(
+                "cluster_coordinator: send_control(rank={rank}): connection closed \
+                 after an earlier write failure"
+            )));
+        }
+        if let Err(e) = record.write_to(&mut self.control_streams[conn_idx], &self.salt) {
             if self.conn_closed.len() < self.control_streams.len() {
                 self.conn_closed.resize(self.control_streams.len(), false);
             }
@@ -580,6 +589,23 @@ impl ClusterCoordinator {
         if all_dead && let Some(stream) = self.control_streams.get(conn_idx) {
             let _ = stream.set_write_timeout(Some(DEAD_CONN_WRITE_TIMEOUT));
         }
+    }
+
+    /// Tell the relay carrying `rank` that the rank is dead, on the control
+    /// connection. The relay is the only writer of each local rank's
+    /// socket; knowing the rank is dead lets it bound its writes to that
+    /// rank, so a wedged-but-connected rank cannot delay the control frames
+    /// (liveness beacons included) of the other ranks on its host.
+    /// Best-effort: a failure means the connection is gone, which is
+    /// handled where it is written next.
+    pub(super) fn tell_relay_rank_is_dead(&mut self, rank: usize) {
+        let Some(conn_idx) = self.rank_to_conn.get(rank).copied().flatten() else {
+            return;
+        };
+        let record = MuxRecord::control(
+            crate::distributed::relay::mux::RelayControlMsg::DeclareDead { rank: rank as u32 },
+        );
+        let _ = self.write_control_record(conn_idx, rank, record);
     }
 
     /// Broadcast `msg` to every rank.
