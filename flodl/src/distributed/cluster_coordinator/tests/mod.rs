@@ -212,6 +212,11 @@ pub(super) fn recv_control(stream: &mut TcpStream, salt: &SessionSalt) -> Result
     loop {
         let payload = match MuxRecord::read_from(stream, salt)? {
             Some(MuxRecord::Data { payload, .. }) => payload,
+            // Addressed to the relay, which these tests stand in for: the
+            // coordinator's notice that a rank is dead. Not a rank frame.
+            Some(MuxRecord::Control(
+                crate::distributed::relay::mux::RelayControlMsg::DeclareDead { .. },
+            )) => continue,
             Some(other) => {
                 return Err(TensorError::new(&format!(
                     "recv_control: expected mux Data, got {other:?}"
@@ -263,6 +268,10 @@ pub(super) fn recv_control_keepalive(
     let result = loop {
         let payload = match MuxRecord::try_read_from(stream, salt)? {
             MuxRead::Record(MuxRecord::Data { payload, .. }) => payload,
+            // Relay-addressed notice, as in `recv_control`.
+            MuxRead::Record(MuxRecord::Control(
+                crate::distributed::relay::mux::RelayControlMsg::DeclareDead { .. },
+            )) => continue,
             MuxRead::Record(other) => {
                 break Err(TensorError::new(&format!(
                     "recv_control_keepalive: expected mux Data, got {other:?}"
