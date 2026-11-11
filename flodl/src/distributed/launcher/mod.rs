@@ -1909,11 +1909,31 @@ pub fn run_launcher_with_config(
     // teardown trigger) and shut the sockets, which also unblocks the
     // readers' blocking reads (this was the failure path's wedge: the
     // final reader join used to block on agents nobody had told to
-    // die). A host that vanished without closing its TCP link can stall
-    // the success-path wait — the same exposure the coordinator's
-    // heartbeat machinery owns for the training plane, accepted here.
+    // die). A host that vanished without closing its TCP link is released
+    // by the wait below once its ranks are declared dead.
     if let Some(err) = &any_failure {
         abort_worker_links(&mut worker_links, &salt, &err.to_string());
+    }
+    // A host that died without closing its link (power loss, a paused VM,
+    // a network partition) never sends the EOF this wait is for, and a
+    // blocked read is not woken by dropping our clone of the socket. Once
+    // the coordinator has declared every rank of a host dead, nothing more
+    // can come from it: shut its link, which ends that host's reader. A
+    // host that is merely slow sees its link close and tears down ranks
+    // the run has already written off.
+    loop {
+        if rank_exit_readers.iter().all(|r| r.is_finished()) {
+            break;
+        }
+        for (host, link) in &worker_links {
+            let lost = ranks_by_host.get(host).is_some_and(|ranks| {
+                !ranks.is_empty() && ranks.iter().all(|r| dead_ranks_shared.is_dead(*r))
+            });
+            if lost {
+                let _ = link.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
     }
     for r in rank_exit_readers {
         let _ = r.join();
