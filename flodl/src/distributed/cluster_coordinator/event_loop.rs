@@ -428,8 +428,10 @@ impl ClusterCoordinator {
         }
         for (epoch, pool) in &self.chunk_pools {
             let inflight: Vec<usize> = (0..self.world_size).map(|r| pool.in_flight(r)).collect();
+            let unrealized: Vec<usize> = (0..self.world_size).map(|r| pool.unrealized(r)).collect();
             eprintln!(
-                "  pool epoch={epoch}: remaining={} in_flight={inflight:?}",
+                "  pool epoch={epoch}: remaining={} in_flight={inflight:?} \
+                 unrealized={unrealized:?}",
                 pool.remaining(),
             );
         }

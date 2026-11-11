@@ -249,6 +249,18 @@ impl ClusterCoordinator {
             tl.event(crate::monitor::EventKind::SyncStart);
         }
         self.sync_start = Some(Instant::now());
+        // REALIZED WORK, NCCL: its finish runs inline with the trigger,
+        // before the collective has retired on the ranks, so the previous
+        // reduce is only known complete here (the firing gate required
+        // every live rank's ack of it). Settle what that reduce had marked.
+        if matches!(self.backend, AverageBackend::Nccl) {
+            self.commit_realized_work(false);
+        }
+        // REALIZED-WORK MARK: what each rank has reported complete by now
+        // was trained before the snapshot this reduce takes.
+        for pool in self.chunk_pools.values_mut() {
+            pool.mark_reduce_trigger();
+        }
         // CHECKPOINT ARM (before any RequestParams/SyncNow broadcast = before the
         // param freeze): if a checkpoint is due this reduce, capture coverage now
         // (so `covered ⊆ consensus`; a post-reduce capture would over-count under
@@ -267,6 +279,17 @@ impl ClusterCoordinator {
         }
     }
 
+    /// Settle the realized work of every live rank in every open pool (see
+    /// [`crate::distributed::chunk_pool::ChunkPool::commit_realized`]).
+    fn commit_realized_work(&mut self, held_at_barrier: bool) {
+        let live: Vec<usize> = (0..self.world_size).filter(|&r| !self.is_dead(r)).collect();
+        for pool in self.chunk_pools.values_mut() {
+            for &r in &live {
+                pool.commit_realized(r, held_at_barrier);
+            }
+        }
+    }
+
     /// Shared first half of `finish_averaging_nccl` / `finish_averaging_cpu`:
     /// feed ElChe the window timing, run the convergence-guard verdict +
     /// LR-aware meta-controller, apply the anchor action, bump
@@ -275,6 +298,15 @@ impl ClusterCoordinator {
     /// here is backend-independent; the per-backend middle (NCCL
     /// `SetGlobalStep` vs CPU fold + `Update` fan-out) follows it.
     pub(super) fn finish_averaging_head(&mut self) {
+        // REALIZED WORK, CPU: this reduce finalized with every live rank in
+        // it (each acked the consensus), so the work each contributed
+        // survives the rank. A barrier-paced rank is held from its snapshot
+        // to this point, so all it reported is settled; an async rank may
+        // have trained on during the round trip, so only what it had
+        // reported at the trigger is. NCCL settles at its next trigger.
+        if matches!(self.backend, AverageBackend::Cpu) {
+            self.commit_realized_work(self.policy.is_barrier_paced());
+        }
         let prev_sync_ms = self.cycle.take_last_sync_ms();
         // Snapshot anchor BEFORE the guard verdict + meta-nudge so the
         // post-cycle `AnchorChanged` event captures the cycle's net
