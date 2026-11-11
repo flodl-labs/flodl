@@ -34,6 +34,10 @@ fn shutdown_waits_for_inflight_sync_to_settle() {
         RunPhase::Training,
         "an unsettled sync must hold the shutdown transition",
     );
+    assert!(
+        !coord.run_completed(),
+        "a run still waiting on its last sync has not completed",
+    );
 
     // Rank 1's ack lands (collective fully retired everywhere): the
     // next tick releases the broadcast.
@@ -45,6 +49,24 @@ fn shutdown_waits_for_inflight_sync_to_settle() {
         RunPhase::ShutdownInitiated,
         "the first settled tick must initiate shutdown",
     );
+    assert!(coord.run_completed());
+    assert_eq!(coord.epochs_aggregated(), 1);
+}
+
+/// A run that stops before its last epoch (ranks lost, stall escalation)
+/// never reports completion, however it got there: the launcher turns
+/// this into a failed run instead of a clean exit.
+#[test]
+fn a_run_short_of_its_last_epoch_is_not_completed() {
+    let mut coord = ClusterCoordinator::for_test(cfg_sync_cpu(2).num_epochs(5));
+    assert!(!coord.run_completed());
+    assert_eq!(coord.epochs_aggregated(), 0);
+
+    coord.last_aggregated_epoch = Some(2);
+    coord.try_advance_or_shutdown_after_aggregate();
+
+    assert!(!coord.run_completed());
+    assert_eq!(coord.epochs_aggregated(), 3);
 }
 
 #[test]

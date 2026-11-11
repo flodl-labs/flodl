@@ -363,9 +363,9 @@ pub(super) fn supervise_children(
         if any_failure.is_none() {
             if dead > 0 {
                 eprintln!(
-                    "cluster launcher: run completed DEGRADED — {dead} of {} \
-                         ranks lost along the way (tolerated by elastic \
-                         membership); survivors carried the full workload",
+                    "cluster launcher: DEGRADED run, {dead} of {} ranks lost \
+                         along the way (within the elastic membership \
+                         tolerance)",
                     e.world_size,
                 );
             } else if tolerated_deaths > 0 {
@@ -380,10 +380,9 @@ pub(super) fn supervise_children(
                 // exiting non-zero at teardown is a signal the operator
                 // may want to chase.
                 eprintln!(
-                    "cluster launcher: run completed; {tolerated_deaths} \
-                         child exit(s) in the teardown window were tolerated \
-                         (never registered as rank deaths) — full workload \
-                         delivered, nothing redistributed",
+                    "cluster launcher: {tolerated_deaths} child exit(s) in \
+                         the teardown window were tolerated (never \
+                         registered as rank deaths), nothing redistributed",
                 );
             }
         }
