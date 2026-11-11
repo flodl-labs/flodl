@@ -107,10 +107,15 @@ SOFT_FAIL=0
 # Actions folds each ::group::, so anything after an error scrolls it out
 # of view. Per-host coverage is unaffected, since `fail-fast: false` on
 # the matrix keeps the other hosts running.
-fail() {
+fail() { fail_with "" "$@"; }
+# fail, printing DETAIL (indented) under the FAIL line. fail exits, so a
+# diagnostic written after the call never reaches the log; pass it here.
+fail_with() {
+    FAIL_DETAIL=$1; shift
     endgroup
     echo "${C_RED}FAIL${C_OFF}: $*"
     [ -n "$IN_CI" ] && echo "::error::$*"
+    [ -n "$FAIL_DETAIL" ] && printf '%s\n' "$FAIL_DETAIL" | sed 's/^/    /'
     echo
     echo "${C_RED}RESULT: $HOST FAILED${C_OFF} (stopped at the first failure)"
     exit 1
@@ -535,14 +540,14 @@ if [ "$FARM_OK" = 1 ]; then
     CONF22="$FARM/.fdl/ci-22/sshd-ci-22.conf"
     CONF2222="$FARM/.fdl/ci-2222/sshd-ci-2222.conf"
     if grep -Ev '^[[:space:]]*(#|$)' "$CONF22" | grep -q .; then
-        fail "$HOST: a door on port 22 must emit no live sshd directive:"; sed 's/^/    /' "$CONF22"
+        fail_with "$(cat "$CONF22")" "$HOST: a door on port 22 must emit no live sshd directive:"
     else
         pass "port 22 drop-in carries no live directive (the key line is the guardrail)"
     fi
     if grep -q '^Match LocalPort 2222' "$CONF2222"; then
         pass "port 2222 drop-in scopes the guardrail to the door"
     else
-        fail "$HOST: port 2222 drop-in lacks its Match LocalPort block"; sed 's/^/    /' "$CONF2222"
+        fail_with "$(cat "$CONF2222")" "$HOST: port 2222 drop-in lacks its Match LocalPort block:"
     fi
     # sshd -t needs the host keys, which only root reads. Root directly
     # (the rocky legs) or passwordless sudo (hosted runners); anything
@@ -557,7 +562,9 @@ if [ "$FARM_OK" = 1 ]; then
     if [ -z "$SSHD" ]; then
         note "$HOST: no sshd, or no root to run it: the drop-in was not parsed by a real daemon here"
     elif $SUDO "$SSHD" -t -f "$CONF2222" >/dev/null 2>&1; then
-        SPLIT=$($SUDO "$SSHD" -T -f "$CONF2222" -C user=ci,host=x,addr=127.0.0.1,laddr=127.0.0.1,lport=2222 2>/dev/null | grep -E '^(forcecommand|permitopen|permittty) ' | tr '\n' ' ')
+        T_RC=0
+        T_OUT=$($SUDO "$SSHD" -T -f "$CONF2222" -C user=ci,host=x,addr=127.0.0.1,laddr=127.0.0.1,lport=2222 2>&1) || T_RC=$?
+        SPLIT=$(printf '%s\n' "$T_OUT" | grep -E '^(forcecommand|permitopen|permittty) ' | tr '\n' ' ')
         # Door b (the default): the daemon confines the port but forces
         # NO command -- the key line carries rrsync, and a daemon-level
         # ForceCommand would override it into a tunnel that works while
@@ -565,10 +572,11 @@ if [ "$FARM_OK" = 1 ]; then
         if has "$SPLIT" "forcecommand none" && has "$SPLIT" "permitopen 127.0.0.1:1337" && has "$SPLIT" "permittty no"; then
             pass "real sshd accepts the drop-in and confines port 2222: $SPLIT"
         else
-            fail "$HOST: sshd -T on port 2222 did not show the guardrail: $SPLIT"
+            fail_with "$(printf '%s\n' "$T_OUT" | head -n 40)" \
+                "$HOST: sshd -T on port 2222 did not show the guardrail ($SSHD, $(ssh -V 2>&1 | head -n 1), exit $T_RC): $SPLIT"
         fi
     else
-        fail "$HOST: sshd -t rejects the generated drop-in:"; $SUDO "$SSHD" -t -f "$CONF2222" 2>&1 | sed 's/^/    /'
+        fail_with "$($SUDO "$SSHD" -t -f "$CONF2222" 2>&1)" "$HOST: sshd -t rejects the generated drop-in:"
     fi
 fi
 rm -rf "$FARM"
