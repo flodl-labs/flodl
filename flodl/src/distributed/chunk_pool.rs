@@ -53,6 +53,16 @@ pub struct ChunkPool {
     /// BEFORE the cursor advances, so a dead rank's samples are
     /// re-dispatched to survivors instead of silently dropped.
     reclaimed: VecDeque<(usize, usize)>,
+    /// Per-rank `(offset, size)` ranges reported complete whose effect has
+    /// not yet reached a consensus: the rank trained them, but no reduce
+    /// that includes them has finalized. Until one does they exist only in
+    /// that rank's parameters, so [`Self::forfeit`] hands them back along
+    /// with the unfinished ones when the rank dies.
+    unrealized: Vec<VecDeque<(usize, usize)>>,
+    /// Per-rank: how many leading `unrealized` entries were already
+    /// reported when the reduce in flight was triggered (see
+    /// [`Self::mark_reduce_trigger`]).
+    marked: Vec<usize>,
     /// Wall-clock start of this epoch (for EpochMetrics).
     pub epoch_start: Instant,
 }
@@ -92,6 +102,8 @@ impl ChunkPool {
             chunks_sent: vec![0; world_size],
             outstanding: vec![VecDeque::new(); world_size],
             reclaimed: VecDeque::new(),
+            unrealized: vec![VecDeque::new(); world_size],
+            marked: vec![0; world_size],
             epoch_start: Instant::now(),
         }
     }
@@ -244,19 +256,60 @@ impl ChunkPool {
         }
     }
 
-    /// Return a dead rank's dispatched-but-never-completed chunks to the
-    /// pool so survivors can re-dispatch them, and zero its in-flight
+    /// Return a dead rank's work that never reached a consensus to the pool
+    /// so survivors can re-dispatch it: its dispatched-but-never-completed
+    /// chunks, and the ranges it completed after its last realized reduce
+    /// (trained, but lost with the rank's parameters). Zeroes its in-flight
     /// accounting so `is_epoch_done` / the reduce gate stop waiting on a
-    /// rank that will never report. Returns the number of reclaimed
-    /// samples. Idempotent (a second call finds nothing outstanding).
-    pub fn forfeit(&mut self, rank: usize) -> usize {
-        let mut reclaimed_total = 0;
+    /// rank that will never report. Returns the reclaimed samples as
+    /// `(never completed, completed but never realized)`. Idempotent (a
+    /// second call finds nothing left).
+    pub fn forfeit(&mut self, rank: usize) -> (usize, usize) {
+        let mut in_flight = 0;
         while let Some(range) = self.outstanding[rank].pop_front() {
-            reclaimed_total += range.1;
+            in_flight += range.1;
             self.reclaimed.push_back(range);
         }
-        self.dispatched[rank] = self.dispatched[rank].saturating_sub(reclaimed_total);
-        reclaimed_total
+        let mut unrealized = 0;
+        while let Some(range) = self.unrealized[rank].pop_front() {
+            unrealized += range.1;
+            self.reclaimed.push_back(range);
+        }
+        self.marked[rank] = 0;
+        self.completed[rank] = self.completed[rank].saturating_sub(unrealized);
+        self.dispatched[rank] = self.dispatched[rank].saturating_sub(in_flight + unrealized);
+        (in_flight, unrealized)
+    }
+
+    /// A reduce is being triggered: everything each rank has reported
+    /// complete so far was trained before the parameter snapshot this
+    /// reduce takes, so it will be in the consensus once the reduce
+    /// finalizes. Later completions are not covered by it, since a rank may
+    /// keep training while the round trip runs.
+    pub fn mark_reduce_trigger(&mut self) {
+        for (m, q) in self.marked.iter_mut().zip(&self.unrealized) {
+            *m = q.len();
+        }
+    }
+
+    /// A reduce that `rank` took part in has finalized: its work is in the
+    /// consensus and no longer depends on the rank surviving. Settles the
+    /// ranges marked at the trigger, or every reported range when
+    /// `held_at_barrier` says the rank could not train between its snapshot
+    /// and this finalize (barrier-paced policies hold it there).
+    pub fn commit_realized(&mut self, rank: usize, held_at_barrier: bool) {
+        let n = if held_at_barrier {
+            self.unrealized[rank].len()
+        } else {
+            self.marked[rank].min(self.unrealized[rank].len())
+        };
+        self.unrealized[rank].drain(..n);
+        self.marked[rank] = 0;
+    }
+
+    /// Samples `rank` completed whose effect has not reached a consensus.
+    pub fn unrealized(&self, rank: usize) -> usize {
+        self.unrealized[rank].iter().map(|&(_, s)| s).sum()
     }
 
     /// Samples not yet assigned to any rank (every span's residue plus
@@ -293,9 +346,12 @@ impl ChunkPool {
             match self.outstanding[rank].front_mut() {
                 Some(front) if front.1 <= left => {
                     left -= front.1;
+                    let done = *front;
                     self.outstanding[rank].pop_front();
+                    self.unrealized[rank].push_back(done);
                 }
                 Some(front) => {
+                    self.unrealized[rank].push_back((front.0, left));
                     front.0 += left;
                     front.1 -= left;
                     left = 0;
@@ -595,11 +651,14 @@ mod tests {
         pool.take_chunk(50, 1).unwrap();
         assert_eq!(pool.remaining(), 0);
 
-        // Rank 1 completes its first chunk... then dies with 0 in flight,
-        // while rank 0 dies with its whole chunk in flight.
+        // Rank 1 completes its first chunk and a reduce realizes it... then
+        // it dies with nothing in flight, while rank 0 dies with its whole
+        // chunk in flight.
         pool.mark_completed(1, 50);
-        assert_eq!(pool.forfeit(1), 0); // nothing outstanding
-        assert_eq!(pool.forfeit(0), 50);
+        pool.mark_reduce_trigger();
+        pool.commit_realized(1, false);
+        assert_eq!(pool.forfeit(1), (0, 0)); // nothing left to lose
+        assert_eq!(pool.forfeit(0), (50, 0));
 
         // The forfeited 50 samples are back in the pool.
         assert_eq!(pool.remaining(), 50);
@@ -613,12 +672,89 @@ mod tests {
         assert!(pool.is_epoch_done());
     }
 
+    /// Work a rank trained after its last realized reduce lives only in
+    /// that rank's parameters: when it dies, those samples go back to the
+    /// pool with the unfinished ones, and the epoch is no longer done.
+    #[test]
+    fn chunk_pool_forfeit_reclaims_completed_but_unrealized_work() {
+        let mut pool = ChunkPool::new(0, 100, 2);
+        pool.take_chunk(30, 0).unwrap(); // (0, 30)
+        pool.take_chunk(20, 0).unwrap(); // (30, 20)
+        pool.take_chunk(50, 1).unwrap();
+        pool.mark_completed(0, 30);
+        pool.mark_completed(1, 50);
+        assert_eq!(pool.unrealized(0), 30);
+
+        // Rank 0 dies: 20 never completed, 30 trained but never averaged.
+        assert_eq!(pool.forfeit(0), (20, 30));
+        assert_eq!(pool.unrealized(0), 0);
+        assert_eq!(pool.in_flight(0), 0);
+        assert_eq!(pool.remaining(), 50);
+        assert!(!pool.is_epoch_done());
+
+        // The survivor is handed exactly those samples, each once.
+        let mut got = vec![
+            pool.take_chunk(50, 1).unwrap(),
+            pool.take_chunk(50, 1).unwrap(),
+        ];
+        got.sort_unstable();
+        assert_eq!(got, vec![(0, 30), (30, 20)]);
+        pool.mark_completed(1, 50);
+        assert!(pool.is_epoch_done());
+    }
+
+    /// A reduce only settles what was reported before it was triggered: a
+    /// rank that keeps training during the round trip can report a chunk
+    /// before the reduce finalizes, and that chunk is not in the consensus.
+    #[test]
+    fn chunk_pool_commit_settles_only_work_reported_before_the_trigger() {
+        let mut pool = ChunkPool::new(0, 100, 1);
+        pool.take_chunk(30, 0).unwrap();
+        pool.take_chunk(30, 0).unwrap();
+        pool.mark_completed(0, 30);
+        pool.mark_reduce_trigger();
+        // Reported during the round trip.
+        pool.mark_completed(0, 30);
+
+        pool.commit_realized(0, false);
+        assert_eq!(
+            pool.unrealized(0),
+            30,
+            "the second chunk waits for the next reduce"
+        );
+        assert_eq!(pool.forfeit(0), (0, 30));
+    }
+
+    /// A barrier-paced rank is held between its snapshot and the finalize,
+    /// so everything it has reported by then is in the consensus.
+    #[test]
+    fn chunk_pool_commit_settles_everything_for_a_rank_held_at_the_barrier() {
+        let mut pool = ChunkPool::new(0, 100, 1);
+        pool.take_chunk(30, 0).unwrap();
+        pool.mark_reduce_trigger();
+        pool.mark_completed(0, 30); // report raced the trigger
+        pool.commit_realized(0, true);
+        assert_eq!(pool.unrealized(0), 0);
+        assert_eq!(pool.forfeit(0), (0, 0));
+    }
+
+    /// A partial completion report settles the reported front of a chunk.
+    #[test]
+    fn chunk_pool_partial_completion_tracks_the_reported_front() {
+        let mut pool = ChunkPool::new(0, 100, 1);
+        pool.take_chunk(40, 0).unwrap();
+        pool.mark_completed(0, 10);
+        assert_eq!(pool.unrealized(0), 10);
+        assert_eq!(pool.forfeit(0), (30, 10));
+        assert_eq!(pool.remaining(), 100);
+    }
+
     #[test]
     fn chunk_pool_forfeit_split_reclaim() {
         // Spans: [0,50) / [50,100). Rank 0 dies with its whole span in flight.
         let mut pool = ChunkPool::new(0, 100, 2);
         pool.take_chunk(50, 0).unwrap();
-        assert_eq!(pool.forfeit(0), 50);
+        assert_eq!(pool.forfeit(0), (50, 0));
 
         // Smaller takes split the reclaimed range.
         assert_eq!(pool.take_chunk(25, 1), Some((0, 25)));
@@ -635,7 +771,7 @@ mod tests {
         pool.take_chunk(30, 0).unwrap();
         pool.take_chunk(20, 0).unwrap();
         assert_eq!(pool.in_flight(0), 50);
-        assert_eq!(pool.forfeit(0), 50);
+        assert_eq!(pool.forfeit(0), (50, 0));
         assert_eq!(pool.in_flight(0), 0);
         assert_eq!(pool.remaining(), 100);
         // Ranges come back in dispatch order.
@@ -708,7 +844,7 @@ mod tests {
 
         let (off, size) = pool.take_chunk(40, 0).unwrap();
         assert_eq!((off, size), (0, 40));
-        assert_eq!(pool.forfeit(0), 40); // rank 0 dies, range reclaimed
+        assert_eq!(pool.forfeit(0), (40, 0)); // rank 0 dies, range reclaimed
 
         // Survivor drains the whole pool (reclaimed range first, then the
         // cursor residue), completing each chunk.
