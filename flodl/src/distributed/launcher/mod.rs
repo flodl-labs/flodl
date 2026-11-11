@@ -1345,7 +1345,11 @@ pub fn run_launcher_with_config(
 
     // Infrastructure-thread handles, kept so the exit paths can JOIN them
     // (with `abort` raised on failure) instead of leaving them detached.
-    let mut coord_driver: Option<thread::JoinHandle<()>> = None;
+    // The coordinator thread returns whether training reached its end
+    // (`Err` carries why not): the only positive completion signal the
+    // launcher has, since child exit codes cannot tell a finished run from
+    // one whose ranks all left early.
+    let mut coord_driver: Option<thread::JoinHandle<std::result::Result<(), String>>> = None;
     let mut rdv_driver: Option<thread::JoinHandle<()>> = None;
     // Root cause slot for a coordinator that failed to START (formation
     // deadline, bind/handshake error): the coord thread records it here and
@@ -1525,7 +1529,7 @@ pub fn run_launcher_with_config(
                                 eprintln!(
                                     "cluster launcher: resume_progressive_from_coverage failed: {e}"
                                 );
-                                return;
+                                return Err(format!("resume from coverage failed: {e}"));
                             }
                         };
                         if !kicked
@@ -1533,7 +1537,7 @@ pub fn run_launcher_with_config(
                                 eprintln!(
                                     "cluster launcher: dispatch_epoch({start_epoch}) failed: {e}"
                                 );
-                                return;
+                                return Err(format!("dispatch_epoch({start_epoch}) failed: {e}"));
                             }
                         // Drive ticks until shutdown_workers fires (all
                         // ranks exited) or the process is killed. Paced
@@ -1545,6 +1549,7 @@ pub fn run_launcher_with_config(
                         // millions of times per second for zero work.
                         // 2ms keeps reduce latency negligible while the
                         // blocking recv yields the core between frames.
+                        let mut tick_error: Option<String> = None;
                         loop {
                             // Launcher abort (failure path): bounded exit
                             // within one 2ms drain, so the failure path can
@@ -1562,9 +1567,23 @@ pub fn run_launcher_with_config(
                                     eprintln!(
                                         "cluster launcher: coord tick error: {e}"
                                     );
+                                    tick_error = Some(e.to_string());
                                     break;
                                 }
                             }
+                        }
+                        if coord.run_completed() {
+                            Ok(())
+                        } else {
+                            let mut why = format!(
+                                "training stopped after {} of {} epochs",
+                                coord.epochs_aggregated(),
+                                coord.num_epochs(),
+                            );
+                            if let Some(e) = tick_error {
+                                why.push_str(&format!(" (coordinator error: {e})"));
+                            }
+                            Err(why)
                         }
                     }
                     Err(e) => {
@@ -1584,6 +1603,7 @@ pub fn run_launcher_with_config(
                             *slot = Some(e.to_string());
                         }
                         coord_abort.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Err(format!("coordinator failed to start: {e}"))
                     }
                 }
             })
@@ -1963,9 +1983,31 @@ pub fn run_launcher_with_config(
     //   poll interval, so we can join and RETURN the error — a library
     //   embedder catches it via DdpHandle::join, and CLI consumers exit
     //   non-zero through their own main.
-    abort.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(h) = coord_driver.take() {
-        let _ = h.join();
+    //
+    // An abort already raised here with no failure on record is the
+    // caller's explicit cancel (`DdpHandle::shutdown`): a cancelled run is
+    // not expected to have reached its last epoch.
+    let cancelled = abort.swap(true, std::sync::atomic::Ordering::SeqCst);
+    let coord_end = coord_driver.take().map(|h| h.join());
+    // Completion verdict. Supervision only knows how the children exited,
+    // and ranks that bail out (coordinator silent, peers gone) exit clean:
+    // without the coordinator's word a run that stopped at epoch 42 of 200
+    // returns Ok. It is the last word because it is read after every child
+    // and every host link is gone.
+    let mut any_failure = any_failure;
+    if any_failure.is_none() && !cancelled {
+        let incomplete = match coord_end {
+            Some(Ok(Err(why))) => Some(why),
+            Some(Err(_)) => Some("the coordinator thread panicked".to_string()),
+            Some(Ok(Ok(()))) | None => None,
+        };
+        if let Some(why) = incomplete {
+            any_failure = Some(TensorError::new(&format!(
+                "cluster launcher: the run did not complete: {why}"
+            )));
+            membership_state.phase = membership::ClusterPhase::Failed;
+            status_board.publish(&membership_state);
+        }
     }
     if let Some(h) = rdv_driver.take() {
         let _ = h.join();
