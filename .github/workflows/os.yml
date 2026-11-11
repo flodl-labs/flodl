@@ -117,12 +117,13 @@ jobs:
           sudo apt-get clean || true
           df -h /
 
-      # Every image but Windows ships an sshd, so on those a missing one is
-      # a regression to fail on, not a skip to note.
+      # Every runner image ships an sshd (Windows included, as OpenSSH for
+      # Windows), so a missing one is a regression to fail on, not a skip
+      # to note.
       - name: ci/os-matrix.sh
         env:
           FDL_CI_VARIANT: ${{ github.event.inputs.variant || 'rotate' }}
-          FDL_CI_EXPECT_SSHD: ${{ runner.os != 'Windows' && '1' || '' }}
+          FDL_CI_EXPECT_SSHD: '1'
         run: bash ci/os-matrix.sh
 
   # The RHEL-family legs. A dnf system is what an AMD cloud rental is
