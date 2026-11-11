@@ -183,3 +183,95 @@ fn a_broadcast_to_a_fully_exited_cohort_is_a_clean_no_op() {
         "no LostBroadcast event for a fully-exited cohort",
     );
 }
+
+/// A connected socket pair on loopback: `(coordinator side, host side)`.
+fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let host = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (coord, _) = listener.accept().unwrap();
+    (coord, host)
+}
+
+/// A failed write ends the connection for good: it is shut, and later
+/// sends fail at once without touching the socket. A host that stopped
+/// reading would otherwise cost the coordinator a full write-stall timeout
+/// on every frame, on the thread that keeps the healthy ranks' beacon
+/// going, until those ranks give the coordinator up for dead.
+#[test]
+fn a_failed_write_closes_the_connection_and_is_never_retried() {
+    let mut coord = coord_with_timeline(2, Timeline::new(100));
+    let (stream, host) = socket_pair();
+    coord.control_streams = vec![stream];
+    coord.rank_to_conn = vec![Some(0), Some(0)];
+
+    // The host goes away. A first write can still land in the kernel
+    // buffer; the reset it provokes fails one of the next.
+    drop(host);
+    let mut failed = false;
+    for _ in 0..200 {
+        if coord
+            .send_control(0, &ControlMsgWire::CoordHeartbeat)
+            .is_err()
+        {
+            failed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(failed, "writing to a closed peer must fail eventually");
+    assert_eq!(coord.conn_closed, vec![true]);
+
+    // Every rank on that connection now fails fast, with the latch named.
+    for rank in 0..2 {
+        let err = coord
+            .send_control(rank, &ControlMsgWire::CoordHeartbeat)
+            .expect_err("a closed connection is not written again");
+        assert!(err.to_string().contains("connection closed"), "got: {err}");
+    }
+}
+
+/// The short write bound applies only once EVERY rank a connection
+/// carries is dead: a host with one live rank keeps the normal timeout,
+/// since its relay is alive and a slow drain must not cost that rank its
+/// connection.
+#[test]
+fn writes_are_bounded_only_on_a_connection_whose_ranks_are_all_dead() {
+    let ledger = crate::distributed::controller::DeadRanks::new(3);
+    let mut coord = ClusterCoordinator::for_test(
+        ClusterCoordinatorConfig::new(
+            ApplyPolicy::Cadence,
+            AverageBackend::Cpu,
+            3,
+            ElChe::new(3, 4),
+        )
+        .no_divergence_guard()
+        .dead_ranks(std::sync::Arc::clone(&ledger)),
+    );
+    let (stream_a, _host_a) = socket_pair();
+    let (stream_b, _host_b) = socket_pair();
+    // Host A carries rank 0; host B carries ranks 1 and 2.
+    coord.control_streams = vec![stream_a, stream_b];
+    coord.rank_to_conn = vec![Some(0), Some(1), Some(1)];
+    let normal = coord.control_streams[1].write_timeout().unwrap();
+
+    ledger.declare_dead(1);
+    coord.bound_writes_to_dead_conn(1);
+    assert_eq!(
+        coord.control_streams[1].write_timeout().unwrap(),
+        normal,
+        "rank 2 still lives on that host",
+    );
+
+    ledger.declare_dead(2);
+    coord.bound_writes_to_dead_conn(2);
+    let bounded = coord.control_streams[1].write_timeout().unwrap();
+    assert!(
+        bounded.is_some_and(|t| t <= std::time::Duration::from_secs(1)),
+        "a connection with no live rank gets a short write bound, got {bounded:?}",
+    );
+    assert_eq!(
+        coord.control_streams[0].write_timeout().unwrap(),
+        normal,
+        "the other host is untouched",
+    );
+}

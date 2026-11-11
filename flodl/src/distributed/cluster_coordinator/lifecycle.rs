@@ -17,6 +17,12 @@ use super::{
     relay_reader_loop,
 };
 
+/// Longest a single write may block on a connection whose ranks are all
+/// declared dead (see [`ClusterCoordinator::bound_writes_to_dead_conn`]).
+/// Far below the ranks' coordinator-silence deadline, and paid at most once
+/// per connection, since the first failed write closes it.
+const DEAD_CONN_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl ClusterCoordinator {
     /// Bind a control TcpListener at `bind_addr`, accept exactly
     /// `world_size` rank connections (validating the session salt at
@@ -463,6 +469,7 @@ impl ClusterCoordinator {
             metrics_device_indices: (0..world_size as u8).collect(),
             control_streams: streams,
             rank_to_conn,
+            conn_closed: Vec::new(),
             reader_handles,
             shutdown_flag,
             bound_port,
@@ -501,20 +508,78 @@ impl ClusterCoordinator {
                  (headless coord, or rank not announced by any relay)"
             )));
         };
+        if self.conn_closed.get(conn_idx).copied().unwrap_or(false) {
+            return Err(TensorError::new(&format!(
+                "cluster_coordinator: send_control(rank={rank}): connection closed \
+                 after an earlier write failure"
+            )));
+        }
         // Encode the control frame, then wrap it as a rank-tagged mux
         // record on the per-host connection (the relay demuxes it to the
         // local rank).
         let frame = ControlFrame::encode(&self.salt, MsgKind::Control, msg)?;
         let mut buf = Vec::new();
         frame.write_to(&mut buf)?;
-        MuxRecord::data(rank as u32, buf)
+        if let Err(e) = MuxRecord::data(rank as u32, buf)
             .write_to(&mut self.control_streams[conn_idx], &self.salt)
-            .map_err(|e| {
-                TensorError::new(&format!(
-                    "cluster_coordinator: send_control(rank={rank}): {e}"
-                ))
-            })?;
+        {
+            // A failed write ends the connection. A stall that tripped the
+            // write timeout may have left half a record on the stream, so
+            // nothing after it would parse; and a peer that stopped reading
+            // (a host that died without closing) makes every later write
+            // block for the full timeout on this thread, which is also the
+            // thread that keeps the healthy ranks' liveness beacon going.
+            // Shutting the socket ends the host's reader too: its ranks go
+            // heartbeat-silent and are reaped by staleness if they were not
+            // declared dead already.
+            if self.conn_closed.len() < self.control_streams.len() {
+                self.conn_closed.resize(self.control_streams.len(), false);
+            }
+            self.conn_closed[conn_idx] = true;
+            let _ = self.control_streams[conn_idx].shutdown(std::net::Shutdown::Both);
+            crate::verbose!(
+                "  ddp: control connection {conn_idx} closed after a write failure \
+                 (sending to rank {rank}): {e}"
+            );
+            return Err(TensorError::new(&format!(
+                "cluster_coordinator: send_control(rank={rank}): {e}"
+            )));
+        }
         Ok(())
+    }
+
+    /// Whether the connection carrying `rank` was closed after a write
+    /// failure (see [`Self::send_control`]).
+    fn conn_is_closed(&self, rank: usize) -> bool {
+        self.rank_to_conn
+            .get(rank)
+            .copied()
+            .flatten()
+            .and_then(|c| self.conn_closed.get(c).copied())
+            .unwrap_or(false)
+    }
+
+    /// `rank` was just declared dead. If every rank its connection carries
+    /// is now dead, nothing live depends on that connection: bound how long
+    /// one write to it may block. Frames are still sent (a rank declared
+    /// dead on a stale heartbeat may be slow, not gone, and
+    /// `ShutdownWithSave` is meant to reach it), and a host that is
+    /// draining its socket never notices the bound. A host that went
+    /// silent fills the socket buffer within minutes; the first write to
+    /// hit the full buffer then fails after this bound and closes the
+    /// connection, where the default would hold the coordinator for the
+    /// whole write-stall timeout, long enough for every healthy rank to
+    /// conclude the coordinator is gone.
+    pub(super) fn bound_writes_to_dead_conn(&mut self, rank: usize) {
+        let Some(conn_idx) = self.rank_to_conn.get(rank).copied().flatten() else {
+            return;
+        };
+        let all_dead = (0..self.world_size)
+            .filter(|&r| self.rank_to_conn.get(r).copied().flatten() == Some(conn_idx))
+            .all(|r| self.is_dead(r));
+        if all_dead && let Some(stream) = self.control_streams.get(conn_idx) {
+            let _ = stream.set_write_timeout(Some(DEAD_CONN_WRITE_TIMEOUT));
+        }
     }
 
     /// Broadcast `msg` to every rank.
@@ -546,6 +611,11 @@ impl ClusterCoordinator {
                 continue;
             }
             let dead = self.is_dead(rank);
+            // A dead rank whose connection has been closed is out of reach
+            // for good; the closure was logged once, when it happened.
+            if dead && self.conn_is_closed(rank) {
+                continue;
+            }
             if let Err(e) = self.send_control(rank, msg) {
                 if dead {
                     crate::verbose!(
