@@ -187,13 +187,19 @@ impl ClusterCoordinator {
         // pool for survivor re-dispatch and zeroes the rank's
         // in-flight books.
         if self.progressive {
-            let reclaimed: usize = self.chunk_pools.values_mut().map(|p| p.forfeit(r)).sum();
-            if reclaimed > 0 {
+            let (in_flight, unrealized) = self
+                .chunk_pools
+                .values_mut()
+                .map(|p| p.forfeit(r))
+                .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+            if in_flight + unrealized > 0 {
                 crate::verbose!(
-                    "  ddp: reclaimed {} in-flight samples from dead \
-                     rank {} for survivor re-dispatch",
-                    reclaimed,
+                    "  ddp: reclaimed {} samples from dead rank {} for survivor \
+                     re-dispatch ({} in flight, {} trained but never averaged)",
+                    in_flight + unrealized,
                     r,
+                    in_flight,
+                    unrealized,
                 );
             }
         }
