@@ -61,6 +61,27 @@ fn movers_delivered_complete_requires_every_mover() {
     assert!(coord.movers_delivered_complete());
 }
 
+/// A mover with a single batch this window never gets a delivered sample
+/// (its only batch is the skipped fill batch). The feed must still refuse
+/// the delivered scale for that window, but the wait before the reduce
+/// must not hold the cohort for a sample that cannot arrive: on the rig it
+/// sat out the full 32 s ceiling at the final reduce after a rank death.
+#[test]
+fn a_single_batch_mover_is_settled_but_not_complete() {
+    let mut coord = cadence_cpu_coord(2);
+    set_steps(&mut coord, &[4, 1]);
+    set_delivered(&mut coord, &[80.0, 0.0], &[4, 0]);
+    assert!(
+        !coord.movers_delivered_complete(),
+        "no delivered feed this window"
+    );
+    assert!(coord.movers_delivered_settled(), "nothing left to wait for");
+
+    // A mover with two batches and no sample yet is still worth waiting for.
+    set_steps(&mut coord, &[4, 2]);
+    assert!(!coord.movers_delivered_settled());
+}
+
 #[test]
 fn movers_delivered_complete_ignores_idle_and_dead_ranks() {
     let mut coord = cadence_cpu_coord(2);
