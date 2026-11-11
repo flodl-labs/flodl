@@ -513,7 +513,7 @@ impl Report {
         ));
         verify.push(format!(
             "sudo sshd -T -C user={u},host=x,addr=127.0.0.1,laddr=127.0.0.1,lport={p} \
-             | grep -E 'permitopen|forcecommand'"
+             | grep -iE 'permitopen|forcecommand'"
         ));
         step(&mut out, "prove the door does exactly one thing:", &verify);
 

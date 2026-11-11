@@ -564,7 +564,12 @@ if [ "$FARM_OK" = 1 ]; then
     elif $SUDO "$SSHD" -t -f "$CONF2222" >/dev/null 2>&1; then
         T_RC=0
         T_OUT=$($SUDO "$SSHD" -T -f "$CONF2222" -C user=ci,host=x,addr=127.0.0.1,laddr=127.0.0.1,lport=2222 2>&1) || T_RC=$?
-        SPLIT=$(printf '%s\n' "$T_OUT" | grep -E '^(forcecommand|permitopen|permittty) ' | tr '\n' ' ')
+        # Older sshd -T prints keywords lowercase (`permittty no`); OpenSSH
+        # 10.5 (macOS runner image 20261102) prints their documented case
+        # (`PermitTTY no`). Match the keyword case-insensitively and fold it.
+        SPLIT=$(printf '%s\n' "$T_OUT" \
+            | awk 'tolower($1) ~ /^(forcecommand|permitopen|permittty)$/ { $1 = tolower($1); print }' \
+            | tr '\n' ' ')
         # Door b (the default): the daemon confines the port but forces
         # NO command -- the key line carries rrsync, and a daemon-level
         # ForceCommand would override it into a tunnel that works while
