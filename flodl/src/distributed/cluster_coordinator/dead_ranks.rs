@@ -113,6 +113,7 @@ impl ClusterCoordinator {
         );
         let remainder_plan = self.compute_dead_rank_remainder(r);
         ledger.declare_dead(r);
+        self.bound_writes_to_dead_conn(r);
         self.active_count = self.active_count.saturating_sub(1);
         self.last_heartbeat[r] = Instant::now();
         // Callback-role failover. For `Rank(n)` policy the

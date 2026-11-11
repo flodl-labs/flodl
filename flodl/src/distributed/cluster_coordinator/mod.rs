@@ -755,6 +755,10 @@ pub struct ClusterCoordinator {
     /// relay connection carrying that rank (`None` for a headless test
     /// coord, or a rank not announced by any relay).
     rank_to_conn: Vec<Option<usize>>,
+    /// Per connection: a write to it has failed, so it is shut and never
+    /// written again (see [`Self::send_control`]). Sized lazily; a missing
+    /// entry reads as healthy.
+    conn_closed: Vec<bool>,
     /// Reader-thread join handles (one per host relay connection). Drop on
     /// [`Self::shutdown`].
     reader_handles: Vec<Option<JoinHandle<()>>>,
