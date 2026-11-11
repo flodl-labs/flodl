@@ -927,6 +927,20 @@ impl ClusterCoordinator {
         self.num_epochs
     }
 
+    /// Whether training reached its end: the last epoch aggregated and
+    /// `Shutdown` went out from the post-aggregate hook. Every other way a
+    /// run stops (every rank lost, a stall escalation, a save-and-shutdown,
+    /// an abort) leaves this `false`, so it is the positive completion
+    /// signal a caller needs before reporting success.
+    pub fn run_completed(&self) -> bool {
+        self.run_phase == RunPhase::ShutdownInitiated
+    }
+
+    /// Epochs aggregated so far (the index after the last aggregated one).
+    pub fn epochs_aggregated(&self) -> usize {
+        self.last_aggregated_epoch.map_or(0, |e| e + 1)
+    }
+
     /// Total samples across the dataset; basis for partition sizing.
     pub fn total_samples(&self) -> usize {
         self.total_samples
