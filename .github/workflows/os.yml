@@ -117,9 +117,12 @@ jobs:
           sudo apt-get clean || true
           df -h /
 
+      # Every image but Windows ships an sshd, so on those a missing one is
+      # a regression to fail on, not a skip to note.
       - name: ci/os-matrix.sh
         env:
           FDL_CI_VARIANT: ${{ github.event.inputs.variant || 'rotate' }}
+          FDL_CI_EXPECT_SSHD: ${{ runner.os != 'Windows' && '1' || '' }}
         run: bash ci/os-matrix.sh
 
   # The RHEL-family legs. A dnf system is what an AMD cloud rental is
@@ -192,8 +195,12 @@ jobs:
       # the shim's C++ compile need, plus the two tools the script
       # itself calls (find, awk). Anything fdl is supposed to detect and
       # advise about stays out, so the probe assertions run against an
-      # honest baseline. GITHUB_RUN_NUMBER rides in for the rotation,
-      # GITHUB_ACTIONS for the ::group:: folds.
+      # honest baseline. openssh-server is the one exception: the
+      # join-config check needs a real daemon to parse the drop-in, and
+      # while join-config's preflight does look for sshd, the script
+      # asserts nothing about that advice. FDL_CI_EXPECT_SSHD makes losing
+      # the package a failure rather than a skip. GITHUB_RUN_NUMBER rides
+      # in for the rotation, GITHUB_ACTIONS for the ::group:: folds.
       #
       # The install is retried because Rocky's mirrorlist service returns an
       # empty list often enough to matter: `Cannot prepare internal
@@ -216,11 +223,12 @@ jobs:
             -v "$HOME/.rocky/rustup:/root/.rustup" \
             -w /workspace \
             -e FDL_CI_VARIANT -e GITHUB_ACTIONS -e GITHUB_RUN_NUMBER \
+            -e FDL_CI_EXPECT_SSHD=1 \
             ${{ matrix.image }} bash -c '
               set -e
               ok=0
               for attempt in 1 2 3; do
-                if dnf install -y -q git gcc gcc-c++ unzip tar gzip findutils gawk; then
+                if dnf install -y -q git gcc gcc-c++ unzip tar gzip findutils gawk openssh-server; then
                   ok=1; break
                 fi
                 echo "dnf attempt $attempt failed (mirrorlist), retrying in 5s"
