@@ -18,6 +18,11 @@ use super::{ClusterCoordinator, RunPhase};
 /// enough that the per-tick broadcast overhead is negligible.
 const COORD_HEARTBEAT_CADENCE: Duration = Duration::from_secs(1);
 
+/// A beacon gap at or above this is reported (see
+/// `ClusterCoordinator::emit_coord_heartbeat`). Beacons are due every
+/// second, so this is already five missed.
+const BEACON_GAP_REPORT: Duration = Duration::from_secs(5);
+
 impl ClusterCoordinator {
     /// Process a single timing message. Ported literally from OLD
     /// `Coordinator::process_timing_msg`, modulo the field-name `rank`
@@ -631,10 +636,41 @@ impl ClusterCoordinator {
         if !due {
             return;
         }
+        // How long the ranks may have gone without hearing from the
+        // coordinator: the time since the previous beacon went out, plus
+        // however long this one takes to reach the last rank. A rank gives
+        // the coordinator up for dead after its silence deadline, and the
+        // whole run with it, so a gap that approaches the deadline is the
+        // one number that says how close a run came. Recorded always;
+        // reported once it is long enough to matter.
+        let since_last = self.last_coord_heartbeat.map(|t| t.elapsed());
+        let send_start = Instant::now();
         if let Err(e) = self.broadcast_control(&ControlMsgWire::CoordHeartbeat) {
             crate::verbose!("  ddp: coord heartbeat broadcast (best-effort): {e}");
         }
         self.last_coord_heartbeat = Some(Instant::now());
+        if let Some(since_last) = since_last {
+            let gap = since_last + send_start.elapsed();
+            if gap > self.longest_beacon_gap {
+                self.longest_beacon_gap = gap;
+            }
+            if gap >= BEACON_GAP_REPORT {
+                eprintln!(
+                    "flodl ddp: the coordinator went {:.1}s without a liveness beacon \
+                     (ranks stop after {}s of coordinator silence)",
+                    gap.as_secs_f64(),
+                    self.heartbeat_timeout_secs,
+                );
+            }
+        }
+    }
+
+    /// Longest stretch the ranks may have gone without a coordinator
+    /// beacon this run. Beacons are due every second; anything much longer
+    /// means the coordinator thread was held up (a stalled write, a slow
+    /// callback, a paused host).
+    pub fn longest_beacon_gap(&self) -> Duration {
+        self.longest_beacon_gap
     }
 
     /// One coordinator tick: drain incoming timing, throttle fast
@@ -648,13 +684,28 @@ impl ClusterCoordinator {
         // abort the tick loop, and a wedged rank's failure is already reaped
         // by the staleness scan. The reverse-direction twin of the rank→coord
         // heartbeat, letting each rank detect a wedged-open coordinator.
-        self.emit_coord_heartbeat();
-        // Heartbeat-driven dead-rank detection. Must run BEFORE
-        // poll_cpu_averaging / should_average so the rest of this
-        // tick already sees the updated active membership; a rank
-        // declared dead this tick won't gate the cycle's finalize.
+        //
+        // Heartbeat-driven dead-rank detection runs FIRST, straight after
+        // the drain that refreshed every live rank's stamp. Liveness is
+        // stamped when a frame is processed, so anything that holds this
+        // thread between the drain and the scan ages every stamp by that
+        // much: a beacon stalled on one dead host used to make the scan
+        // that followed it declare every healthy rank dead at once.
+        // Must also run BEFORE poll_cpu_averaging / should_average so the
+        // rest of this tick already sees the updated active membership; a
+        // rank declared dead this tick won't gate the cycle's finalize.
         // No-op when elastic membership isn't configured.
         self.check_dead_ranks();
+        // The epoch-callback role changes at the first pace measurement
+        // and at a rank death. Progressive dispatch never passes through
+        // `dispatch_epoch`, the only other place that sends it, so without
+        // this the role stayed on the first rank and died with it.
+        if self.progressive
+            && let Err(e) = self.broadcast_epoch_callback_role_if_dirty()
+        {
+            crate::verbose!("  ddp: epoch-callback role broadcast incomplete: {e}");
+        }
+        self.emit_coord_heartbeat();
         // Cascading-death + slow-generator guard: an in-flight NCCL
         // rendezvous whose generator died (or stopped responding) would
         // hang the cohort indefinitely. Retries from the next survivor
@@ -783,7 +834,11 @@ impl ClusterCoordinator {
         let mut progressive_completions: Vec<(usize, usize)> = Vec::new();
         while let Ok(wire) = self.metrics_rx.try_recv() {
             let rank = wire.rank as usize;
-            if rank >= self.world_size {
+            // A late report from a rank already declared dead changes
+            // nothing: its work was handed back when it was declared, and
+            // crediting it now would also hand it a new chunk that nobody
+            // would ever reclaim.
+            if rank >= self.world_size || self.is_dead(rank) {
                 continue;
             }
             // Forward the rank's resource sample (if present) before

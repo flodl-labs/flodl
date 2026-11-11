@@ -104,8 +104,8 @@ impl ClusterCoordinator {
     /// feed unchanged. Every alive mover (steps > 0) has a delivered
     /// sample this window (nonzero ms AND batches). This is both the
     /// all-or-none coherence predicate for the delivered feed in
-    /// [`Self::build_window_report`] and the settle condition for
-    /// `trigger_averaging`'s pre-finish drain.
+    /// [`Self::build_window_report`]. The pre-finish drain waits on the
+    /// weaker [`Self::movers_delivered_settled`].
     pub(super) fn movers_delivered_complete(&self) -> bool {
         (0..self.world_size)
             .filter(|&r| !self.is_dead(r) && self.window.steps(r) > 0)
@@ -115,6 +115,20 @@ impl ClusterCoordinator {
             // single-batch window (marginal skipped its only batch) has no
             // sample -> coherent compute-scale fallback for that (rare)
             // window.
+            .all(|r| self.window.has_delivered_sample(r))
+    }
+
+    /// Whether waiting any longer can still complete the delivered set:
+    /// [`Self::movers_delivered_complete`], except that a mover with a
+    /// single batch this window counts as settled. Its only batch is the
+    /// fill batch the marginal accumulator skips, so its sample will never
+    /// arrive; the window then feeds the compute scale, as designed. This
+    /// is the settle condition for the pre-finish wait, which otherwise
+    /// sat out its whole ceiling (the heartbeat timeout and more, with the
+    /// cohort parked at the barrier) on every such window.
+    pub(super) fn movers_delivered_settled(&self) -> bool {
+        (0..self.world_size)
+            .filter(|&r| !self.is_dead(r) && self.window.steps(r) > 1)
             .all(|r| self.window.has_delivered_sample(r))
     }
 
@@ -792,6 +806,56 @@ impl ClusterCoordinator {
         if !matches!(self.backend, AverageBackend::Cpu) {
             return;
         }
+        let Some((label, target, cluster_epoch)) = self.take_due_eval() else {
+            return;
+        };
+        let msg = ControlMsgWire::ArmConsensusEval {
+            schedule_id: label,
+            epoch: label,
+            target_rank: target as u64,
+        };
+        if let Err(e) = self.send_control(target, &msg) {
+            eprintln!(
+                "flodl ddp: consensus-eval arm to rank {target} failed \
+                 (epoch {cluster_epoch}): {e}"
+            );
+        }
+    }
+
+    /// NCCL twin of [`Self::maybe_arm_eval`] for progressive dispatch,
+    /// called right AFTER the round's `SyncNow` broadcast: the elected
+    /// rank's control channel is FIFO, so it runs the collective first and
+    /// scores its post-collective model, which is the consensus. The
+    /// non-progressive path keeps its boundary dispatch in
+    /// `dispatch_epoch`; progressive dispatch never goes through there, so
+    /// without this a cadence eval never fired under `nccl-cadence`.
+    pub(super) fn dispatch_nccl_eval_after_sync(&mut self) {
+        if !matches!(self.backend, AverageBackend::Nccl) || !self.progressive {
+            return;
+        }
+        let Some((label, target, cluster_epoch)) = self.take_due_eval() else {
+            return;
+        };
+        let msg = ControlMsgWire::ExecuteEvalCallback {
+            schedule_id: label,
+            epoch: label,
+            target_rank: target as u64,
+            adopt_consensus: false,
+        };
+        if let Err(e) = self.send_control(target, &msg) {
+            eprintln!(
+                "flodl ddp: eval dispatch to rank {target} failed \
+                 (epoch {cluster_epoch}): {e}"
+            );
+        }
+    }
+
+    /// Whether a consensus eval is due at the reduce being triggered, and
+    /// for which label and rank; consumes the cadence slot / the pending
+    /// intent. Returns `(label, target rank, cluster epoch)`. `None` when
+    /// nothing is due or the elected rank is gone (a missed cadence, as
+    /// documented on [`Self::maybe_arm_eval`]).
+    fn take_due_eval(&mut self) -> Option<(u64, usize, usize)> {
         let cluster_epoch = (0..self.world_size)
             .filter(|&r| !self.is_dead(r))
             .map(|r| self.rank_epoch[r])
@@ -804,7 +868,7 @@ impl ClusterCoordinator {
         let cadence_crossed = cadence_target > self.last_eval_arm_epoch;
         let intent_due = self.pending_eval_intent;
         if !(cadence_crossed || intent_due) {
-            return;
+            return None;
         }
         if cadence_crossed {
             self.last_eval_arm_epoch = cadence_target;
@@ -819,19 +883,9 @@ impl ClusterCoordinator {
         };
         let target = self.eval_role;
         if target >= self.world_size || self.is_dead(target) {
-            return;
+            return None;
         }
-        let msg = ControlMsgWire::ArmConsensusEval {
-            schedule_id: label,
-            epoch: label,
-            target_rank: target as u64,
-        };
-        if let Err(e) = self.send_control(target, &msg) {
-            eprintln!(
-                "flodl ddp: consensus-eval arm to rank {target} failed \
-                 (epoch {cluster_epoch}): {e}"
-            );
-        }
+        Some((label, target, cluster_epoch))
     }
 
     /// Whether the run's remaining work fits within one reduce window: the

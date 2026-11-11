@@ -1572,6 +1572,10 @@ pub fn run_launcher_with_config(
                                 }
                             }
                         }
+                        crate::verbose!(
+                            "  ddp: longest coordinator silence this run: {:.1}s",
+                            coord.longest_beacon_gap().as_secs_f64(),
+                        );
                         if coord.run_completed() {
                             Ok(())
                         } else {

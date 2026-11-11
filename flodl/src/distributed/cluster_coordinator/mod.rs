@@ -449,6 +449,9 @@ pub struct ClusterCoordinator {
     /// bridge distinguish a legitimately-silent coord (mid-compute) from a
     /// wedged-open one.
     last_coord_heartbeat: Option<Instant>,
+    /// Longest stretch the ranks may have gone without a coordinator
+    /// beacon this run (see [`Self::longest_beacon_gap`]).
+    longest_beacon_gap: std::time::Duration,
     /// Per-rank clean-exit latch, set by `TimingMsgWire::Exiting`. A rank
     /// that exited cleanly stops heartbeating, so without this latch the
     /// staleness scan declares it dead 30s later and `active_count` is
