@@ -775,3 +775,61 @@ fn relay_channel_control_channel_end_to_end() {
     let _ = rank_thread.join();
     let _ = ctrl_thread.join();
 }
+
+/// A local rank that stops reading must not stall its siblings. The
+/// upstream reader is the only writer of every local rank socket, so before
+/// this a rank whose buffer had filled cost the others on its host the full
+/// write-stall timeout on every record, liveness beacons included. Once the
+/// controller declares the rank dead, a write to it is bounded, and the
+/// first one that fails drops its socket for good.
+#[test]
+fn a_wedged_dead_rank_does_not_stall_its_sibling() {
+    // Rank 7 never reads; rank 8 is healthy.
+    let (_wedged_client, wedged_relay) = loopback_pair();
+    let (mut healthy_client, healthy_relay) = loopback_pair();
+    healthy_client.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    let (relay_up, mut controller) = loopback_pair();
+    let (shutdown, threads) = start_mux(
+        ChannelKind::Control,
+        vec![(7, wedged_relay), (8, healthy_relay)],
+        relay_up,
+    );
+
+    // The controller declares rank 7 dead, then keeps sending it frames
+    // (dead ranks are still written to) until well past what a socket
+    // buffer holds, with a frame for rank 8 behind them.
+    let writer = thread::spawn(move || {
+        MuxRecord::control(RelayControlMsg::DeclareDead { rank: 7 })
+            .write_to(&mut controller, &SALT)
+            .unwrap();
+        let big = vec![0u8; 256 * 1024];
+        for _ in 0..64 {
+            if MuxRecord::data(7, big.clone())
+                .write_to(&mut controller, &SALT)
+                .is_err()
+            {
+                break;
+            }
+        }
+        MuxRecord::data(8, vec![1, 2, 3])
+            .write_to(&mut controller, &SALT)
+            .unwrap();
+        controller
+    });
+
+    let start = std::time::Instant::now();
+    let blob = read_len_framed(&mut healthy_client)
+        .expect("the healthy rank's frame arrives")
+        .expect("frame, not EOF");
+    assert_eq!(blob, vec![1, 2, 3]);
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "the sibling waited {:?} behind a wedged rank",
+        start.elapsed(),
+    );
+
+    shutdown.store(true, Ordering::SeqCst);
+    drop(healthy_client);
+    drop(writer.join().unwrap());
+    join_within(threads);
+}

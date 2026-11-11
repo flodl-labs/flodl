@@ -78,6 +78,29 @@ use super::mux::{
 /// without busy-spinning.
 const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Longest one write may block on the socket of a local rank the
+/// controller has declared dead. Such a rank is still written to (it may be
+/// slow, not gone), but it must not hold up its siblings: the upstream
+/// reader is the only writer of every local rank socket, so a write that
+/// stalls on one rank delays the others on this host, liveness beacons
+/// included.
+const DEAD_RANK_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Write one length-framed payload to a local rank. A failed write ends
+/// that rank's socket for good: a stall that tripped the write timeout may
+/// have left half a frame on the stream, so nothing after it would parse,
+/// and retrying would stall the host's other ranks for the full timeout on
+/// every record. Shutting the socket also ends the rank's reader, which
+/// reports the exit upstream.
+fn write_to_rank(rank_writes: &mut HashMap<u32, TcpStream>, rank: u32, payload: &[u8]) {
+    let failed = rank_writes
+        .get_mut(&rank)
+        .is_some_and(|w| write_len_framed(w, payload).is_err());
+    if failed && let Some(w) = rank_writes.remove(&rank) {
+        let _ = w.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Channel kind + handshake termination
 // ---------------------------------------------------------------------------
@@ -745,9 +768,7 @@ impl FoldCtx {
             if dead.contains(rank) {
                 continue;
             }
-            if let Some(w) = rank_writes.get_mut(rank) {
-                let _ = write_len_framed(w, payload);
-            }
+            write_to_rank(rank_writes, *rank, payload);
         }
     }
 }
@@ -1015,13 +1036,10 @@ fn upstream_reader(
         }
         match MuxRecord::try_read_from(&mut up_read, &salt) {
             Ok(MuxRead::Record(MuxRecord::Data { rank, payload })) => {
-                if let Some(w) = rank_writes.get_mut(&rank) {
-                    // Rank socket may already be gone (rank exited); a
-                    // failed write just means there's no one to deliver
-                    // to. Drop it — the rank's RankExit is already in
-                    // flight / delivered upstream.
-                    let _ = write_len_framed(w, &payload);
-                }
+                // Rank socket may already be gone (rank exited): then
+                // there is no one to deliver to, and its RankExit is
+                // already in flight / delivered upstream.
+                write_to_rank(&mut rank_writes, rank, &payload);
                 // Unknown rank: controller addressed a rank not on this
                 // host. Drop silently — a misroute would have failed the
                 // mux HMAC, so this only happens on a benign post-exit
@@ -1041,6 +1059,11 @@ fn upstream_reader(
                 }
             }
             Ok(MuxRead::Record(MuxRecord::Control(RelayControlMsg::DeclareDead { rank }))) => {
+                // Both channels: bound writes to the dead rank so it
+                // cannot stall its siblings (see the constant).
+                if let Some(w) = rank_writes.get(&rank) {
+                    let _ = w.set_write_timeout(Some(DEAD_RANK_WRITE_TIMEOUT));
+                }
                 if let Some(ctx) = &fold {
                     // Controller-side death (heartbeat staleness, a
                     // broken host elsewhere): drop the rank from the
