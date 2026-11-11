@@ -478,8 +478,8 @@ fn run_reduce_thread(
     // mass), and scatter ONE consensus Broadcast down each surviving
     // connection — the relay fans it out to its local ranks. The reduce
     // loop is the SOLE writer of every relay connection. Terminates when
-    // an alive rank's data connection closes (clean training-end exit),
-    // every rank is dead, or shutdown is signalled.
+    // every rank is dead or has left the data channel, or shutdown is
+    // signalled. One rank leaving only shrinks the barrier.
     //
     // Dead-diff forwarding: deaths declared cluster-side (coordinator
     // heartbeat staleness, scatter failure on another host) must reach
@@ -552,11 +552,14 @@ struct SlotsInner {
     /// A connection is EXPECTED in a round while any of its ranks is
     /// alive.
     conn_ranks: Vec<Vec<usize>>,
-    /// A reader observed an alive rank's data connection close (clean
-    /// training-end exit, or a relay/host drop) — the reduce loop should
-    /// terminate cleanly. Mirrors the pre-relay "alive-rank EOF → clean
-    /// shutdown" semantics.
-    shutdown: bool,
+    /// Ranks whose data connection closed (a relay `RankExit`, or the
+    /// relay connection itself reaching EOF). The data channel cannot tell
+    /// a rank that finished from one that crashed, so an exit only takes
+    /// the rank out of the round barrier: the survivors keep reducing, and
+    /// whether the run is over is the coordinator's call. Kept apart from
+    /// the dead ledger on purpose, since a clean end-of-run exit is not a
+    /// death.
+    left: std::collections::HashSet<usize>,
     /// A reader hit a hard wire error on an alive rank's frame. Surfaced
     /// from the reduce loop as the thread's `Err`.
     error: Option<TensorError>,
@@ -567,8 +570,8 @@ enum RoundOutcome {
     /// Every expected connection's folded frame for this round
     /// (connections whose ranks are all dead are `None`).
     Frames(Vec<Option<RoundFrame>>),
-    /// Clean shutdown requested (alive-rank exit, all ranks dead, or the
-    /// external shutdown flag).
+    /// Nothing left to reduce (every rank dead or gone from the data
+    /// channel), or the external shutdown flag.
     Shutdown,
     /// A reader surfaced a hard wire error.
     Error(TensorError),
@@ -580,7 +583,7 @@ impl ReduceSlots {
             inner: Mutex::new(SlotsInner {
                 frames: Vec::new(),
                 conn_ranks: Vec::new(),
-                shutdown: false,
+                left: std::collections::HashSet::new(),
                 error: None,
             }),
             cv: Condvar::new(),
@@ -606,10 +609,12 @@ impl ReduceSlots {
         self.cv.notify_all();
     }
 
-    /// Request a clean shutdown of the reduce loop.
-    fn request_shutdown(&self) {
+    /// Take `ranks` out of the round barrier: their data connection
+    /// closed. Wakes the round wait, which may now be complete for the
+    /// ranks that remain.
+    fn mark_left(&self, ranks: &[usize]) {
         let mut inner = self.inner.lock().unwrap();
-        inner.shutdown = true;
+        inner.left.extend(ranks.iter().copied());
         self.cv.notify_all();
     }
 
@@ -622,9 +627,10 @@ impl ReduceSlots {
         self.cv.notify_all();
     }
 
-    /// Block until every expected connection (one with ≥1 alive rank)
-    /// has deposited its folded frame, then take them (leaving
-    /// fully-dead connections `None`). Re-evaluates dead ranks every
+    /// Block until every expected connection (one with ≥1 rank that is
+    /// neither dead nor gone from the data channel) has deposited its
+    /// folded frame, then take them (leaving the other connections
+    /// `None`). Re-evaluates dead ranks every
     /// `poll` so a coord-declared death (which carries no notify) is
     /// observed. `on_poll` runs on every wake (deposit, shutdown, or
     /// poll tick) OUTSIDE the slots lock — the reduce loop uses it to
@@ -641,7 +647,7 @@ impl ReduceSlots {
     ) -> RoundOutcome {
         let mut inner = self.inner.lock().unwrap();
         loop {
-            if external_shutdown.load(Ordering::SeqCst) || inner.shutdown {
+            if external_shutdown.load(Ordering::SeqCst) {
                 return RoundOutcome::Shutdown;
             }
             if let Some(e) = inner.error.take() {
@@ -649,10 +655,14 @@ impl ReduceSlots {
             }
             let n_conns = inner.frames.len();
             let expected: Vec<usize> = (0..n_conns)
-                .filter(|c| inner.conn_ranks[*c].iter().any(|r| !dead.is_dead(*r)))
+                .filter(|c| {
+                    inner.conn_ranks[*c]
+                        .iter()
+                        .any(|r| !dead.is_dead(*r) && !inner.left.contains(r))
+                })
                 .collect();
             if expected.is_empty() {
-                // Every rank dead/done → nothing left to reduce.
+                // Every rank dead or gone → nothing left to reduce.
                 return RoundOutcome::Shutdown;
             }
             if expected.iter().all(|c| inner.frames[*c].is_some()) {
@@ -680,9 +690,8 @@ impl ReduceSlots {
 }
 
 /// Per-connection reader: deposit the relay's folded `HostFrame` into
-/// this connection's reduce slot, surface `RankExit` / EOF as clean
-/// shutdown for still-alive ranks, and parse the RoundFrame payload
-/// from memory.
+/// this connection's reduce slot, take ranks out of the round barrier on
+/// `RankExit` / EOF, and parse the RoundFrame payload from memory.
 fn reduce_reader(
     mut read: TcpStream,
     conn_idx: usize,
@@ -729,13 +738,11 @@ fn reduce_reader(
                 return;
             }
             Ok(MuxRead::Record(MuxRecord::Control(RelayControlMsg::RankExit { rank }))) => {
-                // Alive rank's data connection closed: clean training-end
-                // exit (or an undetected failure). Mirrors the pre-relay
-                // "alive-rank EOF → clean shutdown" semantics. A RankExit
-                // for an already-dead rank is expected post-failure cleanup.
-                if !dead_ranks.is_dead(rank as usize) {
-                    slots.request_shutdown();
-                }
+                // The rank's data connection closed: the end of training
+                // or a crash, which look the same from here. Its relay
+                // already dropped it from the host fold; drop it from the
+                // round barrier and keep reducing for the others.
+                slots.mark_left(&[rank as usize]);
             }
             Ok(MuxRead::Record(MuxRecord::Control(_))) => {
                 // Hello/HelloAck only occur at startup; ignore mid-stream.
@@ -749,11 +756,9 @@ fn reduce_reader(
             }
             Ok(MuxRead::WouldBlock) => {}
             Ok(MuxRead::Eof) => {
-                // Relay connection closed. If any of this host's ranks were
-                // still alive, treat as their exit (clean shutdown).
-                if ranks.iter().any(|r| !dead_ranks.is_dead(*r)) {
-                    slots.request_shutdown();
-                }
+                // Relay connection closed: none of this host's ranks can
+                // contribute again.
+                slots.mark_left(&ranks);
                 return;
             }
             Err(e) => {
@@ -860,6 +865,12 @@ fn average_and_scatter(
     for (ci, ranks) in conn_ranks.iter().enumerate() {
         if ranks.iter().all(|r| dead_ranks.is_dead(*r)) {
             continue; // fully-dead host — no one to deliver to
+        }
+        if frames[ci].is_none() {
+            // Not part of this round: every rank of the host had left the
+            // data channel. A write here would fail and declare them dead
+            // from the data plane, behind the coordinator's back.
+            continue;
         }
         if let Err(e) = record.write_to(&mut conn_writes[ci], salt) {
             eprintln!(

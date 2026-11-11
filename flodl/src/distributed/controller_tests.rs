@@ -1093,3 +1093,66 @@ fn two_host_fold_average_one_round() {
     assert_eq!(recv_a[0][0], recv_b[0][0]);
     assert!((recv_b[0][0].weight - 3.0).abs() < 1e-9);
 }
+
+/// One rank leaving the data channel (a crash looks exactly like this from
+/// here) must not end the reduce for the others: the survivor's later
+/// rounds are still reduced and answered. The loop used to treat any exit
+/// of a rank not yet declared dead as the end of training and drop every
+/// connection, so one crashed rank ended a CPU-averaging run.
+#[test]
+fn a_rank_leaving_the_data_channel_does_not_end_the_reduce_for_survivors() {
+    let avg =
+        ClusterController::start(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0), 2, TEST_SALT)
+            .unwrap();
+    let port = avg.port();
+
+    // Rank 1's relay joins, reports the rank's exit and goes away.
+    let leaver = std::thread::spawn(move || {
+        let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+        let mut stream = TcpStream::connect(addr).unwrap();
+        crate::distributed::wire::write_channel_magic(
+            &mut stream,
+            crate::distributed::wire::CHANNEL_MAGIC_DATA,
+        )
+        .unwrap();
+        MuxRecord::control(RelayControlMsg::Hello {
+            host: "leaver".into(),
+            ranks: vec![1],
+            model_sigs: vec![],
+        })
+        .write_to(&mut stream, &TEST_SALT)
+        .unwrap();
+        assert!(matches!(
+            MuxRecord::read_from(&mut stream, &TEST_SALT).unwrap(),
+            Some(MuxRecord::Control(RelayControlMsg::HelloAck))
+        ));
+        MuxRecord::control(RelayControlMsg::RankExit { rank: 1 })
+            .write_to(&mut stream, &TEST_SALT)
+            .unwrap();
+    });
+
+    // Rank 0 keeps training: two rounds, each answered with its own
+    // contribution (the only realized work left in the cohort).
+    let recv = fake_relay(
+        port,
+        vec![0],
+        TEST_SALT,
+        vec![vec![
+            one_tensor_frame(&[1.0, 2.0]),
+            one_tensor_frame(&[5.0, 6.0]),
+        ]],
+    )
+    .expect("the survivor's rounds must still be reduced");
+    leaver.join().unwrap();
+    avg.shutdown().unwrap();
+
+    assert_eq!(recv[0].len(), 2);
+    assert_eq!(
+        bytes_as_f32(&recv[0][0].tensors[0].bytes).unwrap(),
+        vec![1.0, 2.0]
+    );
+    assert_eq!(
+        bytes_as_f32(&recv[0][1].tensors[0].bytes).unwrap(),
+        vec![5.0, 6.0]
+    );
+}

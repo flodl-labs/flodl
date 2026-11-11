@@ -76,7 +76,7 @@ impl ClusterCoordinator {
             let mut slow_wait_logged = false;
             loop {
                 self.drain_metrics();
-                if self.movers_delivered_complete() {
+                if self.movers_delivered_settled() {
                     break;
                 }
                 if wait_start.elapsed() >= ceiling {
@@ -127,6 +127,7 @@ impl ClusterCoordinator {
                      relying on dead-rank recovery"
             );
         }
+        self.dispatch_nccl_eval_after_sync();
         self.finish_averaging_nccl()?;
         Ok(())
     }

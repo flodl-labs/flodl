@@ -1340,6 +1340,10 @@ pub struct ParamSnapshot {
     pub buffers: Vec<Tensor>,
     /// Number of batches processed since last averaging (for weighting).
     pub batch_count: usize,
+    /// The rank's cumulative step count at this snapshot, on the same
+    /// clock as its `Batch` reports. Tells the coordinator exactly which
+    /// completed work this snapshot contains.
+    pub step: usize,
 }
 
 // ---------------------------------------------------------------------------

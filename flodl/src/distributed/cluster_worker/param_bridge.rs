@@ -54,6 +54,7 @@ pub(super) fn param_bridge_loop(
             params,
             buffers,
             batch_count: n_i,
+            step: snapshot_step,
         } = snapshot;
         debug_assert_eq!(
             snap_rank as u64, rank,
@@ -225,16 +226,16 @@ pub(super) fn param_bridge_loop(
         }
         // Ack the coordinator. CPU re-arm runs off the coord's
         // `cpu_avg_state` machine (finalized by `poll_cpu_averaging` once
-        // every rank's divergence has landed), NOT off `step_count`, so
-        // this ack carries no synthetic step. A real step_count isn't
-        // available here anyway — the inner GpuWorker doesn't bump
-        // `local_step` on `RequestParams`. Sending 0 keeps the coord's
-        // `last_step_count` clean (it ignores CPU-path step_counts). The
-        // previous `usize::MAX / 2` sentinel poisoned `last_step_count`,
-        // wedging the NCCL-style re-arm gate after a few cycles.
+        // every rank's divergence has landed), NOT off `step_count`: the
+        // coordinator never folds a CPU-path ack into `last_step_count`
+        // or its ack gate (a synthetic `usize::MAX / 2` here once poisoned
+        // that counter and wedged the re-arm gate). What the field carries
+        // is the step count of the SNAPSHOT this round just averaged, so
+        // the coordinator knows exactly which of the rank's completed work
+        // is now in the consensus.
         let _ = timing_tx.send(TimingMsg::SyncAck {
             rank: rank as usize,
-            step_count: 0,
+            step_count: snapshot_step,
             divergence: Some(divergence),
             post_norm,
             pre_norm,

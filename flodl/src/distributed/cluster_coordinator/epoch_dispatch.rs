@@ -348,7 +348,17 @@ impl ClusterCoordinator {
     /// back into motion by [`Self::wake_idle_ranks_in_progressive`]
     /// after the next averaging cycle.
     pub(super) fn dispatch_next_chunk(&mut self, rank: usize) {
-        let epoch = self.rank_epoch[rank];
+        // Oldest open epoch with work left wins over the rank's current
+        // one. Work only reappears in an older pool when a dead rank's
+        // samples are handed back; a rank that has already streamed ahead
+        // must come back for them, or that pool never completes and, since
+        // epochs close in order, neither does any later one.
+        let epoch = self
+            .chunk_pools
+            .iter()
+            .find(|&(&e, p)| e < self.rank_epoch[rank] && p.remaining() > 0)
+            .map_or(self.rank_epoch[rank], |(&e, _)| e);
+        let came_from = self.rank_epoch[rank];
         // Plan the epoch's final reduce window before sizing (no-op until the
         // pool is within one window of empty). The first rank dispatched this
         // window sees the window-start remainder and pins the split.
@@ -418,10 +428,20 @@ impl ClusterCoordinator {
             .is_some_and(|p| p.remaining() > 0)
         {
             let batches = self.compute_chunk_batches(rank, epoch);
-            if let Err(e) = self.dispatch_next_chunk_with_batches(rank, epoch, batches) {
-                crate::verbose!(
-                    "  ddp: dispatch_next_chunk(rank={rank}, epoch={epoch}) error: {e}"
-                );
+            match self.dispatch_next_chunk_with_batches(rank, epoch, batches) {
+                Ok(Some(plan)) if epoch < came_from => {
+                    crate::verbose!(
+                        "  ddp: rank {rank} returns from epoch {came_from} to epoch {epoch} \
+                         for {} handed-back samples",
+                        plan.partition_size,
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    crate::verbose!(
+                        "  ddp: dispatch_next_chunk(rank={rank}, epoch={epoch}) error: {e}"
+                    );
+                }
             }
             return;
         }
@@ -461,6 +481,21 @@ impl ClusterCoordinator {
                 self.dispatch_hold_logged[rank] = true;
                 crate::debug!(
                     "  ddp: epoch barrier HOLD rank {rank} | epoch={epoch} first_live={first_live}"
+                );
+            }
+            return;
+        }
+
+        // ONE EPOCH AHEAD AT MOST (async). An epoch closes at the first
+        // sync that covers it; a rank two epochs past the oldest open one
+        // would let a single sync cover two of them, and their events would
+        // then describe the same consensus. Holding it here leaves it
+        // quiesced, which lets the reduce gate fire and close the oldest.
+        if next_epoch > first_live + 1 {
+            if !self.dispatch_hold_logged[rank] {
+                self.dispatch_hold_logged[rank] = true;
+                crate::debug!(
+                    "  ddp: epoch-ahead HOLD rank {rank} | next={next_epoch} first_live={first_live}"
                 );
             }
             return;

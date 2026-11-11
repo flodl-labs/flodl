@@ -114,6 +114,12 @@ pub(super) struct AvgCycleState {
     /// Per-rank: true once post-sync evidence has arrived (a `Batch`
     /// or `SyncAck` with `step_count` past the snapshot).
     pub(super) acked: Vec<bool>,
+    /// Per-rank: the current cycle's `SyncAck` frame itself has arrived.
+    /// Distinct from the divergence slot the CPU finalize gates on, which a
+    /// `Batch` frame can fill first: a cycle can finalize with a rank's
+    /// `SyncAck` still in transit. A sync armed before that frame lands
+    /// would read it as its own. All-true at rest.
+    sync_ack_seen: Vec<bool>,
     /// Per-rank weight-space divergence from the last SyncAck. Doubles
     /// as the CPU finalize gate (`is_some` for every alive rank).
     pub(super) divergence: Vec<Option<f64>>,
@@ -160,6 +166,7 @@ impl AvgCycleState {
             // (`nccl_sync_settled`) and elapsed captures see a settled
             // cycle until the first arm.
             acked: vec![true; world_size],
+            sync_ack_seen: vec![true; world_size],
             divergence: vec![None; world_size],
             pre_norm: vec![None; world_size],
             post_norm: None,
@@ -190,6 +197,14 @@ impl AvgCycleState {
         self.started_at = Some(now);
         self.step_snapshot.copy_from_slice(last_step_count);
         self.acked.fill(false);
+        self.sync_ack_seen.fill(false);
+    }
+
+    /// Whether every live rank's `SyncAck` of the last cycle has arrived
+    /// (see the field). A sync the coordinator triggers on its own
+    /// initiative, right behind the previous one, waits for this.
+    pub(super) fn all_alive_sync_acked(&self, mut is_dead: impl FnMut(usize) -> bool) -> bool {
+        (0..self.sync_ack_seen.len()).all(|r| is_dead(r) || self.sync_ack_seen[r])
     }
 
     // -----------------------------------------------------------------
@@ -243,6 +258,9 @@ impl AvgCycleState {
         pre_norm: Option<f64>,
         post_norm: Option<f64>,
     ) {
+        if let Some(seen) = self.sync_ack_seen.get_mut(rank) {
+            *seen = true;
+        }
         if let Some(div) = divergence {
             self.divergence[rank] = Some(div);
         }
