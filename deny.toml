@@ -53,7 +53,7 @@ ignore = []
 [licenses]
 version = 2
 # Grounded in what the tree actually contains, not a generic permissive
-# list copied from elsewhere. flodl itself is MIT.
+# list copied from elsewhere. flodl itself is MIT OR Apache-2.0.
 #
 # Keep it that way: an entry matching nothing raises
 # `license-not-encountered`, which is how the first survey's speculative
@@ -78,7 +78,7 @@ allow = [
     # The one non-permissive license in the tree, and a deliberate call
     # rather than an oversight: `option-ext`, reached through
     # `dirs -> dirs-sys`. MPL-2.0 is FILE-level copyleft, so linking it
-    # unmodified imposes nothing on flodl's own MIT terms; the obligation
+    # unmodified imposes nothing on flodl's own terms; the obligation
     # would only attach to modifications of option-ext's own files, and
     # there are none. If that ever changes, this line is the place the
     # decision is recorded.

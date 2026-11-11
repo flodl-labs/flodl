@@ -14,7 +14,7 @@ Same GPU kernels as PyTorch. No Python. No GIL. No GC. Just Rust.
   <a href="https://github.com/flodl-labs/flodl/actions"><img src="https://github.com/flodl-labs/flodl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/flodl"><img src="https://img.shields.io/crates/v/flodl.svg" alt="crates.io"></a>
   <a href="https://docs.rs/flodl"><img src="https://docs.rs/flodl/badge.svg" alt="docs.rs"></a>
-  <a href="https://github.com/flodl-labs/flodl/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="https://github.com/flodl-labs/flodl#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
 </p>
 
 <p align="center">
@@ -949,4 +949,6 @@ the memory fights didn't.
 
 ## License
 
-floDl is open-sourced software licensed under the [MIT license](https://github.com/flodl-labs/flodl/blob/main/LICENSE).
+floDl is open-sourced software licensed under either of the [Apache License, Version 2.0](https://github.com/flodl-labs/flodl/blob/main/LICENSE-APACHE) or the [MIT license](https://github.com/flodl-labs/flodl/blob/main/LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in floDl by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
