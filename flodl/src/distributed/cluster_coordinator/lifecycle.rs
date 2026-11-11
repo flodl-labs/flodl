@@ -363,6 +363,7 @@ impl ClusterCoordinator {
             last_step_count: vec![0; world_size],
             cycle: super::cycle_state::AvgCycleState::new(config.backend, world_size),
             dispatch_hold_logged: vec![false; world_size],
+            deferred_completions: Vec::new(),
             // Per-epoch d-aggregator identity values; see field docs on
             // `ClusterCoordinator`.
             epoch_d_min: f64::INFINITY,

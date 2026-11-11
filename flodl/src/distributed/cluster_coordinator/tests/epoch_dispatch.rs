@@ -438,7 +438,7 @@ fn one_shot_checkpoint_meta_round_trips_to_resume_coverage() {
         let pool = coord_a.chunk_pools.get_mut(&2).unwrap();
         assert_eq!(pool.take_chunk(40, 0).unwrap(), (0, 40));
         assert_eq!(pool.take_chunk(30, 1).unwrap(), (50, 30));
-        pool.mark_completed(0, 40);
+        pool.mark_completed(0, 40, 0);
     }
     coord_a.rank_epoch[0] = 2;
     coord_a.rank_epoch[1] = 2;

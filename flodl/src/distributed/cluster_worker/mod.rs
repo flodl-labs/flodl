@@ -710,7 +710,10 @@ impl<M: Module + 'static> ClusterWorker<M> {
     /// `EpochCallbackPolicy::Fastest` re-resolve (e.g. after rank death) the
     /// coord broadcasts a fresh role picked up before the next boundary.
     pub(crate) fn fire_epoch_callback(&mut self, epoch: usize) {
-        if epoch == self.last_epoch_fired {
+        // Monotone, not merely "different from the last": a dead peer's
+        // samples can send this rank back to an older epoch and forward
+        // again, and neither move is a new epoch.
+        if self.last_epoch_fired != usize::MAX && epoch <= self.last_epoch_fired {
             return;
         }
         self.last_epoch_fired = epoch;

@@ -356,6 +356,10 @@ pub struct ClusterCoordinator {
     /// per HOLD episode: set when logged, cleared at the reduce reset
     /// (`finish_averaging_*`) so the next window's first HOLD logs again.
     dispatch_hold_logged: Vec<bool>,
+    /// `(rank, epoch)` chunk completions whose bookkeeping was ingested at a
+    /// reduce finalize, with their next-chunk dispatch still owed (it runs
+    /// at the next metrics drain, as it always did).
+    deferred_completions: Vec<(usize, usize)>,
     /// Per-epoch d-aggregator. Each call to [`Self::finish_averaging_nccl`]
     /// / [`Self::finish_averaging_cpu`] feeds the cycle's `d_raw` +
     /// `k_max` into [`Self::update_epoch_d_aggregator`]; the
