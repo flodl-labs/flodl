@@ -1,0 +1,81 @@
+name: Rust pin
+
+# The lint gates run on a pinned Rust release (ci/rust-pin.sh says why and
+# how to bump it). A pin that nobody is reminded of only trades one kind
+# of drift for another, so this compares it with current stable once a
+# week and opens an issue when stable has moved.
+#
+# It reports and does nothing else. The bump stays a reviewed commit: it
+# is the PR that changes the Dockerfiles, so its own CI builds the GPU
+# images from them and lints on the new release before anything merges,
+# and the merge is what publishes those images (images.yml).
+
+on:
+  schedule:
+    # Mondays 06:00 UTC. Rust ships on Thursdays, so this lands after a
+    # release has had its first days of point-release fixes.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Pin vs current stable
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          pin=$(sh ci/rust-pin.sh)
+
+          # The channel manifest is what rustup itself resolves `stable`
+          # from. Its [pkg.rust] table carries `version = "x.y.z (hash date)"`.
+          # awk reads to the end rather than exiting at the match, which
+          # would close the pipe under curl and make it report a failure.
+          stable=$(curl -fsSL https://static.rust-lang.org/dist/channel-rust-stable.toml \
+            | awk '/^\[pkg\.rust\]/ { found = 1; next }
+                   found && /^version = / { gsub(/"/, "", $3); print $3; found = 0 }')
+          case "$stable" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::could not read the stable version from the channel manifest (got '$stable')"
+              exit 1
+              ;;
+          esac
+
+          echo "pinned $pin, stable $stable"
+          if [ "$pin" = "$stable" ]; then
+            echo "::notice::the Rust pin is current ($pin)"
+            exit 0
+          fi
+
+          # One open reminder at a time. A second release landing before
+          # the first bump is noted on the existing issue instead.
+          title="Rust pin is behind stable"
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          body="The lint gates are pinned to Rust **$pin**; current stable is **$stable**.
+
+          To bump, follow the header of \`ci/rust-pin.sh\`: change \`ARG RUST_VERSION\` in every Dockerfile it lists, rebuild the local images, run \`fdl clippy\` and \`fdl gpu-clippy\`, fix what the new release flags, and open the PR. That PR builds the GPU images from the changed Dockerfiles, and merging it publishes them."
+
+          if [ -n "$open" ]; then
+            if gh issue view "$open" --repo "$GITHUB_REPOSITORY" --json body,comments \
+                 --jq '[.body, .comments[].body] | join("\n")' | grep -qF "**$stable**"; then
+              echo "::notice::issue #$open already names $stable"
+            else
+              gh issue comment "$open" --repo "$GITHUB_REPOSITORY" \
+                --body "Stable has moved again: it is now **$stable** (the pin is still **$pin**)."
+            fi
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

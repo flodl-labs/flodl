@@ -129,9 +129,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             wget unzip g++ pkg-config graphviz
 
+      # The pinned release, not floating `stable`: the GPU jobs lint inside
+      # images that carry this same version, and a clippy that moves on
+      # its own would turn main red with no commit behind it. The script
+      # also fails when the Dockerfiles disagree about the pin.
+      - name: Read the Rust pin
+        id: rust
+        run: echo "version=$(sh ci/rust-pin.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.version }}
           components: clippy, rustfmt
 
       # Formatting is rustfmt's from 2026-08-08, and this keeps it that

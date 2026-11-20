@@ -90,9 +90,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned like every other lint gate (ci/rust-pin.sh says why). What
+      # these legs vary is the platform, not the compiler.
+      - name: Read the Rust pin
+        id: rust
+        shell: bash
+        run: echo "version=$(sh ci/rust-pin.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.version }}
           components: clippy
 
       - name: Cache cargo registry + build artifacts
@@ -218,13 +226,15 @@ jobs:
           FDL_CI_VARIANT: ${{ (github.event.inputs.variant == '' || github.event.inputs.variant == 'rotate') && matrix.variant || github.event.inputs.variant }}
         run: |
           mkdir -p ~/.rocky/cargo ~/.rocky/rustup
+          RUST_PIN=$(sh ci/rust-pin.sh)
+          export RUST_PIN
           docker run --rm \
             -v "$PWD:/workspace" \
             -v "$HOME/.rocky/cargo:/root/.cargo" \
             -v "$HOME/.rocky/rustup:/root/.rustup" \
             -w /workspace \
             -e FDL_CI_VARIANT -e GITHUB_ACTIONS -e GITHUB_RUN_NUMBER \
-            -e FDL_CI_EXPECT_SSHD=1 \
+            -e FDL_CI_EXPECT_SSHD=1 -e RUST_PIN \
             ${{ matrix.image }} bash -c '
               set -e
               ok=0
@@ -239,11 +249,16 @@ jobs:
                 echo "::error::dnf install failed after 3 attempts"
                 exit 1
               fi
-              if [ ! -x /root/.cargo/bin/cargo ]; then
+              if [ ! -x /root/.cargo/bin/rustup ]; then
                 curl -sSf https://sh.rustup.rs \
-                  | sh -s -- -y --profile minimal --component clippy
+                  | sh -s -- -y --profile minimal --default-toolchain none
               fi
               . /root/.cargo/env
+              # Outside the install guard on purpose: the rustup home is
+              # cached across runs, so a restored one may hold an older
+              # toolchain than the pin.
+              rustup toolchain install "$RUST_PIN" --profile minimal --component clippy
+              rustup default "$RUST_PIN"
               git config --global --add safe.directory /workspace
               bash ci/os-matrix.sh'
 

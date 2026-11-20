@@ -74,8 +74,10 @@ RUN dnf install -y \
 # needs none of this — its rsync package installs /usr/bin/rrsync.
 RUN install -m 755 /usr/share/doc/rsync/support/rrsync /usr/local/bin/rrsync
 
-# Rust, as the user would get it.
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
+# Rust, installed the way a user would, at the version the lint gates
+# are pinned to (ci/rust-pin.sh reads it, and explains the bump).
+ARG RUST_VERSION=1.100.0
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy --default-toolchain "$RUST_VERSION"
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /workspace
