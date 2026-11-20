@@ -47,7 +47,7 @@ jobs:
     name: MSRV (declared floor compiles)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Two floors: the workspace's for the core crates, and flodl-hf's own
       # higher one (its Hub client's dependency chain must not raise the
@@ -94,7 +94,7 @@ jobs:
     name: Supply chain (cargo-deny)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -105,7 +105,7 @@ jobs:
     name: CPU (test + clippy)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Cheap, toolchain-free gate: the embedded skill assets baked into
       # the fdl binary (flodl-cli/assets/skills/) must match the ai/
@@ -155,7 +155,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Cache cargo registry + build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -166,7 +166,7 @@ jobs:
 
       - name: Cache libtorch download
         id: cache-libtorch
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/libtorch
           key: libtorch-cpu-${{ env.LIBTORCH_VERSION }}
@@ -289,7 +289,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Free disk space
         run: |
@@ -336,7 +336,7 @@ jobs:
 
       - name: Cache libtorch download (CUDA)
         id: cache-libtorch-cuda
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/libtorch-ci
           key: libtorch-cu128-${{ env.LIBTORCH_VERSION }}
@@ -422,7 +422,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ROCm is the disk-hungry job: the base image is ~25 GB and a full
       # libtorch-rocm expands to ~12 GB, so free everything possible
@@ -467,7 +467,7 @@ jobs:
       # bump this token too -- the step after the download asserts it.
       - name: Cache libtorch download (ROCm)
         id: cache-libtorch-rocm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/libtorch-ci
           key: libtorch-rocm70-so-${{ env.LIBTORCH_VERSION }}

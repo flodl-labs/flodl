@@ -41,7 +41,7 @@ default = ["hub", "tokenizer"]
 gpu = ["flodl/gpu"]
 cuda = ["gpu", "flodl/cuda"]
 rocm = ["gpu", "flodl/rocm"]
-hub = ["hf-hub", "dep:flodl-cli"]
+hub = ["hf-hub"]
 tokenizer = ["tokenizers"]
 
 [dependencies]
@@ -50,10 +50,12 @@ safetensors.workspace = true
 serde_json.workspace = true
 hf-hub = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
-# Optional, gated behind `hub`: lets the export_hf CLI binary use the
-# FdlArgs derive so its --help output matches what `fdl flodl-hf export
-# -h` renders. Pure-Rust dep; pulls no libtorch.
-flodl-cli = { workspace = true, optional = true }
+
+[dev-dependencies]
+# For the export_hf example only: it uses the FdlArgs derive so its
+# --help output matches what `fdl flodl-hf export -h` renders. A dev
+# dependency, so nothing that depends on flodl-hf compiles it.
+flodl-cli.workspace = true
 
 [[example]]
 name = "bert_embed"
