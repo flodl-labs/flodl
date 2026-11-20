@@ -656,18 +656,15 @@ impl ReduceSlots {
                 return RoundOutcome::Shutdown;
             }
             if expected.iter().all(|c| inner.frames[*c].is_some()) {
-                let mut out: Vec<Option<RoundFrame>> = Vec::with_capacity(n_conns);
-                for c in 0..n_conns {
-                    if expected.contains(&c) {
-                        out.push(inner.frames[c].take());
-                    } else {
-                        // Stale frame from a connection whose ranks all
-                        // died — clear it so it can't leak into a later
-                        // round.
-                        inner.frames[c] = None;
-                        out.push(None);
-                    }
-                }
+                // Every slot is taken, expected or not: a stale frame from
+                // a connection whose ranks all died is cleared here so it
+                // can't leak into a later round.
+                let out: Vec<Option<RoundFrame>> = inner
+                    .frames
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(c, frame)| frame.take().filter(|_| expected.contains(&c)))
+                    .collect();
                 return RoundOutcome::Frames(out);
             }
             drop(inner);
