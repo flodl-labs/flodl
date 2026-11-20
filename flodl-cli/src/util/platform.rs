@@ -318,5 +318,6 @@ mod tests {
         // macOS ships sshd, so there is no package to name for it.
         assert_eq!(Platform::MacOs.sshd_package(), None);
         assert_eq!(Platform::Debian.sshd_package(), Some("openssh-server"));
+        assert_eq!(Platform::Rhel.sshd_package(), Some("openssh-server"));
     }
 }

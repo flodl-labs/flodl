@@ -22,6 +22,10 @@
 #             FDL_CI_SKIP_LIBTORCH=1     skip the download/install phase,
 #                                        so a local run never mutates an
 #                                        existing libtorch/.active
+#             FDL_CI_EXPECT_SSHD=1       a host without sshd FAILS the
+#                                        drop-in check instead of noting
+#                                        it, so a leg that provisions
+#                                        sshd cannot lose it silently
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -549,21 +553,28 @@ if [ "$FARM_OK" = 1 ]; then
     else
         fail_with "$(cat "$CONF2222")" "$HOST: port 2222 drop-in lacks its Match LocalPort block:"
     fi
-    # sshd -t needs the host keys, which only root reads. Root directly
-    # (the rocky legs) or passwordless sudo (hosted runners); anything
-    # else is reported as not run, never as ok.
-    SSHD=""; SUDO=""
-    for c in sshd /usr/sbin/sshd /usr/libexec/sshd-keygen-wrapper; do
+    # sshd -t and -T refuse to answer without a host key. -h hands them a
+    # throwaway one, so the check needs neither root nor the box's own
+    # keys (a fresh container has none), and a local run executes it
+    # exactly as CI does. Without an sshd it is reported as not run,
+    # never as ok, and FDL_CI_EXPECT_SSHD turns that into a failure.
+    SSHD=""
+    for c in sshd /usr/sbin/sshd; do
         if command -v "$c" >/dev/null 2>&1; then SSHD="$c"; break; fi
     done
-    if [ -n "$SSHD" ] && [ "$(id -u)" != 0 ]; then
-        if sudo -n true >/dev/null 2>&1; then SUDO="sudo -n"; else SSHD=""; fi
-    fi
-    if [ -z "$SSHD" ]; then
-        note "$HOST: no sshd, or no root to run it: the drop-in was not parsed by a real daemon here"
-    elif $SUDO "$SSHD" -t -f "$CONF2222" >/dev/null 2>&1; then
+    HOSTKEY="$FARM/ssh_host_ed25519_key"
+    if [ -z "$SSHD" ] && [ "${FDL_CI_EXPECT_SSHD:-}" = 1 ]; then
+        fail "$HOST: no sshd, but FDL_CI_EXPECT_SSHD=1 says this host provisions one: the drop-in went unparsed by a real daemon"
+    elif [ -z "$SSHD" ]; then
+        note "$HOST: no sshd: the drop-in was not parsed by a real daemon here"
+    elif ! KG_OUT=$(ssh-keygen -q -t ed25519 -N '' -f "$HOSTKEY" </dev/null 2>&1); then
+        fail_with "$KG_OUT" "$HOST: ssh-keygen could not mint a throwaway host key:"
+    elif "$SSHD" -t -f "$CONF2222" -h "$HOSTKEY" >/dev/null 2>&1; then
+        # The daemon's version, not the client's: the two can differ. An
+        # sshd too old for -V still prints it at the top of its usage.
+        SSHD_VER=$("$SSHD" -V 2>&1 | grep OpenSSH | head -n 1)
         T_RC=0
-        T_OUT=$($SUDO "$SSHD" -T -f "$CONF2222" -C user=ci,host=x,addr=127.0.0.1,laddr=127.0.0.1,lport=2222 2>&1) || T_RC=$?
+        T_OUT=$("$SSHD" -T -f "$CONF2222" -h "$HOSTKEY" -C user=ci,host=x,addr=127.0.0.1,laddr=127.0.0.1,lport=2222 2>&1) || T_RC=$?
         # Older sshd -T prints keywords lowercase (`permittty no`); OpenSSH
         # 10.5 (macOS runner image 20261102) prints their documented case
         # (`PermitTTY no`). Match the keyword case-insensitively and fold it.
@@ -575,13 +586,13 @@ if [ "$FARM_OK" = 1 ]; then
         # ForceCommand would override it into a tunnel that works while
         # the source pull fails. `forcecommand none` is the invariant.
         if has "$SPLIT" "forcecommand none" && has "$SPLIT" "permitopen 127.0.0.1:1337" && has "$SPLIT" "permittty no"; then
-            pass "real sshd accepts the drop-in and confines port 2222: $SPLIT"
+            pass "real sshd accepts the drop-in and confines port 2222: $SPLIT(${SSHD_VER:-version unknown})"
         else
             fail_with "$(printf '%s\n' "$T_OUT" | head -n 40)" \
-                "$HOST: sshd -T on port 2222 did not show the guardrail ($SSHD, $(ssh -V 2>&1 | head -n 1), exit $T_RC): $SPLIT"
+                "$HOST: sshd -T on port 2222 did not show the guardrail ($SSHD, ${SSHD_VER:-version unknown}, exit $T_RC): $SPLIT"
         fi
     else
-        fail_with "$($SUDO "$SSHD" -t -f "$CONF2222" 2>&1)" "$HOST: sshd -t rejects the generated drop-in:"
+        fail_with "$("$SSHD" -t -f "$CONF2222" -h "$HOSTKEY" 2>&1)" "$HOST: sshd -t rejects the generated drop-in:"
     fi
 fi
 rm -rf "$FARM"
