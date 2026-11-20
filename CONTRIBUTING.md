@@ -208,8 +208,9 @@ before every `cargo publish`.
 
 ### Matching GitHub CI locally
 
-`make docs-rs` mirrors docs.rs. For GitHub CI parity (which runs stable Rust
-workspace-wide with `-D warnings` on rustdoc), use the `fdl` shortcuts:
+`make docs-rs` mirrors docs.rs. For GitHub CI parity (which runs a pinned
+stable Rust workspace-wide with `-D warnings` on rustdoc), use the `fdl`
+shortcuts:
 
 ```bash
 fdl doc         # strict rustdoc pass (matches CI's "Doc" step)
@@ -238,6 +239,29 @@ intended, not a broken gate.
 The Makefile still exposes a few targets that pre-date `fdl` (useful
 when `fdl` itself is broken); treat it as a fallback, not the primary
 workflow.
+
+### The pinned Rust release
+
+Every lint gate, in CI and in the Docker images, runs on one Rust release,
+declared as `ARG RUST_VERSION` in the Dockerfiles and read by
+`ci/rust-pin.sh`. Clippy grows lints with each release, so a floating
+`stable` would fail CI on code nobody touched.
+
+A weekly workflow opens an issue when stable moves ahead of the pin. To bump:
+
+```bash
+# 1. set the new version in every Dockerfile the script lists
+sh ci/rust-pin.sh              # prints the pin, fails if they disagree
+# 2. rebuild the local images so they carry it
+docker compose build dev       # and the GPU service you use
+# 3. fix what the new release flags
+fdl clippy && fdl gpu-clippy
+```
+
+The PR's own CI builds the GPU images from the changed Dockerfiles, and
+merging it publishes them. A local image is only rebuilt when you rebuild
+it: after pulling a bump, run step 2 again, or `fdl clippy` keeps passing
+on the old release.
 
 ## License
 

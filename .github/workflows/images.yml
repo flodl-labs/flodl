@@ -25,10 +25,17 @@ name: CI images
 # the image and the build context contributes nothing. ADDING ONE WOULD
 # BREAK THAT and the hash would have to cover the copied paths too.
 #
-# The hash is an identity, not a reproducibility claim: apt and rustup
-# resolve to whatever is current, so the same Dockerfile built twice
-# yields different bytes. That is fine here. It answers "which recipe",
-# and rebuilding is a `workflow_dispatch` away.
+# The hash is an identity, not a reproducibility claim: apt resolves to
+# whatever is current, so the same Dockerfile built twice yields
+# different bytes. That is fine here. It answers "which recipe", and
+# rebuilding is a `workflow_dispatch` away.
+#
+# The Rust release is the exception, and deliberately part of the recipe:
+# each Dockerfile pins it (`ARG RUST_VERSION`, read by ci/rust-pin.sh), so
+# moving to a new release changes the hash and lands here as a push.
+# Left floating, these images kept the compiler of the day they were
+# built while the CPU job followed stable, and the two disagreed about
+# which lints a tree had to pass.
 
 on:
   push:

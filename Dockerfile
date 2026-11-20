@@ -29,7 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Rust ---
 ENV CARGO_HOME="/usr/local/cargo"
 ENV RUSTUP_HOME="/usr/local/rustup"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+# Pinned, and read by CI through ci/rust-pin.sh: see that script to bump.
+ARG RUST_VERSION=1.100.0
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUST_VERSION" \
     && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
