@@ -429,6 +429,9 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         }
     }
 
+    // Owned here rather than returned by the run, so the lines written
+    // before a failure survive it.
+    let mut log_lines: Vec<String> = Vec::new();
     let start = Instant::now();
     let result = match mode {
         DdpMode::Solo(gpu_idx) => run_baseline_solo(
@@ -441,6 +444,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
             real_data,
             &timeline,
             &mut monitor,
+            &mut log_lines,
         ),
         DdpMode::Builder { policy, backend } => run_unified(
             model_def,
@@ -452,6 +456,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
             &timeline,
             &mut monitor,
             dashboard_path.as_deref(),
+            &mut log_lines,
         ),
     };
     let total_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -477,6 +482,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
     // that wrote last in managed mode is gone).
     if !suppress_artifacts {
         rotate_artifact(&run_dir, "training.log");
+        rotate_artifact(&run_dir, INCOMPLETE_LOG);
         rotate_artifact(&run_dir, "timeline.json");
         rotate_artifact(&run_dir, "timeline.csv");
         rotate_artifact(&run_dir, "timeline.html");
@@ -486,12 +492,18 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
     }
     monitor.finish();
 
-    let (final_loss, _epoch_times, log_lines) = result?;
-
     // Save training log with GPU header and total time (narrator only under
-    // the cooperative tier; always in managed).
+    // the cooperative tier; always in managed). A failed run keeps what it
+    // logged under another name: the lines up to the failure say where it
+    // stopped and what a resume would save, but the analyzer and the report
+    // read `training.log` as a finished run, so a partial log must never
+    // carry that name.
     if !suppress_artifacts {
-        let log_path = format!("{run_dir}/training.log");
+        let (log_name, footer_tag) = match &result {
+            Ok(_) => ("training.log", "# total".to_string()),
+            Err(e) => (INCOMPLETE_LOG, format!("# incomplete: {e}\n# ran")),
+        };
+        let log_path = format!("{run_dir}/{log_name}");
         #[cfg(feature = "gpu")]
         let local_header = {
             let mut h = String::new();
@@ -540,12 +552,16 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         };
         let total_secs = total_ms / 1000.0;
         let footer = format!(
-            "# total: {:.1}s ({:.0}m {:.0}s)",
+            "{footer_tag}: {:.1}s ({:.0}m {:.0}s)",
             total_secs, (total_secs / 60.0).floor(), total_secs % 60.0,
         );
         let content = header + &log_lines.join("\n") + "\n" + &footer + "\n";
         let _ = std::fs::write(&log_path, content);
+        if result.is_err() {
+            eprintln!("  incomplete log: {log_path}");
+        }
     }
+    let (final_loss, _epoch_times) = result?;
 
     // Clean up CUDA state between runs. NCCL communicators and cached
     // allocator blocks from the previous run can fragment VRAM or leave
@@ -723,7 +739,8 @@ fn run_baseline_solo(
     real_data: bool,
     timeline: &Arc<Timeline>,
     monitor: &mut Monitor,
-) -> Result<(f64, Vec<f64>, Vec<String>)> {
+    log_lines: &mut Vec<String>,
+) -> Result<(f64, Vec<f64>)> {
     let device = Device::CUDA(gpu_idx as u8);
     // Seed IMMEDIATELY before construction: weight init draws from libtorch's
     // generator, and nothing else was seeding it, so `--seed` reached the data
@@ -744,7 +761,6 @@ fn run_baseline_solo(
     };
     let scheduler = model_def.scheduler.map(|f| f(config.lr, solo_batches * config.epochs, 1));
     let mut global_batch: usize = 0;
-    let mut log_lines: Vec<String> = Vec::new();
     model.train();
 
     let mut epoch_times = Vec::with_capacity(config.epochs);
@@ -888,7 +904,7 @@ fn run_baseline_solo(
         }
     }
 
-    Ok((final_loss, epoch_times, log_lines))
+    Ok((final_loss, epoch_times))
 }
 
 // ---------------------------------------------------------------------------
@@ -912,7 +928,8 @@ fn run_unified(
     timeline: &Arc<Timeline>,
     monitor: &mut Monitor,
     dashboard_path: Option<&str>,
-) -> Result<(f64, Vec<f64>, Vec<String>)> {
+    log_lines: &mut Vec<String>,
+) -> Result<(f64, Vec<f64>)> {
     let build_fn = model_def.build;
     let train_fn_ptr = model_def.train_fn;
     let augment_fn = model_def.augment_fn;
@@ -1284,6 +1301,7 @@ fn run_unified(
         let worker = builder.into_worker()?;
         return run_cooperative(
             worker, model_def, config, monitor, test_dataset, dataset, train_fn_ptr, augment_fn,
+            log_lines,
         );
     }
 
@@ -1291,7 +1309,6 @@ fn run_unified(
 
     let mut epoch_times = Vec::new();
     let mut final_loss = 0.0;
-    let mut log_lines: Vec<String> = Vec::new();
     // Eval values arrive on `eval_rx` from the worker EpochFn. The hook
     // for epoch N's eval fires on transition into epoch N+1 — which can
     // race with the host receiving metrics for epoch N. Buffer pending
@@ -1300,8 +1317,10 @@ fn run_unified(
     let mut pending_eval: std::collections::HashMap<usize, f64> =
         std::collections::HashMap::new();
 
+    let mut last_epoch: Option<usize> = None;
     while let Some(metrics) = handle.next_metrics() {
         final_loss = metrics.avg_loss;
+        last_epoch = Some(metrics.epoch);
         epoch_times.push(metrics.epoch_ms);
         // Drain any eval values that arrived since the last tick.
         while let Ok((ep, val)) = eval_rx.try_recv() {
@@ -1329,10 +1348,25 @@ fn run_unified(
             }
         }
         let eval_val = pending_eval.remove(&metrics.epoch);
-        emit_epoch_metrics_line(&metrics, eval_val, monitor, &mut log_lines);
+        emit_epoch_metrics_line(&metrics, eval_val, monitor, log_lines);
     }
 
     let state = handle.join()?;
+
+    // A cell is a data point only if it trained every epoch it was asked
+    // for: `final_loss` is whatever the last metrics message carried, so a
+    // run that stopped early would otherwise report a mid-run loss as its
+    // result. The framework fails a truncated cluster run on its own; this
+    // holds the same line for every other path through the handle.
+    let expected_epochs = config.epochs * config.epoch_splits.max(1);
+    if let Some(last) = last_epoch
+        && last + 1 < expected_epochs
+    {
+        return Err(TensorError::new(&format!(
+            "run stopped after epoch {last}: {} of {expected_epochs} epochs trained",
+            last + 1,
+        )));
+    }
 
     // Final drain, after the join so the controller's teardown has run: the
     // last epoch's eval has no metrics tick after it to surface it, and the
@@ -1395,7 +1429,7 @@ fn run_unified(
         log_lines.push(line);
     }
 
-    Ok((final_loss, epoch_times, log_lines))
+    Ok((final_loss, epoch_times))
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,11 +1596,11 @@ fn run_cooperative(
     dataset: Arc<dyn flodl::data::BatchDataSet>,
     train_fn: fn(&dyn Module, &[Tensor]) -> Result<Variable>,
     augment_fn: Option<fn(&[Tensor]) -> Result<Vec<Tensor>>>,
-) -> Result<(f64, Vec<f64>, Vec<String>)> {
+    log_lines: &mut Vec<String>,
+) -> Result<(f64, Vec<f64>)> {
     let narrator = cooperative_narrator();
     let mut final_loss = 0.0;
     let mut epoch_times: Vec<f64> = Vec::new();
-    let mut log_lines: Vec<String> = Vec::new();
 
     // `next_plan` yields per-chunk under progressive dispatch (the same
     // `.epoch` can repeat); the inner loop drains its batches. The reduce
@@ -1587,7 +1621,7 @@ fn run_cooperative(
         }
         // Every rank drains (bounds the channel); narrator emits.
         drain_cooperative_metrics(
-            &worker, narrator, monitor, &mut log_lines, &mut epoch_times, &mut final_loss,
+            &worker, narrator, monitor, log_lines, &mut epoch_times, &mut final_loss,
         );
     }
 
@@ -1595,7 +1629,7 @@ fn run_cooperative(
     // eval both land during the terminal `next_plan` (the controller sends the
     // eval just before `Shutdown`), so catch them here.
     drain_cooperative_metrics(
-        &worker, narrator, monitor, &mut log_lines, &mut epoch_times, &mut final_loss,
+        &worker, narrator, monitor, log_lines, &mut epoch_times, &mut final_loss,
     );
     let mut saw_final_eval = false;
     for (ep, metric) in worker.poll_eval() {
@@ -1643,8 +1677,11 @@ fn run_cooperative(
         log_lines.push(line);
     }
 
-    Ok((final_loss, epoch_times, log_lines))
+    Ok((final_loss, epoch_times))
 }
+
+/// Log of a run that failed before its end (see the write site).
+const INCOMPLETE_LOG: &str = "training.incomplete.log";
 
 /// Rotate an existing artifact file by appending a UTC timestamp before the
 /// extension, e.g. `training.log` -> `training_YYYYMMDD-HHMMSS.log`.

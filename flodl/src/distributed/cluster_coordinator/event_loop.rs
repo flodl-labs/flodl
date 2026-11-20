@@ -18,6 +18,11 @@ use super::{ClusterCoordinator, RunPhase};
 /// enough that the per-tick broadcast overhead is negligible.
 const COORD_HEARTBEAT_CADENCE: Duration = Duration::from_secs(1);
 
+/// A beacon gap at or above this is reported (see
+/// `ClusterCoordinator::emit_coord_heartbeat`). Beacons are due every
+/// second, so this is already five missed.
+const BEACON_GAP_REPORT: Duration = Duration::from_secs(5);
+
 impl ClusterCoordinator {
     /// Process a single timing message. Ported literally from OLD
     /// `Coordinator::process_timing_msg`, modulo the field-name `rank`
@@ -107,6 +112,16 @@ impl ClusterCoordinator {
                 // full story (that bug happened once).
                 if self.cycle.sync_ack_step_meaningful() {
                     self.last_step_count[rank] = self.last_step_count[rank].max(step_count);
+                }
+                // CPU path: the ack names the step count of the snapshot
+                // the round averaged. The round is over for this rank (the
+                // bridge acks after the consensus came back), so the work it
+                // had completed by that step is realized. A barrier-paced
+                // rank is settled wholesale at the finalize instead.
+                if !self.cycle.sync_ack_step_meaningful() && !self.policy.is_barrier_paced() {
+                    for pool in self.chunk_pools.values_mut() {
+                        pool.commit_realized(rank, Some(step_count));
+                    }
                 }
                 // Divergence / norm evidence, the ack gate, and the
                 // per-rank sync-lag capture all live on the cycle.
@@ -428,8 +443,10 @@ impl ClusterCoordinator {
         }
         for (epoch, pool) in &self.chunk_pools {
             let inflight: Vec<usize> = (0..self.world_size).map(|r| pool.in_flight(r)).collect();
+            let unrealized: Vec<usize> = (0..self.world_size).map(|r| pool.unrealized(r)).collect();
             eprintln!(
-                "  pool epoch={epoch}: remaining={} in_flight={inflight:?}",
+                "  pool epoch={epoch}: remaining={} in_flight={inflight:?} \
+                 unrealized={unrealized:?}",
                 pool.remaining(),
             );
         }
@@ -619,10 +636,41 @@ impl ClusterCoordinator {
         if !due {
             return;
         }
+        // How long the ranks may have gone without hearing from the
+        // coordinator: the time since the previous beacon went out, plus
+        // however long this one takes to reach the last rank. A rank gives
+        // the coordinator up for dead after its silence deadline, and the
+        // whole run with it, so a gap that approaches the deadline is the
+        // one number that says how close a run came. Recorded always;
+        // reported once it is long enough to matter.
+        let since_last = self.last_coord_heartbeat.map(|t| t.elapsed());
+        let send_start = Instant::now();
         if let Err(e) = self.broadcast_control(&ControlMsgWire::CoordHeartbeat) {
             crate::verbose!("  ddp: coord heartbeat broadcast (best-effort): {e}");
         }
         self.last_coord_heartbeat = Some(Instant::now());
+        if let Some(since_last) = since_last {
+            let gap = since_last + send_start.elapsed();
+            if gap > self.longest_beacon_gap {
+                self.longest_beacon_gap = gap;
+            }
+            if gap >= BEACON_GAP_REPORT {
+                eprintln!(
+                    "flodl ddp: the coordinator went {:.1}s without a liveness beacon \
+                     (ranks stop after {}s of coordinator silence)",
+                    gap.as_secs_f64(),
+                    self.heartbeat_timeout_secs,
+                );
+            }
+        }
+    }
+
+    /// Longest stretch the ranks may have gone without a coordinator
+    /// beacon this run. Beacons are due every second; anything much longer
+    /// means the coordinator thread was held up (a stalled write, a slow
+    /// callback, a paused host).
+    pub fn longest_beacon_gap(&self) -> Duration {
+        self.longest_beacon_gap
     }
 
     /// One coordinator tick: drain incoming timing, throttle fast
@@ -636,13 +684,28 @@ impl ClusterCoordinator {
         // abort the tick loop, and a wedged rank's failure is already reaped
         // by the staleness scan. The reverse-direction twin of the rank→coord
         // heartbeat, letting each rank detect a wedged-open coordinator.
-        self.emit_coord_heartbeat();
-        // Heartbeat-driven dead-rank detection. Must run BEFORE
-        // poll_cpu_averaging / should_average so the rest of this
-        // tick already sees the updated active membership; a rank
-        // declared dead this tick won't gate the cycle's finalize.
+        //
+        // Heartbeat-driven dead-rank detection runs FIRST, straight after
+        // the drain that refreshed every live rank's stamp. Liveness is
+        // stamped when a frame is processed, so anything that holds this
+        // thread between the drain and the scan ages every stamp by that
+        // much: a beacon stalled on one dead host used to make the scan
+        // that followed it declare every healthy rank dead at once.
+        // Must also run BEFORE poll_cpu_averaging / should_average so the
+        // rest of this tick already sees the updated active membership; a
+        // rank declared dead this tick won't gate the cycle's finalize.
         // No-op when elastic membership isn't configured.
         self.check_dead_ranks();
+        // The epoch-callback role changes at the first pace measurement
+        // and at a rank death. Progressive dispatch never passes through
+        // `dispatch_epoch`, the only other place that sends it, so without
+        // this the role stayed on the first rank and died with it.
+        if self.progressive
+            && let Err(e) = self.broadcast_epoch_callback_role_if_dirty()
+        {
+            crate::verbose!("  ddp: epoch-callback role broadcast incomplete: {e}");
+        }
+        self.emit_coord_heartbeat();
         // Cascading-death + slow-generator guard: an in-flight NCCL
         // rendezvous whose generator died (or stopped responding) would
         // hang the cohort indefinitely. Retries from the next survivor
@@ -662,7 +725,7 @@ impl ClusterCoordinator {
         // (SyncNow broadcast, acks never completing) past its
         // ceiling. No-op on CPU backend and whenever no sync is in flight.
         self.poll_nccl_reduce_stall()?;
-        if self.should_average() {
+        if self.should_average() || self.landing_sync_due() {
             self.trigger_averaging()?;
         }
         // Stall watchdog (debug): capture the should_average gate state
@@ -740,13 +803,42 @@ impl ClusterCoordinator {
     /// tick (`try_recv` drain); dispatch attempts for held ranks are no-ops
     /// (the reduce / epoch barriers hold them).
     pub(super) fn drain_metrics(&mut self) {
-        // Track ranks that received a chunk-complete report so we can
-        // dispatch the next chunk after the borrow on `chunk_pools` /
+        // A completion is stamped with the rank's latest known step count,
+        // which must not lag the batches that precede the report on the
+        // rank's stream (see `ChunkPool::mark_completed`).
+        self.drain_timing();
+        let mut progressive_completions = std::mem::take(&mut self.deferred_completions);
+        progressive_completions.extend(self.ingest_metrics());
+
+        // Progressive: dispatch the next chunk to every rank that just
+        // reported a chunk completion. Done after the ingest so we're not
+        // borrowing chunk_pools / metrics_buffer.
+        if self.progressive {
+            for (rank, _epoch) in progressive_completions {
+                self.dispatch_next_chunk(rank);
+            }
+        }
+    }
+
+    /// The bookkeeping half of [`Self::drain_metrics`]: pool completion,
+    /// metrics buffering and resource samples, with NO dispatch. Returns
+    /// the `(rank, epoch)` completions whose next chunk is still owed.
+    ///
+    /// Split out for the reduce finalize, which must know everything a
+    /// rank reported before it is released (that work is in the consensus)
+    /// without handing out new work in the middle of the finalize.
+    pub(super) fn ingest_metrics(&mut self) -> Vec<(usize, usize)> {
+        // Track ranks that received a chunk-complete report so the caller
+        // can dispatch the next chunk after the borrow on `chunk_pools` /
         // `metrics_buffer` is released.
         let mut progressive_completions: Vec<(usize, usize)> = Vec::new();
         while let Ok(wire) = self.metrics_rx.try_recv() {
             let rank = wire.rank as usize;
-            if rank >= self.world_size {
+            // A late report from a rank already declared dead changes
+            // nothing: its work was handed back when it was declared, and
+            // crediting it now would also hand it a new chunk that nobody
+            // would ever reclaim.
+            if rank >= self.world_size || self.is_dead(rank) {
                 continue;
             }
             // Forward the rank's resource sample (if present) before
@@ -778,7 +870,7 @@ impl ClusterCoordinator {
             };
             if self.progressive {
                 if let Some(pool) = self.chunk_pools.get_mut(&msg.epoch) {
-                    pool.mark_completed(rank, msg.samples_processed);
+                    pool.mark_completed(rank, msg.samples_processed, self.last_step_count[rank]);
                 }
                 progressive_completions.push((rank, msg.epoch));
             }
@@ -792,15 +884,48 @@ impl ClusterCoordinator {
             // not a failure mode this buffer needs to defend against.
             self.metrics_buffer.entry(wire.epoch).or_default().push(msg);
         }
+        progressive_completions
+    }
 
-        // Progressive: dispatch the next chunk to every rank that just
-        // reported a chunk completion. Done after the drain loop so
-        // we're not borrowing chunk_pools / metrics_buffer.
-        if self.progressive {
-            for (rank, _epoch) in progressive_completions {
-                self.dispatch_next_chunk(rank);
-            }
+    /// Whether a finished epoch's pool may close. On the CPU backends that
+    /// is when all its work is realized: until then a dying rank still has
+    /// samples to hand back to it. NCCL keeps closing on reported
+    /// completion (its sync completes on the ranks, out of the
+    /// coordinator's sight, and its crash recovery is a separate matter).
+    fn pool_may_close(&self, pool: &crate::distributed::chunk_pool::ChunkPool) -> bool {
+        match self.backend {
+            AverageBackend::Cpu => pool.is_realized(),
+            AverageBackend::Nccl => pool.is_epoch_done(),
         }
+    }
+
+    /// The oldest open epoch is fully reported but not realized, and no
+    /// rank has work in flight: nothing will cause the sync that lets it
+    /// close, so the coordinator must. Mid-run the next window's sync does
+    /// it; this is the end of the run, or a cohort entirely held at a
+    /// barrier with no step to its name.
+    pub(super) fn landing_sync_due(&self) -> bool {
+        if !self.progressive
+            || !matches!(self.backend, AverageBackend::Cpu)
+            || self.cycle.cpu_pending()
+            || self.active_count == 0
+            // The previous sync's acks must all be in: they are what
+            // settles an async rank's work, so until then "not realized"
+            // may only mean "ack in transit"; and a late ack would be read
+            // as this sync's own.
+            || !self.cycle.all_alive_sync_acked(|r| self.is_dead(r))
+        {
+            return false;
+        }
+        let Some(pool) = self.chunk_pools.values().next() else {
+            return false;
+        };
+        if !pool.is_epoch_done() || pool.is_realized() {
+            return false;
+        }
+        (0..self.world_size)
+            .filter(|&r| !self.is_dead(r))
+            .all(|r| !self.chunk_pools.values().any(|p| p.in_flight(r) > 0))
     }
 
     /// Aggregate any epochs whose metrics are complete — the second half of
@@ -817,7 +942,7 @@ impl ClusterCoordinator {
             // before slower ranks finish earlier epochs).
             let mut ready: Vec<u64> = Vec::new();
             for (&epoch, pool) in &self.chunk_pools {
-                if pool.is_epoch_done() {
+                if self.pool_may_close(pool) {
                     ready.push(epoch as u64);
                 } else {
                     break;

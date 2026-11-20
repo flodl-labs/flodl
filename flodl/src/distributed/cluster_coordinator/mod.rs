@@ -356,6 +356,10 @@ pub struct ClusterCoordinator {
     /// per HOLD episode: set when logged, cleared at the reduce reset
     /// (`finish_averaging_*`) so the next window's first HOLD logs again.
     dispatch_hold_logged: Vec<bool>,
+    /// `(rank, epoch)` chunk completions whose bookkeeping was ingested at a
+    /// reduce finalize, with their next-chunk dispatch still owed (it runs
+    /// at the next metrics drain, as it always did).
+    deferred_completions: Vec<(usize, usize)>,
     /// Per-epoch d-aggregator. Each call to [`Self::finish_averaging_nccl`]
     /// / [`Self::finish_averaging_cpu`] feeds the cycle's `d_raw` +
     /// `k_max` into [`Self::update_epoch_d_aggregator`]; the
@@ -445,6 +449,9 @@ pub struct ClusterCoordinator {
     /// bridge distinguish a legitimately-silent coord (mid-compute) from a
     /// wedged-open one.
     last_coord_heartbeat: Option<Instant>,
+    /// Longest stretch the ranks may have gone without a coordinator
+    /// beacon this run (see [`Self::longest_beacon_gap`]).
+    longest_beacon_gap: std::time::Duration,
     /// Per-rank clean-exit latch, set by `TimingMsgWire::Exiting`. A rank
     /// that exited cleanly stops heartbeating, so without this latch the
     /// staleness scan declares it dead 30s later and `active_count` is
@@ -751,6 +758,10 @@ pub struct ClusterCoordinator {
     /// relay connection carrying that rank (`None` for a headless test
     /// coord, or a rank not announced by any relay).
     rank_to_conn: Vec<Option<usize>>,
+    /// Per connection: a write to it has failed, so it is shut and never
+    /// written again (see [`Self::send_control`]). Sized lazily; a missing
+    /// entry reads as healthy.
+    conn_closed: Vec<bool>,
     /// Reader-thread join handles (one per host relay connection). Drop on
     /// [`Self::shutdown`].
     reader_handles: Vec<Option<JoinHandle<()>>>,
@@ -925,6 +936,20 @@ impl ClusterCoordinator {
     /// `dispatch_epoch` bounds and metrics aggregation.
     pub fn num_epochs(&self) -> usize {
         self.num_epochs
+    }
+
+    /// Whether training reached its end: the last epoch aggregated and
+    /// `Shutdown` went out from the post-aggregate hook. Every other way a
+    /// run stops (every rank lost, a stall escalation, a save-and-shutdown,
+    /// an abort) leaves this `false`, so it is the positive completion
+    /// signal a caller needs before reporting success.
+    pub fn run_completed(&self) -> bool {
+        self.run_phase == RunPhase::ShutdownInitiated
+    }
+
+    /// Epochs aggregated so far (the index after the last aggregated one).
+    pub fn epochs_aggregated(&self) -> usize {
+        self.last_aggregated_epoch.map_or(0, |e| e + 1)
     }
 
     /// Total samples across the dataset; basis for partition sizing.
