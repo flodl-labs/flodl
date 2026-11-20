@@ -88,7 +88,7 @@ jobs:
           - windows-latest     # x86_64: installs, does not compile
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Pinned like every other lint gate (ci/rust-pin.sh says why). What
       # these legs vary is the platform, not the compiler.
@@ -104,7 +104,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry + build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -170,7 +170,7 @@ jobs:
             image: quay.io/rockylinux/rockylinux:10
             variant: rocm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Same sweep as the matrix legs, same reason: a vendor rotation
       # means a multi-GB libtorch plus its toolkit packages.
@@ -192,7 +192,7 @@ jobs:
       # the registry and the toolchain, which are re-fetches rather than
       # re-compiles.
       - name: Cache cargo + rustup
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rocky/cargo
