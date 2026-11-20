@@ -7,7 +7,7 @@ on:
       - 'docs/**'
       - 'site/**'
       - '*.md'
-      - 'LICENSE'
+      - 'LICENSE-*'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/pull_request_template.md'
   pull_request:
@@ -16,7 +16,7 @@ on:
       - 'docs/**'
       - 'site/**'
       - '*.md'
-      - 'LICENSE'
+      - 'LICENSE-*'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/pull_request_template.md'
 

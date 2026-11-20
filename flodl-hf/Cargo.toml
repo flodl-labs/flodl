@@ -27,7 +27,8 @@ include = [
     "tests/*.rs",
     "tests/common/**/*",
     "README.md",
-    "LICENSE",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
     "Cargo.toml",
 ]
 # tests/fixtures/ excluded: ~15 MB of safetensors parity fixtures used by

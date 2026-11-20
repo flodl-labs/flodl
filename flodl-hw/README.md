@@ -58,4 +58,6 @@ test report on the wrong machine.
 
 ## License
 
-MIT
+floDl is open-sourced software licensed under either of the [Apache License, Version 2.0](https://github.com/flodl-labs/flodl/blob/main/LICENSE-APACHE) or the [MIT license](https://github.com/flodl-labs/flodl/blob/main/LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in floDl by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

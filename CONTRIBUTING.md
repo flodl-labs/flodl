@@ -241,4 +241,6 @@ workflow.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](./LICENSE).
+floDl is licensed under either of the [Apache License, Version 2.0](./LICENSE-APACHE) or the [MIT license](./LICENSE-MIT), at the user's option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in floDl by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

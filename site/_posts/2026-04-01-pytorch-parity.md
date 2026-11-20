@@ -5,6 +5,10 @@ date: 2026-04-01
 description: "flodl's parity release covers the full PyTorch API surface that DL researchers actually use: every conv, every norm, every pooling, every loss, every optimizer. Same names, same semantics, up to 31% faster."
 ---
 
+*Update: flodl has since moved from MIT to a dual licence,
+[MIT OR Apache-2.0](https://github.com/flodl-labs/flodl#license), at your
+option. Releases up to 0.8.0 remain MIT.*
+
 I've been tracking a list. Every time I hit a PyTorch op that didn't exist
 in flodl, it went on the list. Every time someone asked "does it have X?",
 it went on the list. The list got long.

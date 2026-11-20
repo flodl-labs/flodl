@@ -27,7 +27,7 @@ edition = "2024"
 # ours, and pinning it back in a lockfile nobody ships would not help.
 # Expect to bump it; the job says when.
 rust-version = "1.90"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/flodl-labs/flodl"
 homepage = "https://flodl.dev"
 
