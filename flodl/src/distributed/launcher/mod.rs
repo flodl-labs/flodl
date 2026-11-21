@@ -76,7 +76,6 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::distributed::membership::JoinedMember;
 use crate::distributed::relay::agent::{ChannelKind, RelayChannel};
-use crate::distributed::relay::{RELAY_CONTROL_LOOPBACK_OFFSET, RELAY_DATA_LOOPBACK_OFFSET};
 use crate::tensor::{Result, TensorError};
 
 mod agent;
@@ -361,8 +360,8 @@ pub struct RelaySpec {
     pub controller_host: String,
     /// Controller port: both upstream legs dial it directly (the
     /// channel-select magic routes them through the controller's
-    /// single-port mux); the relay binds loopback `+4` (data) / `+5`
-    /// (control) for its local ranks.
+    /// single-port mux); the relay binds a loopback pair for its local
+    /// ranks, derived from this port and the host's first rank.
     pub controller_port: u16,
     /// Global ranks this host carries (the relay's local rank set).
     pub ranks: Vec<u32>,
@@ -383,7 +382,7 @@ pub struct RelaySpec {
 }
 
 /// Run this process as a per-host transport relay: bind the loopback data
-/// (`+4`) / control (`+5`) channels its local ranks dial, forward upstream
+/// and control channels its local ranks dial, forward upstream
 /// to the controller's single mux port, and stay up until every local
 /// rank disconnects (training finished). Touches no CUDA.
 ///
@@ -403,11 +402,11 @@ pub fn run_relay() -> Result<()> {
     let salt = crate::distributed::wire::salt_from_hex(&spec.salt_hex)?;
     let base = spec.controller_port;
 
-    let loopback = |off: u16| -> Result<std::net::SocketAddr> {
-        format!("127.0.0.1:{}", base.saturating_add(off))
-            .parse()
-            .map_err(|e| TensorError::new(&format!("relay: loopback addr: {e}")))
-    };
+    let (data_port, control_port) = crate::distributed::relay::relay_loopback_ports(
+        base,
+        spec.ranks.iter().map(|&r| r as usize),
+    )?;
+    let loopback = |port: u16| std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let resolve = |host: &str, port: u16| -> Result<std::net::SocketAddr> {
         use std::net::ToSocketAddrs;
         (host, port)
@@ -426,14 +425,14 @@ pub fn run_relay() -> Result<()> {
     // Both upstream legs dial the controller's single mux port; the
     // channel-select magic (written by `RelayChannel::start`) routes
     // each connection to its subsystem.
-    let (ctrl_listener, _) = RelayChannel::bind(loopback(RELAY_CONTROL_LOOPBACK_OFFSET)?)?;
+    let (ctrl_listener, _) = RelayChannel::bind(loopback(control_port))?;
     let ctrl_upstream = resolve(&spec.controller_host, base)?;
 
     // Data channel (CPU backends only). Ranks connect to BOTH channels
     // (data first, then control in the CPU path), so the two accept loops
     // must run concurrently — the data relay runs on its own thread.
     let data_handle = if spec.data_channel {
-        let (data_listener, _) = RelayChannel::bind(loopback(RELAY_DATA_LOOPBACK_OFFSET)?)?;
+        let (data_listener, _) = RelayChannel::bind(loopback(data_port))?;
         let data_upstream = resolve(&spec.controller_host, base)?;
         let host = spec.host.clone();
         let ranks = spec.ranks.clone();
@@ -1925,9 +1924,28 @@ pub fn run_launcher_with_config(
     // can come from it: shut its link, which ends that host's reader. A
     // host that is merely slow sees its link close and tears down ranks
     // the run has already written off.
+    //
+    // A coordinator that fails to start during this wait leaves the same
+    // wedge the failure verdict above clears, one step later: a cohort of
+    // walk-ins has no process children, so supervision returned at once
+    // with no failure, and the hosts still connected have ranks that will
+    // never hear from a coordinator. Tell them to tear down as soon as
+    // the coordinator records why it died.
+    let mut coordinator_abort_sent = false;
     loop {
         if rank_exit_readers.iter().all(|r| r.is_finished()) {
             break;
+        }
+        if !coordinator_abort_sent {
+            let root = coord_fatal.lock().ok().and_then(|s| s.clone());
+            if let Some(root) = root {
+                abort_worker_links(
+                    &mut worker_links,
+                    &salt,
+                    &format!("the coordinator failed at formation: {root}"),
+                );
+                coordinator_abort_sent = true;
+            }
         }
         for (host, link) in &worker_links {
             let lost = ranks_by_host.get(host).is_some_and(|ranks| {

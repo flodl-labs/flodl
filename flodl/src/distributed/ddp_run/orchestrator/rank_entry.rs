@@ -220,25 +220,18 @@ impl DdpHandle {
              ({policy_label}+{backend_label} via_coord, save_path={save_path:?})"
         );
 
-        // `training_meta` records the relay loopback addresses (control +5,
-        // data +4) for monitor metadata. Recompute the strings here — pure
-        // functions of the controller port — since `build_cluster_worker` owns
-        // the sockets it actually dials.
-        let coord_addr_str = format!(
-            "127.0.0.1:{}",
-            cluster
-                .controller
-                .port
-                .saturating_add(crate::distributed::relay::RELAY_CONTROL_LOOPBACK_OFFSET,)
-        );
+        // `training_meta` records the relay loopback addresses for monitor
+        // metadata. Recompute the strings here (pure functions of the
+        // controller port and this host's ranks) since
+        // `build_cluster_worker` owns the sockets it actually dials.
+        let (relay_data_port, relay_control_port) =
+            crate::distributed::relay::relay_loopback_ports(
+                cluster.controller.port,
+                cluster.worker.ranks.iter().copied(),
+            )?;
+        let coord_addr_str = format!("127.0.0.1:{relay_control_port}");
         let controller_addr_str = match backend {
-            AverageBackend::Cpu => Some(format!(
-                "127.0.0.1:{}",
-                cluster
-                    .controller
-                    .port
-                    .saturating_add(crate::distributed::relay::RELAY_DATA_LOOPBACK_OFFSET,)
-            )),
+            AverageBackend::Cpu => Some(format!("127.0.0.1:{relay_data_port}")),
             AverageBackend::Nccl => None,
         };
         let mut meta = serde_json::json!({
@@ -488,22 +481,18 @@ impl DdpHandle {
         let eval_fn = if fires_callbacks { eval_fn } else { None };
         let eval_dataset = if fires_callbacks { eval_dataset } else { None };
 
-        // Ranks reach the coordinator through their host-local relay's control
-        // loopback (+5); the CPU backend's reduce channel rides the relay's
-        // data loopback (+4).
-        let coord_port = cluster
-            .controller
-            .port
-            .saturating_add(crate::distributed::relay::RELAY_CONTROL_LOOPBACK_OFFSET);
-        let coord_addr = parse_or_resolve_socket_addr(&format!("127.0.0.1:{coord_port}"))?;
+        // Ranks reach the coordinator through their host-local relay's
+        // control loopback; the CPU backend's reduce channel rides the
+        // relay's data loopback. The pair is this host's own, derived
+        // the same way the relay derived the ports it bound.
+        let (relay_data_port, relay_control_port) =
+            crate::distributed::relay::relay_loopback_ports(
+                cluster.controller.port,
+                cluster.worker.ranks.iter().copied(),
+            )?;
+        let coord_addr = parse_or_resolve_socket_addr(&format!("127.0.0.1:{relay_control_port}"))?;
         let controller_addr_str = match backend {
-            AverageBackend::Cpu => {
-                let controller_port = cluster
-                    .controller
-                    .port
-                    .saturating_add(crate::distributed::relay::RELAY_DATA_LOOPBACK_OFFSET);
-                Some(format!("127.0.0.1:{controller_port}"))
-            }
+            AverageBackend::Cpu => Some(format!("127.0.0.1:{relay_data_port}")),
             AverageBackend::Nccl => None,
         };
         let session_salt = cluster.salt;

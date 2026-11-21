@@ -32,6 +32,66 @@ fn formation_deadline_errs_when_relays_never_dial() {
     );
 }
 
+/// A rank is reported dead before any relay dialed in: formation must
+/// fail at once and name the rank, well ahead of the dial-in deadline,
+/// since that host's relay will never cover it.
+#[test]
+fn formation_fails_at_once_when_an_uncovered_rank_is_reported_dead() {
+    let (listener, _port) =
+        ClusterCoordinator::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .expect("bind succeeds");
+    let dead = crate::distributed::controller::DeadRanks::new(3);
+    dead.declare_dead(1);
+    let started = std::time::Instant::now();
+    let Err(err) = ClusterCoordinator::start_from_listener(
+        listener,
+        TEST_SALT,
+        cfg_sync_nccl(3)
+            .dead_ranks(Arc::clone(&dead))
+            .formation_timeout_secs(60),
+    ) else {
+        panic!("a rank died before formation, which must not form");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("rank(s) [1] died before") && msg.contains("0/3 ranks covered"),
+        "error should name the dead rank and the coverage, got: {msg}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "must not wait out the 60s deadline, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// The same verdict from the other source: an exit report a host sent
+/// up, sitting in the queue nothing drains before the first tick. This
+/// is the road a walk-in's rank death actually takes.
+#[test]
+fn formation_fails_at_once_on_an_exit_report_for_an_uncovered_rank() {
+    let (listener, _port) =
+        ClusterCoordinator::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .expect("bind succeeds");
+    let reports: crate::distributed::cluster_coordinator::ReportedDeaths = Default::default();
+    reports.lock().unwrap().push(0);
+    let started = std::time::Instant::now();
+    let Err(err) = ClusterCoordinator::start_from_listener(
+        listener,
+        TEST_SALT,
+        cfg_sync_nccl(2)
+            .reported_deaths(Arc::clone(&reports))
+            .formation_timeout_secs(60),
+    ) else {
+        panic!("a rank died before formation, which must not form");
+    };
+    assert!(
+        err.to_string().contains("rank(s) [0] died before"),
+        "error should name the dead rank, got: {err}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(*reports.lock().unwrap(), vec![0], "the report stays queued");
+}
+
 /// Two single-rank relays announce different model signatures: the
 /// accept loop must refuse formation naming both (host, rank) pairs,
 /// instead of acking a cohort whose first collective would hang on
