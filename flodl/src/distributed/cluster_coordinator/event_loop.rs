@@ -805,10 +805,16 @@ impl ClusterCoordinator {
     pub(super) fn drain_metrics(&mut self) {
         // A completion is stamped with the rank's latest known step count,
         // which must not lag the batches that precede the report on the
-        // rank's stream (see `ChunkPool::mark_completed`).
+        // rank's stream (see `ChunkPool::mark_completed`). One reader
+        // feeds both channels in stream order, so once a report is off its
+        // channel every batch before it is already on the timing channel:
+        // take the reports first, then drain timing, then stamp. Draining
+        // timing first leaves a gap in which a batch and its report can
+        // both land, and the report is then stamped one batch short.
+        let reports = self.take_metric_reports();
         self.drain_timing();
         let mut progressive_completions = std::mem::take(&mut self.deferred_completions);
-        progressive_completions.extend(self.ingest_metrics());
+        progressive_completions.extend(self.ingest_metrics(reports));
 
         // Progressive: dispatch the next chunk to every rank that just
         // reported a chunk completion. Done after the ingest so we're not
@@ -820,6 +826,17 @@ impl ClusterCoordinator {
         }
     }
 
+    /// Every epoch report waiting on the metrics channel, in arrival
+    /// order. Separate from [`Self::ingest_metrics`] so a caller can drain
+    /// timing between the two (see [`Self::drain_metrics`]).
+    pub(super) fn take_metric_reports(&mut self) -> Vec<crate::distributed::wire::MetricsMsgWire> {
+        let mut reports = Vec::new();
+        while let Ok(wire) = self.metrics_rx.try_recv() {
+            reports.push(wire);
+        }
+        reports
+    }
+
     /// The bookkeeping half of [`Self::drain_metrics`]: pool completion,
     /// metrics buffering and resource samples, with NO dispatch. Returns
     /// the `(rank, epoch)` completions whose next chunk is still owed.
@@ -827,12 +844,15 @@ impl ClusterCoordinator {
     /// Split out for the reduce finalize, which must know everything a
     /// rank reported before it is released (that work is in the consensus)
     /// without handing out new work in the middle of the finalize.
-    pub(super) fn ingest_metrics(&mut self) -> Vec<(usize, usize)> {
+    pub(super) fn ingest_metrics(
+        &mut self,
+        reports: Vec<crate::distributed::wire::MetricsMsgWire>,
+    ) -> Vec<(usize, usize)> {
         // Track ranks that received a chunk-complete report so the caller
         // can dispatch the next chunk after the borrow on `chunk_pools` /
         // `metrics_buffer` is released.
         let mut progressive_completions: Vec<(usize, usize)> = Vec::new();
-        while let Ok(wire) = self.metrics_rx.try_recv() {
+        for wire in reports {
             let rank = wire.rank as usize;
             // A late report from a rank already declared dead changes
             // nothing: its work was handed back when it was declared, and

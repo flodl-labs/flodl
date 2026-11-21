@@ -326,7 +326,8 @@ impl ClusterCoordinator {
         // settled from its own ack instead (see the `SyncAck` handler),
         // and NCCL at its next trigger.
         if matches!(self.backend, AverageBackend::Cpu) && self.policy.is_barrier_paced() {
-            let owed = self.ingest_metrics();
+            let reports = self.take_metric_reports();
+            let owed = self.ingest_metrics(reports);
             self.deferred_completions.extend(owed);
             self.commit_realized_work(true);
         }
