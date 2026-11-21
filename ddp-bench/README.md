@@ -84,11 +84,16 @@ Decoder: ConvTranspose2d(32,16,3,s=2,p=1,op=1) -> ReLU -> ConvTranspose2d(16,1,3
 `solo-N` is the bench's own hand-written loop, the control every other
 mode is measured against. It trains the same batches in the same order as
 the trainer's single-device path (same permutation, same `--epoch-splits`
-slicing), so `solo-N` against `solo-trainer` prices the trainer itself. On
-a model with no random augmentation the two losses agree to the last
-digits (LeNet: identical first epoch at six decimals); an augmented model
-draws its crops and flips from a generator the two paths consume
-differently, so its curves track each other without matching.
+slicing), so `solo-N` against `solo-trainer` prices the trainer itself.
+
+Compare the two as distributions, never digit for digit. GPU training is
+not bit-reproducible: two runs of the same mode with the same seed already
+differ, LeNet's first-epoch loss in the fourth decimal and ResNet-20's in
+the second. Over ten one-epoch ResNet-20 runs of each on an RTX 5060 Ti,
+the first-epoch loss was 1.639 (standard deviation 0.027) for `solo-0` and
+1.640 (0.030) for `solo-trainer`: the modes are indistinguishable, and a
+single pair of runs can differ by more than either mean does. On CPU the
+trainer path repeats its loss exactly.
 
 Each DDP mode maps 1:1 to an `ElCheMode` variant in `flodl`. The framework
 default is `nccl-cadence` (`ElCheConfig::default()`). See
