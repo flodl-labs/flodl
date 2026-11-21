@@ -33,6 +33,15 @@ struct Cli {
     #[option]
     epochs: Option<usize>,
 
+    /// Run each model's own short profile instead of its default run: a
+    /// few minutes on a mid-range card, and still long enough to show the
+    /// loss falling. What that means is the model's to say: ResNet-20
+    /// trains 20 passes, the token models one pass over a 1M-token corpus,
+    /// and a model whose default run is already short runs it unchanged.
+    /// An explicit --epochs or --train-tokens wins over the profile.
+    #[option]
+    quick: bool,
+
     /// Unsupported (loud error): epoch length is the dataset; use
     /// --epochs / --batch-size to scale a run, or --train-tokens to size
     /// the staged corpus on token models.
@@ -77,7 +86,13 @@ struct Cli {
     #[option]
     batch_size: Option<usize>,
 
-    /// Multiply default LR (auto-scales when epochs > default).
+    /// Multiply the model's default learning rate. Unset, the default is
+    /// used as is, with one exception: a model that trains at a constant
+    /// rate (no schedule) and is given more epochs than its default gets
+    /// `default * default_epochs / epochs`, so the longer run covers the
+    /// same ground in finer steps and stays comparable. A model with a
+    /// schedule already stretches it over the run and keeps its peak.
+    /// `--lr-scale 1` holds the default rate in every case.
     #[option]
     lr_scale: Option<f64>,
 
@@ -1159,19 +1174,29 @@ fn run() -> flodl::tensor::Result<()> {
                 continue;
             }
 
-            let run_epochs = epochs.unwrap_or(defaults.epochs);
+            // Explicit flags win over the quick profile, which wins over
+            // the model's default run.
+            let quick = if cli.quick { defaults.quick } else { None };
+            let run_epochs = epochs
+                .or(quick.map(|q| q.epochs))
+                .unwrap_or(defaults.epochs);
+            let run_train_tokens = train_tokens.or(quick.and_then(|q| q.train_tokens));
 
-            // LR scaling: explicit --lr-scale takes priority.
-            // When unset and epochs > default, auto-scale LR down so
-            // convergence stretches across the extra epochs.
-            // E.g. 10 epochs with default 5 -> lr_scale = 0.5
-            let effective_lr = if let Some(scale) = lr_scale {
-                defaults.lr * scale
-            } else if run_epochs > defaults.epochs {
-                defaults.lr * (defaults.epochs as f64 / run_epochs as f64)
-            } else {
-                defaults.lr
-            };
+            let effective_lr = crate::config::effective_lr(
+                defaults.lr,
+                defaults.epochs,
+                run_epochs,
+                model_def.scheduler.is_some(),
+                lr_scale,
+            );
+            if lr_scale.is_none() && effective_lr != defaults.lr && !in_cluster {
+                eprintln!(
+                    "  {}: lr {:.1e} instead of the default {:.1e}, since {run_epochs} \
+                     epochs exceed its default {} and it trains at a constant rate \
+                     (--lr-scale 1 holds the default)",
+                    model_def.name, effective_lr, defaults.lr, defaults.epochs,
+                );
+            }
 
             let run_config = RunConfig {
                 epochs: run_epochs,
@@ -1203,7 +1228,7 @@ fn run() -> flodl::tensor::Result<()> {
                 augment: cli.augment.unwrap_or(1).max(1),
                 augment_noise: cli.augment_noise.unwrap_or(0.0),
                 epoch_splits: epoch_splits.unwrap_or(1).max(1),
-                train_tokens,
+                train_tokens: run_train_tokens,
                 olmo_eval,
                 vram_max_usage: cli.vram_max_usage,
                 ram_max_usage: cli.ram_max_usage,

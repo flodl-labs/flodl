@@ -91,6 +91,7 @@ pub fn def() -> ModelDef {
             // ~4.7 GB at batch 4 (params + AdamW are 3 GB of it).
             batch_size: 4,
             lr: 6.0e-4,
+            quick: Some(crate::config::QuickProfile { epochs: 1, train_tokens: Some(1_000_000) }),
         },
     }
 }

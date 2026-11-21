@@ -149,6 +149,43 @@ pub struct ModelDefaults {
     pub batches_per_epoch: usize,
     pub batch_size: usize,
     pub lr: f64,
+    /// The `--quick` run, for a model whose default run takes more than a
+    /// few minutes. `None` when the default run is already that short.
+    pub quick: Option<QuickProfile>,
+}
+
+/// Learning rate of a run: `scale` times the model's default when given.
+/// Otherwise the default, except for a constant-rate model given more
+/// epochs than its default, which gets `default * default_epochs / epochs`.
+/// Rate times steps is then unchanged, so the longer run covers the same
+/// ground in finer steps. A scheduled model stretches its schedule over
+/// the run instead and keeps its peak; scaling it too would count the
+/// longer run twice.
+pub fn effective_lr(
+    default_lr: f64,
+    default_epochs: usize,
+    epochs: usize,
+    scheduled: bool,
+    scale: Option<f64>,
+) -> f64 {
+    match scale {
+        Some(s) => default_lr * s,
+        None if !scheduled && epochs > default_epochs => {
+            default_lr * (default_epochs as f64 / epochs as f64)
+        }
+        None => default_lr,
+    }
+}
+
+/// A model's short run: a few minutes on a mid-range card, and long enough
+/// that the loss still falls clearly. What that takes is the model's to
+/// say, since only it knows whether to cut passes or the data they cover.
+#[derive(Debug, Clone, Copy)]
+pub struct QuickProfile {
+    /// Data passes.
+    pub epochs: usize,
+    /// Size of the staged corpus, on the token models.
+    pub train_tokens: Option<u64>,
 }
 
 /// Convergence guard selection. Materialised by the harness into a concrete
@@ -440,5 +477,29 @@ mod mode_tests {
         // sweep must not pick it up.
         assert!(matches!(DdpMode::parse("solo-1"), Some(DdpMode::Solo(1))));
         assert!(!DdpMode::all_names().contains(&SOLO_TRAINER));
+    }
+}
+
+#[cfg(test)]
+mod effective_lr_tests {
+    use super::effective_lr;
+
+    #[test]
+    fn constant_rate_model_scales_only_above_its_default_epochs() {
+        assert_eq!(effective_lr(0.001, 5, 5, false, None), 0.001);
+        assert_eq!(effective_lr(0.001, 5, 2, false, None), 0.001);
+        assert_eq!(effective_lr(0.001, 5, 10, false, None), 0.0005);
+    }
+
+    #[test]
+    fn scheduled_model_keeps_its_peak_at_any_epoch_count() {
+        assert_eq!(effective_lr(6.0e-4, 3, 5, true, None), 6.0e-4);
+        assert_eq!(effective_lr(0.1, 200, 400, true, None), 0.1);
+    }
+
+    #[test]
+    fn explicit_scale_wins_and_one_holds_the_default() {
+        assert_eq!(effective_lr(0.001, 5, 10, false, Some(1.0)), 0.001);
+        assert_eq!(effective_lr(0.1, 200, 20, true, Some(2.0)), 0.2);
     }
 }

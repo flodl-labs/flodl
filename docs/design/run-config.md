@@ -415,7 +415,7 @@ Three equivalent forms, all explicit; a command-line selector (`@` or
 fdl @ci test                 # @ sigil - pre-command position only (before the command)
 fdl --env ci test            # flag - position-independent: also `fdl test --env ci` / `--env=ci`
 FDL_ENV=ci fdl test          # environment variable, for CI runners + shell rc
-fdl local ddp-bench validate # env=local: `fdl @local ddp-bench validate`
+fdl local ddp-bench quick # env=local: `fdl @local ddp-bench quick`
 ```
 
 Precedence: (`@env` ≡ `--env X`) > `FDL_ENV=X`. Every form must resolve to

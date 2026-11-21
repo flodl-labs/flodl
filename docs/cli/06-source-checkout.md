@@ -93,9 +93,8 @@ fdl bench --rounds 20 --output ...     # ad-hoc flags (listed by `fdl bench -h`)
 preset commands. Example presets (from `ddp-bench/fdl.yml`):
 
 ```bash
-fdl ddp-bench quick                   # fast smoke test (1 epoch, linear model)
-fdl ddp-bench validate                # full DDP validation matrix
-fdl ddp-bench validate --report out   # validation + write report to out/
+fdl ddp-bench quick                   # every model's own short run, one GPU
+fdl ddp-bench quick --model lenet     # the same, one model
 fdl ddp-bench --help                  # list all presets + options
 ```
 

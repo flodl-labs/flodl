@@ -76,6 +76,7 @@ pub fn def() -> ModelDef {
             batches_per_epoch: 0,
             batch_size: 4,
             lr: 6.0e-4,
+            quick: Some(crate::config::QuickProfile { epochs: 1, train_tokens: Some(1_000_000) }),
         },
     }
 }

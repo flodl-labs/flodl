@@ -16,14 +16,13 @@ docker: gpu
 compile: true
 entry: cargo run --release --features "$FDL_GPU_FEATURE" --
 
-# Default LRs per model (for reference):
-#   linear=0.001  mlp=0.001  convnet=0.001  lstm=0.001
-#   transformer=0.0005  autoencoder=0.001  residual=0.0003
-#   moe=0.001  feedback=0.001
-# LR auto-scales when --epochs > 5: lr = default * (5 / epochs)
-# Override with --lr-scale <F> to multiply all LRs explicitly.
+# No global `epochs:` on purpose: a bare `fdl ddp-bench --model <m>` runs the
+# model's own default (`fdl ddp-bench --list` names the models), and a preset
+# that wants a short run says so itself.
+# LR is the model's default. One exception: a model with no LR schedule given
+# more epochs than its default trains at `default * default_epochs / epochs`.
+# `--lr-scale <F>` multiplies the default instead (`--lr-scale 1` holds it).
 training:
-  epochs: 5
   seed: 42
 
 output:
@@ -31,33 +30,33 @@ output:
 
 commands:
   quick:
-    description: Fast smoke test (logistic, 1 epoch)
-    training: { epochs: 1 }
-    options: { model: logistic, mode: solo-0, batches: 100 }
+    description: Each model's own short run on one GPU (add --model <m> for one)
+    options: { model: all, mode: solo-0, quick: true }
 
   full-sweep:
     description: All models, all DDP modes
+    training: { epochs: 5 }
     options: { model: all, mode: all }
 
   solo-0:
     description: Solo baseline on fast GPU (all models)
+    training: { epochs: 5 }
     options: { model: all, mode: solo-0 }
 
   solo-1:
     description: Solo baseline on slow GPU (all models)
+    training: { epochs: 5 }
     options: { model: all, mode: solo-1 }
 
   solo-2:
     description: Solo baseline on second slow GPU (all models, 3-GPU rigs)
+    training: { epochs: 5 }
     options: { model: all, mode: solo-2 }
 
   nccl-cadence:
     description: NCCL cadence for all models
+    training: { epochs: 5 }
     options: { model: all, mode: nccl-cadence }
-
-  validate:
-    description: Check convergence against structured baselines
-    options: { model: all, mode: all, validate: true, baseline: baselines/structured.json }
 
   report:
     description: Generate convergence report from timeline data
