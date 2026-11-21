@@ -68,16 +68,33 @@ cluster:
 # directive -- `discover_test_cluster()` reads
 # `FLODL_TESTING_CLUSTER_JSON` and constructs its own coord/workers.
 
-# Optional: an env-local NCCL smoke that SHADOWS the base `gpu-test-nccl`
+# Optional: env-local NCCL checks that SHADOW the base `gpu-test-nccl`
 # under `fdl @cluster-test gpu-test-nccl` (same name = override for this
-# env). Build on the orchestrator, ssh-dispatch to the 2-GPU host so the
-# trainer auto-promotes to process-per-rank NCCL. Adjust host, libtorch
-# variant and paths to your rig.
+# env). Build on the orchestrator, ssh-dispatch to the 2-GPU host. Two
+# steps: flodl's `#[ignore]`d NCCL unit tests (rank threads in one
+# process), then a ddp-bench run that auto-promotes to process-per-rank
+# NCCL. Adjust host, libtorch variant and paths to your rig.
 commands:
   gpu-test-nccl:
-    description: 2-GPU process-per-rank NCCL smoke (ddp-bench mlp/nccl-sync)
+    description: 2-GPU NCCL checks (flodl NCCL unit tests, then a ddp-bench mlp/nccl-sync smoke)
     run: |
       set -eo pipefail
+      # flodl's own NCCL unit tests first. They are `#[ignore]`d because
+      # they need 2+ GPUs in one box, and they run rank threads in one
+      # process, which the ddp-bench smoke below (one process per rank)
+      # does not cover. The test binary is built here and run there.
+      OUT=$(docker compose run --rm -T \
+        -e LIBTORCH_PATH=/workspace/libtorch/<variant> \
+        -e CARGO_TARGET_DIR=/workspace/target/cluster/<host> \
+        cuda bash -c 'cargo test -p flodl --lib --features cuda --no-run 2>&1') \
+        || { echo "$OUT" | tail -30; exit 1; }
+      TESTBIN=$(echo "$OUT" | sed -n 's/.*Executable unittests src\/lib.rs (\(.*\))/\1/p' | tail -1)
+      [ -n "$TESTBIN" ] && [ -f "$TESTBIN" ] || { echo "ERROR: flodl test binary not built"; exit 1; }
+      echo "[cluster-test] flodl NCCL unit tests on <host> (rank threads in one process)"
+      ssh <host> "cd /opt/flodl/flodl && \
+        LD_LIBRARY_PATH=/opt/flodl/libtorch/<variant>/lib \
+        timeout --signal=KILL 400 /opt/flodl/${TESTBIN} \
+          nccl --ignored --test-threads=1 --nocapture"
       docker compose run --rm \
         -e LIBTORCH_PATH=/workspace/libtorch/<variant> \
         -e CARGO_TARGET_DIR=/workspace/target/cluster/<host> \

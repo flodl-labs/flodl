@@ -248,7 +248,7 @@ fn end_to_end_sync_nccl_via_coord_smoke() {
     let coord_thread = thread::spawn(move || -> Result<CCoord> {
         CCoord::start_from_listener(
             coord_listener,
-            [0u8; crate::distributed::wire::SESSION_SALT_BYTES],
+            TEST_SALT,
             config_for_coord(),
         )
     });
@@ -275,7 +275,7 @@ fn end_to_end_sync_nccl_via_coord_smoke() {
     // 5. Spawn one worker thread per rank. Each owns its
     //    NcclRankComm + connects to the coord via ClusterWorker
     //    + runs to shutdown.
-    let salt = [0u8; crate::distributed::wire::SESSION_SALT_BYTES];
+    let salt = TEST_SALT;
     let mut worker_handles: Vec<thread::JoinHandle<Result<()>>> = Vec::new();
     for (rank_id, comm) in rank_comms.into_iter().enumerate() {
         let initial_params = initial_params.clone();
@@ -451,7 +451,7 @@ fn end_to_end_cadence_nccl_via_coord_smoke() {
     let coord_thread = thread::spawn(move || -> Result<CCoord> {
         CCoord::start_from_listener(
             coord_listener,
-            [0u8; crate::distributed::wire::SESSION_SALT_BYTES],
+            TEST_SALT,
             config_for_coord(),
         )
     });
@@ -469,7 +469,7 @@ fn end_to_end_cadence_nccl_via_coord_smoke() {
     let initial_buffers: Vec<Tensor> = ref_model.buffers().iter().map(|b| b.get()).collect();
     drop(ref_model);
 
-    let salt = [0u8; crate::distributed::wire::SESSION_SALT_BYTES];
+    let salt = TEST_SALT;
     let mut worker_handles: Vec<thread::JoinHandle<Result<()>>> = Vec::new();
     for (rank_id, comm) in rank_comms.into_iter().enumerate() {
         let initial_params = initial_params.clone();
@@ -559,12 +559,14 @@ fn end_to_end_cadence_nccl_via_coord_smoke() {
         coord.avg_count(),
     );
 
-    // Sanity: ElChe anchor stayed in a valid range (NoGuard never
-    // emits NudgeDown so anchor should equal the initial value).
+    // Sanity: with no guard nothing ever nudges the anchor down. It may
+    // sit above its initial value, since ElChe grows the window on its
+    // own when a sync costs more than its overhead target, and on a
+    // model this small it always does.
     let coord_anchor = coord.el_che().anchor();
-    assert_eq!(
-        coord_anchor, elche_anchor,
-        "NoGuard: anchor stable at initial value ({elche_anchor}), got {coord_anchor}",
+    assert!(
+        coord_anchor >= elche_anchor,
+        "NoGuard: anchor never falls below its initial value ({elche_anchor}), got {coord_anchor}",
     );
 
     coord.shutdown_workers().expect("shutdown_workers");
