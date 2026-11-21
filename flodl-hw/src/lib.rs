@@ -95,7 +95,7 @@ mod report;
 pub mod testing;
 mod vendor;
 
-pub use amd::{rocm_runtime_lib_dir, rocm_runtime_root};
+pub use amd::{amd_gpus_awaiting_runtime, rocm_runtime_lib_dir, rocm_runtime_root};
 pub use cpu::{cpu_model, cpu_package_count, cpu_threads};
 pub use gpu::{
     GpuInfo, detect_gpus, detect_gpus_for, detect_gpus_physical, survey, survey_visible,
