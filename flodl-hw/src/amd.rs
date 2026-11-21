@@ -321,6 +321,12 @@ fn read_node(dir: &Path, index: usize) -> Option<GpuInfo> {
 /// (banners, reports, an ElChe tiebreak), so a missing number is
 /// strictly better than a guessed one.
 fn node_memory_mb(dir: &Path) -> u64 {
+    node_memory_bytes(dir) / (1024 * 1024)
+}
+
+/// [`node_memory_mb`] unrounded: the exact size the kernel publishes,
+/// which is what lets a caller recognise the same pool elsewhere in sysfs.
+pub(crate) fn node_memory_bytes(dir: &Path) -> u64 {
     let Ok(banks) = std::fs::read_dir(dir.join("mem_banks")) else {
         return 0;
     };
@@ -330,7 +336,6 @@ fn node_memory_mb(dir: &Path) -> u64 {
         .filter_map(|text| prop(&text, "size_in_bytes"))
         .max()
         .unwrap_or(0)
-        / (1024 * 1024)
 }
 
 /// Read one `key value` line out of a KFD `properties` file.
