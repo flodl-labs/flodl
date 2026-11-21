@@ -394,6 +394,46 @@ Common quick fixes:
 - **Training hangs (cluster)**: usually stale child processes from a previous aborted run holding rendezvous ports or GPU memory. `fdl @cluster <cmd>` cleans these up pre-spawn, but kill-9 on the launcher bypasses cleanup - clear stragglers with `pkill -f flodl-rank` on each worker.
 - **OOM on smaller GPU**: any anchor-based mode (`NcclCadence`, `CpuAsync`, `CpuCadence`) routes through ElChe, which proportionally shrinks the smaller GPU's batch count. Also: per-rank DataLoader backend selection - the larger GPU can go resident while the smaller streams.
 
+## AMD GPUs (ROCm)
+
+### A transformer trains far slower than the card should allow
+
+A matrix multiply on ROCm can go through rocBLAS or hipBLASLt, each with
+several routines per shape, and the default choice is not always the
+fastest. PyTorch's TunableOp times them once and records the winner. On a
+Strix Halo APU (gfx1151), a 1M-token OLMo run went from 410 s to 198 s of
+training with the same loss, and an eval pass from 17.3 s to 7.7 s
+(measured by a contributor, 23 shapes tuned). The gain depends on the
+card and the model: convolution-heavy models spend their time in MIOpen
+and have little to gain.
+
+Tune once, which is slow because every new shape is timed:
+
+```sh
+PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=1 fdl <your training command>
+```
+
+Then reuse the results on every later run:
+
+```sh
+PYTORCH_TUNABLEOP_ENABLED=1 PYTORCH_TUNABLEOP_TUNING=0 fdl <your training command>
+```
+
+The results land in `tunableop_results<device>.csv` in the working
+directory (`PYTORCH_TUNABLEOP_FILENAME` moves them). The file is tied to
+the card and to the ROCm and libtorch versions that produced it, and is
+ignored after any of them changes, so tune again after an upgrade. `fdl`
+passes these three variables into the ROCm container. Upstream reference:
+[TunableOp](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/cuda/tunable/README.md).
+
+### A rare segfault inside `libaotriton`
+
+Seen once in three parallel runs of the GPU test suite on gfx1151, in
+`libaotriton_v2.so` (the attention kernels libtorch bundles), with two
+clean reruns. It has not been reproduced on gfx1201 or in a training run,
+and the crash is inside the bundled library, not in floDl code. If you hit
+it, rerun, and please report the card, the ROCm version and the backtrace.
+
 ---
 
 ## Getting Help
