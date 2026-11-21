@@ -63,6 +63,17 @@
 #include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
 #include <c10/hip/HIPFunctions.h>
 #include <c10/hip/HIPCachingAllocator.h>
+#include <torch/version.h>
+
+// libtorch 2.11+ HIP builds define c10::cuda::{CUDAStream, stream getters,
+// device functions, CUDACachingAllocator} themselves (HIPStreamMasqueradingAsCUDA
+// is now a thin subclass of c10::cuda::CUDAStream). Defining them again here
+// collides, so on those versions forward to the native names instead.
+#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 11)
+#define FLODL_HIP_NATIVE_CUDA_NS 1
+#else
+#define FLODL_HIP_NATIVE_CUDA_NS 0
+#endif
 
 // Tier 2: c10::cuda::* -> c10::hip::*.
 //
@@ -70,6 +81,7 @@
 // CUDA headers, and their generated cuda_cmake_macros.h is absent), and
 // there is no libc10_cuda.so to link against — libc10_hip.so exports
 // c10::hip::* only. So c10::cuda does not exist here and we define it.
+#if !FLODL_HIP_NATIVE_CUDA_NS
 namespace c10 {
 namespace cuda {
 
@@ -81,6 +93,7 @@ namespace CUDACachingAllocator = ::c10::hip::HIPCachingAllocator;
 
 } // namespace cuda
 } // namespace c10
+#endif // !FLODL_HIP_NATIVE_CUDA_NS
 
 // Tier 3: streams, via the masquerading wrapper. See the note above —
 // the wrapper is what keeps a HIP stream usable wherever the dispatcher
@@ -88,6 +101,17 @@ namespace CUDACachingAllocator = ::c10::hip::HIPCachingAllocator;
 //
 // at::cuda already exists at this point (HIPGraph.h and HIPEvent.h
 // declare into it); these names are additions to it, not a redefinition.
+#if FLODL_HIP_NATIVE_CUDA_NS
+namespace at {
+namespace cuda {
+using ::c10::cuda::CUDAStream;
+using ::c10::cuda::getCurrentCUDAStream;
+using ::c10::cuda::getDefaultCUDAStream;
+using ::c10::cuda::setCurrentCUDAStream;
+using ::c10::cuda::getStreamFromPool;
+} // namespace cuda
+} // namespace at
+#else
 namespace at {
 namespace cuda {
 
@@ -119,6 +143,7 @@ inline CUDAStream getStreamFromPool(const int priority,
 
 } // namespace cuda
 } // namespace at
+#endif // FLODL_HIP_NATIVE_CUDA_NS
 
 // Tier 2 continued: the raw runtime API. Every name below was verified
 // present 1:1 in ROCm 7.0's hip/hip_runtime_api.h. Function aliases are

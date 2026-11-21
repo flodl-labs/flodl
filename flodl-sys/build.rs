@@ -262,10 +262,18 @@ fn main() {
         }
     }
 
+    // libtorch's headers refuse to compile below C++20 from 2.14 on
+    // (`#error`), and C++17 is what every release before that was built
+    // and tested with here. An unreadable version keeps C++17, which is
+    // right for every libtorch old enough to lack the marker.
+    let cxx_std = match libtorch_major_minor(&libtorch) {
+        Some(version) if version >= (2, 14) => "c++20",
+        _ => "c++17",
+    };
     let mut build = cc::Build::new();
     build
         .cpp(true)
-        .std("c++17")
+        .std(cxx_std)
         .file("shim.cpp")
         .include(".")
         .include(libtorch.join("include"))
@@ -382,4 +390,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=HIP_PATH");
     println!("cargo:rerun-if-env-changed=HSA_PATH");
+}
+
+/// The `(major, minor)` of the libtorch at `root`, read from the
+/// `build-version` file every distribution ships (`2.10.0+cu128`).
+fn libtorch_major_minor(root: &Path) -> Option<(u32, u32)> {
+    let version = std::fs::read_to_string(root.join("build-version")).ok()?;
+    let mut parts = version.trim().split(['.', '+']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
