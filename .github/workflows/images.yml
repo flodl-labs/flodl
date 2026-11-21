@@ -28,7 +28,8 @@ name: CI images
 # The hash is an identity, not a reproducibility claim: apt resolves to
 # whatever is current, so the same Dockerfile built twice yields
 # different bytes. That is fine here. It answers "which recipe", and
-# rebuilding is a `workflow_dispatch` away.
+# rebuilding is a `workflow_dispatch` away. A push never rebuilds a recipe
+# that is already published, so the bytes behind a tag only move on purpose.
 #
 # The Rust release is the exception, and deliberately part of the recipe:
 # each Dockerfile pins it (`ARG RUST_VERSION`, read by ci/rust-pin.sh), so
@@ -111,7 +112,23 @@ jobs:
           fi
           echo "digest_tag=$repo:$hash" >> "$GITHUB_OUTPUT"
           echo "latest_tag=$repo:latest" >> "$GITHUB_OUTPUT"
-          echo "publishing $repo:$hash"
+
+      # A push that changed one Dockerfile starts both legs. The hash tag
+      # names a recipe, so a leg whose recipe is already published has
+      # nothing to do, and rebuilding it would swap the bytes under a tag
+      # ci.yml treats as an identity (apt resolves to whatever is current).
+      # A manual dispatch is the deliberate "rebuild anyway".
+      - name: Check whether this recipe is already published
+        id: published
+        run: |
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] \
+            && docker manifest inspect "${{ steps.tags.outputs.digest_tag }}" > /dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.tags.outputs.digest_tag }} is already published, skipping the build"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "publishing ${{ steps.tags.outputs.digest_tag }}"
+          fi
 
       # No `load:` and no layer cache, deliberately. Nothing here consumes
       # the image locally, so buildkit streams it straight to the registry
@@ -119,6 +136,7 @@ jobs:
       # workflow that runs only when a Dockerfile changes has nothing to
       # gain from caching layers between those changes.
       - name: Build and push
+        if: steps.published.outputs.found != 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -129,6 +147,7 @@ jobs:
             ${{ steps.tags.outputs.latest_tag }}
 
       - name: Report
+        if: steps.published.outputs.found != 'true'
         run: |
           echo "pushed ${{ steps.tags.outputs.digest_tag }}"
           echo "pushed ${{ steps.tags.outputs.latest_tag }}"
