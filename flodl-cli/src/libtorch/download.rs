@@ -766,10 +766,16 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
     // Write .arch metadata (always, both project and global). `platform=`
     // records what the binaries ARE -- the dir name is convention, this
     // is fact -- and is what the already-installed check compares.
-    let arch_content = format!(
+    let mut arch_content = format!(
         "cuda={}\ntorch={}\narchs={}\nsource=precompiled\nvariant={}\nplatform={}\n",
         spec.arch_cuda, LIBTORCH_VERSION, spec.arch_archs, spec.arch_variant, platform
     );
+    // The ROCm image this variant is paired with. Written out, not left to
+    // the default, so the pairing is visible in the file and editable
+    // there, the way `cuda=` is for the other vendor.
+    if spec.arch_variant.starts_with("rocm") {
+        arch_content.push_str(&format!("rocm_runtime={}\n", detect::DEFAULT_ROCM_RUNTIME));
+    }
     fs::write(install_path.join(".arch"), arch_content)
         .map_err(|e| format!("cannot write .arch: {}", e))?;
 

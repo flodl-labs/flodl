@@ -311,6 +311,7 @@ pub(super) fn parse_remote_json(json: &str, worker: &ClusterWorker) -> Result<Pr
             cuda_version: lt.get("cuda").and_then(|v| v.as_str()).map(String::from),
             archs: lt.get("archs").and_then(|v| v.as_str()).map(String::from),
             source: None,
+            rocm_runtime: None,
         };
         let mut archs_match = Vec::new();
         if let Some(am) = lt.get("archs_match").and_then(|v| v.as_array()) {

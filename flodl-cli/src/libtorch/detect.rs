@@ -19,6 +19,11 @@ pub struct LibtorchInfo {
     pub cuda_version: Option<String>,
     pub archs: Option<String>,
     pub source: Option<String>,
+    /// ROCm version of the container image this variant is paired with
+    /// (`.arch` `rocm_runtime=`). Not the version libtorch was built
+    /// against: on ROCm the image's runtime is loaded ahead of the copy
+    /// libtorch bundles, so the two are chosen separately.
+    pub rocm_runtime: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +102,7 @@ pub(crate) fn libtorch_info_from_dir(path: String, arch_dir: &Path) -> LibtorchI
         cuda_version: None,
         archs: None,
         source: None,
+        rocm_runtime: None,
     };
     if let Ok(content) = fs::read_to_string(arch_dir.join(".arch")) {
         parse_arch_into(&content, &mut info);
@@ -116,7 +122,89 @@ fn parse_arch_into(content: &str, info: &mut LibtorchInfo) {
             info.archs = Some(val.to_string());
         } else if let Some(val) = line.strip_prefix("source=") {
             info.source = Some(val.to_string());
+        } else if let Some(val) = line.strip_prefix("rocm_runtime=") {
+            info.rocm_runtime = Some(val.to_string());
         }
+    }
+}
+
+/// ROCm image version paired with a variant that names none. The newest
+/// release the AMD help-wanted reports measured: the 7.0 and 7.1 runtimes
+/// segfault on gfx1151 and run several times slower on gfx1201.
+pub(crate) const DEFAULT_ROCM_RUNTIME: &str = "10.2";
+
+/// What `docker compose` needs to build the image a variant goes with:
+/// the vendor's base-image version and the tag the built image is filed
+/// under. One home, because a local command and the cluster prebuild must
+/// reach the same image for the same variant.
+///
+/// The two vendors differ in one respect, on purpose. A CUDA image
+/// supplies the toolchain the shim is compiled with while libtorch brings
+/// its own runtime, so its version is the one libtorch was built against
+/// and nothing may override it. A ROCm image supplies the runtime itself,
+/// which is a free choice, so `ROCM_VERSION` in the environment wins over
+/// the variant's `rocm_runtime` (and `ROCM_BASE_TAG`, when set, is left
+/// alone as the escape hatch for a tag this code cannot derive).
+pub(crate) fn image_env(info: &LibtorchInfo) -> Vec<(String, String)> {
+    let named = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+    image_env_with(info, named("ROCM_VERSION"), named("ROCM_BASE_TAG"))
+}
+
+fn image_env_with(
+    info: &LibtorchInfo,
+    rocm_version: Option<String>,
+    rocm_base_tag: Option<String>,
+) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(cuda) = info.cuda_version.as_deref().filter(|c| *c != "none") {
+        let version = pad_to_patch(cuda);
+        env.push(("CUDA_TAG".into(), major_minor(&version)));
+        env.push(("CUDA_VERSION".into(), version));
+    }
+    // The classifier directly, not `variant_vendor`: that one warns on a
+    // name it does not know, and the caller has already been told.
+    let amd = flodl_hw::VariantClass::Vendor(GpuVendor::Amd);
+    if flodl_hw::classify_variant_label(&info.path) == amd {
+        let version = rocm_version
+            .or_else(|| info.rocm_runtime.clone())
+            .unwrap_or_else(|| DEFAULT_ROCM_RUNTIME.to_string());
+        if rocm_base_tag.is_none() {
+            env.push(("ROCM_BASE_TAG".into(), rocm_base_tag_for(&version)));
+        }
+        env.push(("ROCM_TAG".into(), major_minor(&version)));
+    }
+    env
+}
+
+/// `12.8` to `12.8.0`; a version that already names a patch is kept.
+fn pad_to_patch(version: &str) -> String {
+    if version.matches('.').count() < 2 {
+        format!("{version}.0")
+    } else {
+        version.to_string()
+    }
+}
+
+/// The first two components, which is how a built image is tagged.
+fn major_minor(version: &str) -> String {
+    version.splitn(3, '.').take(2).collect::<Vec<_>>().join(".")
+}
+
+/// The `rocm/dev-ubuntu-*` tag for a ROCm version. AMD changed the scheme
+/// between two releases and published nothing in between: up to 7.2 the
+/// tag is `<version>-complete` with a zero patch left off (`7.2-complete`,
+/// `7.2.4-complete`, never `7.2.0-complete`), and from 7.14 it is
+/// `<major.minor.patch>-full` with the patch required (`10.2.0-full`,
+/// never `10.2-full`).
+fn rocm_base_tag_for(version: &str) -> String {
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().ok());
+    let (major, minor) = (parts.next().flatten(), parts.next().flatten());
+    let old_scheme = matches!((major, minor), (Some(ma), Some(mi)) if (ma, mi) <= (7, 2));
+    if old_scheme {
+        let trimmed = version.strip_suffix(".0").filter(|v| v.contains('.'));
+        format!("{}-complete", trimmed.unwrap_or(version))
+    } else {
+        format!("{}-full", pad_to_patch(version))
     }
 }
 
@@ -401,6 +489,116 @@ pub fn set_active(root: &Path, variant: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    fn info(path: &str, cuda: Option<&str>, rocm_runtime: Option<&str>) -> LibtorchInfo {
+        LibtorchInfo {
+            path: path.to_string(),
+            torch_version: None,
+            cuda_version: cuda.map(String::from),
+            archs: None,
+            source: None,
+            rocm_runtime: rocm_runtime.map(String::from),
+        }
+    }
+
+    fn get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn rocm_base_tags_follow_the_published_scheme() {
+        // Every pair below was checked against the registry; the forms on
+        // the right of a `never` do not exist there.
+        assert_eq!(rocm_base_tag_for("7.0"), "7.0-complete");
+        assert_eq!(rocm_base_tag_for("7.2"), "7.2-complete");
+        assert_eq!(rocm_base_tag_for("7.2.0"), "7.2-complete"); // never 7.2.0-complete
+        assert_eq!(rocm_base_tag_for("7.2.4"), "7.2.4-complete");
+        assert_eq!(rocm_base_tag_for("6.4"), "6.4-complete");
+        assert_eq!(rocm_base_tag_for("7.14"), "7.14.0-full"); // never 7.14-full
+        assert_eq!(rocm_base_tag_for("7.14.1"), "7.14.1-full");
+        assert_eq!(rocm_base_tag_for("10.2"), "10.2.0-full");
+        assert_eq!(rocm_base_tag_for("10.2.0"), "10.2.0-full");
+    }
+
+    #[test]
+    fn a_cuda_variant_gets_the_toolkit_it_was_built_against() {
+        let env = image_env_with(&info("precompiled/cu128", Some("12.8"), None), None, None);
+        assert_eq!(get(&env, "CUDA_VERSION"), Some("12.8.0"));
+        assert_eq!(get(&env, "CUDA_TAG"), Some("12.8"));
+        assert_eq!(get(&env, "ROCM_BASE_TAG"), None);
+    }
+
+    #[test]
+    fn a_source_built_cuda_variant_is_read_from_its_metadata_not_its_name() {
+        // The name says nothing about the toolkit; the metadata does.
+        let env = image_env_with(&info("builds/sm61-sm120", Some("12.6"), None), None, None);
+        assert_eq!(get(&env, "CUDA_VERSION"), Some("12.6.0"));
+        assert_eq!(get(&env, "CUDA_TAG"), Some("12.6"));
+    }
+
+    #[test]
+    fn nothing_overrides_the_cuda_version() {
+        let env = image_env_with(
+            &info("precompiled/cu128", Some("12.8"), None),
+            Some("7.2".into()),
+            None,
+        );
+        assert_eq!(get(&env, "CUDA_VERSION"), Some("12.8.0"));
+        assert_eq!(get(&env, "ROCM_TAG"), None, "not an AMD variant");
+    }
+
+    #[test]
+    fn a_rocm_variant_gets_the_default_runtime_when_it_names_none() {
+        let env = image_env_with(&info("precompiled/rocm70", Some("none"), None), None, None);
+        assert_eq!(get(&env, "ROCM_BASE_TAG"), Some("10.2.0-full"));
+        assert_eq!(get(&env, "ROCM_TAG"), Some("10.2"));
+        assert_eq!(get(&env, "CUDA_VERSION"), None);
+    }
+
+    #[test]
+    fn a_rocm_variant_uses_the_runtime_its_metadata_names() {
+        let env = image_env_with(
+            &info("precompiled/rocm70", Some("none"), Some("7.2")),
+            None,
+            None,
+        );
+        assert_eq!(get(&env, "ROCM_BASE_TAG"), Some("7.2-complete"));
+        assert_eq!(get(&env, "ROCM_TAG"), Some("7.2"));
+    }
+
+    #[test]
+    fn the_environment_wins_over_the_metadata_for_rocm() {
+        let env = image_env_with(
+            &info("builds/gfx1151", Some("none"), Some("10.2")),
+            Some("7.14.1".into()),
+            None,
+        );
+        assert_eq!(get(&env, "ROCM_BASE_TAG"), Some("7.14.1-full"));
+        assert_eq!(get(&env, "ROCM_TAG"), Some("7.14"));
+    }
+
+    #[test]
+    fn an_explicit_base_tag_is_left_alone() {
+        let env = image_env_with(
+            &info("precompiled/rocm70", Some("none"), None),
+            None,
+            Some("nightly-full".into()),
+        );
+        assert_eq!(
+            get(&env, "ROCM_BASE_TAG"),
+            None,
+            "the caller's value stands"
+        );
+        assert_eq!(get(&env, "ROCM_TAG"), Some("10.2"));
+    }
+
+    #[test]
+    fn rocm_runtime_is_read_from_arch_metadata() {
+        let mut i = info("precompiled/rocm70", None, None);
+        parse_arch_into("cuda=none\ntorch=2.10.0\nrocm_runtime=10.1\n", &mut i);
+        assert_eq!(i.rocm_runtime.as_deref(), Some("10.1"));
+    }
+
     use super::*;
     use crate::util::test_env::env_lock;
     use std::path::PathBuf;

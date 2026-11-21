@@ -232,8 +232,8 @@ services:
       context: .
       dockerfile: Dockerfile.rocm
       args:
-        ROCM_VERSION: ${ROCM_VERSION:-7.0}
-    image: flodl-rocm:${ROCM_TAG:-7.0}
+        ROCM_BASE_TAG: ${ROCM_BASE_TAG:-10.2.0-full}
+    image: flodl-rocm:${ROCM_TAG:-10.2}
     user: "${UID:-1000}:${GID:-1000}"
     devices:
       - /dev/kfd
