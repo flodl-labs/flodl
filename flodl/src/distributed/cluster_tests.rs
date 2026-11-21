@@ -53,10 +53,15 @@ fn parses_canonical_envelope() {
 #[test]
 fn rejects_local_devices_all_when_cuda_devices_insufficient() {
     // `local_devices: "all"` resolves on the host that receives the
-    // envelope, using gpu_device_count(). With ranks of length > visible
-    // CUDA devices (always true in CPU test mode, where count == 0), the
-    // resolver must error loudly mentioning the count.
+    // envelope, using gpu_device_count(). With more ranks than visible
+    // devices the resolver must error loudly mentioning the count. The
+    // rank list is sized one past whatever this box has, so the test
+    // asks for too many on a two-GPU box as well as on a CPU one.
+    let visible = crate::tensor::gpu_device_count().max(0) as u64;
+    let ranks: Vec<u64> = (1..=visible + 1).collect();
     let mut v = worker_envelope();
+    v["world_size"] = json!(visible + 2);
+    v["worker"]["ranks"] = json!(ranks);
     v["worker"]["local_devices"] = json!("all");
     let err = LocalCluster::from_value(&v).unwrap_err();
     let msg = err.to_string();
