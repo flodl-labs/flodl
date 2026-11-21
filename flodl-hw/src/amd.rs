@@ -75,6 +75,35 @@ pub(crate) fn probe(out: &mut GpuSurvey) {
     );
 }
 
+/// AMD cards this box has and a process could open, which the survey
+/// holds back only because the host carries no ROCm userspace.
+///
+/// They are not usable devices here, and [`crate::survey`] rightly does not count
+/// them: nothing on this host can train on them. But the runtime need not
+/// come from the host. A container image carries its own, so a
+/// provisioning decision made for a containerized build (which libtorch
+/// variant to install) has to see these cards, or a Docker-only AMD box
+/// is set up as CPU-only. Empty when ROCm is installed (the cards are
+/// then in the survey proper) and under a test spoof.
+pub fn amd_gpus_awaiting_runtime() -> Vec<GpuInfo> {
+    if crate::testing::spoofed_survey().is_some() {
+        return Vec::new();
+    }
+    awaiting_runtime_at(
+        Path::new("/sys"),
+        Path::new("/dev/kfd"),
+        rocm_runtime_root().as_deref(),
+    )
+}
+
+/// [`amd_gpus_awaiting_runtime`] with its filesystem roots injected.
+fn awaiting_runtime_at(sys: &Path, kfd_dev: &Path, rocm: Option<&Path>) -> Vec<GpuInfo> {
+    if rocm.is_some() || !kfd_dev.exists() {
+        return Vec::new();
+    }
+    read_topology(&sys.join("class/kfd/kfd/topology/nodes"))
+}
+
 /// [`probe`] with its filesystem roots injected, so every branch is
 /// testable against a synthetic sysfs tree.
 fn probe_at(sys: &Path, kfd_dev: &Path, rocm: Option<&Path>, out: &mut GpuSurvey) {
@@ -134,7 +163,8 @@ fn probe_at(sys: &Path, kfd_dev: &Path, rocm: Option<&Path>, out: &mut GpuSurvey
                 "{} AMD GPU(s) present ({}) but no ROCm runtime was found \
                  (`libhsa-runtime64.so` under $ROCM_PATH, $HIP_PATH, $HSA_PATH or \
                  /opt/rocm). They are not counted as usable devices. Install ROCm \
-                 to train on them.",
+                 to train on them natively; a container image that carries ROCm \
+                 (the `rocm` compose service) needs nothing more from this host.",
                 gpus.len(),
                 archs.join(", "),
             ),
@@ -858,6 +888,36 @@ mod tests {
             out.notes[0].message.contains("Install ROCm"),
             "says what to do"
         );
+    }
+
+    #[test]
+    fn a_card_without_host_rocm_is_awaiting_a_runtime() {
+        // Same box as above. Not a device, but it is the card a
+        // containerized build should be provisioned for.
+        let s = Scratch::new();
+        node(s.path(), 0, CPU_NODE, None);
+        node(s.path(), 1, &gpu_node_props(100306, 4), Some(16106430464));
+        fs::write(s.path().join("kfd-dev"), "").unwrap();
+
+        let waiting = awaiting_runtime_at(s.path(), &s.path().join("kfd-dev"), None);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].vendor, GpuVendor::Amd);
+        assert_eq!(waiting[0].arch, GpuArch::Gfx("gfx1036".into()));
+    }
+
+    #[test]
+    fn nothing_awaits_a_runtime_once_rocm_is_installed_or_the_node_is_missing() {
+        let s = Scratch::new();
+        node(s.path(), 0, CPU_NODE, None);
+        node(s.path(), 1, &gpu_node_props(100300, 4), Some(17179869184));
+        let rocm = rocm_install(s.path(), "lib", "libhsa-runtime64.so.1");
+
+        // No device node: no process can open the card, runtime or not.
+        assert!(awaiting_runtime_at(s.path(), &s.path().join("kfd-dev"), None).is_empty());
+
+        fs::write(s.path().join("kfd-dev"), "").unwrap();
+        // ROCm installed: the card is a device in the survey proper.
+        assert!(awaiting_runtime_at(s.path(), &s.path().join("kfd-dev"), Some(&rocm)).is_empty());
     }
 
     #[test]

@@ -85,7 +85,21 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
     }
 
     let survey = flodl_hw::survey();
-    let gpus = &survey.devices;
+    // What this setup provisions for. With Docker available that includes
+    // AMD cards the host has no ROCm for: the image carries the runtime,
+    // so the box is not CPU-only, it only looks it from the host.
+    let awaiting_runtime = if has_docker {
+        flodl_hw::amd_gpus_awaiting_runtime()
+    } else {
+        Vec::new()
+    };
+    let gpus: Vec<_> = survey
+        .devices
+        .iter()
+        .chain(awaiting_runtime.iter())
+        .cloned()
+        .collect();
+    let gpus = &gpus;
     if !gpus.is_empty() {
         println!();
         println!("  GPUs:");
@@ -97,6 +111,12 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                 g.arch_label(),
                 g.total_memory_mb / 1024
             );
+        }
+        // Said only where it is true: a card no ROCm build covers is
+        // listed above and explained by the vendor branch below.
+        if !download::rocm_covered(&awaiting_runtime).is_empty() {
+            println!("          ROCm is not installed on this host. The Docker image");
+            println!("          provides it, so the AMD card(s) are set up for Docker.");
         }
     } else {
         println!();
@@ -235,7 +255,13 @@ pub fn run(opts: SetupOpts) -> Result<(), String> {
                 println!();
                 println!("  AMD GPU(s) detected alongside NVIDIA. One libtorch build");
                 println!("  serves one vendor, so the NVIDIA cards are set up here.");
-                println!("  For the AMD cards: fdl libtorch download --rocm 7.0");
+                // Only where a ROCm build would actually serve one of
+                // them: an integrated GPU outside its targets is the
+                // common companion of an NVIDIA card, and pointing at a
+                // download that cannot use it sends the operator nowhere.
+                if !covered.is_empty() {
+                    println!("  For the AMD cards: fdl libtorch download --rocm 7.0");
+                }
             } else if covered.is_empty() {
                 let names: Vec<String> = amd
                     .iter()

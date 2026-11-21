@@ -128,7 +128,10 @@ fn value_to_string(v: &serde_json::Value) -> String {
 
 /// Check if we're already running inside a Docker container.
 fn inside_docker() -> bool {
-    Path::new("/.dockerenv").exists()
+    // Docker's marker, then Podman's. Missing the second sent every
+    // `docker:` command in a Podman container off to start a container
+    // from inside one.
+    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
 }
 
 /// Default container path we assume the host project root is mounted
@@ -1093,8 +1096,21 @@ pub fn exec_command(
                 return ExitCode::FAILURE;
             }
         };
-        let mut cmd = std::process::Command::new(program);
-        cmd.args(entry_args).args(&args);
+        // Through a shell, like the docker arm and like a native `run:`
+        // line: an entry is written as a shell line (the committed
+        // examples say `--features "$FDL_GPU_FEATURE"`), and exec'ing its
+        // whitespace-split words handed cargo that text verbatim, quotes
+        // and dollar included. Windows keeps the direct exec: `cmd` does
+        // not expand that syntax and does not read POSIX quoting.
+        let mut cmd = if cfg!(target_os = "windows") {
+            let mut c = std::process::Command::new(program);
+            c.args(entry_args).args(&args);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", &format!("{entry} {}", shell_join(&args))]);
+            c
+        };
         for (key, val) in &env_vars {
             cmd.env(key, val);
         }

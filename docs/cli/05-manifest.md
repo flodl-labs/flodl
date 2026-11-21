@@ -159,6 +159,25 @@ runs on the host (with the same libtorch env applied). `docker:` is only
 valid on `run:` commands - declaring it on a `path:` or preset entry is
 rejected at load time.
 
+### Where `fdl` itself runs
+
+`fdl` is meant to run on the host. It starts the containers, so nothing
+has to be installed inside them by hand. Three setups work, and it helps
+to know which one you are in:
+
+| Setup | What it needs | What `docker:` does |
+|-------|---------------|---------------------|
+| `fdl` on the host, Docker available (the default) | Docker and the `docker compose` plugin | Each command runs in its compose service |
+| `fdl` on the host, no containers | Rust, a C++ compiler, and for a GPU the vendor's toolkit (CUDA or ROCm) | Remove the `docker:` lines; the same commands then run natively |
+| `fdl` inside a container you started yourself | Whatever that image carries | Ignored: `fdl` sees it is already in a container (Docker or Podman) and runs each command in place |
+
+In the Docker setup the host needs no GPU userspace at all. On an AMD
+box that means no ROCm install: the `rocm` image carries the runtime,
+and `fdl setup` provisions the ROCm libtorch from the hardware the
+kernel reports. `fdl probe` run on such a host still says the cards are
+not usable, because from the host they are not. To see what a training
+process will see, open `fdl gpu-shell` and run `./fdl probe` there.
+
 Two pieces of GPU indirection keep a manifest vendor-neutral:
 
 - **`docker: gpu`** is a logical service name: fdl resolves it to the
