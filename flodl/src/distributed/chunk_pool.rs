@@ -61,6 +61,12 @@ pub struct ChunkPool {
     /// `step` is an upper bound of the rank's step count when it finished
     /// the range (see [`Self::mark_completed`]); entries are in step order.
     unrealized: Vec<VecDeque<(usize, usize, usize)>>,
+    /// Per-rank: the highest snapshot step a finalized reduce has settled
+    /// (see [`Self::commit_realized`]). A report can be read after the
+    /// reduce that covered its work has already been settled; without
+    /// this it would wait for a sync of its own, and that sync would
+    /// carry no work. `None` until the rank's first settled reduce.
+    realized_step: Vec<Option<usize>>,
     /// Wall-clock start of this epoch (for EpochMetrics).
     pub epoch_start: Instant,
 }
@@ -101,6 +107,7 @@ impl ChunkPool {
             outstanding: vec![VecDeque::new(); world_size],
             reclaimed: VecDeque::new(),
             unrealized: vec![VecDeque::new(); world_size],
+            realized_step: vec![None; world_size],
             epoch_start: Instant::now(),
         }
     }
@@ -294,6 +301,7 @@ impl ChunkPool {
                 while q.front().is_some_and(|&(_, _, done_at)| done_at <= step) {
                     q.pop_front();
                 }
+                self.realized_step[rank] = self.realized_step[rank].max(Some(step));
             }
         }
     }
@@ -324,8 +332,12 @@ impl ChunkPool {
     /// finished these samples (its latest known step count at the time the
     /// report is read qualifies, since the batches precede the report on
     /// the rank's stream). It decides which reduce settles them, see
-    /// [`Self::commit_realized`].
+    /// [`Self::commit_realized`]. A report whose step a finalized reduce
+    /// has already covered is settled on the spot: the order in which a
+    /// report and the reduce's acknowledgement are read must not decide
+    /// whether the work counts as averaged.
     pub fn mark_completed(&mut self, rank: usize, samples: usize, step: usize) {
+        let settled = self.realized_step[rank].is_some_and(|r| step <= r);
         self.completed[rank] += samples;
         if self.completed[rank] > self.dispatched[rank] {
             crate::verbose!(
@@ -345,10 +357,14 @@ impl ChunkPool {
                     left -= front.1;
                     let done = *front;
                     self.outstanding[rank].pop_front();
-                    self.unrealized[rank].push_back((done.0, done.1, step));
+                    if !settled {
+                        self.unrealized[rank].push_back((done.0, done.1, step));
+                    }
                 }
                 Some(front) => {
-                    self.unrealized[rank].push_back((front.0, left, step));
+                    if !settled {
+                        self.unrealized[rank].push_back((front.0, left, step));
+                    }
                     front.0 += left;
                     front.1 -= left;
                     left = 0;
@@ -741,6 +757,24 @@ mod tests {
         pool.mark_completed(0, 30, 3);
         pool.commit_realized(0, Some(3));
         assert!(pool.is_realized());
+    }
+
+    /// The reduce's acknowledgement can be read before the report of work
+    /// that reduce covered. The work is in the consensus all the same; left
+    /// unsettled it would call for a sync with nothing to average.
+    #[test]
+    fn chunk_pool_a_report_read_after_its_reduce_settled_is_realized() {
+        let mut pool = ChunkPool::new(0, 60, 1);
+        pool.take_chunk(30, 0).unwrap();
+        pool.take_chunk(30, 0).unwrap();
+        // The reduce whose snapshot was taken at step 3 settles first.
+        pool.commit_realized(0, Some(3));
+        pool.mark_completed(0, 30, 3);
+        assert_eq!(pool.unrealized(0), 0, "trained before the snapshot");
+        // Work finished after that snapshot still waits for the next one.
+        pool.mark_completed(0, 30, 6);
+        assert_eq!(pool.unrealized(0), 30);
+        assert_eq!(pool.forfeit(0), (0, 30));
     }
 
     /// A barrier-paced rank is held between its snapshot and the finalize,

@@ -1357,14 +1357,18 @@ fn run_unified(
     // for: `final_loss` is whatever the last metrics message carried, so a
     // run that stopped early would otherwise report a mid-run loss as its
     // result. The framework fails a truncated cluster run on its own; this
-    // holds the same line for every other path through the handle.
+    // holds the same line for every other path through the handle. A run
+    // that reported no epoch at all trained none. Two cases report none
+    // and are complete all the same: a rank child, whose handle carries no
+    // metrics by design (the launcher's does), and a resume from a
+    // checkpoint that already covers the last epoch.
     let expected_epochs = config.epochs * config.epoch_splits.max(1);
-    if let Some(last) = last_epoch
-        && last + 1 < expected_epochs
-    {
+    let trained_epochs = last_epoch.map_or(0, |last| last + 1);
+    let silent_by_design =
+        last_epoch.is_none() && (is_cluster_rank() || config.resume_from.is_some());
+    if !silent_by_design && trained_epochs < expected_epochs {
         return Err(TensorError::new(&format!(
-            "run stopped after epoch {last}: {} of {expected_epochs} epochs trained",
-            last + 1,
+            "run stopped early: {trained_epochs} of {expected_epochs} epochs trained",
         )));
     }
 
