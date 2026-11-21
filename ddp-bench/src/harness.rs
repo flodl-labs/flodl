@@ -307,15 +307,26 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
     // Epoch geometry (starved-epoch refusal, tail report) belongs to flodl,
     // which validates it once at the tier entry point for every caller.
     // Solo is the one case flodl cannot see: it hand-drives its own loop
-    // instead of going through the builder, so the knob would be accepted
-    // and ignored, and the run recorded as split while training unsplit.
-    if config.epoch_splits > 1 && matches!(mode, DdpMode::Solo(_)) {
-        return Err(flodl::tensor::TensorError::new(&format!(
-            "--epoch-splits {} is not honored in solo mode: the solo baseline runs \
-             its own loop rather than the trainer, so the run would train unsplit \
-             while recording {} epochs. Use a DDP mode, or drop the flag.",
-            config.epoch_splits, config.epoch_splits,
-        )));
+    // instead of going through the builder, so the refusal is repeated here.
+    if let DdpMode::Solo(_) = mode {
+        if !real_data && config.epoch_splits > 1 {
+            return Err(flodl::tensor::TensorError::new(
+                "--epoch-splits is not honored by a synthetic-pool solo run: its \
+                 epoch is a batch count, not a pass over a dataset.",
+            ));
+        }
+        let slice = dataset.len() / config.epoch_splits.max(1);
+        if slice < config.batch_size {
+            return Err(flodl::tensor::TensorError::new(&format!(
+                "--epoch-splits {} slices {} samples into epochs of {slice}, short of \
+                 one {}-sample batch: those epochs would train nothing. Use at most \
+                 {} splits.",
+                config.epoch_splits,
+                dataset.len(),
+                config.batch_size,
+                (dataset.len() / config.batch_size.max(1)).max(1),
+            )));
+        }
     }
 
     let preload_tag = if mode.requires_multi_gpu() { "cpu" } else { "gpu-preload" };
@@ -422,7 +433,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
     let dashboard_path = config
         .save_dashboard
         .then(|| format!("{run_dir}/dashboard.html"));
-    if let (Some(path), DdpMode::Solo(_)) = (&dashboard_path, mode) {
+    if let (Some(path), false) = (&dashboard_path, mode.requires_multi_gpu()) {
         monitor.save_html(path);
         if let Some(theme) = config.dashboard_theme.as_deref() {
             monitor.set_archive_theme(theme);
@@ -444,6 +455,22 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
             real_data,
             &timeline,
             &mut monitor,
+            &mut log_lines,
+        ),
+        // Policy and backend describe averaging, and one device has none:
+        // the trainer takes its single-device path whatever they say.
+        DdpMode::SoloTrainer => run_unified(
+            model_def,
+            ApplyPolicy::Sync,
+            AverageBackend::Cpu,
+            dataset,
+            test_dataset,
+            config,
+            &timeline,
+            &mut monitor,
+            // One process: this Monitor wrote the archive request above,
+            // and the trainer has no dashboard sink on a single device.
+            None,
             &mut log_lines,
         ),
         DdpMode::Builder { policy, backend } => run_unified(
@@ -651,7 +678,13 @@ fn preload_gpu_batches(
 
 /// Form a batch from bulk GPU tensors via index_select.
 fn slice_batch(gpu_data: &[Tensor], start: usize, end: usize, device: Device) -> Result<Vec<Tensor>> {
-    let idx: Vec<i64> = (start as i64..end as i64).collect();
+    let rows: Vec<usize> = (start..end).collect();
+    select_batch(gpu_data, &rows, device)
+}
+
+/// Gather the given rows of every preloaded tensor into one batch.
+fn select_batch(gpu_data: &[Tensor], rows: &[usize], device: Device) -> Result<Vec<Tensor>> {
+    let idx: Vec<i64> = rows.iter().map(|&r| r as i64).collect();
     let idx_tensor = Tensor::from_i64(&idx, &[idx.len() as i64], device)?;
     gpu_data
         .iter()
@@ -789,16 +822,27 @@ fn run_baseline_solo(
         let mut total_train_ms = 0.0_f64;
         let mut total_eval_ms = 0.0_f64;
 
-        for epoch in 0..config.epochs {
+        // The trainer's own order: the same permutation, seed and slicing
+        // its single-device path draws, so `solo-trainer` and this loop
+        // train the same batches in the same sequence and differ only in
+        // the machinery around them. Under `--epoch-splits` an epoch is a
+        // slice of a pass, and `--epochs` keeps counting passes.
+        let mut sampler = flodl::data::SplitSampler::new(
+            n,
+            flodl::distributed::ddp_run::SHUFFLE_BASE_SEED,
+            config.epoch_splits,
+        );
+
+        for epoch in 0..config.epochs * config.epoch_splits.max(1) {
             timeline.event(flodl::monitor::EventKind::EpochStart { epoch });
             let epoch_start = Instant::now();
             let mut total_loss = 0.0;
             let mut batch_count = 0;
 
-            for batch_start in (0..n).step_by(bs) {
-                let end = (batch_start + bs).min(n);
-                if end - batch_start < bs { break; } // drop incomplete last batch
-                let batch = slice_batch(&gpu_data, batch_start, end, device)?;
+            // `chunks_exact` drops a trailing partial batch.
+            let order = flodl::data::Sampler::indices(&mut sampler, epoch);
+            for picks in order.chunks_exact(bs) {
+                let batch = select_batch(&gpu_data, picks, device)?;
                 let batch = if let Some(aug) = model_def.augment_fn {
                     aug(&batch)?
                 } else {

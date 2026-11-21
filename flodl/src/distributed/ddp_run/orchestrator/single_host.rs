@@ -24,6 +24,19 @@ use crate::tensor::{Device, Result, Tensor};
 
 use super::DdpHandle;
 
+/// The saved dashboard is fed by the cluster's record plane, which a
+/// single device never starts. Say so, rather than let a run that asked
+/// for an archive end without one and without a word.
+pub(super) fn warn_dashboard_unwritten(config: &ddp_run::DdpRunConfig) {
+    if let Some(path) = &config.dashboard_html {
+        eprintln!(
+            "  ddp: save_dashboard({path}) is not written on a single device: the \
+             trainer's dashboard needs a cluster. Drive a `Monitor` from \
+             `metrics_fn` for a solo archive."
+        );
+    }
+}
+
 impl DdpHandle {
     /// Single-GPU fallback: run training on the main thread.
     ///

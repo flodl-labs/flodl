@@ -626,6 +626,7 @@ impl DdpHandle {
         // Single-GPU fallback: run on main thread, no coordinator.
         if devices.len() < 2 {
             let dev = devices.first().copied().unwrap_or(Device::CPU);
+            super::single_host::warn_dashboard_unwritten(&config);
             let scheduler = scheduler_fn.map(|f| f(1));
             // Single-device path uses the rank callbacks minus the outer
             // optimizer (there is no cross-rank averaging to steer here).
@@ -821,6 +822,7 @@ impl DdpHandle {
         let devices = crate::tensor::usable_gpu_devices();
         if devices.len() < 2 {
             let dev = devices.first().copied().unwrap_or(Device::CPU);
+            super::single_host::warn_dashboard_unwritten(&config);
             let scheduler = scheduler_fn.map(|f| f(1));
             let RankCallbacks {
                 checkpoint_fn,

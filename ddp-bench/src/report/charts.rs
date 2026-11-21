@@ -34,6 +34,7 @@ const MODE_STYLE: &[(&str, &str)] = &[
     ("solo-0", "#888888"),
     ("solo-1", "#bbbbbb"),
     ("solo-2", "#d9d9d9"),
+    ("solo-trainer", "#555555"),
     ("nccl-sync", "#d62728"),
     ("nccl-cadence", "#ff7f0e"),
     ("cpu-sync", "#9467bd"),

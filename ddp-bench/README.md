@@ -81,7 +81,16 @@ Decoder: ConvTranspose2d(32,16,3,s=2,p=1,op=1) -> ReLU -> ConvTranspose2d(16,1,3
 
 ## DDP Modes
 
-Each mode maps 1:1 to an `ElCheMode` variant in `flodl`. The framework
+`solo-N` is the bench's own hand-written loop, the control every other
+mode is measured against. It trains the same batches in the same order as
+the trainer's single-device path (same permutation, same `--epoch-splits`
+slicing), so `solo-N` against `solo-trainer` prices the trainer itself. On
+a model with no random augmentation the two losses agree to the last
+digits (LeNet: identical first epoch at six decimals); an augmented model
+draws its crops and flips from a generator the two paths consume
+differently, so its curves track each other without matching.
+
+Each DDP mode maps 1:1 to an `ElCheMode` variant in `flodl`. The framework
 default is `nccl-cadence` (`ElCheConfig::default()`). See
 [DDP Reference: ElCheMode](../docs/ddp/01-reference.md#elchemode---cadence--backend-in-one-name)
 for full semantics.
@@ -91,6 +100,7 @@ for full semantics.
 | `solo-0` | -- | Single GPU (device 0), no DDP. Baseline. |
 | `solo-1` | -- | Single GPU (device 1), no DDP. |
 | `solo-2` | -- | Single GPU (device 2), no DDP. |
+| `solo-trainer` | -- | One device through `Trainer::builder()`: the trainer's loop and data plane with nothing to average. Needs exactly one visible device (`--gpus N` picks it on a multi-GPU box) and is not part of `all`. |
 | `nccl-sync` | `NcclSync` | NCCL AllReduce every batch. Traditional DDP / strict-sync baseline. |
 | `nccl-cadence` | `NcclCadence` | **Default.** ElChe-driven anchor; fast GPUs process proportionally more batches per averaging window. Recommended NCCL mode for mixed-GPU rigs. |
 | `cpu-sync` | `CpuSync` | CPU-mediated parameter averaging, every batch. |
@@ -102,6 +112,9 @@ for full semantics.
 ```bash
 # Solo baseline
 fdl ddp-bench --model gpt-nano --mode solo-0 --epochs 50
+
+# One GPU through the trainer, one pass delivered as 20 evaluated epochs
+fdl ddp-bench --model olmo-graph --mode solo-trainer --epochs 1 --epoch-splits 20 --per-epoch-eval
 
 # ElChe cadence with LR scaling for 2 GPUs
 fdl ddp-bench --model gpt-nano --mode nccl-cadence --epochs 50 --lr-scale 2

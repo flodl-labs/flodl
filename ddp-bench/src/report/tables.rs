@@ -144,10 +144,13 @@ fn merged_rank_vram<'a>(
 
 pub(super) fn write_speed_ratio(md: &mut String, groups: &[(String, Vec<RunAnalysis>)]) {
     // One ratio line per solo-N present anywhere (N >= 1), each vs solo-0.
+    // solo-trainer runs the same card as its solo-N, so its ratio is not
+    // a GPU speed ratio; the speedup table carries it.
     let mut solo_modes: Vec<String> = Vec::new();
     for (_, runs) in groups {
         for r in runs {
             if r.mode.starts_with("solo-") && r.mode != "solo-0"
+                && r.mode != crate::config::SOLO_TRAINER
                 && !solo_modes.contains(&r.mode)
             {
                 solo_modes.push(r.mode.clone());
