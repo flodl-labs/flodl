@@ -83,6 +83,24 @@ fn main() -> ExitCode {
         flodl_cli::style::set_quiet(v == 0);
     }
 
+    // One check per process tree: the bootstrap script already made it for
+    // the checkout's own binary, and a nested `fdl` (a run line, a
+    // container) would only repeat what the outer one said.
+    if env::var_os(flodl_cli::build_info::ENV_STALE_CHECKED).is_none()
+        && !flodl_cli::util::system::is_inside_docker()
+    {
+        if verbosity != Some(0)
+            && let (Ok(cwd), Ok(exe)) = (env::current_dir(), env::current_exe())
+            && let Some(notice) = flodl_cli::build_info::stale_notice(&cwd, &exe)
+        {
+            eprintln!("{notice}");
+        }
+        // SAFETY: called before any threads are spawned.
+        unsafe {
+            env::set_var(flodl_cli::build_info::ENV_STALE_CHECKED, "1");
+        }
+    }
+
     // Export HOSTNAME so docker-compose's `hostname: ${HOSTNAME}` resolves to
     // the host's name (the cluster launcher matches
     // `cluster.hosts[i].name == hostname()`). Bash keeps HOSTNAME as a shell

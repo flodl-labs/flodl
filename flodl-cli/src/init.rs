@@ -1067,6 +1067,24 @@ fn write_file(path: &str, content: &str) -> Result<(), String> {
 mod tests {
     use super::validate_name;
 
+    // Two copies of the bootstrap script exist: the one at the repository
+    // root, which the site serves for curl-and-run, and the one embedded
+    // here for `fdl init`. They drifted once, and the served one kept a
+    // bug the embedded one had fixed. The root copy is not part of the
+    // published crate, so outside the repository there is nothing to
+    // compare and nothing that could have drifted.
+    #[test]
+    fn the_embedded_bootstrap_script_is_the_one_at_the_repository_root() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fdl");
+        let Ok(served) = std::fs::read_to_string(&root) else {
+            return;
+        };
+        assert!(
+            served == include_str!("../assets/fdl"),
+            "fdl and flodl-cli/assets/fdl differ: edit one, copy it over the other",
+        );
+    }
+
     #[test]
     fn validate_name_accepts_alnum_hyphen_underscore() {
         for ok in ["my_project", "my-project", "Proj123", "a", "x_1-2"] {

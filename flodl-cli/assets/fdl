@@ -1,8 +1,10 @@
 #!/bin/sh
 # fdl -- floDl CLI entry point.
 #
-# Downloads a pre-compiled binary on first use (no Rust needed).
-# Falls back to building from source if the download fails.
+# Downloads a pre-compiled binary on first use (no Rust needed), and falls
+# back to building from source if the download fails. Inside a flodl
+# checkout that is not on a release tag it builds the checkout's own fdl
+# instead: the release binary would be an older fdl than the tree.
 #
 # Usage:
 #   curl -sL https://flodl.dev/fdl -o fdl && chmod +x fdl
@@ -19,13 +21,64 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 CLI="$DIR/target/release/fdl"
 
 # ---------------------------------------------------------------------------
+# Which fdl does this directory want?
+# ---------------------------------------------------------------------------
+#
+# A flodl checkout between releases wants the fdl of its own tree. The
+# release binary there is a different program from the sources beside it:
+# anything fdl gained since the release is missing, with nothing to say so,
+# and a fix that lives in fdl never reaches whoever pulled it. A checkout
+# sitting exactly on a release tag is that release, and everything else (a
+# scaffolded project, the curl-and-run script alone, a source archive with
+# no git metadata to ask) takes the release binary as before.
+
+FROM_TREE=false
+if [ -f "$DIR/flodl-cli/Cargo.toml" ] && [ -e "$DIR/.git" ] \
+    && command -v git >/dev/null 2>&1 \
+    && ! git -C "$DIR" describe --exact-match --tags HEAD >/dev/null 2>&1; then
+    FROM_TREE=true
+fi
+
+# Build fdl in the dev container. Docker creates a missing bind-mount
+# source itself, as root: on a fresh clone that left the cargo cache
+# unwritable (so this very build failed), turned the credentials FILE into
+# a directory, and handed `libtorch/` to root, where `fdl setup` could then
+# not write the download. Create them first, as the user, the way fdl does
+# before every container it starts.
+docker_build() {
+    (
+        cd "$DIR" || exit 1
+        mkdir -p .cargo-cache .cargo-git libtorch/precompiled/cpu \
+            "${FLODL_HOME_HOST:-$HOME/.flodl}"
+        [ -e .cargo-credentials.toml ] || : > .cargo-credentials.toml
+        env UID="$(id -u)" GID="$(id -g)" \
+            docker compose run --rm dev cargo build --release -p flodl-cli
+    )
+}
+
+# Build the tree's fdl with whatever toolchain is at hand. Succeeds only
+# if the result RUNS here: a container links against its own libc, and a
+# binary built there can be unusable on an older host.
+build_from_tree() {
+    if command -v cargo >/dev/null 2>&1; then
+        echo "Building fdl from this checkout..." >&2
+        (cd "$DIR" && cargo build --release -p flodl-cli) || return 1
+    elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        echo "Building fdl from this checkout, via Docker..." >&2
+        docker_build || return 1
+    else
+        return 1
+    fi
+    "$CLI" version >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
 # Ensure the CLI binary exists
 # ---------------------------------------------------------------------------
 
 if [ ! -f "$CLI" ] || [ "${FDL_REBUILD:-}" = "1" ]; then
     mkdir -p "$DIR/target/release"
 
-    # --- Try downloading pre-compiled binary from GitHub Releases ---
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -33,32 +86,45 @@ if [ ! -f "$CLI" ] || [ "${FDL_REBUILD:-}" = "1" ]; then
         *)     ;;                  # x86_64, aarch64 pass through
     esac
 
-    ARTIFACT="flodl-cli-${OS}-${ARCH}"
-    case "$OS" in
-        *mingw*|*msys*|*cygwin*) ARTIFACT="flodl-cli-windows-x86_64.exe" ;;
-    esac
-
-    # Get latest release tag
-    LATEST_TAG=""
-    if command -v curl >/dev/null 2>&1; then
-        LATEST_TAG=$(curl -sI "https://github.com/$REPO/releases/latest" 2>/dev/null \
-            | grep -i '^location:' | sed 's|.*/||' | tr -d '\r\n')
+    READY=false
+    if $FROM_TREE; then
+        if build_from_tree; then
+            READY=true
+        else
+            echo "warning: could not build fdl from this checkout; falling back to the" >&2
+            echo "  latest release, which is OLDER than these sources. Fixes made to fdl" >&2
+            echo "  since that release are missing until 'FDL_REBUILD=1 ./fdl version' succeeds." >&2
+        fi
     fi
 
-    DOWNLOADED=false
-    if [ -n "$LATEST_TAG" ]; then
-        URL="https://github.com/$REPO/releases/download/${LATEST_TAG}/${ARTIFACT}"
-        echo "Downloading flodl-cli ${LATEST_TAG}..."
-        if curl -sfL "$URL" -o "$CLI" 2>/dev/null; then
-            chmod +x "$CLI"
-            # Verify the binary works
-            if "$CLI" version >/dev/null 2>&1; then
-                DOWNLOADED=true
+    # --- Try downloading pre-compiled binary from GitHub Releases ---
+    if ! $READY; then
+        ARTIFACT="flodl-cli-${OS}-${ARCH}"
+        case "$OS" in
+            *mingw*|*msys*|*cygwin*) ARTIFACT="flodl-cli-windows-x86_64.exe" ;;
+        esac
+
+        # Get latest release tag
+        LATEST_TAG=""
+        if command -v curl >/dev/null 2>&1; then
+            LATEST_TAG=$(curl -sI "https://github.com/$REPO/releases/latest" 2>/dev/null \
+                | grep -i '^location:' | sed 's|.*/||' | tr -d '\r\n')
+        fi
+
+        if [ -n "$LATEST_TAG" ]; then
+            URL="https://github.com/$REPO/releases/download/${LATEST_TAG}/${ARTIFACT}"
+            echo "Downloading flodl-cli ${LATEST_TAG}..."
+            if curl -sfL "$URL" -o "$CLI" 2>/dev/null; then
+                chmod +x "$CLI"
+                # Verify the binary works
+                if "$CLI" version >/dev/null 2>&1; then
+                    READY=true
+                else
+                    rm -f "$CLI"
+                fi
             else
                 rm -f "$CLI"
             fi
-        else
-            rm -f "$CLI"
         fi
     fi
 
@@ -74,7 +140,7 @@ if [ ! -f "$CLI" ] || [ "${FDL_REBUILD:-}" = "1" ]; then
     # This is also what makes a too-new release binary a non-event: the
     # download is verified by RUNNING it above, and a binary that cannot
     # run on this libc is removed and replaced by one compiled here.
-    if ! $DOWNLOADED; then
+    if ! $READY; then
         if command -v cargo >/dev/null 2>&1; then
             if [ -f "$DIR/Cargo.toml" ] && grep -q 'flodl-cli' "$DIR/Cargo.toml" 2>/dev/null; then
                 echo "Building fdl from source..."
@@ -87,7 +153,7 @@ if [ ! -f "$CLI" ] || [ "${FDL_REBUILD:-}" = "1" ]; then
             fi
         elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
             echo "Building fdl via Docker..."
-            (cd "$DIR" && docker compose run --rm dev cargo build --release -p flodl-cli)
+            docker_build
         else
             echo "error: Cannot obtain fdl binary." >&2
             echo "" >&2
@@ -100,6 +166,21 @@ if [ ! -f "$CLI" ] || [ "${FDL_REBUILD:-}" = "1" ]; then
             exit 1
         fi
     fi
+elif $FROM_TREE; then
+    # The binary exists, and nothing rebuilds it when a `git pull` moves
+    # fdl's own sources under it. Say so, since the symptom otherwise is a
+    # fix that visibly merged and visibly does nothing.
+    STALE=$(find "$DIR/flodl-cli" "$DIR/flodl-cli-macros" "$DIR/flodl-hw" \
+        -name target -prune -o -type f -newer "$CLI" -print 2>/dev/null | head -n 1)
+    if [ -n "$STALE" ]; then
+        echo "fdl: its sources changed since this binary was built; rebuild with: FDL_REBUILD=1 ./fdl version" >&2
+    fi
 fi
+
+# This script made the stale check, or established there was none to make
+# (a release binary predates the binary's own check, and a tree build is
+# current): the binary need not repeat it.
+FDL_STALE_CHECKED=1
+export FDL_STALE_CHECKED
 
 exec "$CLI" "$@"
