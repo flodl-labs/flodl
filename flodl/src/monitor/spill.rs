@@ -51,20 +51,21 @@ pub const DEFAULT_SPILL_MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// The single node the spill writes under: `<dir>/timeline.log`.
 const SPILL_NODE: &str = "timeline";
 
-/// Node-local telemetry root: `~/.flodl/telemetry`.
+/// Node-local telemetry root: `$FLODL_HOME/telemetry`, by default
+/// `~/.flodl/telemetry`.
 ///
-/// Falls back to a temp-dir subtree when `HOME` is unset, and says so: a
+/// Falls back to a temp-dir subtree when neither is set, and says so: a
 /// tmpfs `/tmp` keeps the spill in RAM and loses it on reboot, which is
 /// exactly the durability the spill exists to provide.
 pub fn telemetry_root() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".flodl").join("telemetry");
+    if let Some(root) = crate::home::flodl_home() {
+        return root.join("telemetry");
     }
     let tmp = std::env::temp_dir().join("flodl-telemetry");
     eprintln!(
-        "flodl monitor: HOME unset, spilling telemetry under {} — on a tmpfs \
-         /tmp this lives in RAM and vanishes on reboot (crash forensics \
-         degraded). Set HOME to keep spills on disk.",
+        "flodl monitor: FLODL_HOME and HOME unset, spilling telemetry under {}. \
+         On a tmpfs /tmp this lives in RAM and vanishes on reboot (crash \
+         forensics degraded). Set one of them to keep spills on disk.",
         tmp.display(),
     );
     tmp

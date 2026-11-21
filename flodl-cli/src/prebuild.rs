@@ -760,6 +760,11 @@ fn prebuild_one_worker(
     for (k, v) in &extra_envs {
         cmd.env(k, v);
     }
+    if controller_docker_svc.is_some() {
+        for (k, v) in crate::run::docker_host_env(project_root) {
+            cmd.env(k, v);
+        }
+    }
 
     if let Some(cuda_version) = &cuda_version_for_image {
         let normalised = if cuda_version.matches('.').count() < 2 {

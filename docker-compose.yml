@@ -47,6 +47,11 @@ services:
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
       - ./.cargo-credentials.toml:/usr/local/cargo/credentials.toml
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${FLODL_HOME_HOST:-${HOME}/.flodl}:/flodl-home
       - ${LIBTORCH_CPU_PATH:-./libtorch/precompiled/cpu}:/usr/local/libtorch:ro
     working_dir: /workspace
     stdin_open: true
@@ -59,6 +64,7 @@ services:
     hostname: ${HOSTNAME:-}
     environment:
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path. Lets a `run:` line say
@@ -102,6 +108,11 @@ services:
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
       - ./.cargo-credentials.toml:/usr/local/cargo/credentials.toml
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${FLODL_HOME_HOST:-${HOME}/.flodl}:/flodl-home
       - ${LIBTORCH_HOST_PATH:-./libtorch/precompiled/cu128}:/usr/local/libtorch:ro
       # SSH-agent socket forwarded so the launcher can ssh into remote
       # cluster hosts. Falls back to /dev/null when the user has no
@@ -132,11 +143,15 @@ services:
     network_mode: host
     environment:
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path. Lets a `run:` line say
       # `--features "$FDL_GPU_FEATURE"` instead of hardcoding a vendor.
       - FDL_GPU_FEATURE
+      # Names the mounted libtorch variant. The mount point is fixed, so
+      # this is what lets flodl-sys notice a variant switch and rebuild.
+      - LIBTORCH_HOST_PATH
       # Cluster envelope: when fdl-cli activates a `cluster: true`
       # command, these are set on the controller process so the
       # spawned user binary's `flodl::launcher::dispatch` detects
@@ -223,9 +238,13 @@ services:
     devices:
       - /dev/kfd
       - /dev/dri
+    # Numeric ids from the host, exported by `fdl`: a group NAME resolves
+    # inside the image, whose ids need not match the host's, and the
+    # container then sees no GPU. The names are the fallback for a bare
+    # `docker compose` call.
     group_add:
-      - video
-      - render
+      - "${FDL_VIDEO_GID:-video}"
+      - "${FDL_RENDER_GID:-render}"
     # HSA needs these to map queues; without them the runtime fails at
     # device init rather than at first op.
     security_opt:
@@ -236,6 +255,11 @@ services:
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
       - ./.cargo-credentials.toml:/usr/local/cargo/credentials.toml
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${FLODL_HOME_HOST:-${HOME}/.flodl}:/flodl-home
       # LIBTORCH_HOST_PATH, same as the cuda services: fdl exports it
       # from the ACTIVE variant, so a `builds/gfx…` install (or a
       # per-host `arch:` in prebuild docker mode) mounts what fdl
@@ -255,11 +279,15 @@ services:
     network_mode: host
     environment:
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path. Lets a `run:` line say
       # `--features "$FDL_GPU_FEATURE"` instead of hardcoding a vendor.
       - FDL_GPU_FEATURE
+      # Names the mounted libtorch variant. The mount point is fixed, so
+      # this is what lets flodl-sys notice a variant switch and rebuild.
+      - LIBTORCH_HOST_PATH
       - FLODL_INTERNAL_FULL_CLUSTER_JSON
       - FLODL_INTERNAL_FDL_CMD
       - FDL_ENV
@@ -395,6 +423,9 @@ services:
       # fdl from the variant path. Lets a `run:` line say
       # `--features "$FDL_GPU_FEATURE"` instead of hardcoding a vendor.
       - FDL_GPU_FEATURE
+      # Names the mounted libtorch variant. The mount point is fixed, so
+      # this is what lets flodl-sys notice a variant switch and rebuild.
+      - LIBTORCH_HOST_PATH
       # Cluster envelope: when fdl-cli activates a `cluster: true`
       # command, these are set on the controller process so the
       # spawned user binary's `flodl::launcher::dispatch` detects

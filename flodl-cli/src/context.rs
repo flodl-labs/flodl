@@ -93,9 +93,18 @@ fn find_project_root() -> Option<PathBuf> {
 
 /// Global root: $FLODL_HOME or ~/.flodl/
 fn global_root() -> PathBuf {
-    env::var("FLODL_HOME")
+    global_root_if_named().unwrap_or_else(|| home_dir().join(".flodl"))
+}
+
+/// The global root when the environment actually names one: `$FLODL_HOME`,
+/// else `.flodl` under `$HOME`. `None` when neither is set. An empty value
+/// counts as unset. This is the rule flodl itself applies to its dataset
+/// cache and telemetry, so a check made here looks where a run will write.
+pub(crate) fn global_root_if_named() -> Option<PathBuf> {
+    let named = |key: &str| env::var_os(key).filter(|v| !v.is_empty());
+    named("FLODL_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".flodl"))
+        .or_else(|| named("HOME").map(|h| PathBuf::from(h).join(".flodl")))
 }
 
 pub(crate) fn home_dir() -> PathBuf {

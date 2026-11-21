@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 
 use crate::tensor::{Result, TensorError};
 
-/// Node-local dataset cache root: `~/.flodl/data`.
+/// Node-local dataset cache root: `$FLODL_HOME/data`, by default
+/// `~/.flodl/data`.
 ///
 /// Home-relative on purpose, by the same rule the cluster paths follow. A
 /// source root is named across hosts, so it must be absolute (a `~` means
@@ -45,17 +46,18 @@ use crate::tensor::{Result, TensorError};
 /// paths). A cache is one box's own bookkeeping, so it needs no
 /// privileges to create and nothing outside the box ever names it.
 ///
-/// Falls back to a temp-dir subtree when `HOME` is unset, and says so:
-/// `/tmp` is frequently tmpfs, where a large corpus would be spent as RAM
-/// rather than disk.
+/// Falls back to a temp-dir subtree when neither `FLODL_HOME` nor `HOME`
+/// is set, and says so: `/tmp` is frequently tmpfs, where a large corpus
+/// would be spent as RAM rather than disk.
 pub fn data_cache_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".flodl").join("data");
+    if let Some(root) = crate::home::flodl_home() {
+        return root.join("data");
     }
     let tmp = std::env::temp_dir().join("flodl-data");
     eprintln!(
-        "flodl data: HOME unset, caching datasets under {} — on a tmpfs /tmp \
-         this spends RAM, not disk. Set HOME, or pre-provision the source root.",
+        "flodl data: FLODL_HOME and HOME unset, caching datasets under {}. On a \
+         tmpfs /tmp this spends RAM, not disk. Set one of them, or pre-provision \
+         the source root.",
         tmp.display(),
     );
     tmp
