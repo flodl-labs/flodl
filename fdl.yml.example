@@ -148,11 +148,13 @@ commands:
     docker: gpu
   gpu-test-all:
     description: Full GPU suite (parallel + NCCL isolated + serial)
-    run: cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture && cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 nccl && cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 graph_distribute && cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute --skip _live
+    # Every step runs even when an earlier one fails, and the last line
+    # names the steps that did: a first failure must not hide the rest.
+    run: failed=""; cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture || failed="$failed parallel"; cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 nccl || failed="$failed nccl"; cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 graph_distribute || failed="$failed graph_distribute"; cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 --skip nccl --skip graph_distribute --skip _live || failed="$failed serial"; [ -z "$failed" ] || { echo "gpu-test-all failed in:$failed"; exit 1; }
     docker: gpu
   gpu-test-nccl:
     description: NCCL/DDP tests only (isolated processes)
-    run: cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 nccl && cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 graph_distribute
+    run: failed=""; cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 nccl || failed="$failed nccl"; cargo test -p flodl -p flodl-hf --features "$FDL_GPU_FEATURE" -- --nocapture --ignored --test-threads=1 graph_distribute || failed="$failed graph_distribute"; [ -z "$failed" ] || { echo "gpu-test-nccl failed in:$failed"; exit 1; }
     docker: gpu
   gpu-test-serial:
     description: Serial GPU tests (Graphs, manual_seed, probes)

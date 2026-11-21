@@ -299,6 +299,15 @@ services:
       # fails every remote dial with a bare `Permission denied`.
       - FLODL_INTERNAL_HOST_USER
       - SSH_AUTH_SOCK=/ssh-agent
+      # Upstream switches read by libtorch and the HIP runtime, passed
+      # through when set on the host and absent otherwise: TunableOp
+      # (picks the fastest GEMM routine per shape, see
+      # docs/troubleshooting.md) and the kernel-serialization level a
+      # HIP error message asks for.
+      - PYTORCH_TUNABLEOP_ENABLED
+      - PYTORCH_TUNABLEOP_TUNING
+      - PYTORCH_TUNABLEOP_FILENAME
+      - AMD_SERIALIZE_KERNEL
 
   cuda-rank:
     image: flodl-cuda:${CUDA_TAG:-12.8}

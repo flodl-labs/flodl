@@ -555,6 +555,14 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Compose only passes variables listed here into the container —
       # without this line that spelling breaks inside every service.
       - FDL_GPU_FEATURE
+      # Upstream switches read by libtorch and the HIP runtime, passed
+      # through when set on the host: TunableOp (picks the fastest GEMM
+      # routine per shape) and the kernel-serialization level a HIP
+      # error message asks for.
+      - PYTORCH_TUNABLEOP_ENABLED
+      - PYTORCH_TUNABLEOP_TUNING
+      - PYTORCH_TUNABLEOP_FILENAME
+      - AMD_SERIALIZE_KERNEL
 "#
         )
     } else {
@@ -692,6 +700,14 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Names the mounted libtorch variant. The mount point is fixed, so
       # this is what lets flodl-sys notice a variant switch and rebuild.
       - LIBTORCH_HOST_PATH
+      # Upstream switches read by libtorch and the HIP runtime, passed
+      # through when set on the host: TunableOp (picks the fastest GEMM
+      # routine per shape) and the kernel-serialization level a HIP
+      # error message asks for.
+      - PYTORCH_TUNABLEOP_ENABLED
+      - PYTORCH_TUNABLEOP_TUNING
+      - PYTORCH_TUNABLEOP_FILENAME
+      - AMD_SERIALIZE_KERNEL
 "#
         )
     }
