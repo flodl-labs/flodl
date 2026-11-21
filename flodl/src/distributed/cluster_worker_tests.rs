@@ -246,11 +246,7 @@ fn end_to_end_sync_nccl_via_coord_smoke() {
         .num_epochs(1)
     };
     let coord_thread = thread::spawn(move || -> Result<CCoord> {
-        CCoord::start_from_listener(
-            coord_listener,
-            TEST_SALT,
-            config_for_coord(),
-        )
+        CCoord::start_from_listener(coord_listener, TEST_SALT, config_for_coord())
     });
 
     // 3. Build NCCL comms via NcclComms::new + split() — single-
@@ -449,11 +445,7 @@ fn end_to_end_cadence_nccl_via_coord_smoke() {
         .num_epochs(num_epochs)
     };
     let coord_thread = thread::spawn(move || -> Result<CCoord> {
-        CCoord::start_from_listener(
-            coord_listener,
-            TEST_SALT,
-            config_for_coord(),
-        )
+        CCoord::start_from_listener(coord_listener, TEST_SALT, config_for_coord())
     });
 
     let devices: Vec<Device> = (0..world_size as u8).map(Device::CUDA).collect();
