@@ -486,8 +486,9 @@ call.
   that: `--train-tokens` snaps the staged corpus so the pass divides exactly.
 - **Scope.** `TrainerConfig::with_epoch_splits`, `builder.epoch_splits(n)`,
   and the solo `SplitSampler` for non-distributed loaders. In `ddp-bench`:
-  `--epoch-splits N` (DDP modes; the solo baseline drives its own loop and
-  refuses the flag rather than ignoring it).
+  `--epoch-splits N`, on every mode. One device splits a pass the same way:
+  the trainer's single-device path draws the same slices, and the bench's
+  hand-written `solo-N` loop follows them.
 
 ---
 

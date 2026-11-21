@@ -548,3 +548,101 @@ fn epoch_splits_multiply_the_epochs_actually_run() {
         "2 passes x 4 splits must run 8 epochs, not 2",
     );
 }
+
+// The single-device path under `epoch_splits`: an epoch is a slice of a
+// pass there too. Every side task (metrics, eval, checkpoint) fires per
+// slice, and the slices of one pass are disjoint and cover it.
+#[test]
+fn single_device_epoch_splits_slice_the_pass_and_fire_per_slice() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return; // auto-promote path; this pins the in-process fallback
+    }
+    // Each row carries its own index, so the train step can record what
+    // was TRAINED. Counting dataset reads would not do: the data plane
+    // also reads a sample to size its budgets.
+    struct Indexed(usize);
+    impl crate::data::BatchDataSet for Indexed {
+        fn len(&self) -> usize {
+            self.0
+        }
+        fn get_batch(&self, indices: &[usize]) -> crate::tensor::Result<Vec<Tensor>> {
+            let n = indices.len() as i64;
+            let rows: Vec<f32> = indices.iter().flat_map(|&i| [i as f32; 4]).collect();
+            Ok(vec![
+                Tensor::from_f32(&rows, &[n, 4], Device::CPU)?,
+                Tensor::zeros(
+                    &[n, 2],
+                    TensorOptions {
+                        dtype: DType::Float32,
+                        device: Device::CPU,
+                    },
+                )?,
+            ])
+        }
+    }
+
+    let count =
+        |c: &Arc<std::sync::atomic::AtomicUsize>| c.load(std::sync::atomic::Ordering::Relaxed);
+    let trained = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let metrics = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let evals = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ckpts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (t, m, e, c) = (
+        Arc::clone(&trained),
+        Arc::clone(&metrics),
+        Arc::clone(&evals),
+        Arc::clone(&ckpts),
+    );
+
+    let ddp = crate::distributed::Trainer::builder(
+        |dev| Linear::on_device(4, 2, dev),
+        |params| crate::nn::SGD::new(params, 0.0, 0.0),
+        move |model: &Linear, batch: &[Tensor]| {
+            let rows = batch[0].to_f32_vec()?;
+            t.lock()
+                .unwrap()
+                .extend(rows.chunks(4).map(|r| r[0] as usize));
+            mse_train(model, batch)
+        },
+    )
+    .dataset(Arc::new(Indexed(64)))
+    .batch_size(4)
+    .num_epochs(2)
+    .epoch_splits(4)
+    .backend(AverageBackend::Cpu)
+    .metrics_fn(move |_| {
+        m.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    })
+    .eval_dataset(Arc::new(TestDataset { n: 8 }))
+    .eval_every(EvalCadence::Epochs(1))
+    .eval_fn(|_model, _ds| Ok(1.0))
+    .eval_result_fn(move |epoch, _| {
+        e.lock().unwrap().push(epoch);
+        Ok(())
+    })
+    .checkpoint_every(1)
+    .checkpoint_fn(move |_, _| {
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    })
+    .run()
+    .unwrap();
+    ddp.join().unwrap();
+
+    assert_eq!(count(&metrics), 8, "one metrics report per slice");
+    assert_eq!(count(&ckpts), 8, "one checkpoint per slice");
+    assert_eq!(*evals.lock().unwrap(), (1..=8).collect::<Vec<_>>());
+
+    let trained = trained.lock().unwrap();
+    assert_eq!(trained.len(), 128, "2 passes of 64 samples");
+    for pass in trained.chunks(64) {
+        let mut sorted = pass.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (0..64).collect::<Vec<_>>(),
+            "a pass covers every sample once",
+        );
+    }
+}

@@ -357,7 +357,8 @@ struct Cli {
     /// what a rank trains. Under `--epoch-splits` every split is an epoch, so
     /// a single-pass run gets a trajectory. CPU modes score at the first
     /// realized reduce after the epoch boundary, so an epoch with no reduce
-    /// carries no point. Solo modes eval in-process.
+    /// carries no point. `solo-trainer` follows this flag like any trainer
+    /// mode; the hand-written `solo-N` loop evals every epoch regardless.
     #[option]
     per_epoch_eval: bool,
 
@@ -880,6 +881,10 @@ fn run() -> flodl::tensor::Result<()> {
         for name in DdpMode::all_names() {
             eprintln!("  {}", style::green(name));
         }
+        eprintln!(
+            "  {}  one device through the trainer; not part of \"all\"",
+            style::green(config::SOLO_TRAINER)
+        );
         eprintln!();
         eprintln!(
             "Pass either to {} / {}, or \"all\".",
@@ -1125,6 +1130,20 @@ fn run() -> flodl::tensor::Result<()> {
                 || flodl::distributed::launcher::model_sig_probe_requested();
             if mode.requires_multi_gpu() && gpu_count < 2 && !in_cluster {
                 let why = format!("{mode} (requires 2+ GPUs, have {gpu_count})");
+                eprintln!("  skipping {why}");
+                skipped.push(why);
+                continue;
+            }
+            // solo-trainer is the trainer on ONE device. With two visible
+            // the trainer fans out into a cluster, and under a cluster
+            // overlay it already is one: either way the cell would be a
+            // DDP run recorded under a solo name.
+            if matches!(mode, DdpMode::SoloTrainer) && (gpu_count >= 2 || in_cluster) {
+                let why = if in_cluster {
+                    format!("{mode} (runs one device, not a cluster)")
+                } else {
+                    format!("{mode} (runs one device, have {gpu_count}: pick one with --gpus N)")
+                };
                 eprintln!("  skipping {why}");
                 skipped.push(why);
                 continue;

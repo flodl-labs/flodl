@@ -4,11 +4,19 @@ use std::fmt;
 
 use flodl::distributed::{ApplyPolicy, AverageBackend};
 
+/// Name of [`DdpMode::SoloTrainer`], asked for by name only.
+pub const SOLO_TRAINER: &str = "solo-trainer";
+
 /// A DDP training mode to benchmark.
 #[derive(Debug, Clone)]
 pub enum DdpMode {
-    /// Single GPU, no DDP.
+    /// Single GPU, no DDP: the bench's own hand-written loop, the control
+    /// every other mode is measured against.
     Solo(usize),
+    /// Single device through `Trainer::builder()`: the trainer's loop and
+    /// data plane with nothing to average. Against `solo-N` it prices the
+    /// trainer itself, and it is how a one-GPU box exercises the trainer.
+    SoloTrainer,
     /// Framework-managed DDP via `Trainer::builder()` (process-per-rank
     /// on multi-GPU rigs).
     Builder {
@@ -44,12 +52,16 @@ impl DdpMode {
                 policy: ApplyPolicy::Async,
                 backend: AverageBackend::Cpu,
             }),
+            SOLO_TRAINER => Some(DdpMode::SoloTrainer),
             _ if s.starts_with("solo-") => s[5..].parse::<usize>().ok().map(DdpMode::Solo),
             _ => None,
         }
     }
 
-    /// All known mode names.
+    /// The modes a sweep (`--mode all`, or no `--mode`) runs, and the set a
+    /// report checks for missing runs. [`SOLO_TRAINER`] is deliberately not
+    /// one of them: it needs exactly one visible device, so on the
+    /// multi-GPU rigs sweeps are made for it could only ever be skipped.
     pub fn all_names() -> &'static [&'static str] {
         &[
             "solo-0",
@@ -65,7 +77,7 @@ impl DdpMode {
 
     /// Whether this mode requires multiple GPUs.
     pub fn requires_multi_gpu(&self) -> bool {
-        !matches!(self, DdpMode::Solo(_))
+        matches!(self, DdpMode::Builder { .. })
     }
 }
 
@@ -73,6 +85,7 @@ impl fmt::Display for DdpMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DdpMode::Solo(idx) => write!(f, "solo-{idx}"),
+            DdpMode::SoloTrainer => f.write_str(SOLO_TRAINER),
             DdpMode::Builder { policy, backend } => {
                 let b = match backend {
                     AverageBackend::Nccl => "nccl",
@@ -410,5 +423,22 @@ mod token_count_tests {
         assert!(parse_token_count("-5").is_err());
         assert!(parse_token_count("0").is_err());
         assert!(parse_token_count("1.5M").is_err());
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::{DdpMode, SOLO_TRAINER};
+
+    #[test]
+    fn solo_trainer_is_a_one_device_mode_asked_for_by_name() {
+        let mode = DdpMode::parse(SOLO_TRAINER).expect("solo-trainer parses");
+        assert!(matches!(mode, DdpMode::SoloTrainer));
+        assert_eq!(mode.to_string(), SOLO_TRAINER);
+        assert!(!mode.requires_multi_gpu());
+        // The `solo-` prefix must not swallow it into a device index, and a
+        // sweep must not pick it up.
+        assert!(matches!(DdpMode::parse("solo-1"), Some(DdpMode::Solo(1))));
+        assert!(!DdpMode::all_names().contains(&SOLO_TRAINER));
     }
 }
