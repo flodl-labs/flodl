@@ -322,6 +322,12 @@ mod tests {
     #[test]
     #[ignore = "environment probe: needs a host-networked container + a foreign holder"]
     fn names_a_holder_in_another_container() {
+        // Nothing listens on 2222 unless `cuda-rank` is up, and then
+        // there is no foreign holder to name.
+        if std::net::TcpListener::bind("0.0.0.0:2222").is_ok() {
+            eprintln!("port 2222 is free here (cuda-rank not running); nothing to diagnose");
+            return;
+        }
         let hint = port_holder_hint(2222);
         println!("port 2222 -> {hint:?}");
         let hint = hint.expect("2222 is held by cuda-rank's sshd; the socket must be seen");

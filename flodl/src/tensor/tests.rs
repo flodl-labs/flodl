@@ -802,7 +802,14 @@ fn test_cuda_devices_has_compute_capability() {
     let devices = gpu_devices();
     assert!(!devices.is_empty());
     for info in &devices {
-        assert!(info.sm_major > 0, "compute capability should be detected");
+        // Compute capability is an NVIDIA notion: an AMD card has an
+        // architecture name and no `sm_` pair to report.
+        let arch = gpu_arch_name(info.index as i32).unwrap_or_default();
+        if arch.starts_with("sm_") {
+            assert!(info.sm_major > 0, "compute capability should be detected");
+        } else {
+            assert_eq!(info.sm_major, 0, "{arch} must not claim a capability");
+        }
         eprintln!(
             "  CUDA({}) {} {} {:.1}GB",
             info.index,
@@ -840,23 +847,28 @@ fn test_gpu_arch_name_is_vendor_shaped() {
 
 #[test]
 #[ignore = "GPU diagnostics need CUDA; run with: fdl gpu-test-all"]
-fn test_discrete_gpu_reports_not_integrated_and_budgets_unchanged() {
+fn test_integrated_flag_resolves_and_discrete_budgets_are_unchanged() {
     if !test_device().is_cuda() {
         return;
     }
+    let idx = test_device().index() as i32;
     for i in 0..gpu_device_count() {
         let integrated =
             gpu_is_integrated(i).expect("integrated flag should resolve on a live device");
         eprintln!("  device {i}: integrated={integrated}");
-        // Every card this suite runs on is discrete. The unified
-        // budget path must therefore be a strict no-op here: it is
-        // new machinery on the hot path for every existing user, and
-        // a regression would silently shrink their host RAM budget.
-        assert!(!integrated, "expected a discrete GPU in CI/dev");
     }
     let available = crate::sys::mem_info().unwrap().available_bytes;
     let adjusted = crate::data::budget::unified_adjusted_available(available, test_device(), None);
-    assert_eq!(adjusted, available, "discrete must not lose host RAM");
+    if gpu_is_integrated(idx) == Some(true) {
+        // Unified memory: the correction may only ever take host RAM
+        // away, since the device's pool is carved from the same bytes.
+        assert!(adjusted <= available, "unified must not gain host RAM");
+    } else {
+        // The unified budget path is machinery on the hot path of every
+        // discrete-card user, and must be a strict no-op for them: a
+        // regression would silently shrink their host RAM budget.
+        assert_eq!(adjusted, available, "discrete must not lose host RAM");
+    }
 }
 
 #[test]
@@ -897,6 +909,12 @@ fn test_cuda_primary_context_and_nvml_probes() {
     let gpus = crate::sys::detect_gpus();
     assert!(!gpus.is_empty(), "detect_gpus should see the test GPU");
     for g in &gpus {
+        // NVML is NVIDIA's library; an AMD card is read from sysfs by the
+        // monitor and has nothing to answer here.
+        if g.vendor != crate::sys::GpuVendor::Nvidia {
+            assert!(gpu_smi_memory_info_idx(g.index as i32).is_none());
+            continue;
+        }
         let (used, total) = gpu_smi_memory_info_idx(g.index as i32)
             .expect("NVML memory info should be available on a CUDA rig");
         assert!(total > 0, "device-wide VRAM total should be non-zero");

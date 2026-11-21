@@ -53,6 +53,9 @@ fn test_ddp_handle_send_sync() {
 
 #[test]
 fn test_builder_with_defaults() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return; // auto-promote path; this pins the in-process fallback
+    }
     let ddp = crate::distributed::Trainer::builder(
         |dev| Linear::on_device(4, 2, dev),
         |params| crate::nn::SGD::new(params, 0.01, 0.0),
@@ -72,6 +75,9 @@ fn test_builder_with_defaults() {
 
 #[test]
 fn test_builder_with_all_options() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return; // auto-promote path; this pins the in-process fallback
+    }
     // Workload is intentionally tiny (8 samples / batch 4 / 1 epoch =
     // 2 steps): this test verifies that every builder setter is wired,
     // not that policy survives load. ElChe is sized for production
@@ -270,6 +276,9 @@ fn test_worker_set_lr() {
 
 #[test]
 fn test_epoch_fn_called_per_epoch() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return; // auto-promote path; this pins the in-process fallback
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let counter = Arc::new(AtomicUsize::new(0));
@@ -349,6 +358,9 @@ fn test_epoch_fn_called_per_epoch() {
 
 #[test]
 fn test_epoch_fn_set_lr() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return; // auto-promote path; this pins the in-process fallback
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let call_count = Arc::new(AtomicUsize::new(0));

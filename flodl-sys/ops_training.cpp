@@ -467,11 +467,19 @@ struct FlodlRnnParamsImpl {
 // the original Parameter tensors in Rust also see the flat layout.
 // Persists across training steps (in-place optimizers keep the storage).
 // Self-corrects if the layout is broken (checkpoint load, cast, etc.).
+//
+// Only a cuDNN build has this layout to produce. A ROCm build runs its
+// RNNs through MIOpen, which takes the weights as they are, and the
+// flatten call raises there ("ATen not compiled with cuDNN support").
+// `_use_cudnn_rnn_flatten_weight` is the gate PyTorch's own
+// flatten_parameters() consults, so it also covers a CUDA build
+// compiled without cuDNN.
 // mode: 2 = LSTM, 3 = GRU
 static void flatten_rnn_params(std::vector<at::Tensor>& params,
                                 int64_t mode, int64_t num_layers,
                                 bool batch_first) {
     if (params.empty() || !params[0].is_cuda()) return;
+    if (!at::_use_cudnn_rnn_flatten_weight()) return;
 
     int64_t weight_stride0 = 4; // w_ih, w_hh, b_ih, b_hh per layer
     int64_t input_size = params[0].size(1);  // w_ih: [gates*hs, input_size]
