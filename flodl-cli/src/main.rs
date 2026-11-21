@@ -208,6 +208,7 @@ fn main() -> ExitCode {
                 cli.data_path,
                 cli.libtorch_path,
                 cli.docker,
+                cli.rank_host,
             );
             if code == 0 {
                 ExitCode::SUCCESS

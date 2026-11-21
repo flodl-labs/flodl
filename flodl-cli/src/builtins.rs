@@ -73,6 +73,13 @@ pub struct ProbeArgs {
     /// field in `fdl.cluster.yml`.
     #[option]
     pub docker: Option<String>,
+    /// Judge this box as a cluster host, where every GPU is a rank: a
+    /// card the libtorch build does not cover, a card with no runtime,
+    /// or a missing NCCL is then an error even when another card works.
+    /// Without it those are warnings as long as the box has something
+    /// to train on. `fdl @cluster probe` sets it for every host.
+    #[option]
+    pub rank_host: bool,
 }
 
 /// Live cluster run status.

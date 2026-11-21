@@ -208,6 +208,10 @@ fn rocm_base_tag_for(version: &str) -> String {
     }
 }
 
+/// The phrase every "this GPU is not covered" finding carries, so a
+/// caller can tell those apart from the other findings it collects.
+pub(crate) const NOT_COVERED: &str = "not covered by libtorch archs";
+
 /// Record per-GPU arch coverage for a resolved variant and push a loud,
 /// actionable issue for every GPU the libtorch build does not cover — or a
 /// single issue when the variant carries no `.arch` metadata. Returns
@@ -226,7 +230,7 @@ pub(crate) fn arch_coverage(
             archs_match.push((g.index, ok));
             if !ok {
                 issues.push(format!(
-                    "GPU {} ({}, {}) not covered by libtorch archs `{}`. \
+                    "GPU {} ({}, {}) {NOT_COVERED} `{}`. \
                      Rebuild libtorch with this arch or activate a \
                      compatible variant.",
                     g.index,

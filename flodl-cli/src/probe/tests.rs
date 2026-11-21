@@ -10,7 +10,10 @@ use std::path::Path;
 
 use flodl_hw::{GpuArch, GpuVendor};
 
-use super::checks::{check_data_path, check_nccl, gpu_toolkit_warning, unescape_mount};
+use super::checks::{
+    check_data_path, check_nccl, gpu_toolkit_warning, nccl_absence_blocks, route_libtorch_findings,
+    unescape_mount, unusable_card_blocks,
+};
 use super::cluster::parse_remote_json;
 use super::report::report_to_json_object;
 use super::*;
@@ -223,6 +226,95 @@ fn data_path_check_reports_readable_tmp() {
     assert!(status.readable);
     assert!(issues.is_empty(), "issues = {:?}", issues);
     assert!(warnings.is_empty(), "warnings = {:?}", warnings);
+}
+
+// A card the box cannot use is an error where it leaves nothing to train
+// on, and on a cluster host, where every GPU is a rank. Seen from testers:
+// an integrated GPU beside the discrete card the run used turned a working
+// box's verdict into ISSUES.
+#[test]
+fn an_unusable_card_is_an_error_only_where_it_costs_the_run() {
+    // (rank_host, has_usable_device) -> blocks
+    assert!(
+        unusable_card_blocks(false, false),
+        "nothing left to train on"
+    );
+    assert!(
+        !unusable_card_blocks(false, true),
+        "the run uses the other card"
+    );
+    assert!(unusable_card_blocks(true, true), "every GPU is a rank");
+    assert!(unusable_card_blocks(true, false));
+
+    assert!(!nccl_absence_blocks(false, 0));
+    assert!(
+        !nccl_absence_blocks(false, 1),
+        "one card runs no collective"
+    );
+    assert!(nccl_absence_blocks(false, 2));
+    assert!(nccl_absence_blocks(true, 1));
+}
+
+#[test]
+fn only_coverage_findings_can_be_advisory_and_only_beside_a_covered_card() {
+    let uncovered = format!(
+        "GPU 1 (GPU gfx1036, gfx1036) {} `gfx1100`. Rebuild libtorch.",
+        detect::NOT_COVERED,
+    );
+    let broken = "libtorch not configured".to_string();
+    let run = |rank_host, some_covered| {
+        let (mut issues, mut warnings) = (Vec::new(), Vec::new());
+        route_libtorch_findings(
+            vec![uncovered.clone(), broken.clone()],
+            rank_host,
+            some_covered,
+            &mut issues,
+            &mut warnings,
+        );
+        (issues, warnings)
+    };
+
+    // Beside a covered card: advisory, and it says what the run does.
+    let (issues, warnings) = run(false, true);
+    assert_eq!(
+        issues,
+        vec![broken.clone()],
+        "a broken variant stays an error"
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0].contains("use the covered card"),
+        "{}",
+        warnings[0]
+    );
+
+    // No card covered, or a cluster host: both are errors.
+    for (rank_host, some_covered) in [(false, false), (true, true)] {
+        let (issues, warnings) = run(rank_host, some_covered);
+        assert_eq!(issues.len(), 2);
+        assert!(warnings.is_empty());
+    }
+}
+
+// The message `route_libtorch_findings` keys on is written elsewhere; if
+// the two drift apart every uncovered card silently becomes an error again.
+#[test]
+fn the_coverage_finding_carries_the_phrase_it_is_recognised_by() {
+    let info = detect::LibtorchInfo {
+        archs: Some("gfx1100".into()),
+        ..detect::libtorch_info_from_dir("precompiled/rocm71".into(), Path::new("/nonexistent"))
+    };
+    let gpu = GpuInfo {
+        index: 0,
+        vendor: GpuVendor::Nvidia,
+        name: "card".into(),
+        arch: GpuArch::Sm { major: 8, minor: 6 },
+        total_memory_mb: 1024,
+    };
+    let mut found = Vec::new();
+    let pairs = detect::arch_coverage(&info, &[gpu], &mut found);
+    assert_eq!(pairs, vec![(0, false)]);
+    assert!(found[0].contains(detect::NOT_COVERED), "{}", found[0]);
 }
 
 #[test]

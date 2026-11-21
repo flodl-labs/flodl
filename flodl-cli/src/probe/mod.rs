@@ -51,6 +51,7 @@ pub fn run(
     data_path_override: Option<PathBuf>,
     libtorch_path_override: Option<PathBuf>,
     via_docker: Option<String>,
+    rank_host: bool,
 ) -> i32 {
     let ctx = Context::resolve();
     // Cluster fan-out only applies when no explicit libtorch override
@@ -73,6 +74,7 @@ pub fn run(
         libtorch_path_override,
         via_docker,
         data_path_explicit,
+        rank_host,
     );
     if json {
         print_json(&report);
