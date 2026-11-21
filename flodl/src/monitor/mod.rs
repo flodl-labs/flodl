@@ -843,20 +843,15 @@ impl Monitor {
         // epochs as the sample drifts.
         let res = &resources;
         if let Some(alloc) = res.vram_allocated_bytes {
-            let spill = match res.vram_total_bytes {
-                Some(total) if alloc > total => alloc - total,
-                _ => 0,
-            };
             let label = match res.aggregate_rank {
                 Some(idx) => format!("VRAM[cuda{idx}]"),
                 None => String::from("VRAM"),
             };
             let _ = write!(
                 line,
-                "  {}: {} / {}",
+                "  {}: {}",
                 label,
-                format_bytes(alloc),
-                format_bytes(spill),
+                format::format_vram(alloc, res.vram_total_bytes),
             );
         }
         // Label the util sample: a bare `(14%)` after the ETA bracket reads

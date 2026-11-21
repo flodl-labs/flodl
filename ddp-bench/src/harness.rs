@@ -618,7 +618,14 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
                 .gpu_idle_pct
                 .iter()
                 .enumerate()
-                .map(|(i, p)| format!("gpu{i}:{p:.1}%"))
+                // NaN: no utilisation reading ever arrived for this device.
+                .map(|(i, p)| {
+                    if p.is_nan() {
+                        format!("gpu{i}:n/a")
+                    } else {
+                        format!("gpu{i}:{p:.1}%")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", "),
         );

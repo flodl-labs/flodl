@@ -235,7 +235,10 @@ pub struct TimelineSummary {
     pub sample_count: usize,
     /// Number of events recorded.
     pub event_count: usize,
-    /// Per-GPU idle percentage (fraction of samples with compute_util below threshold).
+    /// Per-GPU idle percentage (fraction of samples with compute_util below
+    /// threshold). `NaN` for a device whose utilisation was never
+    /// readable: its idle share is unknown, and 100% would claim a card
+    /// sat idle that nothing measured.
     pub gpu_idle_pct: Vec<f64>,
     /// Number of sync events (SyncStart count).
     pub sync_count: usize,
@@ -316,6 +319,10 @@ pub struct Timeline {
     /// for devices another node trains on — GPU data then comes solely
     /// from the workers' own `rank_samples`.
     gpu_poll: AtomicBool,
+    /// Per polled device: no utilisation reading has arrived yet. A
+    /// device that never yields one (no metrics backend, an unreadable
+    /// driver) has an unknown idle share, which is not an idle one.
+    util_unread: Mutex<Vec<bool>>,
     stop_flag: AtomicBool,
     poller_handle: Mutex<Option<JoinHandle<()>>>,
     /// Live subscribers receive batched updates at the broadcast interval.
@@ -347,6 +354,7 @@ impl Timeline {
             rank_samples: Mutex::new(Vec::new()),
             host: Mutex::new(String::new()),
             gpu_poll: AtomicBool::new(true),
+            util_unread: Mutex::new(Vec::new()),
             stop_flag: AtomicBool::new(false),
             poller_handle: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
@@ -373,6 +381,7 @@ impl Timeline {
             rank_samples: Mutex::new(Vec::new()),
             host: Mutex::new(String::new()),
             gpu_poll: AtomicBool::new(true),
+            util_unread: Mutex::new(Vec::new()),
             stop_flag: AtomicBool::new(false),
             poller_handle: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
@@ -537,8 +546,13 @@ impl Timeline {
                     }
                 }
             }
-            for v in &mut gpu_idle_pct {
-                *v = *v / sample_count as f64 * 100.0;
+            let unread = self.util_unread.lock().unwrap();
+            for (gi, v) in gpu_idle_pct.iter_mut().enumerate() {
+                *v = if unread.get(gi).copied().unwrap_or(false) {
+                    f64::NAN
+                } else {
+                    *v / sample_count as f64 * 100.0
+                };
             }
         }
 
@@ -778,20 +792,18 @@ impl Timeline {
         let mut prev_cpu: Option<CpuTimes> = None;
         let mut last_broadcast = Instant::now();
 
-        // GPU identity via nvidia-smi, live metrics via NVML, allocator
-        // stats gated on an existing CUDA context: the timeline poller
-        // must never initialize the CUDA runtime (it can run in the
-        // launcher, and a context would pin VRAM on every device).
-        // `(physical nvidia-smi index, total VRAM bytes)` per device;
-        // Vec position doubles as the CUDA runtime index.
-        let gpu_statics: Vec<(u8, u64)> = if cfg!(feature = "gpu") {
-            crate::sys::detect_gpus()
-                .into_iter()
-                .map(|g| (g.index, g.total_memory_mb * 1024 * 1024))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Device identity and live metrics both come without a GPU
+        // runtime, and allocator stats are gated on an existing context:
+        // the timeline poller must never initialize the runtime (it can
+        // run in the launcher, and a context would pin VRAM on every
+        // device). One entry per device, its metrics backend already
+        // resolved (NVML or amdgpu sysfs): the same source the per-epoch
+        // resource line reads, so the two cannot disagree about a card.
+        // Vec position doubles as the GPU runtime index.
+        let gpu_statics = super::resources::detect_gpu_statics();
+        if let Some(tl) = weak.upgrade() {
+            *tl.util_unread.lock().unwrap() = vec![true; gpu_statics.len()];
+        }
 
         loop {
             // Re-acquire per tick: a failed upgrade means every user Arc
@@ -830,13 +842,17 @@ impl Timeline {
             // touching them.
             let mut gpus = Vec::with_capacity(gpu_statics.len());
             let poll_gpus = this.gpu_poll.load(Ordering::SeqCst);
-            for (i, &(phys, total_static)) in gpu_statics.iter().enumerate() {
+            for (i, g) in gpu_statics.iter().enumerate() {
                 if !poll_gpus {
                     break;
                 }
-                let compute_util = crate::tensor::gpu_utilization_idx(phys as i32)
-                    .map(|u| u as u8)
-                    .unwrap_or(0);
+                let phys = g.physical_index;
+                let total_static = g.total_bytes.unwrap_or(0);
+                let util = super::resources::read_util(phys, &g.live);
+                if util.is_some() {
+                    this.util_unread.lock().unwrap()[i] = false;
+                }
+                let compute_util = util.map_or(0, |u| u.clamp(0.0, 100.0) as u8);
                 // Device-wide used/total via NVML (physical index);
                 // fall back to the nvidia-smi total when NVML is out.
                 let (vram_used, vram_total) = crate::tensor::gpu_smi_memory_info_idx(phys as i32)
@@ -1255,6 +1271,41 @@ mod tests {
         assert!((s.avg_sync_ms - 3.0).abs() < 0.01);
         assert_eq!(s.anchor_change_count, 1);
         assert_eq!(s.throttle_count, 1);
+    }
+
+    // A device whose utilisation was never readable samples as 0 on every
+    // tick. Reporting that as idle claimed a card sat idle for the whole
+    // run while it trained at full load, on every vendor the poller had
+    // no reader for.
+    #[test]
+    fn a_device_never_read_has_an_unknown_idle_share_not_a_full_one() {
+        let tl = Timeline::new(100);
+        {
+            let mut samples = tl.samples.lock().unwrap();
+            for i in 0..10 {
+                let gpu = |device, compute_util| GpuTimelineSample {
+                    device,
+                    compute_util,
+                    vram_used_bytes: 0,
+                    vram_allocated_bytes: 0,
+                    vram_total_bytes: 0,
+                };
+                samples.push(TimelineSample {
+                    elapsed_ms: i * 100,
+                    cpu_util: 50.0,
+                    ram_used_bytes: 0,
+                    ram_total_bytes: 0,
+                    // Device 0 is read and idles on half its ticks;
+                    // device 1 is never read.
+                    gpus: vec![gpu(0, if i < 5 { 0 } else { 90 }), gpu(1, 0)],
+                });
+            }
+        }
+        *tl.util_unread.lock().unwrap() = vec![false, true];
+
+        let idle = tl.summary().gpu_idle_pct;
+        assert_eq!(idle[0], 50.0);
+        assert!(idle[1].is_nan(), "an unread device reported {}", idle[1]);
     }
 
     #[test]

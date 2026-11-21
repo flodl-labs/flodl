@@ -86,7 +86,7 @@ pub struct ResourceSample {
 impl ResourceSample {
     /// Format a compact resource summary string.
     ///
-    /// Example: `"CPU: 45% | RAM: 3.2/7.8 GB | GPU: 82% | VRAM: 2.1 GB / 0 KB"`
+    /// Example: `"CPU: 45% | RAM: 3.2/7.8 GB | GPU: 82% | VRAM: 2.1 GB / 16.0 GB"`
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
 
@@ -105,19 +105,14 @@ impl ResourceSample {
             // Multi-GPU: show per-device VRAM
             for gpu in &self.gpus {
                 if let Some(alloc) = gpu.vram_allocated_bytes {
-                    let spill = match gpu.vram_total_bytes {
-                        Some(total) if alloc > total => alloc - total,
-                        _ => 0,
-                    };
                     let util = gpu
                         .util_percent
                         .map(|u| format!(" ({:.0}%)", u))
                         .unwrap_or_default();
                     parts.push(format!(
-                        "GPU{}: {} / {}{}",
+                        "GPU{}: {}{}",
                         gpu.device_index,
-                        super::format::format_bytes(alloc),
-                        super::format::format_bytes(spill),
+                        super::format::format_vram(alloc, gpu.vram_total_bytes),
                         util,
                     ));
                 }
@@ -128,14 +123,9 @@ impl ResourceSample {
                 parts.push(format!("GPU: {:.0}%", gpu));
             }
             if let Some(alloc) = self.vram_allocated_bytes {
-                let spill = match self.vram_total_bytes {
-                    Some(total) if alloc > total => alloc - total,
-                    _ => 0,
-                };
                 parts.push(format!(
-                    "VRAM: {} / {}",
-                    super::format::format_bytes(alloc),
-                    super::format::format_bytes(spill),
+                    "VRAM: {}",
+                    super::format::format_vram(alloc, self.vram_total_bytes),
                 ));
             }
         }
@@ -187,7 +177,7 @@ impl Drop for GpuPollerHandle {
 /// AMD, so each keeps its own backend. Resolving per device up front
 /// means the poller never re-decides and never pays a lookup per tick.
 #[derive(Clone)]
-enum LiveMetrics {
+pub(super) enum LiveMetrics {
     /// NVML through the shim, queried by physical index.
     Nvml,
     /// amdgpu sysfs, with every attribute path already resolved.
@@ -198,7 +188,7 @@ enum LiveMetrics {
 }
 
 /// One instantaneous utilization read, routed to the device's backend.
-fn read_util(physical_index: u8, live: &LiveMetrics) -> Option<f32> {
+pub(super) fn read_util(physical_index: u8, live: &LiveMetrics) -> Option<f32> {
     match live {
         LiveMetrics::Nvml => {
             crate::tensor::gpu_utilization_idx(physical_index as i32).map(|u| u as f32)
@@ -211,14 +201,14 @@ fn read_util(physical_index: u8, live: &LiveMetrics) -> Option<f32> {
 /// Static per-device identity, captured once at sampler construction
 /// from [`crate::sys::detect_gpus`]. No CUDA runtime involvement, and
 /// no per-sample process spawn.
-struct GpuStatic {
+pub(super) struct GpuStatic {
     /// Physical index (vendor-tool enumeration). NVML queries must use
     /// this: NVML ignores `CUDA_VISIBLE_DEVICES`.
-    physical_index: u8,
+    pub(super) physical_index: u8,
     name: String,
-    total_bytes: Option<u64>,
+    pub(super) total_bytes: Option<u64>,
     /// Resolved live-metrics backend for this device.
-    live: LiveMetrics,
+    pub(super) live: LiveMetrics,
 }
 
 /// Enumerate GPUs without touching the CUDA runtime. Position in the
@@ -226,7 +216,7 @@ struct GpuStatic {
 /// allocator reads (exact when `CUDA_VISIBLE_DEVICES` is unset or an
 /// ascending index list; a reordering list like `1,0` would mislabel
 /// allocator stats, which nothing in flodl's launch paths produces).
-fn detect_gpu_statics() -> Vec<GpuStatic> {
+pub(super) fn detect_gpu_statics() -> Vec<GpuStatic> {
     if !cfg!(feature = "gpu") {
         return Vec::new();
     }
