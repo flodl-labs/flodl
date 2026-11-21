@@ -14,6 +14,7 @@
 #include <torch/csrc/autograd/function.h>
 #include <torch/csrc/autograd/variable.h>
 #include <queue>
+#include <utility>
 #include <unordered_set>
 #ifdef __linux__
 #include <malloc.h>
@@ -42,6 +43,12 @@ extern "C" int flodl_requires_grad(FlodlTensor t) {
         flodl_fatal("flodl_requires_grad", nullptr);
     }
 }
+
+// The owning pointer grad_accumulator returns: `std::shared_ptr<Node>` up
+// to libtorch 2.13, `c10::intrusive_ptr<Node>` from 2.14. The handle below
+// boxes whichever it is, so the shim follows the header it is built with.
+using FlodlGradAccPtr =
+    decltype(torch::autograd::impl::grad_accumulator(std::declval<const at::Tensor&>()));
 
 // Force creation of the AccumulateGrad node for a leaf tensor with
 // requires_grad=true and return a handle that keeps the node alive.
@@ -73,9 +80,9 @@ extern "C" char* flodl_ensure_grad_accumulator(FlodlTensor t, void** handle_out)
         auto& tensor = unwrap(t);
         if (tensor.is_leaf() && tensor.requires_grad()) {
             auto acc = torch::autograd::impl::grad_accumulator(tensor);
-            // Heap-allocate the shared_ptr so the strong ref survives
+            // Heap-allocate the owning pointer so the strong ref survives
             // after this function returns. Rust owns the deletion.
-            auto* boxed = new std::shared_ptr<torch::autograd::Node>(std::move(acc));
+            auto* boxed = new FlodlGradAccPtr(std::move(acc));
             *handle_out = static_cast<void*>(boxed);
         }
         return nullptr;
@@ -91,7 +98,7 @@ extern "C" char* flodl_ensure_grad_accumulator(FlodlTensor t, void** handle_out)
 extern "C" void flodl_grad_accumulator_delete(void* handle) {
     try {
     if (handle != nullptr) {
-        delete static_cast<std::shared_ptr<torch::autograd::Node>*>(handle);
+        delete static_cast<FlodlGradAccPtr*>(handle);
     }
     } catch (const std::exception& e) {
         flodl_fatal("flodl_grad_accumulator_delete", e.what());
