@@ -137,6 +137,12 @@ fdl ddp-bench --list
 fdl ddp-bench --report
 ```
 
+## Sweeps
+
+`--model all`, `--mode all`, or leaving either out, asks for several cells, one per (model, mode) pair. A sweep trains each cell in a process of its own and exits non-zero if any of them failed; cells the box cannot run (a multi-GPU mode on one card, `solo-2` on a two-card box) are skipped and named. The report is built from the run directories afterwards, so it does not care how the cells were launched.
+
+A cluster that forms through a join window takes one cell per invocation: each cell is a training session of its own, and the fleet would have to dial in again for every one.
+
 ## Run length and learning rate
 
 Without `--epochs`, a model runs its own default: 200 passes for ResNet-20, 50 for gpt-nano and char-rnn, 5 for the small models, 3 for OLMo. `--quick` selects the model's short profile instead, sized to finish in a few minutes on a mid-range card while the loss still falls clearly:

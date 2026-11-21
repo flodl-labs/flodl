@@ -4,6 +4,7 @@
 //! correctness and measure convergence, throughput, and GPU utilization.
 
 mod analyze;
+mod cell;
 mod config;
 mod data;
 mod download;
@@ -115,22 +116,6 @@ struct Cli {
     /// Live dashboard port.
     #[option]
     monitor: Option<u16>,
-
-    /// Check results against baselines.
-    #[option]
-    validate: bool,
-
-    /// Save results as baseline.
-    #[option]
-    save_baseline: bool,
-
-    /// Baseline file.
-    #[option(default = "baselines/baseline.json")]
-    baseline: String,
-
-    /// Validation tolerance, 0.0-1.0.
-    #[option(default = "0.15")]
-    tolerance: f64,
 
     /// RNG seed.
     #[option(default = "42")]
@@ -510,6 +495,7 @@ fn main() {
     // worker-role process falling into that gating sees ONE host of a
     // multi-host world and exits without ever joining.
     flodl::distributed::launcher::exit_if_worker_role();
+    cell::exit_with_driver();
     if let Err(e) = run() {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -838,10 +824,6 @@ fn run() -> flodl::tensor::Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from("data")),
     };
     let monitor_port = cli.monitor;
-    let validate = cli.validate;
-    let save_baseline = cli.save_baseline;
-    let baseline_path = cli.baseline.clone();
-    let tolerance = cli.tolerance;
     let seed = cli.seed;
     // Same gate as --train-tokens: a metric choice a model cannot honor must
     // not be recorded as if it had been.
@@ -1109,7 +1091,26 @@ fn run() -> flodl::tensor::Result<()> {
         );
     }
 
-    let mut all_results: Vec<Vec<harness::RunResult>> = Vec::new();
+    // A sweep trains each cell in a process of its own (see `cell`). The
+    // model-signature probe is the exception: it constructs a model and
+    // exits before any training, so it stays in this process.
+    let cells = model_defs.len() * modes.len();
+    let sweep = cells > 1 && !flodl::distributed::launcher::model_sig_probe_requested();
+    if sweep && std::env::var_os("FLODL_INTERNAL_CLUSTER_JSON").is_some() {
+        return Err(flodl::tensor::TensorError::new(&format!(
+            "this cluster rank was started with a sweep of {cells} cells, and a rank \
+             trains exactly one: its launcher must name one --model and one --mode",
+        )));
+    }
+    if sweep && cell::cluster_has_join_window() {
+        return Err(flodl::tensor::TensorError::new(&format!(
+            "a sweep of {cells} cells cannot run on a cluster that forms through a \
+             join window: every cell is a training session of its own and would \
+             open a new window for the fleet to dial into. Run one cell per \
+             invocation, with one --model and one --mode.",
+        )));
+    }
+
     // A cell that failed must reach the exit code. Reporting it only on
     // stderr made `ddp-bench` exit 0 after training nothing, which reads
     // as success to everything upstream — `fdl join`'s model-sig probe
@@ -1125,7 +1126,6 @@ fn run() -> flodl::tensor::Result<()> {
 
     for model_def in &model_defs {
         let defaults = &model_def.defaults;
-        let mut model_results = Vec::new();
 
         for mode in &modes {
             // Skip multi-GPU modes when only 1 GPU is visible AND
@@ -1171,6 +1171,15 @@ fn run() -> flodl::tensor::Result<()> {
                 let why = format!("{mode} (GPU index {idx} not available, have {gpu_count})");
                 eprintln!("  skipping {why}");
                 skipped.push(why);
+                continue;
+            }
+
+            if sweep {
+                attempted_cells += 1;
+                if let Err(e) = cell::run(model_def.name, &mode.to_string()) {
+                    eprintln!("  FAILED: {} / {}: {}", model_def.name, mode, e);
+                    failed_cells += 1;
+                }
                 continue;
             }
 
@@ -1243,56 +1252,9 @@ fn run() -> flodl::tensor::Result<()> {
             };
 
             attempted_cells += 1;
-            match harness::run_combo(model_def, mode, &run_config) {
-                Ok(result) => model_results.push(result),
-                Err(e) => {
-                    eprintln!("  FAILED: {} / {}: {}", model_def.name, mode, e);
-                    failed_cells += 1;
-                }
-            }
-        }
-
-        all_results.push(model_results);
-    }
-
-    // Flatten results for baseline operations
-    let flat_results: Vec<&harness::RunResult> = all_results.iter().flat_map(|v| v.iter()).collect();
-
-    // Save baseline
-    if save_baseline {
-        let baselines = report::results_to_baselines(
-            &flat_results.iter().map(|r| (*r).clone()).collect::<Vec<_>>(),
-        );
-        // Ensure directory exists
-        if let Some(parent) = std::path::Path::new(&baseline_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match report::save_baselines(&baseline_path, &baselines) {
-            Ok(()) => eprintln!("\nBaseline saved to {baseline_path} ({} entries)", baselines.len()),
-            Err(e) => eprintln!("\nFailed to save baseline: {e}"),
-        }
-    }
-
-    // Validate against baseline
-    if validate {
-        match report::load_baselines(&baseline_path) {
-            Ok(baselines) => {
-                let results_owned: Vec<harness::RunResult> =
-                    flat_results.iter().map(|r| (*r).clone()).collect();
-                let (pass, fail, msgs) = report::validate_results(&results_owned, &baselines, tolerance);
-                eprintln!("\n=== Validation ({:.0}% tolerance) ===\n", tolerance * 100.0);
-                for msg in &msgs {
-                    eprintln!("{msg}");
-                }
-                eprintln!("\n{pass} passed, {fail} failed");
-                if fail > 0 {
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                eprintln!("\nCannot validate: {e}");
-                eprintln!("Run with --save-baseline first to generate baselines.");
-                std::process::exit(1);
+            if let Err(e) = harness::run_combo(model_def, mode, &run_config) {
+                eprintln!("  FAILED: {} / {}: {}", model_def.name, mode, e);
+                failed_cells += 1;
             }
         }
     }

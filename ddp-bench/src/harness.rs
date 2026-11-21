@@ -185,20 +185,8 @@ impl Optimizer for DynOptimizer {
     fn set_lr(&mut self, lr: f64) { self.0.set_lr(lr) }
 }
 
-/// Result of a single (model, mode) benchmark run.
-#[derive(Clone)]
-pub struct RunResult {
-    pub model_name: String,
-    pub mode: String,
-    pub final_loss: f64,
-    /// Training config for baseline generation.
-    pub epochs: usize,
-    pub batches_per_epoch: usize,
-    pub batch_size: usize,
-}
-
 /// Run a single (model, mode) combination.
-pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Result<RunResult> {
+pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Result<()> {
     // An outer optimizer changes the training algorithm, so its runs get
     // their own artifact dir (`cpu-async-diloco`) instead of colliding
     // with the plain mode's cell. Every process (launcher + ranks) derives
@@ -632,14 +620,7 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         eprintln!("  spill: {}", spill_dir.display());
     }
 
-    Ok(RunResult {
-        model_name: model_def.name.to_string(),
-        mode: mode_str,
-        final_loss,
-        epochs: config.epochs,
-        batches_per_epoch: actual_batches,
-        batch_size: config.batch_size,
-    })
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
