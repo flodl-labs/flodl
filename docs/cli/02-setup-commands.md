@@ -75,6 +75,25 @@ older than the host loads, a newer one can fail on a symbol the host
 does not have. So auto-detect picks **7.0**, which serves every ROCm 7.x
 host, and `--rocm 7.1` is there for a host that wants the exact match.
 
+**Which ROCm runtime the container uses.** That is a separate choice
+from the variant. In the `rocm` image the image's own ROCm is loaded
+ahead of the copy libtorch bundles, so a libtorch built for 7.0 runs on
+a newer runtime, and on the cards measured so far it should: the 7.0 and
+7.1 runtimes segfault on gfx1151 and run several times slower than 10.2
+on gfx1201. So the image defaults to **ROCm 10.2**, recorded per variant
+as `rocm_runtime=` in its `.arch` file. To try another one:
+
+```sh
+ROCM_VERSION=7.2 ./fdl gpu-test      # one run, builds that image if needed
+```
+
+or edit `rocm_runtime=` in `libtorch/<variant>/.arch` to make it the
+variant's own. `fdl` works out the base image tag from the version (the
+scheme differs by release: `7.2-complete` up to 7.2, `10.2.0-full` from
+7.14). CUDA has no such knob: there the image supplies the toolchain and
+libtorch its own runtime, so the image follows the `cuda=` the variant
+was built against.
+
 The ROCm archive ships pre-built rocBLAS kernels for a fixed gfx list:
 
 ```

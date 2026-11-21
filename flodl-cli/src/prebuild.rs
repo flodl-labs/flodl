@@ -635,7 +635,25 @@ fn prebuild_one_worker(
     // for `cpu`). The compose SERVICE is `controller.docker` (above),
     // not arch-derived — the controller's toolchain builds every host.
     let features_arg = features_from_arch(arch);
-    let cuda_version_for_image = cuda_version_from_arch(arch);
+    // The image this host's variant goes with, resolved exactly as a local
+    // command resolves it (the variant's `.arch`), so a cluster build and
+    // a local one cannot land on different images for the same libtorch.
+    // The name is only the fallback, for a variant that carries no
+    // metadata: it used to be the sole source here, which gave a
+    // source-built CUDA variant the compose default image whatever it had
+    // been compiled against.
+    let image_env = {
+        let dir = if controller_variant_dir.is_relative() {
+            project_root.join(&controller_variant_dir)
+        } else {
+            controller_variant_dir.clone()
+        };
+        let mut info = crate::libtorch::detect::libtorch_info_from_dir(arch.to_string(), &dir);
+        if info.cuda_version.is_none() {
+            info.cuda_version = cuda_version_from_arch(arch);
+        }
+        crate::libtorch::detect::image_env(&info)
+    };
     // Key the target dir by host AND arch. Host alone is not enough: the
     // `arch:` field selects the libtorch variant, but in docker mode that
     // variant is bind-mounted onto the FIXED container path
@@ -766,19 +784,8 @@ fn prebuild_one_worker(
         }
     }
 
-    if let Some(cuda_version) = &cuda_version_for_image {
-        let normalised = if cuda_version.matches('.').count() < 2 {
-            format!("{cuda_version}.0")
-        } else {
-            cuda_version.clone()
-        };
-        let cuda_tag = normalised
-            .splitn(3, '.')
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(".");
-        cmd.env("CUDA_VERSION", &normalised);
-        cmd.env("CUDA_TAG", &cuda_tag);
+    for (k, v) in &image_env {
+        cmd.env(k, v);
     }
 
     let status = cmd.status().map_err(|e| format!("spawn `{sh_cmd}`: {e}"))?;
@@ -871,11 +878,10 @@ fn runtime_ld_library_path(worker_path: &str, arch: &str) -> String {
 /// version — the caller falls back to the `CUDA_VERSION` env var (or
 /// docker-compose's own default) for the toolkit image tag.
 ///
-/// Deliberately CUDA-only: it feeds the NVIDIA toolkit image tag. A
-/// `rocm70` or `gfx…` basename returns `None` for free (neither starts
-/// with `cu`). ROCm needs no sibling: its compose service pins the
-/// runtime version in the image itself (`ROCM_VERSION` build arg),
-/// rather than deriving a toolkit tag from the libtorch variant.
+/// The fallback for a variant with no `.arch` metadata; the metadata
+/// wins when present (see the call site). CUDA-only: a `rocm70` or
+/// `gfx…` basename returns `None` for free (neither starts with `cu`),
+/// and a ROCm image is not derived from the libtorch name at all.
 fn cuda_version_from_arch(arch: &str) -> Option<String> {
     let basename = std::path::Path::new(arch)
         .file_name()

@@ -3,16 +3,21 @@
 # Mirrors Dockerfile.cuda: no libtorch is baked in, the matching variant
 # is bind-mounted from libtorch/ by docker-compose.
 #
-# Override the ROCm version at build time:
-#   docker build --build-arg ROCM_VERSION=7.1 -f Dockerfile.rocm .
+# The base image is named by its full tag, because AMD changed the tag
+# scheme between releases: `7.0-complete` up to 7.2, `10.2.0-full` from
+# 7.14 on. `fdl` derives the tag from a plain version (the variant's
+# `rocm_runtime`, or `ROCM_VERSION` in the environment); a direct build
+# names it whole:
+#   docker build --build-arg ROCM_BASE_TAG=7.2-complete -f Dockerfile.rocm .
 #
-# Keep the base version aligned with the libtorch variant you mount.
-# libtorch-rocm bundles its own HIP runtime (see the LD_LIBRARY_PATH note
-# below), and a bundle that disagrees with the host driver is exactly the
-# configuration that segfaults at the first GPU op.
+# The ROCm version here need not match the one libtorch was built for.
+# This image's runtime is loaded ahead of the copy libtorch bundles (see
+# the LD_LIBRARY_PATH note below), so it is the runtime that governs, and
+# a newer one serves an older libtorch: on the cards measured so far, the
+# 7.0 and 7.1 runtimes segfault or run several times slower than 10.2.
 
-ARG ROCM_VERSION=7.0
-FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+ARG ROCM_BASE_TAG=10.2.0-full
+FROM rocm/dev-ubuntu-24.04:${ROCM_BASE_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
 

@@ -512,8 +512,8 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       context: .
       dockerfile: Dockerfile.rocm
       args:
-        ROCM_VERSION: ${{ROCM_VERSION:-7.0}}
-    image: {crate_name}-rocm
+        ROCM_BASE_TAG: ${{ROCM_BASE_TAG:-10.2.0-full}}
+    image: {crate_name}-rocm:${{ROCM_TAG:-10.2}}
     user: "${{UID:-1000}}:${{GID:-1000}}"
     devices:
       - /dev/kfd
@@ -648,8 +648,8 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       context: .
       dockerfile: Dockerfile.rocm
       args:
-        ROCM_VERSION: ${{ROCM_VERSION:-7.0}}
-    image: {crate_name}-rocm
+        ROCM_BASE_TAG: ${{ROCM_BASE_TAG:-10.2.0-full}}
+    image: {crate_name}-rocm:${{ROCM_TAG:-10.2}}
     user: "${{UID:-1000}}:${{GID:-1000}}"
     devices:
       - /dev/kfd
@@ -823,10 +823,16 @@ WORKDIR /workspace
 
 const DOCKERFILE_ROCM: &str = r#"# ROCm dev image for floDl projects.
 # Requires: docker run --device /dev/kfd --device /dev/dri ...
-ARG ROCM_VERSION=7.0
-FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+# Named by full tag: the scheme differs by release (`7.2-complete` up to
+# 7.2, `10.2.0-full` from 7.14). `fdl` derives it from a plain version.
+ARG ROCM_BASE_TAG=10.2.0-full
+FROM rocm/dev-ubuntu-24.04:${ROCM_BASE_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Some ROCm base images ship no `render` group, and compose cannot start
+# a container against a group name that does not exist.
+RUN groupadd -f render
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl unzip ca-certificates git gcc g++ pkg-config graphviz \
@@ -856,10 +862,16 @@ WORKDIR /workspace
 
 const DOCKERFILE_ROCM_MOUNTED: &str = r#"# ROCm dev image for floDl projects (libtorch mounted at runtime).
 # Requires: docker run --device /dev/kfd --device /dev/dri ...
-ARG ROCM_VERSION=7.0
-FROM rocm/dev-ubuntu-24.04:${ROCM_VERSION}-complete
+# Named by full tag: the scheme differs by release (`7.2-complete` up to
+# 7.2, `10.2.0-full` from 7.14). `fdl` derives it from a plain version.
+ARG ROCM_BASE_TAG=10.2.0-full
+FROM rocm/dev-ubuntu-24.04:${ROCM_BASE_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Some ROCm base images ship no `render` group, and compose cannot start
+# a container against a group name that does not exist.
+RUN groupadd -f render
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl unzip ca-certificates git gcc g++ pkg-config graphviz \
@@ -926,10 +938,11 @@ fn env_example_template(mode: Mode) -> String {
 #CUDA_VERSION=12.8.0
 #CUDA_TAG=12.8
 
-# ROCm base image version for the `rocm` service (same rule). The service
-# mounts LIBTORCH_HOST_PATH like the cuda one, so the variant override above
-# covers both vendors.
-#ROCM_VERSION=7.0
+# ROCm base image for the `rocm` service (same rule; `fdl` derives it from
+# the variant's `rocm_runtime`). Named by full tag, since the scheme
+# differs by release: `7.2-complete` up to 7.2, `10.2.0-full` from 7.14.
+# With `fdl`, a different runtime is one variable: ROCM_VERSION=7.2 ./fdl ...
+#ROCM_BASE_TAG=10.2.0-full
 ",
         );
     }

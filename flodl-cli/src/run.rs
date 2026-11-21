@@ -355,23 +355,9 @@ pub(crate) fn libtorch_env(project_root: &Path) -> Result<Vec<(String, String)>,
             },
         ));
 
-        // CUDA version from .arch metadata.
-        if let Some(cuda) = &info.cuda_version
-            && cuda != "none"
-        {
-            let cuda_version = if cuda.matches('.').count() < 2 {
-                format!("{cuda}.0")
-            } else {
-                cuda.clone()
-            };
-            let cuda_tag = cuda_version
-                .splitn(3, '.')
-                .take(2)
-                .collect::<Vec<_>>()
-                .join(".");
-            env.push(("CUDA_VERSION".into(), cuda_version));
-            env.push(("CUDA_TAG".into(), cuda_tag));
-        }
+        // The image that goes with this variant (base version and tag,
+        // either vendor), from its `.arch` metadata.
+        env.extend(crate::libtorch::detect::image_env(&info));
     }
 
     Ok(env)
