@@ -33,6 +33,26 @@ pub fn format_eta(secs: f64) -> String {
     }
 }
 
+/// Render a device's VRAM as allocated over total: `"978 MB / 16.0 GB"`.
+///
+/// `allocated` is what the caching allocator has reserved. On a
+/// unified-memory host it can exceed the card's physical VRAM, the
+/// excess living in host RAM, and that excess is named when it exists:
+/// `"17.2 GB / 16.0 GB (+1.2 GB spill)"`. An unknown total leaves the
+/// allocation alone on the line.
+pub fn format_vram(allocated: u64, total: Option<u64>) -> String {
+    match total {
+        None => format_bytes(allocated),
+        Some(total) if allocated > total => format!(
+            "{} / {} (+{} spill)",
+            format_bytes(allocated),
+            format_bytes(total),
+            format_bytes(allocated - total),
+        ),
+        Some(total) => format!("{} / {}", format_bytes(allocated), format_bytes(total)),
+    }
+}
+
 /// Format a byte count to a human-readable string (e.g., `"2.1 GB"`).
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
@@ -95,6 +115,22 @@ pub fn format_metric(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vram_reads_as_allocated_over_total_and_names_a_spill_only_when_there_is_one() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(
+            format_vram(978 * 1024 * 1024, Some(16 * GB)),
+            "978 MB / 16.0 GB"
+        );
+        assert_eq!(format_vram(16 * GB, Some(16 * GB)), "16.0 GB / 16.0 GB");
+        assert_eq!(
+            format_vram(18 * GB, Some(16 * GB)),
+            "18.0 GB / 16.0 GB (+2.0 GB spill)",
+        );
+        // No total to compare against: no second figure to misread.
+        assert_eq!(format_vram(2 * GB, None), "2.0 GB");
+    }
 
     #[test]
     fn test_format_utc_stamp() {

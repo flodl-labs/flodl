@@ -372,7 +372,7 @@ The monitor samples system resources on every `log` call:
 | CPU % | `/proc/stat` (delta) | Linux |
 | RAM used/total | `/proc/meminfo` (Linux), kernel page counters (macOS), `GlobalMemoryStatusEx` (Windows) | Linux, macOS, Windows |
 | GPU utilization % | NVML (NVIDIA, dynamic load) / amdgpu sysfs (AMD) | GPU + driver |
-| VRAM allocated / spill | libtorch caching allocator (`reserved_bytes`) | GPU feature enabled |
+| VRAM allocated / total | libtorch caching allocator (`reserved_bytes`) over the card's physical VRAM | GPU feature enabled |
 
 Resources that aren't available are silently omitted from both the terminal
 output and the dashboard.
@@ -403,7 +403,9 @@ way down):
 
 The monitor tracks `gpu_allocated_bytes` (reserved) because it detects
 unified-memory spill - when reserved bytes exceed physical VRAM, the
-allocator has spilled to host RAM.
+allocator has spilled to host RAM. The terminal line reads
+`VRAM: 978 MB / 16.0 GB`, and names the excess when there is one:
+`VRAM: 17.2 GB / 16.0 GB (+1.2 GB spill)`.
 
 For debugging, compare both: if `active` is small but `reserved` is large,
 the allocator is holding freed blocks. Call `gpu_empty_cache()` to release them.
