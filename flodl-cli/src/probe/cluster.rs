@@ -57,6 +57,8 @@ pub(super) fn run_cluster(cluster: &config::ClusterConfig, json: bool, skip_moun
                     .map(|a| PathBuf::from(&worker.path).join("libtorch").join(a)),
                 worker.docker.clone(),
                 data_path_explicit,
+                // A cluster host: every GPU on it is a rank.
+                true,
             )
         } else {
             probe_remote_via_ssh(worker, skip_mount)
@@ -92,7 +94,14 @@ fn probe_remote_via_ssh(worker: &ClusterWorker, skip_mount: bool) -> ProbeReport
     // PATH the SSH command returns "fdl: command not found" exit
     // 127, which the probe-result parser surfaces as an SSH error
     // for that host.
-    let mut remote_args: Vec<String> = vec!["fdl".into(), "probe".into(), "--json".into()];
+    let mut remote_args: Vec<String> = vec![
+        "fdl".into(),
+        "probe".into(),
+        "--json".into(),
+        // Every GPU on a cluster host is a rank, so the remote judges
+        // an unusable card as the blocker it is there.
+        "--rank-host".into(),
+    ];
     // Only forward --data-path when the host declared one. Without it,
     // the remote falls back to DEFAULT_DATA_PATH and the probe treats a
     // missing path as a WARNING (convention default) rather than an

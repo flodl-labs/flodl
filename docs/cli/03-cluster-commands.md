@@ -16,7 +16,18 @@ fdl probe --skip-mount          # skip shared-data-mount check on single-host se
 fdl probe --data-path /flodl/data        # override the shared-data path
 fdl probe --libtorch-path /opt/libtorch  # override the libtorch directory
 fdl probe --docker cuda         # NCCL is provided by a Docker image (compose service)
+fdl probe --rank-host           # judge this box as a cluster host: every GPU is a rank
 ```
+
+A card the box cannot use (not covered by the active libtorch, or a
+vendor with no runtime installed) is an **error** when it leaves the box
+nothing to train on, and a **warning** otherwise: an integrated GPU
+beside the discrete card a run uses blocks nothing. A cluster host is
+held to the stricter reading, since every GPU there is a rank, so
+`fdl @cluster probe` reports those as errors on every host, and
+`--rank-host` asks for the same reading on one box. Missing `libnccl`
+follows the same line: an error on a cluster host or from two NVIDIA
+cards up, a warning on a one-card box.
 
 Exit code: **0** when every checked component is green, **1** when
 any issue was surfaced. The green path is silent enough to use as a

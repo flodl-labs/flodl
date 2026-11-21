@@ -25,6 +25,7 @@ pub fn probe_local(
     libtorch_path_override: Option<PathBuf>,
     via_docker: Option<String>,
     data_path_explicit: bool,
+    rank_host: bool,
 ) -> ProbeReport {
     let host = resolve_local_hostname();
     let mut issues: Vec<String> = Vec::new();
@@ -37,8 +38,30 @@ pub fn probe_local(
     // operator why a host is not ready, so it is the one command that
     // must never drop them.
     let sweep = flodl_hw::survey();
+    // AMD cards the host has no ROCm for are not devices to the survey,
+    // and on a box that trains in a container they are the box's GPUs
+    // all the same: the image carries the runtime. Counted when they are
+    // what the box would train on (no other device, or an AMD libtorch
+    // is the active one), which is the view `fdl setup` provisions from.
+    // A cluster host is judged on what it has now, so not there.
+    let awaiting_runtime = if !rank_host && crate::util::docker::has_docker() {
+        flodl_hw::amd_gpus_awaiting_runtime()
+    } else {
+        Vec::new()
+    };
+    let amd_is_active = detect::read_active(&ctx.root)
+        .is_some_and(|i| detect::variant_vendor(&i.path) == Some(GpuVendor::Amd));
+    let container_gpus = if sweep.devices.is_empty() || amd_is_active {
+        awaiting_runtime
+    } else {
+        Vec::new()
+    };
+    // A card this box cannot use is why the box is not ready only when
+    // it leaves nothing to train on. Beside a working card it is worth
+    // saying and blocks nothing, unless every GPU is a rank.
+    let has_devices = !sweep.devices.is_empty() || !container_gpus.is_empty();
     for note in &sweep.notes {
-        if note.kind.explains_absence() {
+        if note.kind.explains_absence() && unusable_card_blocks(rank_host, has_devices) {
             issues.push(note.to_string());
         } else {
             warnings.push(note.to_string());
@@ -58,12 +81,24 @@ pub fn probe_local(
     // whose GPUs are temporarily hidden by CUDA_VISIBLE_DEVICES still
     // gets its NCCL install checked.
     let has_nvidia = sweep.has_vendor(GpuVendor::Nvidia);
-    let gpus = sweep.devices;
+    let nvidia_count = sweep
+        .devices
+        .iter()
+        .filter(|g| g.vendor == GpuVendor::Nvidia)
+        .count();
+    let mut gpus = sweep.devices;
+    gpus.extend(container_gpus);
 
+    let mut found = Vec::new();
     let libtorch = match libtorch_path_override {
-        Some(p) => check_libtorch_at(&p, &gpus, &mut issues),
-        None => check_libtorch(&ctx.root, &gpus, &mut issues),
+        Some(p) => check_libtorch_at(&p, &gpus, &mut found),
+        None => check_libtorch(&ctx.root, &gpus, &mut found),
     };
+    // An uncovered card beside a covered one: the run trains on the
+    // covered one. Only the coverage findings move; a variant that
+    // cannot load or is not configured stays an error.
+    let some_covered = libtorch.archs_match.iter().any(|(_, ok)| *ok);
+    route_libtorch_findings(found, rank_host, some_covered, &mut issues, &mut warnings);
     let data_path = check_data_path(
         data_path_override.unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_PATH)),
         skip_mount,
@@ -87,8 +122,12 @@ pub fn probe_local(
             all_found: vec![],
             via_docker: None,
         }
-    } else {
+    } else if nccl_absence_blocks(rank_host, nvidia_count) {
         check_nccl(via_docker, &mut issues)
+    } else {
+        // One card has no collective to run, so a missing library is
+        // worth knowing before a second card arrives and nothing more.
+        check_nccl(via_docker, &mut warnings)
     };
 
     if gpus.is_empty() {
@@ -128,6 +167,44 @@ pub fn probe_local(
         nccl,
         issues,
         warnings,
+    }
+}
+
+/// Whether a card this box cannot use is an error.
+///
+/// On a cluster host every GPU is a rank, so one unusable card breaks the
+/// run it was meant for. Anywhere else it is why the box is not ready only
+/// when it leaves nothing to train on: an integrated GPU the libtorch
+/// build does not cover, beside the discrete card the run uses, is worth
+/// a line and blocks nothing.
+pub(super) fn unusable_card_blocks(rank_host: bool, has_usable_device: bool) -> bool {
+    rank_host || !has_usable_device
+}
+
+/// Whether a missing `libnccl` is an error: on a cluster host, or once
+/// two NVIDIA cards give this box a collective to run.
+pub(super) fn nccl_absence_blocks(rank_host: bool, nvidia_count: usize) -> bool {
+    rank_host || nvidia_count >= 2
+}
+
+/// Sort what the libtorch check found. Only the "GPU not covered"
+/// findings can be advisory, and only under [`unusable_card_blocks`]'s
+/// rule; a variant that cannot load, or is not configured, is an error
+/// wherever it is found.
+pub(super) fn route_libtorch_findings(
+    found: Vec<String>,
+    rank_host: bool,
+    some_card_covered: bool,
+    issues: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    for msg in found {
+        if msg.contains(detect::NOT_COVERED) && !unusable_card_blocks(rank_host, some_card_covered)
+        {
+            warnings.push(format!("{msg} Runs here use the covered card."));
+        } else {
+            issues.push(msg);
+        }
     }
 }
 
