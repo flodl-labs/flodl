@@ -146,12 +146,13 @@ pub struct DataSpec<'a> {
     pub ssh: Option<&'a SshConfig>,
 }
 
-/// Node-local dataset cache, one level up from what it holds. Mirrors
-/// flodl's `data::host_cache::data_cache_dir()` — the `$HOME/.flodl`
-/// convention is fdl's, and flodl-cli is zero-dep on flodl by design, so
-/// the two spell it separately. Only the parent is checked here: the
-/// per-dataset subdirectory below it is the application's business.
-const CACHE_SUBPATH: &str = ".flodl/data";
+/// Node-local dataset cache under the global root, one level up from what
+/// it holds. Mirrors flodl's `data::host_cache::data_cache_dir()`: the
+/// `$FLODL_HOME` / `~/.flodl` convention is fdl's, and flodl-cli is
+/// zero-dep on flodl by design, so the two spell it separately. Only the
+/// parent is checked here: the per-dataset subdirectory below it is the
+/// application's business.
+const CACHE_SUBDIR: &str = "data";
 
 /// Free space below which a local directory gets a warning: smaller than
 /// any real corpus, so it is almost certainly not the volume the
@@ -810,15 +811,14 @@ fn sshfs_argv(target: &SshTarget, mountpoint: &Path, ssh: Option<&SshConfig>) ->
 /// source is normal, an unwritable cache is fatal, and discovering that
 /// mid-epoch wastes the whole window.
 fn check_local_dirs(notes: &mut Vec<String>) -> Result<(), Fail> {
-    match std::env::var_os("HOME") {
-        Some(home) => {
-            let cache = PathBuf::from(home).join(CACHE_SUBPATH);
-            check_writable("dataset cache", &cache, true, notes)?;
+    match crate::context::global_root_if_named() {
+        Some(root) => {
+            check_writable("dataset cache", &root.join(CACHE_SUBDIR), true, notes)?;
         }
         None => notes.push(
-            "HOME is unset, so flodl will cache datasets under the temp \
-             directory — on a tmpfs that spends RAM, not disk. Set HOME, \
-             or pre-provision the source root."
+            "FLODL_HOME and HOME are unset, so flodl will cache datasets under \
+             the temp directory. On a tmpfs that spends RAM, not disk. Set one \
+             of them, or pre-provision the source root."
                 .to_string(),
         ),
     }

@@ -29,6 +29,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Rust ---
+# Some ROCm base images ship no `render` group. Compose's name fallback
+# (`group_add: render`, used when `fdl` did not supply the host's numeric
+# id) cannot start a container against a group that does not exist.
+RUN groupadd -f render
+
 ENV CARGO_HOME="/usr/local/cargo"
 ENV RUSTUP_HOME="/usr/local/rustup"
 # Pinned, and read by CI through ci/rust-pin.sh: see that script to bump.

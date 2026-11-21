@@ -362,6 +362,22 @@ fn main() {
         println!("cargo:rerun-if-changed={}", src);
     }
     println!("cargo:rerun-if-env-changed=LIBTORCH_PATH");
+    // In a container LIBTORCH_PATH is a fixed mount point, so switching
+    // the libtorch variant behind it changes nothing cargo can see and the
+    // shim compiled against the previous one is kept. `fdl` passes the
+    // host-side path of the mounted variant, which does change.
+    println!("cargo:rerun-if-env-changed=LIBTORCH_HOST_PATH");
+    // A variant replaced in place (re-downloaded, rebuilt) keeps its path.
+    // These files are newer then, which is the only thing cargo compares:
+    // on their own they would miss a switch to a variant installed
+    // earlier. Only named when present, since cargo treats a missing
+    // watched file as always changed.
+    for marker in ["build-version", "build-hash", ".arch"] {
+        let path = libtorch.join(marker);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=HIP_PATH");

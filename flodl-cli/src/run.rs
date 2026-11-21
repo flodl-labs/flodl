@@ -5,7 +5,7 @@
 //! Docker when a `docker:` service is declared).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 
 use crate::builtins;
@@ -486,6 +486,89 @@ pub(crate) fn resolve_libtorch_at(path: &Path) -> Option<(libtorch::detect::Libt
     None
 }
 
+/// Host-side facts a compose service needs that compose cannot work out
+/// for itself, plus the two paths docker would otherwise create as root.
+///
+/// Docker creates a missing bind-mount source as a root-owned DIRECTORY.
+/// For the flodl home that leaves a cache the user cannot write, and for
+/// `.cargo-credentials.toml` a directory where cargo expects a file, so
+/// both are created here first, as the invoking user. Best-effort: a
+/// failure surfaces from compose with the path in the message.
+///
+/// The device groups are numeric on purpose. `group_add: [video, render]`
+/// resolves the names inside the IMAGE, whose ids need not match the
+/// host's (and some ROCm images have no `render` group at all), so the
+/// container joins the wrong group and sees no GPU.
+pub(crate) fn docker_host_env(project_root: &Path) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+
+    let home = crate::context::Context::global().root;
+    let _ = std::fs::create_dir_all(&home);
+    env.push(("FLODL_HOME_HOST".into(), home.display().to_string()));
+
+    let credentials = project_root.join(".cargo-credentials.toml");
+    if !credentials.exists() && compose_mentions(project_root, ".cargo-credentials.toml") {
+        let _ = std::fs::write(&credentials, "");
+    }
+
+    for (key, node) in device_group_nodes() {
+        if let Some(gid) = owner_gid(&node) {
+            env.push((key.into(), gid.to_string()));
+        }
+    }
+    env
+}
+
+/// Whether the project's compose file names `needle` (a mount it would
+/// otherwise have docker create). A project without that mount gets no
+/// stray file.
+fn compose_mentions(project_root: &Path, needle: &str) -> bool {
+    std::fs::read_to_string(project_root.join("docker-compose.yml"))
+        .is_ok_and(|s| s.contains(needle))
+}
+
+/// The device nodes whose owning group gates AMD GPU access, with the
+/// variable each one feeds: the DRM card node (`video`) and the render
+/// node, which shares its group with `/dev/kfd` (`render`).
+fn device_group_nodes() -> Vec<(&'static str, PathBuf)> {
+    let first = |prefix: &str| -> Option<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir("/dev/dri")
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(prefix))
+            })
+            .collect();
+        found.sort();
+        found.into_iter().next()
+    };
+    let mut nodes = Vec::new();
+    if let Some(card) = first("card") {
+        nodes.push(("FDL_VIDEO_GID", card));
+    }
+    let kfd = PathBuf::from("/dev/kfd");
+    if kfd.exists() {
+        nodes.push(("FDL_RENDER_GID", kfd));
+    } else if let Some(render) = first("renderD") {
+        nodes.push(("FDL_RENDER_GID", render));
+    }
+    nodes
+}
+
+#[cfg(unix)]
+fn owner_gid(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.gid())
+}
+
+#[cfg(not(unix))]
+fn owner_gid(_path: &Path) -> Option<u32> {
+    None
+}
+
 /// Spawn a shell command with libtorch env vars set.
 ///
 /// `FLODL_VERBOSITY` is forwarded to Docker containers via the
@@ -513,6 +596,9 @@ fn spawn_docker_shell(command: &str, project_root: &Path) -> ExitCode {
         .stdin(Stdio::inherit());
 
     for (key, val) in &env_vars {
+        cmd.env(key, val);
+    }
+    for (key, val) in docker_host_env(project_root) {
         cmd.env(key, val);
     }
 

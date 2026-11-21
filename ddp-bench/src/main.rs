@@ -1096,6 +1096,12 @@ fn run() -> flodl::tensor::Result<()> {
     // concluded the binary was too old to carry the contract when it had
     // in fact failed on a read-only output directory.
     let mut failed_cells = 0usize;
+    // Cells that reached the harness, and the reasons the others did not.
+    // A sweep skips what the box cannot run, which is fine as long as
+    // something ran: an invocation where every cell was skipped trained
+    // nothing and must not exit 0.
+    let mut attempted_cells = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
 
     for model_def in &model_defs {
         let defaults = &model_def.defaults;
@@ -1118,7 +1124,9 @@ fn run() -> flodl::tensor::Result<()> {
                 || std::env::var_os("FLODL_INTERNAL_FULL_CLUSTER_JSON").is_some()
                 || flodl::distributed::launcher::model_sig_probe_requested();
             if mode.requires_multi_gpu() && gpu_count < 2 && !in_cluster {
-                eprintln!("  skipping {} (requires 2+ GPUs, have {})", mode, gpu_count);
+                let why = format!("{mode} (requires 2+ GPUs, have {gpu_count})");
+                eprintln!("  skipping {why}");
+                skipped.push(why);
                 continue;
             }
             // Skip solo-N when GPU index N is out of range (e.g. solo-2
@@ -1126,7 +1134,9 @@ fn run() -> flodl::tensor::Result<()> {
             if let DdpMode::Solo(idx) = mode
                 && *idx >= gpu_count
             {
-                eprintln!("  skipping {} (GPU index {} not available, have {})", mode, idx, gpu_count);
+                let why = format!("{mode} (GPU index {idx} not available, have {gpu_count})");
+                eprintln!("  skipping {why}");
+                skipped.push(why);
                 continue;
             }
 
@@ -1188,6 +1198,7 @@ fn run() -> flodl::tensor::Result<()> {
                 tier,
             };
 
+            attempted_cells += 1;
             match harness::run_combo(model_def, mode, &run_config) {
                 Ok(result) => model_results.push(result),
                 Err(e) => {
@@ -1246,6 +1257,19 @@ fn run() -> flodl::tensor::Result<()> {
         eprintln!(
             "\nddp-bench: {failed_cells} cell(s) failed (see FAILED above)"
         );
+        std::process::exit(1);
+    }
+    if attempted_cells == 0 && !skipped.is_empty() {
+        eprintln!(
+            "\nddp-bench: nothing ran, every requested cell was skipped: {}",
+            skipped.join("; "),
+        );
+        if gpu_count == 0 {
+            eprintln!(
+                "  no GPU is visible to this build. `fdl probe` shows what the box has \
+                 and why a card may not be usable."
+            );
+        }
         std::process::exit(1);
     }
 

@@ -442,6 +442,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       - .:/workspace
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${{FLODL_HOME_HOST:-${{HOME}}/.flodl}}:/flodl-home
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -454,6 +459,7 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # verbosity is what `fdl -v/-vv/...` sets per invocation, and the
       # timeout scale stretches distributed network deadlines on slow links.
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path, so a run: line can say
@@ -472,6 +478,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       - .:/workspace
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${{FLODL_HOME_HOST:-${{HOME}}/.flodl}}:/flodl-home
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -480,6 +491,7 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # verbosity is what `fdl -v/-vv/...` sets per invocation, and the
       # timeout scale stretches distributed network deadlines on slow links.
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path, so a run: line can say
@@ -506,9 +518,13 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
     devices:
       - /dev/kfd
       - /dev/dri
+    # Numeric ids from the host, exported by `fdl`: a group NAME resolves
+    # inside the image, whose ids need not match the host's, and the
+    # container then sees no GPU. The names are the fallback for a bare
+    # `docker compose` call.
     group_add:
-      - video
-      - render
+      - "${{FDL_VIDEO_GID:-video}}"
+      - "${{FDL_RENDER_GID:-render}}"
     # HSA needs these to map queues; without them the runtime fails at
     # device init rather than at first op.
     security_opt:
@@ -518,6 +534,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       - .:/workspace
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${{FLODL_HOME_HOST:-${{HOME}}/.flodl}}:/flodl-home
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -526,6 +547,7 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # verbosity is what `fdl -v/-vv/...` sets per invocation, and the
       # timeout scale stretches distributed network deadlines on slow links.
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path, so a run: line can say
@@ -548,6 +570,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       - .:/workspace
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${{FLODL_HOME_HOST:-${{HOME}}/.flodl}}:/flodl-home
       - ${{LIBTORCH_CPU_PATH:-./libtorch/precompiled/cpu}}:/usr/local/libtorch:ro
     working_dir: /workspace
     stdin_open: true
@@ -562,6 +589,7 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # verbosity is what `fdl -v/-vv/...` sets per invocation, and the
       # timeout scale stretches distributed network deadlines on slow links.
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path, so a run: line can say
@@ -582,6 +610,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       - .:/workspace
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${{FLODL_HOME_HOST:-${{HOME}}/.flodl}}:/flodl-home
       - ${{LIBTORCH_HOST_PATH:-./libtorch/precompiled/cu128}}:/usr/local/libtorch:ro
     working_dir: /workspace
     stdin_open: true
@@ -591,6 +624,7 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # verbosity is what `fdl -v/-vv/...` sets per invocation, and the
       # timeout scale stretches distributed network deadlines on slow links.
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path, so a run: line can say
@@ -598,6 +632,9 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Compose only passes variables listed here into the container —
       # without this line that spelling breaks inside every service.
       - FDL_GPU_FEATURE
+      # Names the mounted libtorch variant. The mount point is fixed, so
+      # this is what lets flodl-sys notice a variant switch and rebuild.
+      - LIBTORCH_HOST_PATH
     deploy:
       resources:
         reservations:
@@ -617,9 +654,13 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
     devices:
       - /dev/kfd
       - /dev/dri
+    # Numeric ids from the host, exported by `fdl`: a group NAME resolves
+    # inside the image, whose ids need not match the host's, and the
+    # container then sees no GPU. The names are the fallback for a bare
+    # `docker compose` call.
     group_add:
-      - video
-      - render
+      - "${{FDL_VIDEO_GID:-video}}"
+      - "${{FDL_RENDER_GID:-render}}"
     # HSA needs these to map queues; without them the runtime fails at
     # device init rather than at first op.
     security_opt:
@@ -629,12 +670,18 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       - .:/workspace
       - ./.cargo-cache:/usr/local/cargo/registry
       - ./.cargo-git:/usr/local/cargo/git
+      # flodl's own directory on this box (dataset cache, telemetry).
+      # Without it every run starts from an empty cache and its telemetry
+      # dies with the container. `fdl` creates the host side first; a bare
+      # `docker compose` creates a missing one as root.
+      - ${{FLODL_HOME_HOST:-${{HOME}}/.flodl}}:/flodl-home
       - ${{LIBTORCH_HOST_PATH:-./libtorch/precompiled/rocm70}}:/usr/local/libtorch:ro
     working_dir: /workspace
     stdin_open: true
     tty: true
     environment:
       - FLODL_VERBOSITY
+      - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
       # The cargo feature the active libtorch variant needs, computed by
       # fdl from the variant path, so a run: line can say
@@ -642,6 +689,9 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Compose only passes variables listed here into the container —
       # without this line that spelling breaks inside every service.
       - FDL_GPU_FEATURE
+      # Names the mounted libtorch variant. The mount point is fixed, so
+      # this is what lets flodl-sys notice a variant switch and rebuild.
+      - LIBTORCH_HOST_PATH
 "#
         )
     }
