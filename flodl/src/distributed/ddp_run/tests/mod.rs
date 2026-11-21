@@ -209,6 +209,9 @@ pub(super) fn make_test_worker_customized(
         .collect();
     let tmp_buffers: Vec<Tensor> = tmp_model.buffers().iter().map(|b| b.get()).collect();
     drop(tmp_model);
+    // The worker copies these on its own stream; streams are not ordered
+    // against each other, so the init kernels must have retired first.
+    settle_device(dev);
 
     let mut config = WorkerConfig {
         rank,
@@ -265,8 +268,19 @@ pub(super) fn make_test_worker_customized(
         None, // no outer optimizer in unit tests
     )
     .unwrap();
+    // The worker wrote its parameters on its compute stream. A test reads
+    // them from the default stream, which without this can run before
+    // that write and see the model's own init (or nothing at all).
+    settle_device(dev);
 
     (worker, channels)
+}
+
+/// Wait for every kernel queued on `dev`, on any stream. No-op on CPU.
+fn settle_device(dev: Device) {
+    if let Device::CUDA(idx) = dev {
+        crate::tensor::gpu_synchronize(idx);
+    }
 }
 
 // In-process coordinator test fixtures lived here. They were removed with
