@@ -558,8 +558,7 @@ quality against them across all five DDP modes:
 
 ```bash
 fdl ddp-bench --list                       # list models and modes
-fdl ddp-bench quick                        # 1-epoch smoke test
-fdl ddp-bench validate                     # full sweep vs structured baselines
+fdl ddp-bench quick --model resnet-graph   # the model's own short run
 fdl ddp-bench --model gpt-nano --mode nccl-cadence --epochs 50 --lr-scale 2
 fdl ddp-bench --report runs/report.md      # convergence report from saved runs
 ```

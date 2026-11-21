@@ -443,9 +443,9 @@ Then:
 
 ```bash
 fdl ddp-bench quick                   # runs the "quick" preset
-fdl ddp-bench validate --report out   # preset + extra flags
+fdl ddp-bench quick --model lenet     # preset + extra flags
 fdl ddp-bench --help                  # description + presets + defaults
-fdl ddp-bench validate --help         # resolved options
+fdl ddp-bench quick --help            # resolved options
 ```
 
 A sub-command's `commands:` may mix kinds freely: a preset sits

@@ -124,6 +124,9 @@ fdl ddp-bench --model olmo-graph --mode solo-trainer --epochs 1 --epoch-splits 2
 # ElChe cadence with LR scaling for 2 GPUs
 fdl ddp-bench --model gpt-nano --mode nccl-cadence --epochs 50 --lr-scale 2
 
+# A model's own short run: a few minutes, and the loss still falls
+fdl ddp-bench quick --model resnet-graph
+
 # All models, solo baseline
 fdl ddp-bench --model all --mode solo-0
 
@@ -133,6 +136,20 @@ fdl ddp-bench --list
 # Generate report from saved runs
 fdl ddp-bench --report
 ```
+
+## Run length and learning rate
+
+Without `--epochs`, a model runs its own default: 200 passes for ResNet-20, 50 for gpt-nano and char-rnn, 5 for the small models, 3 for OLMo. `--quick` selects the model's short profile instead, sized to finish in a few minutes on a mid-range card while the loss still falls clearly:
+
+| Model | `--quick` |
+|-------|-----------|
+| resnet, resnet-graph | 20 passes |
+| olmo, olmo-graph | one pass over a 1M-token corpus |
+| the others | the default run, which is already short |
+
+An explicit `--epochs` or `--train-tokens` wins over the profile.
+
+The learning rate is the model's default at any run length, with one exception. A model that trains at a constant rate (logistic, mlp, lenet, conv-ae, char-rnn) and is given more epochs than its default trains at `default * default_epochs / epochs`: rate times steps stays the same, so the longer run covers the same ground in finer steps and remains comparable to the default one. The run says so when it applies. A model with a schedule (ResNet, gpt-nano, OLMo) stretches the schedule over the run and keeps its peak rate. `--lr-scale 1` holds the default rate in every case.
 
 ## LR Scaling for Multi-GPU
 

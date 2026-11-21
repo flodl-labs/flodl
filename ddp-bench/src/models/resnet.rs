@@ -45,6 +45,7 @@ pub fn def() -> ModelDef {
             batches_per_epoch: 0, // full dataset
             batch_size: 64,
             lr: 0.1,
+            quick: Some(crate::config::QuickProfile { epochs: 20, train_tokens: None }),
         },
     }
 }
