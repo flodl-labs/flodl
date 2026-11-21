@@ -19,7 +19,7 @@ first piece of this design, now landed), onto **one port**:
 | NCCL rendezvous | rank → controller | `port` (channel magic: rendezvous) |
 | CPU-reduce data channel | relay → controller | `port` (channel magic: data) |
 | Coordinator control channel | relay → controller | `port` (channel magic: control) |
-| Rank loopback (data / control) | rank → local relay | `port+4` / `port+5` (127.0.0.1 only) |
+| Rank loopback (data / control) | rank → local relay | `port+4+2r` / `port+5+2r`, `r` = the host's first rank (127.0.0.1 only) |
 | Dashboard (HTTP) | browser → controller | its own port |
 
 The controller never dials out at the TCP level. What prevents the

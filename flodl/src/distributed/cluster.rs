@@ -192,8 +192,8 @@ pub struct ControllerBlock {
     /// The controller's single TCP port: NCCL rendezvous, CPU-reduce
     /// data, and coordinator control all accept here, routed by each
     /// connection's channel-select magic (see `port_mux`). Only the
-    /// host-local rank↔relay loopback channels use derived offsets
-    /// (`port + 4`/`+5`), which never leave the worker host.
+    /// host-local rank↔relay loopback channels use derived ports (see
+    /// `relay::relay_loopback_ports`), which never leave the worker host.
     pub port: u16,
 }
 

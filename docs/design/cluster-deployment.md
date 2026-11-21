@@ -103,10 +103,10 @@ controller, nothing else. From `controller.port` (base, default 1337):
 | base+1 | — | reserved (dashboard side-channel) |
 | base+2 | `0.0.0.0` | CPU-averaging `ClusterController` |
 | base+3 | `0.0.0.0` | `ClusterCoordinator` control channel |
-| base+4 / +5 | `127.0.0.1` | per-host relay loopback (rank ↔ relay) — **not** cross-host |
+| base+4+2r / +5+2r | `127.0.0.1` | per-host relay loopback (rank ↔ relay), `r` = the host's first rank, so two hosts sharing a network namespace do not collide — **not** cross-host |
 
 So for flodl's transport, only the controller needs inbound from
-workers; workers need no inbound from each other, and the `+4/+5` relay
+workers; workers need no inbound from each other, and the relay loopback
 ports never leave `localhost`. This is NAT-friendly on the control side.
 
 The **NCCL data plane is a separate, full-mesh network** and is the

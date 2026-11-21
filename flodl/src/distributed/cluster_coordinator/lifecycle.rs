@@ -143,6 +143,34 @@ impl ClusterCoordinator {
                              cohort formed ({covered}/{world_size} ranks covered)"
                         )));
                     }
+                    // A rank reported dead before its relay dialed in
+                    // settles formation at once: a relay dials only after
+                    // every one of its local ranks has connected to it, so
+                    // that host will never cover its ranks and the deadline
+                    // below would only delay the same verdict, with a
+                    // message that names no rank. Both sources are read:
+                    // the ledger, and the exit reports hosts send up, which
+                    // nothing drains into the ledger before the first tick.
+                    let reported: Vec<usize> = config
+                        .reported_deaths
+                        .as_ref()
+                        .and_then(|q| q.lock().ok().map(|q| q.clone()))
+                        .unwrap_or_default();
+                    let lost: Vec<usize> = (0..world_size)
+                        .filter(|&r| {
+                            rank_to_conn[r].is_none()
+                                && (reported.contains(&r)
+                                    || config.dead_ranks.as_ref().is_some_and(|d| d.is_dead(r)))
+                        })
+                        .collect();
+                    if !lost.is_empty() {
+                        return Err(TensorError::new(&format!(
+                            "cluster_coordinator: rank(s) {lost:?} died before \
+                             their relay dialed in ({covered}/{world_size} \
+                             ranks covered), so the world cannot form; the \
+                             cause is in that host's own output"
+                        )));
+                    }
                     if std::time::Instant::now() >= formation_deadline {
                         return Err(TensorError::new(&format!(
                             "cluster_coordinator: relay dial-in did not cover the \

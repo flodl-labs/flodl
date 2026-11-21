@@ -184,7 +184,7 @@ impl CpuReduceClient {
     /// Connect to the controller and complete the handshake.
     ///
     /// `controller_addr` is the host-local relay's data loopback
-    /// (`controller_port + 4` on `127.0.0.1`); the relay folds and
+    /// (on `127.0.0.1`, see `relay::relay_loopback_ports`); the relay folds and
     /// forwards to the controller's single mux port. `rank_id` must be
     /// in `0..world_size`.
     ///
