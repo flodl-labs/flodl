@@ -198,6 +198,31 @@ pub(super) fn read_util(physical_index: u8, live: &LiveMetrics) -> Option<f32> {
     }
 }
 
+/// One read of what the device is doing: utilisation, and device-wide
+/// memory as `(used, total)` across every process (not this process's
+/// allocator). `None` for a figure the backend does not publish; a
+/// backend that knows the use but not the total reports the total as 0
+/// and leaves it to the caller's static figure.
+pub(super) fn read_live(
+    physical_index: u8,
+    live: &LiveMetrics,
+) -> (Option<f32>, Option<(u64, u64)>) {
+    match live {
+        LiveMetrics::Nvml => (
+            crate::tensor::gpu_utilization_idx(physical_index as i32).map(|u| u as f32),
+            crate::tensor::gpu_smi_memory_info_idx(physical_index as i32),
+        ),
+        LiveMetrics::AmdSysfs(probe) => {
+            let m = probe.read();
+            (
+                m.util_percent.map(|u| u as f32),
+                m.mem_used_bytes.map(|used| (used, 0)),
+            )
+        }
+        LiveMetrics::None => (None, None),
+    }
+}
+
 /// Static per-device identity, captured once at sampler construction
 /// from [`crate::sys::detect_gpus`]. No CUDA runtime involvement, and
 /// no per-sample process spawn.

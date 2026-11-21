@@ -72,12 +72,18 @@ pub struct GpuMetrics {
     pub temp_c: Option<f32>,
     /// Instantaneous board power draw, in watts.
     pub power_w: Option<f32>,
+    /// Device memory in use, in bytes, across every process: the
+    /// counterpart of the total detection reports for the device.
+    pub mem_used_bytes: Option<u64>,
 }
 
 impl GpuMetrics {
     /// Whether the driver published anything at all.
     pub fn is_empty(&self) -> bool {
-        self.util_percent.is_none() && self.temp_c.is_none() && self.power_w.is_none()
+        self.util_percent.is_none()
+            && self.temp_c.is_none()
+            && self.power_w.is_none()
+            && self.mem_used_bytes.is_none()
     }
 }
 
@@ -93,6 +99,8 @@ pub struct AmdMetricsProbe {
     /// Every `temp*_input` found, sorted so the set is deterministic.
     temps: Vec<PathBuf>,
     power: Option<PathBuf>,
+    /// The `mem_info_*_used` counter of the pool compute allocates from.
+    mem_used: Option<PathBuf>,
 }
 
 impl AmdMetricsProbe {
@@ -100,7 +108,10 @@ impl AmdMetricsProbe {
     /// nothing still reads successfully; it just always returns an empty
     /// [`GpuMetrics`].
     pub fn is_empty(&self) -> bool {
-        self.busy.is_none() && self.temps.is_empty() && self.power.is_none()
+        self.busy.is_none()
+            && self.temps.is_empty()
+            && self.power.is_none()
+            && self.mem_used.is_none()
     }
 
     /// Sample every attribute that resolved.
@@ -130,6 +141,7 @@ impl AmdMetricsProbe {
                 .as_deref()
                 .and_then(read_u64)
                 .map(|micro| micro as f32 / 1_000_000.0),
+            mem_used_bytes: self.mem_used.as_deref().and_then(read_u64),
         }
     }
 }
@@ -177,6 +189,8 @@ fn resolve(sys: &Path, node_dir: &Path) -> AmdMetricsProbe {
         probe.busy = Some(busy);
     }
 
+    probe.mem_used = mem_used_counter(&device, crate::amd::node_memory_bytes(node_dir));
+
     let Some(hwmon) = amdgpu_hwmon(&device.join("hwmon")) else {
         return probe;
     };
@@ -207,6 +221,31 @@ fn resolve(sys: &Path, node_dir: &Path) -> AmdMetricsProbe {
     // on the same box is identical, and so the max is over a stable set.
     probe.temps.sort();
     probe
+}
+
+/// The "memory in use" counter that goes with the size KFD reports.
+///
+/// amdgpu accounts two pools, and which one compute memory comes from
+/// depends on the part. A discrete card allocates from its own VRAM. An
+/// integrated one has only a small VRAM carve-out and serves compute from
+/// GTT, which is system RAM: verified on a live gfx1036, where the KFD
+/// memory bank is byte for byte `mem_info_gtt_total` (15 GiB) and
+/// `mem_info_vram_total` is 512 MiB. So the pool is chosen by matching
+/// its total against `kfd_bytes` rather than by guessing from the part:
+/// "used" then counts against the same total detection already reports.
+/// With no match (an unreadable bank, a driver that sizes the bank
+/// differently) VRAM is the fallback, being the pool the name promises.
+fn mem_used_counter(device: &Path, kfd_bytes: u64) -> Option<PathBuf> {
+    const POOLS: &[(&str, &str)] = &[
+        ("mem_info_vram_total", "mem_info_vram_used"),
+        ("mem_info_gtt_total", "mem_info_gtt_used"),
+    ];
+    let used = |name: &str| Some(device.join(name)).filter(|p| p.exists());
+    POOLS
+        .iter()
+        .find(|(total, _)| kfd_bytes > 0 && read_u64(&device.join(total)) == Some(kfd_bytes))
+        .and_then(|(_, name)| used(name))
+        .or_else(|| used(POOLS[0].1))
 }
 
 /// The `hwmon<N>` directory under a device, when it belongs to amdgpu.
@@ -301,6 +340,75 @@ mod tests {
         for (k, v) in attrs {
             fs::write(hwmon.join(k), v).unwrap();
         }
+    }
+
+    /// Give node `n` one memory bank of `bytes`.
+    fn kfd_bank(sys: &Path, n: u64, bytes: u64) {
+        let bank = sys.join(format!("class/kfd/kfd/topology/nodes/{n}/mem_banks/0"));
+        fs::create_dir_all(&bank).unwrap();
+        fs::write(
+            bank.join("properties"),
+            format!("heap_type 1\nsize_in_bytes {bytes}\nflags 0\nwidth 128\n"),
+        )
+        .unwrap();
+    }
+
+    /// Write amdgpu's two memory pools into a render node's device dir.
+    fn mem_pools(sys: &Path, minor: u64, vram: (u64, u64), gtt: (u64, u64)) {
+        let device = sys.join(format!("class/drm/renderD{minor}/device"));
+        for (name, v) in [
+            ("mem_info_vram_total", vram.0),
+            ("mem_info_vram_used", vram.1),
+            ("mem_info_gtt_total", gtt.0),
+            ("mem_info_gtt_used", gtt.1),
+        ] {
+            fs::write(device.join(name), format!("{v}\n")).unwrap();
+        }
+    }
+
+    // The pool is the one KFD sized the device by, not a fixed one: the
+    // figures of the integrated case are the live gfx1036's.
+    #[test]
+    fn memory_in_use_is_read_from_the_pool_kfd_sized_the_device_by() {
+        const GIB: u64 = 1 << 30;
+
+        // Integrated: KFD's bank is the GTT pool.
+        let igpu = Scratch::new();
+        kfd_node(igpu.path(), 1, 129);
+        kfd_bank(igpu.path(), 1, 16_105_074_688);
+        render_device(igpu.path(), 129, Some("3\n"), &[]);
+        mem_pools(
+            igpu.path(),
+            129,
+            (536_870_912, 16_723_968),
+            (16_105_074_688, 14_143_488),
+        );
+        let m = amd_metrics_probes_at(igpu.path())[0].read();
+        assert_eq!(m.mem_used_bytes, Some(14_143_488));
+
+        // Discrete: KFD's bank is the card's VRAM, even with a larger GTT.
+        let dgpu = Scratch::new();
+        kfd_node(dgpu.path(), 1, 128);
+        kfd_bank(dgpu.path(), 1, 24 * GIB);
+        render_device(dgpu.path(), 128, Some("90\n"), &[]);
+        mem_pools(dgpu.path(), 128, (24 * GIB, 9 * GIB), (64 * GIB, GIB));
+        let m = amd_metrics_probes_at(dgpu.path())[0].read();
+        assert_eq!(m.mem_used_bytes, Some(9 * GIB));
+
+        // No bank to match: VRAM, the pool the name promises.
+        let bare = Scratch::new();
+        kfd_node(bare.path(), 1, 128);
+        render_device(bare.path(), 128, None, &[]);
+        mem_pools(bare.path(), 128, (8 * GIB, 2 * GIB), (16 * GIB, GIB));
+        let m = amd_metrics_probes_at(bare.path())[0].read();
+        assert_eq!(m.mem_used_bytes, Some(2 * GIB));
+
+        // No counters at all: nothing to report, and nothing invented.
+        let none = Scratch::new();
+        kfd_node(none.path(), 1, 128);
+        render_device(none.path(), 128, Some("1\n"), &[]);
+        let m = amd_metrics_probes_at(none.path())[0].read();
+        assert_eq!(m.mem_used_bytes, None);
     }
 
     /// The shape verified on a live gfx1036: `power1_input` and no

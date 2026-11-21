@@ -40,7 +40,8 @@ pub struct GpuTimelineSample {
     pub device: u8,
     /// GPU compute utilization (0-100%).
     pub compute_util: u8,
-    /// Physical VRAM used (NVML, bytes).
+    /// Device memory in use across every process, in bytes (NVML on
+    /// NVIDIA, the amdgpu memory counters on AMD).
     pub vram_used_bytes: u64,
     /// CUDA caching allocator bytes.
     pub vram_allocated_bytes: u64,
@@ -848,15 +849,19 @@ impl Timeline {
                 }
                 let phys = g.physical_index;
                 let total_static = g.total_bytes.unwrap_or(0);
-                let util = super::resources::read_util(phys, &g.live);
+                let (util, mem) = super::resources::read_live(phys, &g.live);
                 if util.is_some() {
                     this.util_unread.lock().unwrap()[i] = false;
                 }
                 let compute_util = util.map_or(0, |u| u.clamp(0.0, 100.0) as u8);
-                // Device-wide used/total via NVML (physical index);
-                // fall back to the nvidia-smi total when NVML is out.
-                let (vram_used, vram_total) = crate::tensor::gpu_smi_memory_info_idx(phys as i32)
-                    .unwrap_or((0, total_static));
+                // Device-wide memory in use. The backend's own total wins
+                // where it publishes one; otherwise the one detection
+                // reported for the device.
+                let (vram_used, vram_total) = match mem {
+                    Some((used, 0)) => (used, total_static),
+                    Some(pair) => pair,
+                    None => (0, total_static),
+                };
                 // Allocator reserved bytes: per-process, runtime index,
                 // and only readable where a CUDA context already exists.
                 let vram_alloc = if crate::tensor::gpu_has_primary_context(i as i32) {
