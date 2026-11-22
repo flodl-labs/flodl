@@ -317,7 +317,10 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         }
     }
 
-    let preload_tag = if mode.requires_multi_gpu() { "cpu" } else { "gpu-preload" };
+    // Only the hand-written solo loop holds the dataset on the device.
+    // Every trainer mode, solo-trainer included, keeps it in host memory
+    // and uploads per batch through the data plane.
+    let preload_tag = if matches!(mode, DdpMode::Solo(_)) { "gpu-preload" } else { "cpu" };
     let baseline_tag = if model_def.needs_baseline_eval { " [baseline-eval]" } else { "" };
     // Surface the augmentation arm in the banner: an A/B log where the
     // augmented arm is indistinguishable from control at a glance is a

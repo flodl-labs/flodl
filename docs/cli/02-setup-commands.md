@@ -94,6 +94,13 @@ scheme differs by release: `7.2-complete` up to 7.2, `10.2.0-full` from
 libtorch its own runtime, so the image follows the `cuda=` the variant
 was built against.
 
+**Which AMD cards flodl has been run on.** The table above says what the
+libtorch build covers, which is more than what has been trained on. So
+far: gfx1100 (Radeon RX 7900 XTX, by @DhruvDh), gfx1151 (Strix Halo APU)
+and gfx1201 (Radeon AI PRO R9700, one and two cards), both by @dhekimian.
+The runs and their logs are in
+[#80](https://github.com/flodl-labs/flodl/issues/80).
+
 The ROCm archive ships pre-built rocBLAS kernels for a fixed gfx list:
 
 ```

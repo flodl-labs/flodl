@@ -1146,13 +1146,10 @@ fn transfer_batch(
 /// Whether batches reach `device` synchronously, with no copy stream and
 /// no pinned staging, instead of the pinned async upload.
 ///
-/// True on an integrated GPU (an APU): host and device share the same
-/// memory, so a page-locked staging copy buys nothing there. And on Strix
-/// Halo (gfx1151) the pinned async upload, with the compute stream waiting
-/// on the copy stream's event every batch, hung the GPU under the trainer:
-/// 4 of 4 runs at 20M tokens and 20 splits, while the synchronous upload
-/// completed the same run at the same per-split speed (flodl#80). Unknown
-/// answers keep the async path, which is what a discrete card wants.
+/// True on an integrated GPU: host and device share memory, so a
+/// page-locked staging copy buys nothing, and on Strix Halo (gfx1151) the
+/// pinned async upload hung the GPU under the trainer (flodl#80). An
+/// unknown answer keeps the async path, which is what a discrete card wants.
 #[cfg(feature = "gpu")]
 fn synchronous_upload(device: Device) -> bool {
     device.is_cuda() && crate::tensor::gpu_is_integrated(device.index() as i32) == Some(true)
