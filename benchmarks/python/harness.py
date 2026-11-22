@@ -22,29 +22,34 @@ def get_device():
     return dev
 
 
-def _run_single_pass(model, batches, device, optimizer, loss_fn,
-                     warmup_epochs, measured_epochs):
+def _run_single_pass(run_epoch, device, warmup_epochs, measured_epochs):
     """Run one pass: warmup + measured epochs. Returns (epoch_times, final_loss)."""
-    # Warmup
     for _ in range(warmup_epochs):
-        for x, y in batches:
-            pred = model(x)
-            loss = loss_fn(pred, y)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        run_epoch()
 
     if device.type == "cuda":
         torch.cuda.synchronize()
 
-    # Measured epochs
     epoch_times = []
     final_loss = 0.0
 
     for _ in range(measured_epochs):
         start = time.perf_counter()
-        epoch_loss = 0.0
+        final_loss = run_epoch()
 
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        epoch_times.append((time.perf_counter() - start) * 1000)
+
+    return epoch_times, final_loss
+
+
+def run_benchmark(name, model, batches, device, optimizer,
+                  loss_fn=torch.nn.MSELoss(), **kwargs):
+    """Benchmark a training loop: forward, loss, backward, step per batch."""
+    def run_epoch():
+        epoch_loss = 0.0
         for x, y in batches:
             pred = model(x)
             loss = loss_fn(pred, y)
@@ -52,33 +57,29 @@ def _run_single_pass(model, batches, device, optimizer, loss_fn,
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+        return epoch_loss / len(batches)
 
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        epoch_times.append(elapsed_ms)
-        final_loss = epoch_loss / len(batches)
-
-    return epoch_times, final_loss
+    return run_epochs(name, run_epoch, list(model.parameters()), device,
+                      batches_per_epoch=len(batches),
+                      batch_size=batches[0][0].shape[0], **kwargs)
 
 
-def run_benchmark(name, model, batches, device, optimizer,
-                  loss_fn=torch.nn.MSELoss(),
-                  warmup_epochs=3, measured_epochs=20, runs=4):
-    """Run a benchmark and return a result dict.
+def run_epochs(name, run_epoch, params, device, batches_per_epoch, batch_size,
+               warmup_epochs=3, measured_epochs=20, runs=4):
+    """Run a benchmark whose epoch is the callable `run_epoch` (returns the
+    epoch's average loss) and return a result dict. Mirrors the Rust
+    harness's `run_benchmark`.
 
     Runs `runs` passes (first is warmup, rest measured). Reports the best
     (lowest median) run to filter process-level noise.
     """
-    param_count = sum(p.numel() for p in model.parameters())
-
+    param_count = sum(p.numel() for p in params)
+    tensor_count = len(params)
     measured_runs = max(runs, 2) - 1  # first run is warmup
 
     # Run 0: warmup run (discarded)
     print(f"    run 0/{measured_runs} (warmup)", file=sys.stderr)
-    _run_single_pass(model, batches, device, optimizer, loss_fn,
-                     warmup_epochs, measured_epochs)
+    _run_single_pass(run_epoch, device, warmup_epochs, measured_epochs)
 
     # Reset VRAM peak tracking AFTER warmup so steady-state is measured,
     # not cuDNN autotuning / JIT workspace spikes.
@@ -95,8 +96,7 @@ def run_benchmark(name, model, batches, device, optimizer,
     for r in range(measured_runs):
         print(f"    run {r + 1}/{measured_runs}", file=sys.stderr)
         times, loss = _run_single_pass(
-            model, batches, device, optimizer, loss_fn,
-            warmup_epochs, measured_epochs)
+            run_epoch, device, warmup_epochs, measured_epochs)
         med = statistics.median(times)
         run_medians.append(med)
         final_loss = loss
@@ -126,9 +126,10 @@ def run_benchmark(name, model, batches, device, optimizer,
         "runs": measured_runs,
         "warmup_epochs": warmup_epochs,
         "measured_epochs": measured_epochs,
-        "batches_per_epoch": len(batches),
-        "batch_size": batches[0][0].shape[0],
+        "batches_per_epoch": batches_per_epoch,
+        "batch_size": batch_size,
         "param_count": param_count,
+        "tensor_count": tensor_count,
         "epoch_times_ms": epoch_times,
         "median_epoch_ms": median,
         "mean_epoch_ms": mean,
@@ -145,7 +146,7 @@ def run_benchmark(name, model, batches, device, optimizer,
 def print_result(r):
     print(f"  {r['name']}", file=sys.stderr)
     print(f"    device:     {r['device']}", file=sys.stderr)
-    print(f"    params:     {format_count(r['param_count'])}", file=sys.stderr)
+    print(f"    params:     {format_count(r['param_count'])} in {r['tensor_count']} tensors", file=sys.stderr)
     print(f"    batches:    {r['batches_per_epoch']} x {r['batch_size']}", file=sys.stderr)
     print(f"    runs:       1 warmup + {r['runs']} measured", file=sys.stderr)
     print(f"    epochs:     {r['warmup_epochs']} warmup + {r['measured_epochs']} measured (per run)", file=sys.stderr)

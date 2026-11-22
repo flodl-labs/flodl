@@ -15,6 +15,9 @@ pub struct BenchResult {
     pub batches_per_epoch: usize,
     pub batch_size: usize,
     pub param_count: usize,
+    /// Number of parameter tensors. With the step time it says how
+    /// launch-heavy a row is: many small tensors, short step.
+    pub tensor_count: usize,
     pub epoch_times_ms: Vec<f64>,
     pub median_epoch_ms: f64,
     pub mean_epoch_ms: f64,
@@ -111,9 +114,11 @@ fn median_of(times: &[f64]) -> f64 {
 /// It receives `(epoch_index, is_warmup)`.
 pub fn run_benchmark(
     config: &BenchConfig,
-    param_count: usize,
+    params: &[flodl::Parameter],
     mut run_epoch: impl FnMut(usize, bool) -> flodl::Result<f64>,
 ) -> flodl::Result<BenchResult> {
+    let param_count = params.iter().map(|p| p.variable.numel()).sum::<i64>() as usize;
+    let tensor_count = params.len();
     let device_name = if flodl::gpu_available() {
         format!("CUDA ({})", flodl::gpu_device_name().unwrap_or_default())
     } else {
@@ -185,6 +190,7 @@ pub fn run_benchmark(
         batches_per_epoch: config.batches_per_epoch,
         batch_size: config.batch_size,
         param_count,
+        tensor_count,
         epoch_times_ms: epoch_times,
         median_epoch_ms: median,
         mean_epoch_ms: mean,
@@ -202,7 +208,7 @@ pub fn run_benchmark(
 pub fn print_result(r: &BenchResult) {
     eprintln!("  {}", r.name);
     eprintln!("    device:     {}", r.device);
-    eprintln!("    params:     {}", format_count(r.param_count));
+    eprintln!("    params:     {} in {} tensors", format_count(r.param_count), r.tensor_count);
     eprintln!("    batches:    {} x {}", r.batches_per_epoch, r.batch_size);
     eprintln!("    runs:       1 warmup + {} measured", r.runs);
     eprintln!("    epochs:     {} warmup + {} measured (per run)", r.warmup_epochs, r.measured_epochs);

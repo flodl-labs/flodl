@@ -6,7 +6,8 @@ import sys
 
 from harness import get_device, print_result, print_summary
 
-from tier1 import mlp, convnet, gru_seq, transformer, lstm_seq, conv_autoencoder
+from tier1 import mlp, convnet, gru_seq, transformer, lstm_seq, conv_autoencoder, resnet20
+from optim import step as optim_step
 from tier2 import residual_tower, gated_routing, iterative_refine, feedback_loop_fixed
 
 
@@ -18,6 +19,7 @@ BENCHMARKS = {
     "transformer": transformer,
     "lstm_seq": lstm_seq,
     "conv_autoenc": conv_autoencoder,
+    "resnet20": resnet20,
     # Tier 2
     "residual_tower": residual_tower,
     "gated_routing": gated_routing,
@@ -25,7 +27,10 @@ BENCHMARKS = {
     "feedback_fixed": feedback_loop_fixed,
 }
 
-TIER1 = {"mlp", "convnet", "gru_seq", "transformer", "lstm_seq", "conv_autoenc"}
+TIER1 = {"mlp", "convnet", "gru_seq", "transformer", "lstm_seq", "conv_autoenc", "resnet20"}
+
+# The optimizer step alone, one row per optimizer.
+OPTIM = list(optim_step.OPTIMIZERS)
 
 
 def main():
@@ -33,6 +38,7 @@ def main():
     output_json = "--json" in args
     tier1_only = "--tier1" in args
     tier2_only = "--tier2" in args
+    optim_only = "--optim" in args
     single = None
     if "--bench" in args:
         idx = args.index("--bench")
@@ -40,22 +46,28 @@ def main():
             single = args[idx + 1]
 
     device = get_device()
-    run_all = not tier1_only and not tier2_only and single is None
+    run_all = not tier1_only and not tier2_only and not optim_only and single is None
+
+    runners = {name: module.run for name, module in BENCHMARKS.items()}
+    for name in OPTIM:
+        runners[name] = lambda device, name=name: optim_step.run(name, device)
 
     results = []
-    for name, module in BENCHMARKS.items():
+    for name, run in runners.items():
         if single is not None:
             if name != single:
                 continue
         elif not run_all:
             if tier1_only and name not in TIER1:
                 continue
-            if tier2_only and name in TIER1:
+            if tier2_only and (name in TIER1 or name in OPTIM):
+                continue
+            if optim_only and name not in OPTIM:
                 continue
 
         print(f"--- {name} ---", file=sys.stderr)
         try:
-            result = module.run(device)
+            result = run(device)
             if not output_json:
                 print_result(result)
             results.append(result)

@@ -350,9 +350,14 @@ image.
 
 ### Raw data
 
-Per-round JSON files are saved in `benchmarks/rounds/` with full per-epoch
-timings, VRAM measurements, and model metadata. The merged results and final
-report are written to `benchmarks/report.txt`.
+The rounds behind the table above are committed in
+`benchmarks/published/2026-03-31-v0.3.0/`: one JSON file per round and per
+framework with full per-epoch timings, VRAM measurements and model
+metadata, the merged results, and the report.
+
+A run of your own writes the same files to `benchmarks/runs/<timestamp>/`,
+which is not committed and keeps the ten most recent runs.
+`fdl bench promote` copies the latest run into `benchmarks/published/`.
 
 ### Adding benchmarks
 

@@ -4,3 +4,4 @@ pub mod gru_seq;
 pub mod transformer;
 pub mod lstm_seq;
 pub mod conv_autoencoder;
+pub mod resnet20;

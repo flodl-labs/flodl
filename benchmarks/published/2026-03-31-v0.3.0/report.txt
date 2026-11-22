@@ -1,0 +1,53 @@
+flodl Benchmark Report
+======================
+
+Date:     2026-03-31
+flodl:    v0.3.0
+PyTorch:  2.10.0+cu128
+Rust:     rustc 1.94.0
+GPU:      NVIDIA GeForce RTX 5060 Ti (16 GB) | Driver 595.79 | CUDA 12.8
+OS:       Ubuntu 24.04 (Docker on WSL2)
+CPU:      AMD Ryzen 7 7800X3D
+Rounds:   10 | Warmup: 15s
+
+These are the rounds behind the v0.3.0 results in docs/benchmark.md. The
+tables below were regenerated from them on 2026-11-22 with the current
+comparison script: the times, sigmas and memory figures are those of the
+published table, shown per step. The environment lines are taken from
+that document; the run's own report file was not kept.
+
+=== Comparison (cuda, 10 rounds) ===
+
+  [best-of-3, 10 rounds, each: 3 warmup + 20 measured epochs]
+  [time per step; delta = flodl vs PyTorch, negative is flodl faster; a verdict needs more than 2σ]
+
+  Training throughput (forward, loss, backward, optimizer step)
+
+  benchmark           tensors     PyTorch       flodl      delta   verdict
+  ------------------------------------------------------------------------------
+  mlp                       —     5.82 ms     4.14 ms    -29% ±1   flodl faster
+  convnet                   —    25.96 ms    25.96 ms     +0% ±0   within noise
+  gru_seq                   —    22.10 ms    21.15 ms     -4% ±3   within noise
+  transformer               —    63.66 ms    44.00 ms    -31% ±0   flodl faster
+  lstm_seq                  —    13.85 ms    13.85 ms     -0% ±4   within noise
+  conv_autoenc              —     7.96 ms     7.91 ms     -1% ±1   within noise
+  residual_tower            —     8.14 ms     6.19 ms    -24% ±2   flodl faster
+  gated_routing             —     4.96 ms     4.35 ms    -12% ±4   flodl faster
+  iterative_refine          —     4.61 ms     4.12 ms    -11% ±2   flodl faster
+  feedback_fixed            —     5.51 ms     4.63 ms    -16% ±4   flodl faster
+
+  Memory (peak VRAM)
+
+  benchmark            Py alloc   Rs alloc   Py rsrvd   Rs rsrvd
+  --------------------------------------------------------------
+  mlp                    440 MB     401 MB     466 MB     418 MB
+  convnet               1102 MB    1103 MB    1420 MB    1484 MB
+  gru_seq                523 MB     526 MB     566 MB     558 MB
+  transformer           1395 MB    1358 MB    1544 MB    1534 MB
+  lstm_seq               677 MB     677 MB     846 MB     856 MB
+  conv_autoenc           403 MB     395 MB     484 MB     442 MB
+  residual_tower         400 MB     382 MB     466 MB     392 MB
+  gated_routing          126 MB     129 MB     148 MB     146 MB
+  iterative_refine       196 MB     195 MB     234 MB     214 MB
+  feedback_fixed          64 MB      63 MB      90 MB      88 MB
+

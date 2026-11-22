@@ -20,6 +20,7 @@
 //!   --runs N       Total runs per benchmark: 1 warmup + N-1 measured (default: 4)
 
 mod harness;
+mod optim;
 mod tier1;
 mod tier2;
 
@@ -32,6 +33,7 @@ fn main() {
     let json = args.iter().any(|a| a == "--json");
     let tier1_only = args.iter().any(|a| a == "--tier1");
     let tier2_only = args.iter().any(|a| a == "--tier2");
+    let optim_only = args.iter().any(|a| a == "--optim");
     let single = args.iter().position(|a| a == "--bench")
         .and_then(|i| args.get(i + 1).cloned());
 
@@ -46,11 +48,11 @@ fn main() {
     };
     eprintln!();
 
-    let run_all = !tier1_only && !tier2_only && single.is_none();
+    let run_all = !tier1_only && !tier2_only && !optim_only && single.is_none();
 
     type BenchFn = Box<dyn Fn(Device) -> flodl::Result<BenchResult>>;
 
-    let benchmarks: Vec<(&str, BenchFn)> = vec![
+    let mut benchmarks: Vec<(&str, BenchFn)> = vec![
         // Tier 1
         ("mlp",               Box::new(tier1::mlp::run)),
         ("convnet",           Box::new(tier1::convnet::run)),
@@ -58,6 +60,7 @@ fn main() {
         ("transformer",       Box::new(tier1::transformer::run)),
         ("lstm_seq",          Box::new(tier1::lstm_seq::run)),
         ("conv_autoenc",      Box::new(tier1::conv_autoencoder::run)),
+        ("resnet20",          Box::new(tier1::resnet20::run)),
         // Tier 2
         ("residual_tower",    Box::new(tier2::residual_tower::run)),
         ("gated_routing",     Box::new(tier2::gated_routing::run)),
@@ -65,7 +68,14 @@ fn main() {
         ("feedback_fixed",   Box::new(tier2::feedback_loop_fixed::run)),
     ];
 
-    let tier1_names = ["mlp", "convnet", "gru_seq", "transformer", "lstm_seq", "conv_autoenc"];
+    // The optimizer step alone, one row per optimizer.
+    for &name in optim::NAMES {
+        benchmarks.push((name, Box::new(move |device| optim::run(name, device))));
+    }
+
+    let tier1_names =
+        ["mlp", "convnet", "gru_seq", "transformer", "lstm_seq", "conv_autoenc", "resnet20"];
+    let is_optim = |name: &str| optim::NAMES.contains(&name);
 
     let mut results = Vec::new();
 
@@ -74,7 +84,8 @@ fn main() {
             Some(s) => s == name,
             None if run_all => true,
             None if tier1_only => tier1_names.contains(name),
-            None if tier2_only => !tier1_names.contains(name),
+            None if tier2_only => !tier1_names.contains(name) && !is_optim(name),
+            None if optim_only => is_optim(name),
             _ => false,
         };
 

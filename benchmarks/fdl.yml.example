@@ -11,6 +11,10 @@ commands:
     description: Publication run (10 interleaved rounds, 15s warmup)
     options: { rounds: 10, warmup-secs: 15 }
 
+  promote:
+    description: Copy the latest finished run into published/ (committed). Runs nothing
+    options: { promote: latest }
+
   cpu:
     description: CPU-only quick run
     options: { cpu: true }
