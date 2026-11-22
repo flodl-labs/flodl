@@ -33,9 +33,10 @@ flodl-sys.workspace = true
 flodl-hw.workspace = true
 indexmap.workspace = true
 flate2.workspace = true
-hmac-sha256.workspace = true
+hmac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 bincode-next.workspace = true
 rand = { workspace = true, optional = true }
 # `_exit` for cluster roles that finish and must terminate without running

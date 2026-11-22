@@ -26,7 +26,9 @@ fn hmac_sha256_64_truncation_matches_full_mac() {
     // HMAC-SHA256 output, interpreted little-endian. Guards against
     // accidental endian flips or wrong-half truncation in future edits.
     let bytes = b"some payload bytes for verification";
-    let full: [u8; 32] = HMAC::mac(bytes, SAMPLE_SALT.as_slice());
+    let mut mac = HmacSha256::new(SAMPLE_SALT.as_slice());
+    mac.update(bytes);
+    let full: [u8; 32] = mac.finalize();
     let mut expected_first_8 = [0u8; 8];
     expected_first_8.copy_from_slice(&full[0..8]);
     let expected = u64::from_le_bytes(expected_first_8);

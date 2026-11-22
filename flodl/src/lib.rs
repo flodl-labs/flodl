@@ -31,6 +31,7 @@ pub mod compat;
 pub mod data;
 pub mod distributed;
 pub mod graph;
+mod hash;
 mod home;
 pub mod log;
 pub mod metrics;

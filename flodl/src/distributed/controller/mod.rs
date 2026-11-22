@@ -77,9 +77,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use hmac_sha256::HMAC;
+use crate::hash::HmacSha256;
 
 use crate::distributed::relay::mux::{MuxRead, MuxRecord, RelayControlMsg};
+use crate::distributed::stage_timer::{self, Stage, timed};
 use crate::distributed::wire::SessionSalt;
 use crate::tensor::{Result, TensorError};
 
@@ -512,6 +513,7 @@ fn run_reduce_thread(
                 ) {
                     break Err(e);
                 }
+                stage_timer::report("controller, reduce and scatter");
             }
             RoundOutcome::Shutdown => break Ok(()),
             RoundOutcome::Error(e) => break Err(e),
@@ -708,8 +710,14 @@ fn reduce_reader(
                     continue; // late frame from a fully-dead host — drop
                 }
                 let mut slice = &payload[..];
-                match read_round_frame(&mut slice, &salt) {
-                    Ok(Some(frame)) => slots.deposit(conn_idx, frame),
+                let parsed = timed(Stage::Parse, payload.len(), || {
+                    read_round_frame(&mut slice, &salt)
+                });
+                match parsed {
+                    Ok(Some(frame)) => {
+                        slots.deposit(conn_idx, frame);
+                        stage_timer::report(&format!("controller, receive from relay {conn_idx}"));
+                    }
                     Ok(None) => {
                         slots.set_error(TensorError::new(&format!(
                             "cluster_controller: truncated HostFrame payload on \
@@ -812,7 +820,7 @@ fn average_and_scatter(
     forge: Option<&crate::distributed::CheckpointForge>,
     outer_stepper: Option<&mut crate::distributed::outer_optimizer::OuterStepper>,
 ) -> Result<()> {
-    let averaged = reduce_realized_work(frames)?;
+    let averaged = timed(Stage::Sum, 0, || reduce_realized_work(frames))?;
     // OUTER STEP: transform the averaged consensus into the new global
     // BEFORE scatter (ranks adopt the stepped global) and BEFORE the forge
     // tap below (the checkpoint captures the stepped global). Applies to the
@@ -826,7 +834,7 @@ fn average_and_scatter(
     let mut outer_momentum: Option<Vec<TensorPayload>> = None;
     let averaged = match outer_stepper {
         Some(stepper) => {
-            let stepped = stepper.process_frame(averaged)?;
+            let stepped = timed(Stage::Outer, 0, || stepper.process_frame(averaged))?;
             if stepped.kind == RoundKind::Model
                 && forge.is_some_and(|f| f.is_armed())
                 && let Some(m) = stepper.checkpoint_state()
@@ -849,8 +857,13 @@ fn average_and_scatter(
     // `write_to` borrows, so cloning the model-sized buffer per connection
     // was pure alloc+memcpy churn (n_conns × frame bytes per window).
     let mut buf: Vec<u8> = Vec::new();
-    write_round_frame(&mut buf, &averaged, salt)?;
+    timed(Stage::Encode, 0, || {
+        write_round_frame(&mut buf, &averaged, salt)
+    })?;
     let record = MuxRecord::broadcast(buf);
+    // Sealed once: the tag is a pass over the whole frame, and it is the
+    // same for every connection.
+    let sealed = record.sealed_header(salt)?;
     // ELASTIC SCATTER: a write failure (including a zero-progress stall
     // tripping the socket's write timeout) marks that CONNECTION broken
     // and declares its ranks dead, and the scatter continues to the
@@ -869,7 +882,7 @@ fn average_and_scatter(
             // from the data plane, behind the coordinator's back.
             continue;
         }
-        if let Err(e) = record.write_to(&mut conn_writes[ci], salt) {
+        if let Err(e) = record.write_sealed(&sealed, &mut conn_writes[ci]) {
             eprintln!(
                 "cluster_controller: consensus broadcast to relay {ci} \
                  (ranks {ranks:?}) failed ({e}); declaring its ranks dead and \

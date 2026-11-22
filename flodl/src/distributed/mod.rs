@@ -52,6 +52,7 @@ pub(crate) mod port_mux;
 pub(crate) mod realized_work;
 pub(crate) mod relay;
 pub(crate) mod rendezvous;
+pub(crate) mod stage_timer;
 pub(crate) mod status;
 pub mod testing;
 pub(crate) mod wire;

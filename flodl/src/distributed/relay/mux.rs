@@ -51,7 +51,8 @@ use std::io::{ErrorKind, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-use crate::distributed::wire::{SessionSalt, hmac_sha256_64};
+use crate::distributed::stage_timer::{Stage, timed};
+use crate::distributed::wire::{SessionSalt, hmac_sha256_64_parts};
 use crate::tensor::{Result, TensorError};
 
 // ---------------------------------------------------------------------------
@@ -231,6 +232,15 @@ impl MuxRecord {
     /// (magic, version, kind, rank, payload_len) together with the
     /// payload, keyed by the session salt.
     pub fn write_to<W: Write>(&self, w: &mut W, salt: &SessionSalt) -> Result<()> {
+        let hdr = self.sealed_header(salt)?;
+        self.write_sealed(&hdr, w)
+    }
+
+    /// The record's wire header, authentication tag included. Computing
+    /// the tag is a pass over the payload, so a caller sending one record
+    /// down several connections seals it once and hands the header to
+    /// [`Self::write_sealed`] for each.
+    pub fn sealed_header(&self, salt: &SessionSalt) -> Result<[u8; MUX_HEADER_LEN]> {
         let (kind, rank, payload) = self.parts()?;
         let payload_len = u32::try_from(payload.len()).map_err(|_| {
             TensorError::new(&format!(
@@ -247,8 +257,14 @@ impl MuxRecord {
         hdr[13..17].copy_from_slice(&payload_len.to_le_bytes());
         // auth_tag over header[0..17] (everything but the tag slot) plus
         // the payload bytes.
-        let auth_tag = hmac_sha256_64_2(salt, &hdr[0..17], &payload);
+        let auth_tag = hmac_sha256_64_parts(salt, &[&hdr[0..17], &payload]);
         hdr[17..25].copy_from_slice(&auth_tag.to_le_bytes());
+        Ok(hdr)
+    }
+
+    /// Write the record under a header from [`Self::sealed_header`].
+    pub fn write_sealed<W: Write>(&self, hdr: &[u8; MUX_HEADER_LEN], w: &mut W) -> Result<()> {
+        let (_, _, payload) = self.parts()?;
         match self {
             // Data-plane frames (host fold up, consensus broadcast down)
             // are model-sized: the atomic [hdr‖payload] copy below would
@@ -260,10 +276,10 @@ impl MuxRecord {
             // so a mid-record read timeout can no longer desync the
             // stream.
             MuxRecord::HostFrame { .. } | MuxRecord::Broadcast { .. } => {
-                w.write_all(&hdr).map_err(|e| {
+                w.write_all(hdr).map_err(|e| {
                     TensorError::new(&format!("relay_mux: record header write failed: {e}"))
                 })?;
-                w.write_all(&payload).map_err(|e| {
+                timed(Stage::Send, payload.len(), || w.write_all(&payload)).map_err(|e| {
                     TensorError::new(&format!("relay_mux: record write failed: {e}"))
                 })?;
             }
@@ -278,7 +294,7 @@ impl MuxRecord {
             // these frames are bytes-cheap to copy.
             MuxRecord::Data { .. } | MuxRecord::Control(_) => {
                 let mut frame = Vec::with_capacity(MUX_HEADER_LEN + payload.len());
-                frame.extend_from_slice(&hdr);
+                frame.extend_from_slice(hdr);
                 frame.extend_from_slice(&payload);
                 w.write_all(&frame).map_err(|e| {
                     TensorError::new(&format!("relay_mux: record write failed: {e}"))
@@ -367,9 +383,11 @@ impl MuxRecord {
         // read abandoned here would desync the stream). Incremental
         // allocation: the length is unauthenticated until the MAC check
         // below, so never trust it for one big up-front allocation.
-        let payload = fill_committed_incremental(r, payload_len)?;
+        let payload = timed(Stage::Recv, payload_len, || {
+            fill_committed_incremental(r, payload_len)
+        })?;
 
-        let actual = hmac_sha256_64_2(salt, &hdr[0..17], &payload);
+        let actual = hmac_sha256_64_parts(salt, &[&hdr[0..17], &payload]);
         if actual != auth_tag {
             return Err(TensorError::new(&format!(
                 "relay_mux: HMAC verification failed (computed 0x{actual:016x}, \
@@ -427,10 +445,13 @@ pub fn write_len_framed<W: Write>(w: &mut W, bytes: &[u8]) -> Result<()> {
     // Single atomic write (prefix + body) so a reader on a timeout'd
     // socket never sees the length prefix without its body — see the
     // rationale in `MuxRecord::write_to`.
-    let mut framed = Vec::with_capacity(4 + bytes.len());
-    framed.extend_from_slice(&len.to_le_bytes());
-    framed.extend_from_slice(bytes);
-    w.write_all(&framed)
+    let framed = timed(Stage::Copy, bytes.len(), || {
+        let mut framed = Vec::with_capacity(4 + bytes.len());
+        framed.extend_from_slice(&len.to_le_bytes());
+        framed.extend_from_slice(bytes);
+        framed
+    });
+    timed(Stage::Send, bytes.len(), || w.write_all(&framed))
         .map_err(|e| TensorError::new(&format!("relay_mux: len-framed write failed: {e}")))?;
     Ok(())
 }
@@ -548,7 +569,7 @@ pub fn try_read_len_framed<R: Read>(r: &mut R) -> Result<LenFramedRead> {
              {ceiling}; corrupt or hostile peer"
         )));
     }
-    let body = fill_committed_incremental(r, len)?;
+    let body = timed(Stage::Recv, len, || fill_committed_incremental(r, len))?;
     Ok(LenFramedRead::Blob(body))
 }
 
@@ -682,25 +703,6 @@ fn fill_committed_incremental<R: Read>(r: &mut R, len: usize) -> Result<Vec<u8>>
         fill_committed(r, &mut buf[old_len..])?;
     }
     Ok(buf)
-}
-
-// ---------------------------------------------------------------------------
-// HMAC over two byte regions (header-without-tag || payload)
-// ---------------------------------------------------------------------------
-
-/// HMAC-SHA256-64 over the concatenation of two byte regions, keyed by
-/// `salt`. Lets the mux header authenticate its routing fields together
-/// with the payload without an intermediate allocation in the common
-/// (empty/borrowed payload) case.
-fn hmac_sha256_64_2(salt: &SessionSalt, a: &[u8], b: &[u8]) -> u64 {
-    // hmac_sha256_64 takes a single slice; build the MAC input once.
-    // Header is 17 bytes; payloads here are control blobs or already-
-    // framed opaque data, so a single concat is acceptable and keeps the
-    // auth helper identical to the rest of the wire layer.
-    let mut buf = Vec::with_capacity(a.len() + b.len());
-    buf.extend_from_slice(a);
-    buf.extend_from_slice(b);
-    hmac_sha256_64(salt, &buf)
 }
 
 // ---------------------------------------------------------------------------

@@ -185,7 +185,7 @@ pub(crate) fn read_round_frame_streamed<R: Read>(
     on_header: Option<&mut dyn FnMut(RoundKind, f64)>,
     sink: &mut dyn FnMut(usize, TensorPayload) -> Result<()>,
 ) -> Result<Option<(RoundKind, f64)>> {
-    let mut mac = HMAC::new(salt.as_slice());
+    let mut mac = HmacSha256::new(salt.as_slice());
 
     let mut hdr = [0u8; 8];
     match stream.read_exact(&mut hdr) {
@@ -297,7 +297,7 @@ pub(crate) fn read_round_frame_streamed<R: Read>(
                     "cluster_controller: tensor[{ti}] data read failed: {e}"
                 ))
             })?;
-        mac.update(&bytes);
+        timed(Stage::Mac, bytes.len(), || mac.update(&bytes));
         sink(
             ti,
             TensorPayload {
@@ -363,14 +363,14 @@ pub(crate) fn round_frame_wire_len(parts: &[PayloadPart<'_>]) -> u64 {
 /// verify the emitter honored its declared `nbytes`.
 pub(crate) struct MacTee<'a, W: Write> {
     inner: &'a mut W,
-    mac: &'a mut HMAC,
+    mac: &'a mut HmacSha256,
     written: u64,
 }
 
 impl<W: Write> Write for MacTee<'_, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
-        self.mac.update(&buf[..n]);
+        timed(Stage::Mac, n, || self.mac.update(&buf[..n]));
         self.written += n as u64;
         Ok(n)
     }
@@ -398,7 +398,7 @@ pub(crate) fn write_round_frame_streamed<W: Write>(
     salt: &SessionSalt,
     emit: &mut dyn FnMut(usize, &mut MacTee<'_, W>) -> Result<()>,
 ) -> Result<()> {
-    let mut mac = HMAC::new(salt.as_slice());
+    let mut mac = HmacSha256::new(salt.as_slice());
 
     let mut hdr = [0u8; 8];
     hdr[0..4].copy_from_slice(&ROUND_FRAME_MAGIC.to_le_bytes());
