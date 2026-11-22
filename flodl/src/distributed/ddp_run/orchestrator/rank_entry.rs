@@ -676,6 +676,8 @@ impl DdpHandle {
             seed: crate::distributed::ddp_run::resolve_shuffle_seed(config.resume_from.as_deref())?,
             epoch_splits: config.epoch_splits.max(1),
             max_grad_norm: config.max_grad_norm,
+            precision: config.precision,
+            precision_fallback: config.precision_fallback,
             vram_pool: config.vram_pool,
             vram_max_usage: config.vram_max_usage,
             ram_max_usage: config.ram_max_usage,

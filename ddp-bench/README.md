@@ -157,6 +157,10 @@ An explicit `--epochs` or `--train-tokens` wins over the profile.
 
 The learning rate is the model's default at any run length, with one exception. A model that trains at a constant rate (logistic, mlp, lenet, conv-ae, char-rnn) and is given more epochs than its default trains at `default * default_epochs / epochs`: rate times steps stays the same, so the longer run covers the same ground in finer steps and remains comparable to the default one. The run says so when it applies. A model with a schedule (ResNet, gpt-nano, OLMo) stretches the schedule over the run and keeps its peak rate. `--lr-scale 1` holds the default rate in every case.
 
+## Precision
+
+`--precision bf16-mixed` runs the training forward under bf16 autocast in every mode: through `TrainerConfig::precision` in the trainer modes, and by hand in the `solo-N` loop. Parameters, averaging, checkpoints and evaluation stay f32, and the run's banner and metadata record the arm. It pays on the transformer models (gpt-nano, OLMo) on a card with native bf16 and can slow the small convolutional ones. `--precision-fallback` keeps a rank in f32 when its card only emulates bf16 (NVIDIA below compute capability 8.0). It is unrelated to `--bf16-wire`, which is the wire format of the CPU averaging plane.
+
 ## LR Scaling for Multi-GPU
 
 With multiple GPUs, the per-batch LR schedule advances faster (global_step counts all GPUs' batches). Use `--lr-scale <N>` to compensate:

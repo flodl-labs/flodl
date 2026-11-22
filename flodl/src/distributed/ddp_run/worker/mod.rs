@@ -346,6 +346,9 @@ pub struct GpuWorker<M: Module> {
     vram_pool_budget_sent: bool,
     /// Maximum gradient norm for clipping (None = no clipping).
     max_grad_norm: Option<f64>,
+    /// The precision this worker's training forward runs: the requested
+    /// one, or `F32` when the fallback applied on this device.
+    precision: crate::nn::Precision,
     /// EASGD elastic averaging weight (0, 1]. `None` = full overwrite
     /// (current behavior; uses fast non-blocking copy_). When `Some(α)`,
     /// `load_averaged` blends `W_local := (1-α)·W_local + α·W_avg` instead

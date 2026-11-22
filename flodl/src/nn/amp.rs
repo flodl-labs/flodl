@@ -5,7 +5,7 @@ use std::ptr;
 use flodl_sys as ffi;
 
 use crate::autograd::Variable;
-use crate::tensor::{DType, Result, Tensor};
+use crate::tensor::{DType, Device, Result, Tensor};
 
 use super::checkpoint::{read_f64_le, read_i64_le, write_f64_le, write_i64_le};
 use super::optim::Stateful;
@@ -84,6 +84,130 @@ pub fn is_autocast_enabled() -> bool {
 /// [`AutocastGuard::for_device`], which sets it per device type.
 pub fn is_autocast_enabled_for(device_type: i32) -> bool {
     unsafe { ffi::flodl_is_autocast_enabled(device_type) != 0 }
+}
+
+/// The numeric precision a training step computes in.
+///
+/// This is *mixed* precision: parameters, gradients, checkpoints and
+/// averaging stay `f32` on every variant, and only the forward pass is
+/// allowed a narrower type (libtorch's autocast, which keeps losses,
+/// norms and softmax in `f32` on its own). Storing the model itself in
+/// another type is a different axis and not expressed here.
+///
+/// A reduced precision pays on matmul-heavy models (transformers) on
+/// hardware that computes it natively. A small convolutional model can
+/// get slower, and a card that only emulates the type gets much slower
+/// (see [`Precision::is_native_on`]), so `F32` is the default.
+///
+/// ```ignore
+/// let loss = Precision::Bf16Mixed.run(device, || {
+///     let out = model.forward(&input)?;
+///     cross_entropy_loss(&out, &target)
+/// })?;
+/// loss.backward()?; // outside, as with autocast
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Precision {
+    /// Full `f32` compute. The default.
+    #[default]
+    F32,
+    /// `bf16` forward under autocast, `f32` parameters. Needs no
+    /// gradient scaler: `bf16` keeps `f32`'s exponent range.
+    Bf16Mixed,
+}
+
+impl Precision {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Precision] = &[Precision::F32, Precision::Bf16Mixed];
+
+    /// The name used on command lines and in run metadata (`f32`,
+    /// `bf16-mixed`). Round-trips through [`FromStr`](std::str::FromStr).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Precision::F32 => "f32",
+            Precision::Bf16Mixed => "bf16-mixed",
+        }
+    }
+
+    /// The autocast dtype of the forward pass, `None` for full precision.
+    pub fn autocast_dtype(self) -> Option<DType> {
+        match self {
+            Precision::F32 => None,
+            Precision::Bf16Mixed => Some(DType::BFloat16),
+        }
+    }
+
+    /// Whether `device` computes this precision natively, as opposed to
+    /// emulating it.
+    ///
+    /// `bf16` is native on NVIDIA from compute capability 8.0 (Ampere)
+    /// and emulated below it, and native on every AMD card: the same
+    /// answers as PyTorch's `torch.cuda.is_bf16_supported(
+    /// including_emulation=False)`. Emulation is correct but slow: a GTX 1060 trains a small
+    /// transformer about 1.3x slower in `bf16` than in `f32`, and a small
+    /// convolutional model several times slower. A device that cannot
+    /// answer (an AMD build, where compute capability does not exist, or
+    /// the CPU) counts as native.
+    pub fn is_native_on(self, device: Device) -> bool {
+        match self {
+            Precision::F32 => true,
+            Precision::Bf16Mixed => match device {
+                Device::CUDA(idx) => crate::tensor::cuda_compute_capability(idx as i32)
+                    .is_none_or(|(major, _)| major >= 8),
+                Device::CPU => true,
+            },
+        }
+    }
+
+    /// The precision `device` should run when the caller prefers `f32`
+    /// over an emulated type: `self` where it is native, `F32` otherwise.
+    pub fn native_or_f32(self, device: Device) -> Precision {
+        if self.is_native_on(device) {
+            self
+        } else {
+            Precision::F32
+        }
+    }
+
+    /// Run a forward pass (forward plus loss) at this precision on
+    /// `device`. Call `backward` outside the closure.
+    pub fn run<F, R>(self, device: Device, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        match self.autocast_dtype() {
+            Some(dtype) => {
+                let _guard = AutocastGuard::for_device(device.to_ffi().0, dtype);
+                f()
+            }
+            None => f(),
+        }
+    }
+}
+
+impl std::fmt::Display for Precision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Precision {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        Precision::ALL
+            .iter()
+            .copied()
+            .find(|p| p.as_str() == s)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Precision::ALL.iter().map(|p| p.as_str()).collect();
+                format!(
+                    "unknown precision `{s}` (expected one of: {})",
+                    names.join(", ")
+                )
+            })
+    }
 }
 
 /// Cast all parameters to a different dtype. No-op for parameters already

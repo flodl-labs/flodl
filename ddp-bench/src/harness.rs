@@ -88,6 +88,12 @@ fn describe_run(
         if config.augment > 1 {
             obj.insert("augment".into(), config.augment.into());
         }
+        if config.precision != flodl::nn::Precision::F32 {
+            obj.insert("precision".into(), config.precision.as_str().into());
+            if config.precision_fallback {
+                obj.insert("precision_fallback".into(), true.into());
+            }
+        }
         // Without these two a split run's artifact is indistinguishable
         // from an unsplit one: `epochs` counts data passes, so a 1-pass
         // 20-split run and a plain 1-epoch run record the same number
@@ -333,6 +339,12 @@ pub fn run_combo(model_def: &ModelDef, mode: &DdpMode, config: &RunConfig) -> Re
         }
     } else {
         String::new()
+    };
+    let augment_tag = if config.precision != flodl::nn::Precision::F32 {
+        let fallback = if config.precision_fallback { " (f32 where emulated)" } else { "" };
+        format!("{augment_tag}, precision={}{fallback}", config.precision)
+    } else {
+        augment_tag
     };
     // "N epochs" means N passes over the data. Once an epoch is a slice of
     // a pass those stop being the same number, and the banner is what ends
@@ -727,8 +739,10 @@ fn train_step(
     train_fn: fn(&dyn Module, &[Tensor]) -> Result<Variable>,
     batch: &[Tensor],
     global_batch: usize,
+    precision: flodl::nn::Precision,
 ) -> Result<f64> {
-    let loss = train_fn(model, batch)?;
+    let device = batch.first().map_or(Device::CPU, |t| t.device());
+    let loss = precision.run(device, || train_fn(model, batch))?;
     let loss_val = loss.item()?;
     if let Some(sched) = scheduler {
         optimizer.set_lr(sched.lr(global_batch));
@@ -766,6 +780,7 @@ fn run_baseline_solo(
     log_lines: &mut Vec<String>,
 ) -> Result<(f64, Vec<f64>)> {
     let device = Device::CUDA(gpu_idx as u8);
+    let precision = config.precision_on(device);
     // Seed IMMEDIATELY before construction: weight init draws from libtorch's
     // generator, and nothing else was seeding it, so `--seed` reached the data
     // path and left the model random every run. Measured before this line:
@@ -847,6 +862,7 @@ fn run_baseline_solo(
                     model_def.train_fn,
                     &batch,
                     global_batch,
+                    precision,
                 )?;
                 batch_count += 1;
                 global_batch += 1;
@@ -922,6 +938,7 @@ fn run_baseline_solo(
                     model_def.train_fn,
                     batch,
                     global_batch,
+                    precision,
                 )?;
                 global_batch += 1;
             }
@@ -1144,6 +1161,15 @@ fn run_unified(
     // builder loud-errors at `.run()` when paired with an NCCL mode.
     if config.bf16_wire {
         builder = builder.bf16_wire(true);
+    }
+
+    // The managed tier applies the precision inside the trainer's step.
+    // The cooperative loop below runs its own forward, so it applies it
+    // there and the builder stays at f32 (`into_worker` refuses otherwise).
+    if !matches!(config.tier, crate::config::Tier::Cooperative) {
+        builder = builder
+            .precision(config.precision)
+            .precision_fallback(config.precision_fallback);
     }
 
     // Heterogeneous topology: explicit per-rank shares disable the uniform
@@ -1651,7 +1677,12 @@ fn run_cooperative(
                 Some(aug) => aug(&batch)?,
                 None => batch,
             };
-            let loss = train_fn(worker.model().as_ref(), &batch)?;
+            let precision = match batch.first() {
+                Some(t) => config.precision_on(t.device()),
+                None => flodl::nn::Precision::F32,
+            };
+            let device = batch.first().map_or(Device::CPU, |t| t.device());
+            let loss = precision.run(device, || train_fn(worker.model().as_ref(), &batch))?;
             loss.backward()?;
             let outcome = worker.step(&loss)?;
             if outcome.shutdown {

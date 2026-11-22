@@ -491,6 +491,19 @@ pub struct TrainerConfig<M: Module> {
 
     /// Maximum gradient norm for per-worker clipping. `None` = no clipping.
     pub max_grad_norm: Option<f64>,
+    /// Numeric precision of each rank's training forward (default
+    /// [`Precision::F32`](crate::nn::Precision)). Mixed precision only:
+    /// parameters, gradients, averaging and checkpoints stay `f32`, and
+    /// evaluation always runs in `f32` so its metric means the same thing
+    /// in every arm. Applied on every rank as given, including a rank
+    /// whose card only emulates the type, which then says so at startup;
+    /// see [`Self::precision_fallback`] to keep such a rank in `f32`.
+    pub precision: crate::nn::Precision,
+    /// Keep a rank in `f32` when its device only emulates
+    /// [`Self::precision`] (default `false`). Averaging is unaffected,
+    /// since parameters are `f32` on every rank either way. Each rank
+    /// reports the precision it runs.
+    pub precision_fallback: bool,
     /// Device-resident sample pool on rank workers (default `true`):
     /// leftover VRAM retains samples after the first training step so
     /// later epochs gather them on device instead of re-uploading them.
@@ -717,6 +730,8 @@ impl<M: Module> TrainerConfig<M> {
             num_epochs: 1,
             elche: ElCheConfig::default(),
             max_grad_norm: None,
+            precision: crate::nn::Precision::F32,
+            precision_fallback: false,
             vram_pool: crate::data::vram_pool::VRAM_POOL_DEFAULT,
             profile_graph: false,
             augment: 1,
@@ -880,6 +895,17 @@ impl<M: Module> TrainerConfig<M> {
     /// Set the gradient-clipping max norm.
     pub fn max_grad_norm(mut self, n: f64) -> Self {
         self.max_grad_norm = Some(n);
+        self
+    }
+    /// Set the training precision (see [`Self::precision`]).
+    pub fn precision(mut self, precision: crate::nn::Precision) -> Self {
+        self.precision = precision;
+        self
+    }
+    /// Keep a rank in `f32` where its device only emulates the requested
+    /// precision (see [`Self::precision_fallback`]).
+    pub fn precision_fallback(mut self, fallback: bool) -> Self {
+        self.precision_fallback = fallback;
         self
     }
     /// Set the periodic checkpoint cadence (in epochs).

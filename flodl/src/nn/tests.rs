@@ -1170,6 +1170,46 @@ fn test_autocast_matmul_output_dtype() {
 }
 
 #[test]
+fn precision_names_round_trip_and_reject_unknown() {
+    for &p in amp::Precision::ALL {
+        assert_eq!(p.as_str().parse::<amp::Precision>(), Ok(p));
+        assert_eq!(p.to_string(), p.as_str());
+    }
+    let err = "f16".parse::<amp::Precision>().unwrap_err();
+    assert!(err.contains("f32") && err.contains("bf16-mixed"), "{err}");
+    assert_eq!(amp::Precision::default(), amp::Precision::F32);
+}
+
+#[test]
+fn precision_run_scopes_the_forward_to_its_dtype() {
+    let opts = crate::tensor::test_opts();
+    let dev = crate::tensor::test_device();
+    let a = Tensor::randn(&[4, 4], opts).unwrap();
+    let b = Tensor::randn(&[4, 4], opts).unwrap();
+
+    let inside = amp::Precision::Bf16Mixed.run(dev, || a.matmul(&b).unwrap().dtype());
+    assert_eq!(inside, crate::tensor::DType::BFloat16);
+    // The guard ends with the closure: the next op is f32 again.
+    assert_eq!(a.matmul(&b).unwrap().dtype(), crate::tensor::DType::Float32);
+
+    let full = amp::Precision::F32.run(dev, || a.matmul(&b).unwrap().dtype());
+    assert_eq!(full, crate::tensor::DType::Float32);
+}
+
+#[test]
+fn full_precision_is_native_everywhere_and_never_falls_back() {
+    let dev = crate::tensor::test_device();
+    assert!(amp::Precision::F32.is_native_on(dev));
+    assert_eq!(amp::Precision::F32.native_or_f32(dev), amp::Precision::F32);
+    // Whatever the device answers for bf16, the fallback is one of the two.
+    let chosen = amp::Precision::Bf16Mixed.native_or_f32(dev);
+    assert_eq!(
+        chosen == amp::Precision::Bf16Mixed,
+        amp::Precision::Bf16Mixed.is_native_on(dev)
+    );
+}
+
+#[test]
 fn test_adaptive_avg_pool2d() {
     use crate::autograd::adaptive_avg_pool2d;
     // Input: [batch=1, channels=1, h=4, w=4]

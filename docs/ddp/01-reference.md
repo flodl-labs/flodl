@@ -305,6 +305,8 @@ let cfg = TrainerConfig::new(dataset)
 | `.num_epochs(n)` | `usize` | Total epochs. |
 | `.elche(cfg)` | `ElCheConfig` | DDP cadence + backend + tuning. |
 | `.max_grad_norm(f)` | `f64` | Per-rank gradient clip applied before AllReduce. Fused kernel. |
+| `.precision(p)` | `Precision` | Precision of each rank's training forward. `Precision::Bf16Mixed` runs it under bf16 autocast; parameters, averaging, checkpoints and evaluation stay f32. Default `F32`. Refused by `into_worker()`, where the forward is yours: wrap it in `Precision::run`. |
+| `.precision_fallback(b)` | `bool` | Keep a rank in f32 when its card only emulates the requested precision (NVIDIA below compute capability 8.0 for bf16). Default `false`: the precision applies on every rank, and an emulating rank says so at startup. |
 | `.checkpoint_every(n)` | `usize` | Checkpoint cadence in epochs: fires `checkpoint_fn` (when set) with the consensus model, and writes the consensus bundle when `.save_path` is set (each write atomically supersedes the last). |
 | `.save_path(p)` | `String` | Stem for checkpoint bundles (writes `<stem>.fdl` + `<stem>.meta.json`). Writers create the stem's parent directories, and the run prints where the stem resolves in its first lines (a relative stem resolves against each process's working directory, not where the operator typed the command). |
 | `.resume_from(p)` | `String` | Load bundle at start; restores params, buffers, optimizer, ElCheState. |

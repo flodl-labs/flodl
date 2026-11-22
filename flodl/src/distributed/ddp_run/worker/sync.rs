@@ -1201,8 +1201,11 @@ impl<M: Module> GpuWorker<M> {
 
         let start = Instant::now();
 
-        // User-provided forward + loss computation
-        let loss = train_fn(&self.model, batch)?;
+        // User-provided forward + loss, at this worker's precision.
+        // Backward stays outside, as autocast requires.
+        let loss = self
+            .precision
+            .run(self.device, || train_fn(&self.model, batch))?;
         let loss_val: f64 = loss.data().item()?;
 
         // Backward

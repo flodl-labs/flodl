@@ -255,6 +255,20 @@ struct Cli {
     #[option]
     bf16_wire: bool,
 
+    /// Precision of the training forward. `bf16-mixed` runs it under
+    /// bfloat16 autocast while parameters, averaging, checkpoints and
+    /// evaluation stay f32. It pays on transformers on a card with native
+    /// bf16; a small convolutional model can get slower. Unrelated to
+    /// `--bf16-wire`, which is the averaging plane's wire format.
+    #[option(default = "f32", choices = &["f32", "bf16-mixed"])]
+    precision: String,
+
+    /// Keep a rank in f32 when its card only emulates `--precision`
+    /// (NVIDIA below compute capability 8.0 for bf16), instead of applying
+    /// it on every rank.
+    #[option]
+    precision_fallback: bool,
+
     /// Augmentation multiplicity: each sample appears k times per epoch
     /// as distinct schedule picks (flodl `.augment(k)`) — the epoch's
     /// work scales by k and the picks shard/balance exactly like
@@ -849,6 +863,13 @@ fn run() -> flodl::tensor::Result<()> {
     };
 
     let lr_scale = cli.lr_scale;
+    let precision: flodl::nn::Precision = match cli.precision.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: --precision: {e}");
+            std::process::exit(2);
+        }
+    };
     let list = cli.list;
 
     // --report: None=training mode (no report); Some("-")=report to stdout;
@@ -1234,6 +1255,8 @@ fn run() -> flodl::tensor::Result<()> {
                 outer_optimizer: outer_opt_choice.clone(),
                 gamma: cli.gamma.unwrap_or(1.0),
                 bf16_wire: cli.bf16_wire,
+                precision,
+                precision_fallback: cli.precision_fallback,
                 augment: cli.augment.unwrap_or(1).max(1),
                 augment_noise: cli.augment_noise.unwrap_or(0.0),
                 epoch_splits: epoch_splits.unwrap_or(1).max(1),

@@ -43,6 +43,14 @@ impl BatchDataSet for DeterministicDataset {
 /// Mirrors `make_test_worker_with` but with reproducible data + a caller-chosen
 /// dataset size (`total` must be a multiple of the batch size, 4).
 fn make_det_worker(total: usize) -> (GpuWorker<Linear>, WorkerChannels) {
+    make_det_worker_with(total, crate::nn::Precision::F32)
+}
+
+/// [`make_det_worker`] at a chosen training precision.
+fn make_det_worker_with(
+    total: usize,
+    precision: crate::nn::Precision,
+) -> (GpuWorker<Linear>, WorkerChannels) {
     let dev = test_device();
 
     let tmp = Linear::on_device(4, 2, dev).unwrap();
@@ -69,6 +77,8 @@ fn make_det_worker(total: usize) -> (GpuWorker<Linear>, WorkerChannels) {
         seed: 42,
         epoch_splits: 1,
         max_grad_norm: None,
+        precision,
+        precision_fallback: false,
         vram_pool: false,
         easgd_alpha: None,
         gamma: 1.0,
@@ -202,6 +212,71 @@ fn worker_sync_now_drains_reduce_in_step() {
     assert!(
         saw_sync_ack,
         "step() must drain the SyncNow and emit a SyncAck (reduce path ran)"
+    );
+}
+
+#[test]
+fn the_trainer_step_runs_the_forward_at_the_configured_precision() {
+    // The managed step wraps the user's forward in autocast for the
+    // configured precision and leaves it off again for backward and the
+    // optimizer step. An f32 worker never turns it on.
+    let dev = test_device();
+    let device_type = dev.to_ffi().0;
+    let opts = crate::tensor::test_opts();
+    let batch = vec![
+        Tensor::full(&[4, 4], 0.5, opts).unwrap(),
+        Tensor::full(&[4, 2], 0.25, opts).unwrap(),
+    ];
+
+    for (precision, expect) in [
+        (crate::nn::Precision::Bf16Mixed, true),
+        (crate::nn::Precision::F32, false),
+    ] {
+        let (mut w, _c) = make_det_worker_with(16, precision);
+        let seen = std::cell::Cell::new(None);
+        let (loss, _ms) = w
+            .train_step(&batch, &|m: &Linear, b: &[Tensor]| {
+                seen.set(Some(crate::nn::is_autocast_enabled_for(device_type)));
+                mse_train(m, b)
+            })
+            .unwrap();
+        assert_eq!(
+            seen.get(),
+            Some(expect),
+            "{precision}: autocast inside the forward"
+        );
+        assert!(
+            !crate::nn::is_autocast_enabled_for(device_type),
+            "{precision}: autocast must not outlive the forward"
+        );
+        assert!(loss.is_finite(), "{precision}: loss {loss}");
+    }
+}
+
+#[test]
+fn into_worker_refuses_a_reduced_precision() {
+    // The cooperative tier runs the caller's forward, so a precision set
+    // on the builder could only be ignored. It is refused, before any
+    // device or dataset work, with the way to apply it by hand.
+    use crate::distributed::Trainer;
+    let dataset: Arc<dyn BatchDataSet> = Arc::new(DeterministicDataset { n: 16 });
+    let result = Trainer::builder(
+        |d| Linear::on_device(4, 2, d),
+        |p| crate::nn::SGD::new(p, 0.01, 0.0),
+        mse_train,
+    )
+    .dataset(dataset)
+    .batch_size(4)
+    .num_epochs(1)
+    .precision(crate::nn::Precision::Bf16Mixed)
+    .into_worker();
+    let msg = match result {
+        Ok(_) => panic!("into_worker accepted a reduced precision"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("bf16-mixed") && msg.contains("Precision::run"),
+        "{msg}"
     );
 }
 
