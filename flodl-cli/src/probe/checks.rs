@@ -145,14 +145,28 @@ pub fn probe_local(
 
     check_gpu_toolkit(libtorch.info.as_ref(), &mut warnings);
 
-    // Host tools are a hard issue: without them `fdl` cannot download or
-    // unpack anything, whatever the build strategy.
+    // curl and unzip are a hard issue: without them `fdl` cannot download
+    // or unpack anything, whatever the build strategy. The C++ compiler is
+    // only for a native build: with Docker on the box the build runs in the
+    // image, which carries its own, so its absence is a warning there --
+    // the same split `fdl setup` makes.
     let tools = requirements::missing_host_tools();
-    if !tools.is_empty() {
-        let packages: Vec<String> = tools.iter().map(|t| t.to_string()).collect();
+    let docker = crate::util::system::has_command("docker");
+    let (hard, native_only): (Vec<&str>, Vec<&str>) =
+        tools.iter().partition(|t| !(docker && **t == "g++"));
+    if !hard.is_empty() {
+        let packages: Vec<String> = hard.iter().map(|t| t.to_string()).collect();
         issues.push(format!(
             "missing host tools `fdl` needs: {}. {}",
-            tools.join(", "),
+            hard.join(", "),
+            requirements::install_hint(&packages),
+        ));
+    }
+    if !native_only.is_empty() {
+        let packages: Vec<String> = native_only.iter().map(|t| t.to_string()).collect();
+        warnings.push(format!(
+            "native builds would also need: {}. {} (not needed when building in the container)",
+            native_only.join(", "),
             requirements::install_hint(&packages),
         ));
     }
