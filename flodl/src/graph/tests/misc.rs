@@ -329,6 +329,33 @@ fn test_named_parameters_unique() {
     assert_eq!(names.len(), unique.len(), "duplicate names: {:?}", names);
 }
 
+// A node with two tags is named by the same one in every build. The tag
+// map has no order of its own, and each map is seeded apart, so a rule
+// that depended on iteration order would show within a few builds.
+#[test]
+fn a_node_with_two_tags_is_named_by_the_same_one_every_time() {
+    for _ in 0..64 {
+        let graph =
+            FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())
+                .tag("trunk")
+                .tag("encoder")
+                .through(Linear::on_device(8, 2, crate::tensor::test_device()).unwrap())
+                .build()
+                .unwrap();
+        let tagged: Vec<String> = graph
+            .named_parameters()
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| n.starts_with("encoder/") || n.starts_with("trunk/"))
+            .collect();
+        assert_eq!(tagged.len(), 2, "{tagged:?}");
+        assert!(
+            tagged.iter().all(|n| n.starts_with("encoder/")),
+            "{tagged:?}"
+        );
+    }
+}
+
 #[test]
 fn test_named_parameters_tagged_prefix() {
     let graph = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())

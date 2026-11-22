@@ -626,7 +626,7 @@ impl Graph {
 
     /// Shared body of [`named_parameters`](Self::named_parameters) and
     /// [`named_buffers`](Self::named_buffers): walk nodes in execution
-    /// order, prefix each item by its node's tag (first tag wins) or node
+    /// order, prefix each item by its node's naming tag (`tags_by_node`) or node
     /// ID, dedup by identity (`id_of`), and disambiguate same-named items
     /// within a node with `_0`/`_1`/... suffixes. `collect` pulls the
     /// items from a module; `id_of`/`name_of` read an item's identity and
@@ -637,12 +637,7 @@ impl Graph {
         id_of: impl Fn(&T) -> usize,
         name_of: impl Fn(&T) -> String,
     ) -> Vec<(String, T)> {
-        // Reverse map: node_idx → tag name (first tag wins; deterministic
-        // because we only need one prefix).
-        let mut idx_to_tag: HashMap<usize, String> = HashMap::new();
-        for (tag, &(ni, _)) in &self.tag_names {
-            idx_to_tag.entry(ni).or_insert_with(|| tag.clone());
-        }
+        let idx_to_tag = self.tags_by_node();
 
         let mut result = Vec::new();
         let mut seen = HashSet::new();
