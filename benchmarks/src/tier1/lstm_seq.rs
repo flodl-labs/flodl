@@ -60,7 +60,6 @@ pub fn run(device: Device) -> Result<BenchResult> {
 
     let model = LstmSeqModel::new(device)?;
     let params = model.parameters();
-    let param_count = params.iter().map(|p| p.variable.numel()).sum::<i64>() as usize;
     let mut optimizer = Adam::new(&params, 1e-3);
 
     // Synthetic sequence data: [B, seq_len, input_dim] → [B, input_dim]
@@ -72,7 +71,7 @@ pub fn run(device: Device) -> Result<BenchResult> {
         })
         .collect();
 
-    let result = run_benchmark(&config, param_count, |_epoch, _warmup| {
+    let result = run_benchmark(&config, &params, |_epoch, _warmup| {
         let mut total_loss = 0.0;
         for (x, y) in &batches {
             let input = Variable::new(x.clone(), false);

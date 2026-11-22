@@ -9,6 +9,7 @@ Cargo.lock
 .*/
 !.github/
 __pycache__/
+benchmarks/runs/
 benchmarks/rounds/
 benchmarks/report*.txt
 ddp-bench/runs-*/

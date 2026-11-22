@@ -10,6 +10,7 @@ the benchmarks measure framework overhead, not kernel speed.
 fdl bench                        # CUDA benchmarks (all tiers)
 fdl bench cpu                    # CPU-only
 fdl bench --tier1                # tier 1 only
+fdl bench --optim                # optimizer-step benchmarks only
 fdl bench --bench mlp            # single benchmark
 ```
 
@@ -31,28 +32,41 @@ results:
 - **Interleaved rounds** -- alternates which framework runs first each round
   (odd: Rust first, even: Python first) to distribute thermal drift and
   background noise equally
-- **GPU clock locking** -- pins the GPU to its base clock, eliminating boost
-  clock variance (on WSL2, use `bench-publish.ps1` from the Windows host since
-  WSL cannot access the driver clock control plane)
+- **GPU clock locking** -- pins the GPU to the frequency given with
+  `--lock-clocks`, eliminating boost clock variance. Older drivers report a
+  base clock that is used when the flag is absent; recent ones do not, and
+  the run then says the clocks stay unlocked
 - **Extended warmup** -- 15-second GPU matmul burst before any measurement to
   stabilize thermals
 - **Multi-round statistics** -- each round's best-run median becomes one sample;
   the final reported median is the median of those samples, with standard
   deviation across rounds
 
-### WSL2 clock locking
+### WSL2
 
-WSL2's `nvidia-smi` is a shim that cannot lock GPU clocks. The
-`bench-publish.ps1` / `bench-publish.cmd` scripts solve this by locking clocks
-from Windows before launching the benchmark inside WSL:
+WSL2's `nvidia-smi` is a shim that cannot lock GPU clocks, and a lock set
+from Windows applies to WSL2 workloads. To publish from WSL2, lock the
+clocks on the Windows host (`nvidia-smi -lgc <MHz>,<MHz>` from an admin
+prompt), pass the same value as `--lock-clocks` so the report records it,
+and unlock afterwards (`nvidia-smi -rgc`). The reference results are
+produced on native Linux.
 
+### Keeping a run
+
+Every run writes to its own directory, `runs/<timestamp>/` (per-round JSON,
+the merged results and the report). That directory is gitignored and the
+ten most recent runs are kept, so running the suite never touches results
+that were published.
+
+```bash
+fdl bench promote                 # copy the latest run into published/
+fdl bench --promote <timestamp>   # or a specific one
 ```
-benchmarks\bench-publish.cmd                  # auto-detects base clock
-benchmarks\bench-publish.cmd -Rounds 20       # more rounds
-benchmarks\bench-publish.cmd -Clock 1800      # manual frequency
-```
 
-Requires an admin command prompt.
+The published set is named by the date and commit in its report, is never
+overwritten, and is meant to be committed with the results it backs. The
+step warns when the run was a single round, had unlocked GPU clocks, or
+measured uncommitted sources.
 
 ## Measurement methodology
 
@@ -97,14 +111,22 @@ directly comparable.
 
 ### Statistical reporting
 
-The comparison table reports:
+The comparison prints three tables, one per thing measured.
+
+**Training throughput** and **optimizer step** share these columns:
 
 | Column | Meaning |
 |--------|---------|
-| PyTorch / flodl | Best-run median epoch time (ms) |
-| delta | Percentage difference (negative = flodl faster) |
-| alloc / reserved | Peak VRAM (MB) |
-| sigma | Standard deviation across rounds (multi-round only) |
+| tensors | Number of parameter tensors. With the step time it says how launch-heavy a row is: many small tensors and a short step is where framework overhead shows |
+| PyTorch / flodl | Median time of one step (best-run median, divided by the steps per epoch) |
+| delta | flodl against PyTorch, negative = flodl faster, with its uncertainty in points |
+| verdict | `flodl faster`, `PyTorch faster`, or `within noise` when the two sides differ by less than 2 combined sigma |
+
+Sigma is the scaled MAD of the best-run medians (across runs, or across
+rounds with `--rounds`), with a floor of 0.5% of the PyTorch time so a
+handful of identical samples cannot make any difference look real.
+
+**Memory** reports peak allocated and reserved VRAM for each side.
 
 ## Benchmark tiers
 
@@ -115,9 +137,13 @@ frameworks express naturally.
 
 | Benchmark | Architecture | What it measures |
 |-----------|-------------|------------------|
-| `mlp` | 4-layer MLP (784 -> 256 -> 128 -> 64 -> 10) | Linear + ReLU + Adam throughput |
+| `mlp` | 5 Linear layers (1024 -> 2048 x3 -> 1024) with GELU and LayerNorm | Matmul + activation + Adam throughput |
 | `convnet` | 3x Conv2d + MaxPool + 2x Linear | Conv + pooling + mixed pipeline |
 | `gru_seq` | GRUCell unrolled over 50 timesteps | Per-timestep RNN overhead |
+| `transformer` | Embedding + encoder layers (attention, feed-forward, LayerNorm) + projection | Attention throughput |
+| `lstm_seq` | Multi-layer LSTM + output projection | Fused recurrent kernels, comparable to `gru_seq` |
+| `conv_autoenc` | Conv2d encoder + ConvTranspose2d decoder | Transposed convolution throughput |
+| `resnet20` | ResNet-20 on 32x32 inputs, batch 64, SGD with momentum and weight decay | The launch-heavy case: 65 small tensors and a step of a few ms |
 
 ### Tier 2 -- Graph builder patterns
 
@@ -132,6 +158,16 @@ hand-written `nn.Module` subclasses -- the benchmark measures how much overhead
 | `iterative_refine` | Fixed 5-iteration refinement loop | `loop_body().for_n()` |
 | `feedback_fixed` | 10-iteration loop (no adaptive halt) | Fixed loop overhead isolation |
 
+### Optimizer step
+
+The optimizer's `step()` alone, with no forward and no backward, on
+ResNet-20's 65 parameter tensors and a fixed gradient. One row per
+optimizer (`optim_sgd`, `optim_adam`, `optim_adamw`, `optim_rmsprop`,
+`optim_adagrad`, `optim_nadam`, `optim_radam`), each with the settings a
+user gets by default on both sides. The cost of a step on many small
+tensors is all framework: the same elementwise updates, issued as a few
+batched kernels or as a loop over tensors.
+
 ## Project structure
 
 ```
@@ -139,21 +175,20 @@ benchmarks/
   src/
     main.rs          -- CLI entry point, tier dispatch
     harness.rs       -- Timing, warmup, VRAM tracking, JSON output
-    tier1/           -- Rust benchmarks (mlp, convnet, gru_seq)
+    tier1/           -- Rust benchmarks (mlp, convnet, gru_seq, resnet20, ...)
     tier2/           -- Rust benchmarks (residual_tower, gated_routing, ...)
+    optim/           -- Optimizer-step benchmarks
   python/
     run_all.py       -- CLI entry point (mirrors main.rs)
     harness.py       -- Python harness (mirrors harness.rs)
-    compare.py       -- Side-by-side comparison table
+    compare.py       -- Comparison tables (throughput, optimizer step, memory)
     merge_rounds.py  -- Multi-round aggregation
     tier1/           -- Python benchmarks
     tier2/           -- Python benchmarks
+    optim/           -- Optimizer-step benchmarks
   run.sh             -- Orchestrator: build, warmup, interleave, merge, compare
-  bench-publish.ps1  -- Windows host clock locking + WSL2 dispatch
-  bench-publish.cmd  -- CMD wrapper for bench-publish.ps1
-  rounds/            -- Per-round JSON data (generated)
-  report.txt         -- Final report with metadata header (generated)
-  IMPROVEMENTS.md    -- Known issues and planned improvements
+  runs/<timestamp>/  -- One directory per run: rounds, merged JSON, report (gitignored)
+  published/         -- Promoted runs: the raw data behind published results (committed)
 ```
 
 ## Harness parity
@@ -175,7 +210,8 @@ differences.
 
 1. Create `src/tier{1,2}/my_bench.rs` -- implement a function
    `pub fn run(device: Device) -> flodl::Result<BenchResult>` that builds
-   the model, generates data, and calls `harness::run_benchmark()`
+   the model, generates data, and calls `harness::run_benchmark()` with
+   the model's parameters
 2. Create `python/tier{1,2}/my_bench.py` -- mirror the architecture exactly
 3. Register in `src/tier{1,2}/mod.rs` and `python/tier{1,2}/__init__.py`
 4. Add to the dispatch table in `src/main.rs` and `python/run_all.py`

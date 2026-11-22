@@ -71,6 +71,7 @@ def main():
             "batches_per_epoch": t.get("batches_per_epoch", 100),
             "batch_size": t.get("batch_size", 128),
             "param_count": t["param_count"],
+            "tensor_count": t.get("tensor_count"),
             # Best round's epoch times (lowest median)
             "epoch_times_ms": t["epoch_times_ms"],
             # Median of best-run medians across rounds

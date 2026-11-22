@@ -35,7 +35,6 @@ pub fn run(device: Device) -> Result<BenchResult> {
         .build()?;
 
     let params = model.parameters();
-    let param_count = params.iter().map(|p| p.variable.numel()).sum::<i64>() as usize;
     let mut optimizer = Adam::new(&params, 1e-3);
     model.train();
 
@@ -48,7 +47,7 @@ pub fn run(device: Device) -> Result<BenchResult> {
         })
         .collect();
 
-    run_benchmark(&config, param_count, |_epoch, _warmup| {
+    run_benchmark(&config, &params, |_epoch, _warmup| {
         let mut total_loss = 0.0;
         for (x, y) in &batches {
             let input = Variable::new(x.clone(), false);
