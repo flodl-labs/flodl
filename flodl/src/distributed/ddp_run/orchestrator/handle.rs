@@ -667,6 +667,8 @@ impl DdpHandle {
                 eval_dataset,
                 config.eval_every_epochs,
                 eval_result_fn,
+                config.save_path.clone(),
+                config.resume_from.clone(),
             );
         }
 
@@ -856,6 +858,9 @@ impl DdpHandle {
                 scheduler,
                 eval_fn,
                 eval_dataset,
+                config.checkpoint_every,
+                config.save_path.clone(),
+                config.resume_from.clone(),
             );
         }
 

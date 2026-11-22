@@ -137,7 +137,7 @@ fn single_host_worker_trains_and_finishes() {
     let total = 16; // 4 batches/epoch at batch_size 4
     let epochs = 2;
     let (w, _ch) = make_det_worker(total);
-    let mut coop = Worker::single(w, epochs, total);
+    let mut coop = Worker::single(w, epochs, total, 0, None, None);
 
     let mut steps = 0usize;
     while let Some(_plan) = coop.next_plan().unwrap() {
@@ -159,7 +159,7 @@ fn single_host_worker_trains_and_finishes() {
 #[test]
 fn worker_next_plan_stops_after_num_epochs() {
     let (w, _ch) = make_det_worker(16);
-    let mut coop = Worker::single(w, 3, 16);
+    let mut coop = Worker::single(w, 3, 16, 0, None, None);
     assert!(coop.next_plan().unwrap().is_some());
     assert!(coop.next_plan().unwrap().is_some());
     assert!(coop.next_plan().unwrap().is_some());
@@ -170,7 +170,7 @@ fn worker_next_plan_stops_after_num_epochs() {
 #[test]
 fn worker_step_without_batch_errs() {
     let (w, _ch) = make_det_worker(16);
-    let mut coop = Worker::single(w, 1, 16);
+    let mut coop = Worker::single(w, 1, 16, 0, None, None);
     // A dummy loss Variable; step should reject before touching it because no
     // batch is in flight.
     let opts = test_opts();
@@ -190,7 +190,7 @@ fn worker_sync_now_drains_reduce_in_step() {
     // inside step(), not decided by the Worker.
     let total = 16;
     let (w, ch) = make_det_worker(total);
-    let mut coop = Worker::single(w, 1, total);
+    let mut coop = Worker::single(w, 1, total, 0, None, None);
 
     // Advance into the epoch and run one batch's forward/backward.
     assert!(coop.next_plan().unwrap().is_some());
@@ -348,7 +348,7 @@ fn cooperative_worker_matches_managed_run_epoch_plan() {
     let managed_snap = managed.snapshot_params();
 
     // Cooperative: user owns the loop.
-    let mut coop = Worker::single(coop_w, epochs, total);
+    let mut coop = Worker::single(coop_w, epochs, total, 0, None, None);
     while let Some(_plan) = coop.next_plan().unwrap() {
         while let Some(batch) = coop.next_batch().unwrap() {
             let loss = mse_train(coop.model(), &batch).unwrap();
@@ -381,4 +381,105 @@ fn cooperative_worker_matches_managed_run_epoch_plan() {
             "param {i} diverged between managed and cooperative: L1 diff = {diff}"
         );
     }
+}
+
+// The cooperative single-device worker keeps what `save_path` and
+// `resume_from` promise even though the caller owns the loop: periodic
+// bundles on the epoch boundary, a final one at `finish`, and a resumed
+// worker that hands out only the epochs left.
+#[test]
+fn single_device_worker_saves_a_bundle_and_resumes_from_it() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return; // auto-promote path; this pins the in-process fallback
+    }
+    use crate::distributed::{CheckpointBundle, CheckpointMeta, SaveReason, Trainer};
+    let dir = std::env::temp_dir().join(format!("flodl_coop_solo_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let stem = dir.join("ck").to_str().unwrap().to_string();
+    let meta = || CheckpointMeta::read_from_file(&CheckpointBundle::meta_path(&stem)).unwrap();
+
+    // 16 samples at batch 4: 4 steps an epoch.
+    let worker = |epochs: usize, resume: bool| {
+        let dataset: Arc<dyn BatchDataSet> = Arc::new(DeterministicDataset { n: 16 });
+        let mut b = Trainer::builder(
+            |d| Linear::on_device(4, 2, d),
+            |p| crate::nn::SGD::new(p, 0.01, 0.0),
+            mse_train,
+        )
+        .dataset(dataset)
+        .batch_size(4)
+        .num_epochs(epochs)
+        .checkpoint_every(2)
+        .save_path(stem.clone());
+        if resume {
+            b = b.resume_from(stem.clone());
+        }
+        b.into_worker().unwrap()
+    };
+    let train_epoch = |w: &mut crate::distributed::Worker<Linear>| {
+        while let Some(batch) = w.next_batch().unwrap() {
+            let loss = mse_train(w.model(), &batch).unwrap();
+            loss.backward().unwrap();
+            w.step(&loss).unwrap();
+        }
+    };
+
+    // Three of four epochs, then the caller walks away mid-run.
+    let mut w = worker(4, false);
+    let mut seen = Vec::new();
+    while let Some(plan) = w.next_plan().unwrap() {
+        if plan.epoch == 2 {
+            // Asking for epoch 2 closed epochs 0 and 1: the periodic bundle.
+            let m = meta();
+            assert_eq!((m.epoch, m.global_step), (2, 8));
+            assert_eq!(m.save_reason, SaveReason::Checkpoint);
+        }
+        if plan.epoch == 3 {
+            break; // planned, never trained
+        }
+        seen.push(plan.epoch);
+        train_epoch(&mut w);
+    }
+    w.finish().unwrap();
+    assert_eq!(seen, vec![0, 1, 2]);
+    let m = meta();
+    assert_eq!((m.epoch, m.global_step), (3, 12), "epoch 3 was not trained");
+    assert_eq!(m.save_reason, SaveReason::GracefulShutdown);
+    assert!(CheckpointBundle::model_path(&stem).exists());
+
+    // The resumed worker hands out epoch 3 only.
+    let mut w = worker(4, true);
+    let mut seen = Vec::new();
+    while let Some(plan) = w.next_plan().unwrap() {
+        seen.push(plan.epoch);
+        train_epoch(&mut w);
+    }
+    w.finish().unwrap();
+    assert_eq!(seen, vec![3]);
+    let m = meta();
+    assert_eq!((m.epoch, m.global_step), (4, 16));
+
+    // A final bundle that cannot be written fails `finish`.
+    std::fs::write(dir.join("blocker"), b"x").unwrap();
+    let bad = dir.join("blocker").join("ck").to_str().unwrap().to_string();
+    let dataset: Arc<dyn BatchDataSet> = Arc::new(DeterministicDataset { n: 16 });
+    let w = Trainer::builder(
+        |d| Linear::on_device(4, 2, d),
+        |p| crate::nn::SGD::new(p, 0.01, 0.0),
+        mse_train,
+    )
+    .dataset(dataset)
+    .batch_size(4)
+    .num_epochs(1)
+    .save_path(bad)
+    .into_worker()
+    .unwrap();
+    let msg = match w.finish() {
+        Ok(_) => panic!("expected an error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("final checkpoint was not written"), "{msg}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -58,6 +58,12 @@ pub const ENV_FDL_ENV: &str = "FDL_ENV";
 /// `flodl::distributed::cluster::ENV_CLUSTER_JSON`.
 pub const ENV_CLUSTER_JSON: &str = "FLODL_INTERNAL_CLUSTER_JSON";
 
+/// Env var names carrying a host agent's or a relay's bootstrap spec.
+/// Set by the launcher on what it spawns per host. Mirror
+/// `flodl::distributed::launcher::{ENV_AGENT_JSON, ENV_RELAY_JSON}`.
+pub const ENV_AGENT_JSON: &str = "FLODL_INTERNAL_AGENT_JSON";
+pub const ENV_RELAY_JSON: &str = "FLODL_INTERNAL_RELAY_JSON";
+
 /// Pre-resolved `name:ip` pairs (space-separated) for every cluster
 /// host, written by [`prepare_cluster_env`] using the controller's NSS
 /// resolution. Consumed by run/prebuild/schema-cache when they build
@@ -161,11 +167,18 @@ pub fn should_dispatch(project: &ProjectConfig, chain: &[Option<bool>]) -> bool 
     config::cluster_dispatch_enabled(project, chain)
 }
 
-/// Whether this fdl invocation is itself a spawned child of a launcher's
-/// ssh fan-out (`FLODL_INTERNAL_CLUSTER_JSON` already set in env). Used as the
-/// recursion guard everywhere cluster dispatch is evaluated.
+/// Whether this fdl invocation was itself spawned by a launcher, in any
+/// of the roles a launcher hands out: a rank, a host agent or a relay.
+/// Used as the recursion guard everywhere cluster dispatch is evaluated.
+///
+/// The agent role is the one a remote host is in when the fan-out
+/// re-enters `fdl <cmd>` there (`--no-prebuild`). Missing it makes that
+/// host act as a controller of its own: it pre-flights and builds for
+/// the other hosts, with its own paths.
 pub fn is_recursive_invocation() -> bool {
-    std::env::var_os(ENV_CLUSTER_JSON).is_some()
+    [ENV_CLUSTER_JSON, ENV_AGENT_JSON, ENV_RELAY_JSON]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
 }
 
 /// A configured join window that this command will not open.
@@ -1007,12 +1020,8 @@ mod tests {
     }
 
     #[test]
-    fn should_dispatch_returns_false_when_cluster_json_set() {
+    fn should_dispatch_returns_false_under_every_launcher_role() {
         let _guard = env_lock();
-        // SAFETY: serialized via env_lock() above.
-        unsafe {
-            std::env::set_var(ENV_CLUSTER_JSON, "deadbeef");
-        }
         let yaml = "\
 cluster:
   controller:
@@ -1028,12 +1037,21 @@ commands:
   x: { cluster: true, run: \"echo hi\" }
 ";
         let project: ProjectConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(
-            !should_dispatch(&project, &[Some(true)]),
-            "recursion guard: must return false when FLODL_INTERNAL_CLUSTER_JSON is set"
-        );
+        let roles = [ENV_CLUSTER_JSON, ENV_AGENT_JSON, ENV_RELAY_JSON];
+        // SAFETY: serialized via env_lock() above.
         unsafe {
-            std::env::remove_var(ENV_CLUSTER_JSON);
+            for k in roles {
+                std::env::remove_var(k);
+            }
+        }
+        assert!(should_dispatch(&project, &[Some(true)]));
+        for k in roles {
+            unsafe { std::env::set_var(k, "deadbeef") };
+            assert!(
+                !should_dispatch(&project, &[Some(true)]),
+                "recursion guard: must return false when {k} is set"
+            );
+            unsafe { std::env::remove_var(k) };
         }
     }
 
