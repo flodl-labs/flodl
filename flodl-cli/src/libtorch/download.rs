@@ -618,14 +618,22 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
     println!("  URL:  {}", url);
     println!("  Path: {}", install_path.display());
 
-    if opts.dry_run {
-        println!();
-        println!("  [dry-run] Would download and extract to above path.");
-        return Ok(variant_id);
+    // What is at the path decides everything below, and it is decided
+    // before the dry-run return so a dry run reports the same refusal or
+    // replacement the real one would act on.
+    let existing = classify_existing(&install_path)?;
+    if existing == Existing::Foreign {
+        return Err(format!(
+            "{} exists and is not a libtorch install (no build-version, no .arch,\n\
+             no lib/libtorch). Installing would replace the whole directory, so\n\
+             nothing was touched. Pick an empty or new directory, or remove this\n\
+             one yourself if it really is meant to go.",
+            install_path.display()
+        ));
     }
 
-    // Check existing installation
-    if install_path.exists() {
+    let mut replacing = false;
+    if existing == Existing::Libtorch {
         let build_ver_path = install_path.join("build-version");
         let existing_ver = fs::read_to_string(&build_ver_path)
             .ok()
@@ -654,18 +662,29 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
         println!();
         if ver_matches {
             println!(
-                "  Installed build is for {}, this download targets {}; replacing...",
+                "  Installed build is for {}, this download targets {}; it is replaced\n  \
+                 once the new one is downloaded and checked.",
                 existing_platform.as_deref().unwrap_or("unknown"),
                 platform
             );
         } else {
             println!(
-                "  Removing existing installation (version: {})...",
+                "  Existing installation (version: {}) is replaced once the new one\n  \
+                 is downloaded and checked.",
                 existing_ver.as_deref().unwrap_or("unknown")
             );
         }
-        fs::remove_dir_all(&install_path)
-            .map_err(|e| format!("cannot remove {}: {}", install_path.display(), e))?;
+        replacing = true;
+    }
+
+    if opts.dry_run {
+        println!();
+        if replacing {
+            println!("  [dry-run] Would download, extract and replace the above path.");
+        } else {
+            println!("  [dry-run] Would download and extract to above path.");
+        }
+        return Ok(variant_id);
     }
 
     // Stage BESIDE the destination, not in the system temp dir.
@@ -701,11 +720,13 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
     println!("  Extracting...");
     archive::extract_zip(&tmp_zip, &tmp_extract)?;
 
-    fs::create_dir_all(&install_path)
-        .map_err(|e| format!("cannot create {}: {}", install_path.display(), e))?;
+    // The install is assembled and checked in staging and only then
+    // swapped in, so a failed download, a changed archive layout or an
+    // interruption leaves whatever was installed before exactly as it was.
+    let staged = stage.path().join("install");
+    fs::create_dir_all(&staged)
+        .map_err(|e| format!("cannot create {}: {}", staged.display(), e))?;
 
-    // Move extracted contents to target path. Same filesystem now, so
-    // the rename path is the one that fires.
     let extracted_lt = tmp_extract.join("libtorch");
     let wheel_root = tmp_extract.join("torch");
     if wheel_root.join("lib").is_dir() {
@@ -718,7 +739,7 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
             if !from.is_dir() {
                 continue;
             }
-            let to = install_path.join(sub);
+            let to = staged.join(sub);
             if fs::rename(&from, &to).is_err() {
                 copy_dir_recursive(&from, &to)?;
             }
@@ -726,7 +747,7 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
         // The wheel carries no build-version file; the already-installed
         // check above reads it, so write what the zip would have held.
         fs::write(
-            install_path.join("build-version"),
+            staged.join("build-version"),
             format!("{}+cpu\n", LIBTORCH_VERSION),
         )
         .map_err(|e| format!("cannot write build-version: {}", e))?;
@@ -736,32 +757,24 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
         } else {
             &tmp_extract
         };
-        move_contents(source, &install_path)?;
+        move_contents(source, &staged)?;
     }
 
-    // `stage` cleans itself up on drop, including on the error paths
-    // above -- the predecessor leaked its temp zip and extract dir
-    // whenever anything failed, which on a tmpfs meant a failed
-    // download left gigabytes behind until reboot.
-    drop(stage);
-
     // Verify
-    let lib_dir = install_path.join("lib");
-    let has_lib = lib_dir.join("libtorch.so").exists()
-        || lib_dir.join("libtorch.dylib").exists()
-        || lib_dir.join("torch.lib").exists();
-
-    if !has_lib {
+    if !has_libtorch_lib(&staged) {
         return Err(format!(
-            "libtorch library not found at {}.\n\
-             The archive structure may have changed.\n\
-             Check: ls {}",
-            lib_dir.display(),
-            lib_dir.display()
+            "libtorch library not found in the downloaded archive (expected\n\
+             lib/libtorch.so, lib/libtorch.dylib or lib/torch.lib).\n\
+             The archive structure may have changed. Nothing was installed{}.",
+            if replacing {
+                ", and the existing installation is untouched"
+            } else {
+                ""
+            }
         ));
     }
 
-    relink_bundled_libomp(&lib_dir);
+    relink_bundled_libomp(&staged.join("lib"));
 
     // Write .arch metadata (always, both project and global). `platform=`
     // records what the binaries ARE -- the dir name is convention, this
@@ -776,8 +789,16 @@ pub fn run_with_context(opts: DownloadOpts, ctx: &Context) -> Result<String, Str
     if spec.arch_variant.starts_with("rocm") {
         arch_content.push_str(&format!("rocm_runtime={}\n", detect::DEFAULT_ROCM_RUNTIME));
     }
-    fs::write(install_path.join(".arch"), arch_content)
+    fs::write(staged.join(".arch"), arch_content)
         .map_err(|e| format!("cannot write .arch: {}", e))?;
+
+    swap_in(&staged, &install_path)?;
+
+    // `stage` cleans itself up on drop, including on the error paths
+    // above -- the predecessor leaked its temp zip and extract dir
+    // whenever anything failed, which on a tmpfs meant a failed
+    // download left gigabytes behind until reboot.
+    drop(stage);
 
     if opts.activate {
         detect::set_active(&ctx.root, &variant_id)?;
@@ -869,6 +890,76 @@ fn read_arch_platform(dir: &Path) -> Option<String> {
         .ok()?
         .lines()
         .find_map(|l| l.strip_prefix("platform=").map(|v| v.trim().to_string()))
+}
+
+/// What already sits at an install path.
+#[derive(Debug, PartialEq, Eq)]
+enum Existing {
+    Absent,
+    /// An empty directory: nothing to lose, installed into as if absent.
+    Empty,
+    Libtorch,
+    /// Anything else. The install replaces the directory as a whole, so
+    /// this is refused rather than deleted.
+    Foreign,
+}
+
+fn has_libtorch_lib(dir: &Path) -> bool {
+    let lib = dir.join("lib");
+    ["libtorch.so", "libtorch.dylib", "torch.lib"]
+        .iter()
+        .any(|f| lib.join(f).exists())
+}
+
+/// A directory counts as a libtorch install on any one of the markers,
+/// so an install whose metadata was lost can still be replaced.
+fn classify_existing(path: &Path) -> Result<Existing, String> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Existing::Absent),
+        Err(e) => return Err(format!("cannot inspect {}: {}", path.display(), e)),
+    };
+    if !meta.is_dir() {
+        return Ok(Existing::Foreign);
+    }
+    if path.join("build-version").is_file()
+        || path.join(".arch").is_file()
+        || has_libtorch_lib(path)
+    {
+        return Ok(Existing::Libtorch);
+    }
+    let mut entries =
+        fs::read_dir(path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    Ok(if entries.next().is_none() {
+        Existing::Empty
+    } else {
+        Existing::Foreign
+    })
+}
+
+/// Put the assembled install at `dest`, replacing a previous libtorch or
+/// an empty directory there. Anything else at `dest` is refused: this is
+/// the one place a directory is deleted, so it checks for itself rather
+/// than trusting what the caller saw earlier.
+fn swap_in(staged: &Path, dest: &Path) -> Result<(), String> {
+    match classify_existing(dest)? {
+        Existing::Absent => {}
+        Existing::Empty => {
+            fs::remove_dir(dest).map_err(|e| format!("cannot remove {}: {}", dest.display(), e))?
+        }
+        Existing::Libtorch => fs::remove_dir_all(dest)
+            .map_err(|e| format!("cannot remove {}: {}", dest.display(), e))?,
+        Existing::Foreign => {
+            return Err(format!(
+                "{} is not a libtorch install; refusing to replace it",
+                dest.display()
+            ));
+        }
+    }
+    if fs::rename(staged, dest).is_err() {
+        copy_dir_recursive(staged, dest)?;
+    }
+    Ok(())
 }
 
 fn move_contents(src: &Path, dest: &Path) -> Result<(), String> {
@@ -1156,6 +1247,125 @@ libtorch/lib/libtorch_cpu.dylib:
         .unwrap();
         assert_eq!(read_arch_platform(&dir).as_deref(), Some("linux-aarch64"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A fresh scratch directory per test.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fdl-dl-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fake_libtorch(dir: &Path, version: &str) {
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(dir.join("lib/libtorch.so"), version).unwrap();
+        fs::write(dir.join("build-version"), version).unwrap();
+    }
+
+    #[test]
+    fn an_existing_path_is_classified_by_what_it_holds() {
+        let root = scratch("classify");
+        assert_eq!(
+            classify_existing(&root.join("missing")).unwrap(),
+            Existing::Absent
+        );
+
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(classify_existing(&empty).unwrap(), Existing::Empty);
+
+        let file = root.join("file");
+        fs::write(&file, "x").unwrap();
+        assert_eq!(classify_existing(&file).unwrap(), Existing::Foreign);
+
+        let foreign = root.join("foreign");
+        fs::create_dir_all(foreign.join("lib")).unwrap();
+        fs::write(foreign.join("notes.txt"), "mine").unwrap();
+        assert_eq!(classify_existing(&foreign).unwrap(), Existing::Foreign);
+
+        // Each marker is enough on its own.
+        for (name, marker) in [
+            ("by-version", "build-version"),
+            ("by-arch", ".arch"),
+            ("by-lib", "lib/torch.lib"),
+        ] {
+            let dir = root.join(name);
+            fs::create_dir_all(dir.join("lib")).unwrap();
+            fs::write(dir.join(marker), "x").unwrap();
+            assert_eq!(
+                classify_existing(&dir).unwrap(),
+                Existing::Libtorch,
+                "{marker}"
+            );
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_download_onto_a_foreign_directory_is_refused_and_deletes_nothing() {
+        let root = scratch("foreign");
+        let target = root.join("documents");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("thesis.txt"), "years of work").unwrap();
+
+        // Dry run and real run refuse alike, and before any network use.
+        for dry_run in [true, false] {
+            let err = run(DownloadOpts {
+                variant: Variant::Cpu,
+                custom_path: Some(target.clone()),
+                activate: false,
+                dry_run,
+                force_linux: true,
+            })
+            .unwrap_err();
+            assert!(err.contains("not a libtorch install"), "{err}");
+            assert_eq!(
+                fs::read_to_string(target.join("thesis.txt")).unwrap(),
+                "years of work"
+            );
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_swap_replaces_a_libtorch_and_an_empty_dir_and_nothing_else() {
+        let root = scratch("swap");
+        let stage = |v: &str| {
+            let s = root.join("staged");
+            fake_libtorch(&s, v);
+            s
+        };
+
+        // Absent.
+        let dest = root.join("install");
+        swap_in(&stage("1"), &dest).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("build-version")).unwrap(), "1");
+        assert!(!root.join("staged").exists());
+
+        // A previous libtorch goes, stale files included.
+        fs::write(dest.join("stale"), "old").unwrap();
+        swap_in(&stage("2"), &dest).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("build-version")).unwrap(), "2");
+        assert!(!dest.join("stale").exists());
+
+        // Empty.
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        swap_in(&stage("3"), &empty).unwrap();
+        assert!(has_libtorch_lib(&empty));
+
+        // Foreign: refused, content and staged build both intact.
+        let foreign = root.join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("keep"), "me").unwrap();
+        let staged = stage("4");
+        let err = swap_in(&staged, &foreign).unwrap_err();
+        assert!(err.contains("refusing"), "{err}");
+        assert_eq!(fs::read_to_string(foreign.join("keep")).unwrap(), "me");
+        assert!(has_libtorch_lib(&staged));
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
