@@ -19,6 +19,8 @@ pub(super) struct Request {
     pub(super) query: HashMap<String, String>,
     pub(super) host: Option<String>,
     pub(super) token: Option<String>,
+    /// Raw `Cookie:` header.
+    pub(super) cookie: Option<String>,
     /// POST body, empty on GET.
     pub(super) body: Vec<u8>,
 }
@@ -56,6 +58,7 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Option<Request> {
     }
     let mut host = None;
     let mut token = None;
+    let mut cookie = None;
     let mut content_length = 0usize;
     for line in lines {
         if line.is_empty() {
@@ -67,6 +70,8 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Option<Request> {
                 host = Some(value.to_string());
             } else if name.eq_ignore_ascii_case("x-fdl-token") {
                 token = Some(value.to_string());
+            } else if name.eq_ignore_ascii_case("cookie") {
+                cookie = Some(value.to_string());
             } else if name.eq_ignore_ascii_case("content-length") {
                 content_length = value.parse().ok()?;
             }
@@ -96,6 +101,7 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Option<Request> {
         query,
         host,
         token,
+        cookie,
         body,
     })
 }
@@ -154,6 +160,7 @@ pub(super) fn http(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
+         Referrer-Policy: no-referrer\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Connection: close\r\n\r\n",
         body.len(),
@@ -161,6 +168,28 @@ pub(super) fn http(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
     .into_bytes();
     out.extend_from_slice(body);
     out
+}
+
+/// Send the browser to `/` with the session cookie set. The redirect is
+/// what takes the token out of the address bar and the history.
+///
+/// `SameSite=Lax`, not `Strict`: the first visit is a navigation started
+/// outside this origin (a terminal link, a pasted URL), and a `Strict`
+/// cookie is withheld from the redirect that follows it, which would
+/// land every login back on the login page. `Lax` still keeps the cookie
+/// out of another site's subrequests and frames, and `/api/` asks for
+/// the token header on top.
+pub(super) fn redirect_with_cookie(name: &str, value: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 303 See Other\r\n\
+         Location: /\r\n\
+         Set-Cookie: {name}={value}; Path=/; HttpOnly; SameSite=Lax\r\n\
+         Content-Length: 0\r\n\
+         Cache-Control: no-store\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Connection: close\r\n\r\n",
+    )
+    .into_bytes()
 }
 
 pub(super) fn json_ok(value: &serde_json::Value) -> Vec<u8> {

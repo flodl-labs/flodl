@@ -58,14 +58,33 @@ fn spawn_server(root: &Path) -> (u16, String) {
     (port, "tok-test".to_string())
 }
 
+/// The cookie a browser holds once it has opened the session URL. The
+/// helpers below send it, so a test is about its route and not about
+/// logging in; the session tests use [`get_as`] to leave it out.
+fn session_cookie(port: u16) -> String {
+    format!("Cookie: other=1; fdl_ui_{port}=tok-test\r\n")
+}
+
 fn get(port: u16, target: &str, host: Option<&str>, token: Option<&str>) -> String {
+    get_as(port, target, host, token, &session_cookie(port))
+}
+
+fn get_as(
+    port: u16,
+    target: &str,
+    host: Option<&str>,
+    token: Option<&str>,
+    cookie_line: &str,
+) -> String {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     let host_line = host.map(|h| format!("Host: {h}\r\n")).unwrap_or_default();
     let token_line = token
         .map(|t| format!("x-fdl-token: {t}\r\n"))
         .unwrap_or_default();
-    s.write_all(format!("GET {target} HTTP/1.1\r\n{host_line}{token_line}\r\n").as_bytes())
-        .unwrap();
+    s.write_all(
+        format!("GET {target} HTTP/1.1\r\n{host_line}{token_line}{cookie_line}\r\n").as_bytes(),
+    )
+    .unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).unwrap();
     out
@@ -180,8 +199,9 @@ fn post(port: u16, target: &str, token: Option<&str>, body: &str) -> String {
         .unwrap_or_default();
     s.write_all(
         format!(
-            "POST {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{token_line}\
+            "POST {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{token_line}{}\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            session_cookie(port),
             body.len(),
         )
         .as_bytes(),
@@ -901,4 +921,154 @@ fn oversized_and_malformed_requests_hang_up() {
     let _ = s.read_to_string(&mut out);
     assert!(out.is_empty(), "expected a hangup, got: {out}");
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── The session ─────────────────────────────────────────────────
+
+#[test]
+fn nothing_is_served_without_a_session_and_the_page_never_leaks_the_token() {
+    let tmp = tempdir();
+    let (port, token) = spawn_server(&tmp);
+    let local = format!("127.0.0.1:{port}");
+    let anon = |target: &str, header: Option<&str>| get_as(port, target, Some(&local), header, "");
+
+    // Another local user: right Host, no cookie. The page is the login
+    // page and does not carry the token.
+    let page = anon("/", None);
+    assert!(page.starts_with("HTTP/1.1 403"), "{page}");
+    assert!(page.contains("fdl ui --url"), "{page}");
+    assert!(!page.contains(&token));
+
+    // Every other route refuses, the iframe routes included, and the
+    // token header alone opens nothing.
+    for target in [
+        "/run",
+        "/archive?path=x",
+        "/archive/x",
+        "/api/farms",
+        "/nope",
+    ] {
+        for header in [None, Some(token.as_str())] {
+            let r = anon(target, header);
+            assert!(r.starts_with("HTTP/1.1 403"), "{target}: {r}");
+            assert!(r.contains("fdl ui --url"), "{target}: {r}");
+        }
+    }
+
+    // A cookie for another port's server, or a wrong value, is no session.
+    for cookie in [
+        format!("Cookie: fdl_ui_{}=tok-test\r\n", port.wrapping_add(1)),
+        format!("Cookie: fdl_ui_{port}=tok-tesT\r\n"),
+        format!("Cookie: fdl_ui_{port}=\r\n"),
+    ] {
+        let r = get_as(port, "/api/farms", Some(&local), Some(&token), &cookie);
+        assert!(r.starts_with("HTTP/1.1 403"), "{cookie}: {r}");
+    }
+
+    // With the session, the same requests are served.
+    let page = get(port, "/", Some(&local), None);
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    assert!(page.contains(&token));
+    let farms = get(port, "/api/farms", Some(&local), Some(&token));
+    assert!(farms.starts_with("HTTP/1.1 200"), "{farms}");
+    // The cookie does not replace the token header on the API.
+    let headerless = get(port, "/api/farms", Some(&local), None);
+    assert!(headerless.starts_with("HTTP/1.1 403"), "{headerless}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn the_session_url_trades_the_token_for_a_cookie_as_often_as_asked() {
+    let tmp = tempdir();
+    let (port, token) = spawn_server(&tmp);
+    let local = format!("127.0.0.1:{port}");
+
+    // Twice: a second browser, or one whose cookies were cleared.
+    for _ in 0..2 {
+        let r = get_as(port, &format!("/?token={token}"), Some(&local), None, "");
+        assert!(r.starts_with("HTTP/1.1 303"), "{r}");
+        assert!(r.contains("Location: /\r\n"), "{r}");
+        let cookie = format!("Set-Cookie: fdl_ui_{port}={token}; Path=/; HttpOnly; SameSite=Lax");
+        assert!(r.contains(&cookie), "{r}");
+    }
+
+    // A wrong token gets the login page back, and no cookie.
+    let r = get_as(port, "/?token=nope", Some(&local), None, "");
+    assert!(r.starts_with("HTTP/1.1 403"), "{r}");
+    assert!(!r.contains("Set-Cookie"), "{r}");
+    assert!(!r.contains(&token));
+
+    // The Host check still comes first.
+    let r = get_as(
+        port,
+        &format!("/?token={token}"),
+        Some("evil.example:80"),
+        None,
+        "",
+    );
+    assert!(r.starts_with("HTTP/1.1 403"), "{r}");
+    assert!(!r.contains("Set-Cookie"), "{r}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn the_session_record_is_private_and_lists_only_live_servers() {
+    let tmp = tempdir();
+    // A live listener stands in for a serving ui.
+    let live = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let live_port = live.local_addr().unwrap().port();
+    // A port that was bound and released: nothing answers there.
+    let dead_port = {
+        let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let path = session::write(&tmp, live_port, "tok-live").unwrap();
+    session::write(&tmp, dead_port, "tok-dead").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tmp.join(".fdl/.gitignore")).unwrap(),
+        "*\n",
+        "the record is a credential and must not be committed"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "owner-only, like the token it holds");
+    }
+
+    assert_eq!(
+        session::live_urls(&tmp),
+        vec![format!("http://127.0.0.1:{live_port}/?token=tok-live")],
+    );
+    // The dead server's record went with the listing.
+    assert!(
+        !tmp.join(format!(".fdl/ui/session-{dead_port}.json"))
+            .exists()
+    );
+    assert!(path.exists());
+
+    // A record written over an older one replaces it, permissions included.
+    session::write(&tmp, live_port, "tok-new").unwrap();
+    assert_eq!(
+        session::live_urls(&tmp),
+        vec![format!("http://127.0.0.1:{live_port}/?token=tok-new")],
+    );
+    drop(live);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn cookie_and_token_helpers() {
+    use session::{cookie_value, token_matches};
+    assert_eq!(
+        cookie_value("a=1; fdl_ui_9=xyz; b=2", "fdl_ui_9"),
+        Some("xyz")
+    );
+    assert_eq!(cookie_value("fdl_ui_90=xyz", "fdl_ui_9"), None);
+    assert_eq!(cookie_value("", "fdl_ui_9"), None);
+    assert!(token_matches("abc", "abc"));
+    assert!(!token_matches("abd", "abc"));
+    assert!(!token_matches("ab", "abc"));
+    assert!(!token_matches("", "abc"));
 }

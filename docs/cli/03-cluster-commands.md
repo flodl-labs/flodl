@@ -678,9 +678,19 @@ actions:
   the stream from its first line and follows live.
 
 ```bash
-fdl ui                # serve http://127.0.0.1:1338/
+fdl ui                # serve on 127.0.0.1:1338 and print the URL to open
 fdl ui --port 8040    # any free loopback port
+fdl ui --url          # print the URL of the ui already serving this project
 ```
+
+The URL printed at startup carries the session's token
+(`http://127.0.0.1:1338/?token=…`). Opening it gives the browser a
+session cookie and lands on the plain address. The URL stays valid for
+as long as the server runs, so a second browser, or one whose cookies
+were cleared, opens it again. When the terminal that printed it is out
+of reach, `fdl ui --url`, run in the project on the box that serves it,
+prints it again; a browser without a session is told so, and its page
+also takes the pasted token.
 
 The **run tab** is one slot whose backing follows the run's lifecycle:
 before anything answers on the dashboard port it shows the admission
@@ -767,16 +777,27 @@ a terminal, and the page structurally cannot drift from the CLI. The
 farm list is the one pure local read, and it calls the same function
 `fdl join-config --list --json` prints from.
 
-Security: binds `127.0.0.1` only, and on top of the bind every request
-must carry the loopback `Host` it was served on (which stops
-DNS-rebinding pages that resolve an attacker domain to 127.0.0.1), and
-every API route requires the per-session token minted at startup and
-injected into the served page (which stops blind cross-site requests).
-Reaching the page from another box is an ssh forward — `ssh -L
-1338:127.0.0.1:1338 <controller>` — the same trust story as the
-cluster itself. There is no auth beyond that on purpose: the page has
-exactly the authority of the user's own shell on that box, so the
-boundary worth defending is the box, not the page.
+Security: binds `127.0.0.1` only, and on top of the bind:
+
+- every request must carry the loopback `Host` it was served on, which
+  stops DNS-rebinding pages that resolve an attacker domain to
+  127.0.0.1;
+- every route requires the session cookie, the page itself and the
+  dashboard and archive routes included. A loopback port is reachable by
+  every user of the box, so without it another local user could fetch
+  the page and act as the one who started `fdl ui`;
+- every API route also requires the session token as a header, which the
+  served page holds and a cross-site request does not.
+
+The session URL is also kept in `.fdl/ui/session-<port>.json`, readable
+by its owner only, which is where `fdl ui --url` finds it. `.fdl/`
+ignores itself in git. On Windows there are no mode bits, and the file is
+as private as the project directory.
+
+Reaching the page from another box is an ssh forward (`ssh -L
+1338:127.0.0.1:1338 <controller>`, then the same URL), the same trust
+story as the cluster itself. Within a session the page has exactly the
+authority of the user's own shell on that box.
 
 ## `fdl nccl`
 

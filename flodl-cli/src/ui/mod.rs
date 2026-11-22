@@ -25,10 +25,17 @@
 //!   was served on. A DNS-rebinding page (attacker domain resolving to
 //!   127.0.0.1) reaches the socket but carries its own Host, and is
 //!   refused before any route runs.
-//! - **Session token**: minted from OS entropy at startup, injected into
-//!   the served page, required (header `x-fdl-token`) on every `/api/*`
-//!   route. A cross-site request can fire blind at loopback but cannot
-//!   read the page, so it never holds the token.
+//! - **Session**: a token minted from OS entropy at startup travels in
+//!   the URL printed on the terminal. Opening that URL trades it for a
+//!   cookie, and every route requires the cookie, the page itself and
+//!   the dashboard and archive routes an iframe loads included. Without
+//!   it, another local user could fetch `/` with the right Host, read the
+//!   token out of the page, and drive the actions as this user. The
+//!   `session` submodule covers how a browser that lost its session
+//!   gets back in.
+//! - **Token header**: every `/api/*` route also requires the token as
+//!   the `x-fdl-token` header. The served page holds it; a cross-site
+//!   request, which a browser may send with the cookie, cannot.
 //!
 //! ## The run ledger
 //!
@@ -101,6 +108,17 @@ pub fn run(cli: &UiArgs) -> i32 {
     let root = crate::config::find_project_config(&cwd)
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or(cwd);
+    if cli.url {
+        let urls = session::live_urls(&root);
+        if urls.is_empty() {
+            crate::cli_error!("no fdl ui is serving {}", root.display());
+            return 1;
+        }
+        for url in urls {
+            println!("{url}");
+        }
+        return 0;
+    }
     let fdl_bin = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -126,6 +144,8 @@ pub fn run(cli: &UiArgs) -> i32 {
         }
     };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(cli.port);
+    let url = session::login_url(port, &token);
+    let recorded = session::write(&root, port, &token);
     let server = Arc::new(UiServer {
         root: root.clone(),
         token,
@@ -136,7 +156,7 @@ pub fn run(cli: &UiArgs) -> i32 {
     });
 
     eprintln!("fdl ui — serving {}", root.display());
-    eprintln!("  → {}", style::bold(&format!("http://127.0.0.1:{port}/")));
+    eprintln!("  → {}", style::bold(&url));
     eprintln!(
         "{}",
         style::dim(&format!(
@@ -144,6 +164,16 @@ pub fn run(cli: &UiArgs) -> i32 {
              Ctrl+C stops it.",
         )),
     );
+    match recorded {
+        Ok(_) => eprintln!(
+            "{}",
+            style::dim("  the URL carries this session's token; `fdl ui --url` prints it again."),
+        ),
+        Err(e) => eprintln!(
+            "fdl ui: cannot record the session URL ({e}); `fdl ui --url` will not find it, \
+             keep the line above"
+        ),
+    }
 
     serve(listener, server);
     0
@@ -246,11 +276,36 @@ fn respond(req: &Request, server: &UiServer) -> Reply {
     if !host_is_local(req.host.as_deref(), server.port) {
         return error_json("403 Forbidden", "wrong or missing Host header").into();
     }
+    let has_session = req
+        .cookie
+        .as_deref()
+        .and_then(|c| session::cookie_value(c, &session::cookie_name(server.port)))
+        .is_some_and(|v| session::token_matches(v, &server.token));
+    if req.path == "/" {
+        if req.method != "GET" {
+            return error_json("405 Method Not Allowed", "GET only").into();
+        }
+        // The login: a valid token in the query opens a session and the
+        // redirect drops it from the address bar.
+        if let Some(presented) = req.query.get("token") {
+            return if session::token_matches(presented, &server.token) {
+                redirect_with_cookie(&session::cookie_name(server.port), &server.token).into()
+            } else {
+                login_reply("That token is not this session's.")
+            };
+        }
+        if !has_session {
+            return login_reply("This browser has no session with this fdl ui.");
+        }
+    } else if !has_session {
+        return error_json(
+            "403 Forbidden",
+            "no session: open the URL `fdl ui` printed, or run `fdl ui --url`",
+        )
+        .into();
+    }
     match req.path.as_str() {
         "/" => {
-            if req.method != "GET" {
-                return error_json("405 Method Not Allowed", "GET only").into();
-            }
             let page = PAGE_HTML
                 .replace("__FDL_TOKEN__", &server.token)
                 .replace("__FDL_ROOT__", &server.root.display().to_string());
@@ -258,10 +313,9 @@ fn respond(req: &Request, server: &UiServer) -> Reply {
         }
         // The dashboard slot. `/run` is the page, the rest are the
         // dashboard's own root-relative routes, forwarded verbatim so
-        // the embedded page's fetches work unrewritten. Host-gated but
-        // token-free BY NECESSITY (an iframe cannot send headers) and
-        // by proportion: this is exactly the content the dashboard
-        // already serves with no auth at all on its own port. The
+        // the embedded page's fetches work unrewritten. Behind the
+        // session cookie like everything else, and without the token
+        // header, which an iframe cannot send. The
         // dashboard's legacy `/api/history` route is deliberately NOT
         // forwarded — dashboard.html never fetches it, and `/api/` is
         // this server's own namespace.
@@ -292,8 +346,8 @@ fn respond(req: &Request, server: &UiServer) -> Reply {
             };
             Reply::Proxy(target)
         }
-        // Archived dashboards from disk — an iframe src, so Host-gated
-        // like the proxy. What it can serve is bounded twice: the path
+        // Archived dashboards from disk — an iframe src, so behind the
+        // session cookie like the proxy. What it can serve is bounded twice: the path
         // must resolve inside the project root, and the file must look
         // like a run artifact (the same predicate the scan uses).
         "/archive" => {
@@ -324,6 +378,15 @@ fn respond(req: &Request, server: &UiServer) -> Reply {
         }
         _ => error_json("404 Not Found", "unknown route").into(),
     }
+}
+
+fn login_reply(note: &str) -> Reply {
+    http(
+        "403 Forbidden",
+        "text/html; charset=utf-8",
+        session::login_page(note).as_bytes(),
+    )
+    .into()
 }
 
 fn api(req: &Request, path: &str, server: &UiServer) -> Reply {
@@ -422,6 +485,7 @@ fn api(req: &Request, path: &str, server: &UiServer) -> Reply {
 mod drive;
 mod http;
 mod job;
+mod session;
 mod slot;
 
 use drive::{
@@ -429,7 +493,8 @@ use drive::{
 };
 use drive::{join_config_argv, run_target_route};
 use http::{
-    Request, error_json, host_is_local, http, json_ok, percent_decode, percent_encode, read_request,
+    Request, error_json, host_is_local, http, json_ok, percent_decode, percent_encode,
+    read_request, redirect_with_cookie,
 };
 use job::{JobSlot, follow_job, stream_job};
 use slot::{proxy_dashboard, read_runs_ledger, scan_archives, serve_archive, serve_archive_rel};
