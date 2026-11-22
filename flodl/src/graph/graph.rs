@@ -297,6 +297,24 @@ impl Graph {
             }
         }
 
+        // A tag and a node's generated id share one namespace: both prefix
+        // parameter and buffer names. A tag spelled like ANOTHER node's id
+        // would give two nodes the same prefix, and their checkpoint keys
+        // would collide. Checked here, not in `tag`, because the other
+        // node may be added after the tag is written.
+        let mut clashes: Vec<&String> = tag_names_map
+            .iter()
+            .filter(|&(name, &(ni, _))| node_index.get(name).is_some_and(|&other| other != ni))
+            .map(|(name, _)| name)
+            .collect();
+        clashes.sort();
+        if let Some(name) = clashes.first() {
+            return Err(TensorError::new(&format!(
+                "tag {name:?} is also the generated id of another node, so both would \
+                 name their parameters {name:?}/...; pick another tag name",
+            )));
+        }
+
         // Detect child subgraphs: labeled Graphs become tree children
         let mut children: HashMap<String, usize> = HashMap::new();
         for (idx, node) in nodes.iter().enumerate() {

@@ -356,6 +356,62 @@ fn a_node_with_two_tags_is_named_by_the_same_one_every_time() {
     }
 }
 
+// A tag spelled like another node's generated id would give two nodes
+// the same parameter prefix. The build refuses it, whichever of the two
+// comes first.
+#[test]
+fn a_tag_equal_to_another_nodes_generated_id_fails_the_build() {
+    let dev = crate::tensor::test_device();
+    let ids: Vec<String> = FlowBuilder::from(Linear::on_device(4, 8, dev).unwrap())
+        .through(Linear::on_device(8, 2, dev).unwrap())
+        .build()
+        .unwrap()
+        .named_parameters()
+        .into_iter()
+        .map(|(n, _)| n.split('/').next().unwrap().to_string())
+        .collect();
+    let (first, second) = (ids[0].clone(), ids[2].clone());
+    assert_ne!(first, second);
+
+    // The first node tagged with the id the second will be given.
+    let err = FlowBuilder::from(Linear::on_device(4, 8, dev).unwrap())
+        .tag(&second)
+        .through(Linear::on_device(8, 2, dev).unwrap())
+        .build()
+        .err()
+        .expect("the build must refuse a tag that names another node");
+    assert!(
+        err.to_string().contains("generated id of another node"),
+        "{err}"
+    );
+
+    // The second node tagged with the first one's id.
+    let err = FlowBuilder::from(Linear::on_device(4, 8, dev).unwrap())
+        .through(Linear::on_device(8, 2, dev).unwrap())
+        .tag(&first)
+        .build()
+        .err()
+        .expect("the build must refuse a tag that names another node");
+    assert!(
+        err.to_string().contains("generated id of another node"),
+        "{err}"
+    );
+
+    // A node tagged with its OWN id names nothing twice.
+    let graph = FlowBuilder::from(Linear::on_device(4, 8, dev).unwrap())
+        .tag(&first)
+        .through(Linear::on_device(8, 2, dev).unwrap())
+        .build()
+        .unwrap();
+    let names: Vec<String> = graph
+        .named_parameters()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let unique: std::collections::HashSet<&String> = names.iter().collect();
+    assert_eq!(names.len(), unique.len(), "{names:?}");
+}
+
 #[test]
 fn test_named_parameters_tagged_prefix() {
     let graph = FlowBuilder::from(Linear::on_device(4, 8, crate::tensor::test_device()).unwrap())

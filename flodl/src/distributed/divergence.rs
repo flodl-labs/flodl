@@ -83,7 +83,7 @@ pub(crate) fn divergence_triple(
         sums
     };
 
-    Ok(triple_from_sums(pre_sq, diff_sq, post_sq))
+    triple_from_sums(pre_sq, diff_sq, post_sq)
 }
 
 /// Accumulate one `(pre_f32, post)` pair's contribution into the three
@@ -132,17 +132,41 @@ fn observe_pair(pre_f32: &Tensor, post: &Tensor, sums: &mut (f64, f64, f64)) -> 
     Ok(())
 }
 
+/// The error every backend returns when a norm is NaN or infinite.
+///
+/// A model whose weights are no longer finite cannot train any further,
+/// and averaging it spreads the damage to every other rank. Read as a
+/// number, its divergence would be zero, the guards' "perfectly
+/// converged", and the run would spend the rest of its budget on nothing.
+/// So it is an error, raised where the norms are first known.
+fn non_finite_model(pre_norm: f64, post_norm: f64) -> TensorError {
+    TensorError::new(&format!(
+        "the model's parameters are no longer finite at this sync (norm before the \
+         average: {pre_norm}, after: {post_norm}): training has diverged to NaN or \
+         infinity. Stopping the run. The usual causes are a learning rate that is too \
+         high, missing gradient clipping, or a reduced-precision overflow."
+    ))
+}
+
 /// Finish the triple from the three accumulated sums — the single
-/// definition of the ratio and its ~zero-post-norm guard.
-fn triple_from_sums(pre_sq: f64, diff_sq: f64, post_sq: f64) -> (f64, Option<f64>, Option<f64>) {
+/// definition of the ratio, its ~zero-post-norm guard, and the refusal of
+/// a non-finite model.
+pub(crate) fn triple_from_sums(
+    pre_sq: f64,
+    diff_sq: f64,
+    post_sq: f64,
+) -> Result<(f64, Option<f64>, Option<f64>)> {
     let pre_norm = pre_sq.sqrt();
     let post_norm = post_sq.sqrt();
+    if !(pre_norm.is_finite() && post_norm.is_finite()) {
+        return Err(non_finite_model(pre_norm, post_norm));
+    }
     let divergence = if post_norm > 1e-10 {
         diff_sq.sqrt() / post_norm
     } else {
         0.0
     };
-    (divergence, Some(post_norm), Some(pre_norm))
+    Ok((divergence, Some(post_norm), Some(pre_norm)))
 }
 
 /// Streaming counterpart of [`divergence_triple`]: same triple, one
@@ -216,9 +240,9 @@ impl DivergenceAccum {
 
     /// The exact triple over every observed pair. Empty (no pairs)
     /// mirrors [`divergence_triple`]'s empty contract: `(0, None, None)`.
-    pub(crate) fn finish(self) -> (f64, Option<f64>, Option<f64>) {
+    pub(crate) fn finish(self) -> Result<(f64, Option<f64>, Option<f64>)> {
         if self.pairs == 0 {
-            return (0.0, None, None);
+            return Ok((0.0, None, None));
         }
         triple_from_sums(self.sums.0, self.sums.1, self.sums.2)
     }
@@ -226,12 +250,15 @@ impl DivergenceAccum {
     /// Keep-local round (zero realized mass — the caller keeps its own
     /// tensors, so pre == post): `(0, pre_norm, pre_norm)`, trusting
     /// only the pre-side sums (the reply's payloads were meaningless).
-    pub(crate) fn finish_keep_local(self) -> (f64, Option<f64>, Option<f64>) {
+    pub(crate) fn finish_keep_local(self) -> Result<(f64, Option<f64>, Option<f64>)> {
         if self.pairs == 0 {
-            return (0.0, None, None);
+            return Ok((0.0, None, None));
         }
         let pre_norm = self.sums.0.sqrt();
-        (0.0, Some(pre_norm), Some(pre_norm))
+        if !pre_norm.is_finite() {
+            return Err(non_finite_model(pre_norm, pre_norm));
+        }
+        Ok((0.0, Some(pre_norm), Some(pre_norm)))
     }
 }
 
@@ -270,6 +297,41 @@ mod tests {
         let (d, post, pre) = divergence_triple(&[], &[]).unwrap();
         assert_eq!(d, 0.0);
         assert!(post.is_none() && pre.is_none());
+    }
+
+    // A model that went NaN or infinite is an error on every path, never
+    // a divergence of zero.
+    #[test]
+    fn a_non_finite_model_is_an_error_not_zero_divergence() {
+        let bad = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+        for v in bad {
+            // After the average.
+            let pre = [t(&[1.0, 2.0])];
+            let post = [t(&[v, 2.0])];
+            let msg = divergence_triple(&pre, &post).unwrap_err().to_string();
+            assert!(msg.contains("no longer finite"), "{msg}");
+
+            // Before it, with a finite average.
+            let pre = [t(&[v, 2.0])];
+            let post = [t(&[1.0, 2.0])];
+            assert!(divergence_triple(&pre, &post).is_err());
+
+            // The streaming accumulator, both ways of finishing.
+            let pre = t(&[v, 2.0]);
+            let post = t(&[v, 2.0]);
+            let mut accum = DivergenceAccum::new();
+            accum.capture_pre(&pre).unwrap();
+            accum.observe_post(&post).unwrap();
+            assert!(accum.finish().is_err());
+            let mut accum = DivergenceAccum::new();
+            accum.capture_pre(&pre).unwrap();
+            accum.observe_post(&post).unwrap();
+            assert!(accum.finish_keep_local().is_err());
+        }
+        // A sum of squares that overflows to infinity is the same case.
+        assert!(triple_from_sums(1.0, 1.0, f64::INFINITY).is_err());
+        assert!(triple_from_sums(f64::NAN, 1.0, 1.0).is_err());
+        assert!(triple_from_sums(1.0, 1.0, 4.0).is_ok());
     }
 
     #[test]
@@ -352,7 +414,7 @@ mod tests {
             accum.capture_pre(p).unwrap();
             accum.observe_post(q).unwrap();
         }
-        let streamed = accum.finish();
+        let streamed = accum.finish().unwrap();
         assert!((streamed.0 - reference.0).abs() < 1e-12, "divergence");
         assert!(
             (streamed.1.unwrap() - reference.1.unwrap()).abs() < 1e-12,
@@ -390,7 +452,7 @@ mod tests {
             accum.capture_pre(p).unwrap();
             accum.observe_post(q).unwrap();
         }
-        let streamed = accum.finish();
+        let streamed = accum.finish().unwrap();
         assert!((streamed.0 - reference.0).abs() < 1e-6, "divergence");
         assert!(
             (streamed.1.unwrap() - reference.1.unwrap()).abs() < 1e-6,
@@ -412,7 +474,7 @@ mod tests {
         let mut accum = DivergenceAccum::new();
         accum.capture_pre(&pre[0]).unwrap();
         accum.observe_post(&garbage_post[0]).unwrap();
-        let (d, post_n, pre_n) = accum.finish_keep_local();
+        let (d, post_n, pre_n) = accum.finish_keep_local().unwrap();
         assert_eq!(d, 0.0);
         assert!((pre_n.unwrap() - 5.0).abs() < 1e-5);
         assert!((post_n.unwrap() - 5.0).abs() < 1e-5, "post_norm = pre_norm");
@@ -421,10 +483,10 @@ mod tests {
     /// Empty accumulator mirrors divergence_triple's empty contract.
     #[test]
     fn accum_empty_is_zero_none_none() {
-        let (d, post, pre) = DivergenceAccum::new().finish();
+        let (d, post, pre) = DivergenceAccum::new().finish().unwrap();
         assert_eq!(d, 0.0);
         assert!(post.is_none() && pre.is_none());
-        let (d, post, pre) = DivergenceAccum::new().finish_keep_local();
+        let (d, post, pre) = DivergenceAccum::new().finish_keep_local().unwrap();
         assert_eq!(d, 0.0);
         assert!(post.is_none() && pre.is_none());
     }
