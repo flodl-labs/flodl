@@ -350,12 +350,18 @@ pub struct JoinConfigArgs {
 ///
 /// Binds 127.0.0.1 only. Reaching it from another box is an ssh forward
 /// (`ssh -L 1338:127.0.0.1:1338 <controller>`), the same trust story as
-/// the cluster itself.
+/// the cluster itself. The page opens with the URL printed at startup,
+/// which carries the session token; `fdl ui --url` prints it again.
 #[derive(crate::FdlArgs, Debug)]
 pub struct UiArgs {
     /// Port to serve on (loopback only).
     #[option(default = "1338")]
     pub port: u16,
+    /// Print the URL of the ui already serving this project, and exit.
+    /// For a browser that lost its session: cleared cookies, another
+    /// browser, a terminal whose scrollback is gone.
+    #[option]
+    pub url: bool,
 }
 
 /// Publish a training run for a fleet to pull.
