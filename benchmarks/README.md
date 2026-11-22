@@ -168,6 +168,11 @@ user gets by default on both sides. The cost of a step on many small
 tensors is all framework: the same elementwise updates, issued as a few
 batched kernels or as a loop over tensors.
 
+Adam and AdamW have a second row each, `optim_adam_fused` and
+`optim_adamw_fused`, where PyTorch runs with `fused=True`. flodl's Adam
+always uses libtorch's fused kernel, so the default rows compare what a
+user gets on each side and the fused rows compare the same kernel.
+
 ## Project structure
 
 ```

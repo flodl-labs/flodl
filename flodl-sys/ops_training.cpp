@@ -826,13 +826,26 @@ static char* fused_adam_impl(FlodlTensor* params, FlodlTensor* grads,
         // No amsgrad support — empty list
         std::vector<at::Tensor> max_v_list;
 
-        // state_steps: per-param float32 scalar tensors on the param's
-        // device — bias correction is computed per param from these.
-        std::vector<at::Tensor> steps;
-        steps.reserve(count);
+        // state_steps: one float32 scalar per param on the params' device,
+        // from which the kernel computes each param's bias correction.
+        // They are filled on the device, one tensor per distinct count
+        // (params stepped together share one): a fill is an asynchronous
+        // kernel, where uploading the counts is a blocking copy that
+        // drains the queue on every step.
+        std::vector<at::Tensor> steps(count);
+        std::vector<std::pair<int64_t, at::Tensor>> filled;
+        auto step_opts = torch::dtype(torch::kFloat32).device(p_list[0].device());
         for (int i = 0; i < count; i++) {
-            steps.push_back(torch::tensor((float)steps_in[i],
-                torch::dtype(torch::kFloat32).device(p_list[i].device())));
+            const at::Tensor* t = nullptr;
+            for (auto& f : filled) {
+                if (f.first == steps_in[i]) { t = &f.second; break; }
+            }
+            if (!t) {
+                filled.emplace_back(steps_in[i],
+                    torch::full({}, (float)steps_in[i], step_opts));
+                t = &filled.back().second;
+            }
+            steps[i] = *t;
         }
 
         auto gs = grad_scale
@@ -1090,6 +1103,90 @@ extern "C" char* flodl_foreach_sqrt_(FlodlTensor* tensors, int count) {
         if (count == 0) return nullptr;
         auto list = unwrap_list(tensors, count);
         at::_foreach_sqrt_(list);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    } catch (...) {
+        return make_error("flodl: non-standard C++ exception");
+    }
+}
+
+extern "C" char* flodl_foreach_sqrt(FlodlTensor* tensors, int count, FlodlTensor* results) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(tensors, count);
+        auto out = at::_foreach_sqrt(list);
+        for (size_t i = 0; i < out.size(); i++) {
+            results[i] = wrap(out[i]);
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    } catch (...) {
+        return make_error("flodl: non-standard C++ exception");
+    }
+}
+
+extern "C" char* flodl_foreach_add_list(FlodlTensor* tensors1, FlodlTensor* tensors2,
+                                         int count, double alpha, FlodlTensor* results) {
+    try {
+        if (count == 0) return nullptr;
+        auto list1 = unwrap_list(tensors1, count);
+        auto list2 = unwrap_list(tensors2, count);
+        auto out = at::_foreach_add(list1, list2, alpha);
+        for (size_t i = 0; i < out.size(); i++) {
+            results[i] = wrap(out[i]);
+        }
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    } catch (...) {
+        return make_error("flodl: non-standard C++ exception");
+    }
+}
+
+extern "C" char* flodl_foreach_addcmul_(FlodlTensor* self, FlodlTensor* tensors1,
+                                         FlodlTensor* tensors2, int count, double value) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(self, count);
+        auto list1 = unwrap_list(tensors1, count);
+        auto list2 = unwrap_list(tensors2, count);
+        at::_foreach_addcmul_(list, list1, list2, value);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    } catch (...) {
+        return make_error("flodl: non-standard C++ exception");
+    }
+}
+
+extern "C" char* flodl_foreach_addcdiv_(FlodlTensor* self, FlodlTensor* tensors1,
+                                         FlodlTensor* tensors2, int count, double value) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(self, count);
+        auto list1 = unwrap_list(tensors1, count);
+        auto list2 = unwrap_list(tensors2, count);
+        at::_foreach_addcdiv_(list, list1, list2, value);
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    } catch (...) {
+        return make_error("flodl: non-standard C++ exception");
+    }
+}
+
+extern "C" char* flodl_foreach_addcdiv_scalars_(FlodlTensor* self, FlodlTensor* tensors1,
+                                                 FlodlTensor* tensors2, int count,
+                                                 const double* values) {
+    try {
+        if (count == 0) return nullptr;
+        auto list = unwrap_list(self, count);
+        auto list1 = unwrap_list(tensors1, count);
+        auto list2 = unwrap_list(tensors2, count);
+        std::vector<at::Scalar> scalars(values, values + count);
+        at::_foreach_addcdiv_(list, list1, list2, at::ArrayRef<at::Scalar>(scalars));
         return nullptr;
     } catch (const std::exception& e) {
         return make_error(e.what());

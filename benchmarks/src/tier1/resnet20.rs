@@ -8,113 +8,58 @@
 use flodl::*;
 use crate::harness::{BenchConfig, BenchResult, run_benchmark};
 
-struct Block {
-    conv1: Conv2d,
-    bn1: BatchNorm2d,
-    conv2: Conv2d,
-    bn2: BatchNorm2d,
-    skip: Option<(Conv2d, BatchNorm2d)>,
+fn conv(in_ch: i64, out_ch: i64, kernel: i64, stride: i64, device: Device) -> Result<Conv2d> {
+    Conv2d::configure(in_ch, out_ch, kernel)
+        .with_stride(stride)
+        .with_padding(kernel / 2)
+        .without_bias()
+        .on_device(device)
+        .done()
 }
 
-impl Block {
-    fn new(in_ch: i64, out_ch: i64, stride: i64, device: Device) -> Result<Self> {
-        let conv = |i, o, k, s, p| {
-            Conv2d::configure(i, o, k)
-                .with_stride(s)
-                .with_padding(p)
-                .without_bias()
-                .on_device(device)
-                .done()
-        };
-        let skip = if stride != 1 || in_ch != out_ch {
-            Some((conv(in_ch, out_ch, 1, stride, 0)?, BatchNorm2d::on_device(out_ch, device)?))
+/// The residual branch of a basic block: conv, norm, ReLU, conv, norm.
+fn branch(in_ch: i64, out_ch: i64, stride: i64, device: Device) -> Result<Graph> {
+    FlowBuilder::from(conv(in_ch, out_ch, 3, stride, device)?)
+        .through(BatchNorm2d::on_device(out_ch, device)?)
+        .through(ReLU)
+        .through(conv(out_ch, out_ch, 3, 1, device)?)
+        .through(BatchNorm2d::on_device(out_ch, device)?)
+        .build()
+}
+
+/// The projection a block's skip path takes when its shape changes.
+fn projection(in_ch: i64, out_ch: i64, stride: i64, device: Device) -> Result<Graph> {
+    FlowBuilder::from(conv(in_ch, out_ch, 1, stride, device)?)
+        .through(BatchNorm2d::on_device(out_ch, device)?)
+        .build()
+}
+
+/// ResNet-20 for 32x32 inputs (He et al. 2015) as a graph: a stem and
+/// three stages of three basic blocks at 16, 32 and 64 channels. `also`
+/// is the residual connection; `also_with` projects the skip path where
+/// a stage changes shape.
+pub fn resnet20(device: Device) -> Result<Graph> {
+    let mut fb = FlowBuilder::from(conv(3, 16, 3, 1, device)?)
+        .through(BatchNorm2d::on_device(16, device)?)
+        .through(ReLU);
+    for (in_ch, out_ch, stride) in [(16, 16, 1), (16, 32, 2), (32, 64, 2)] {
+        fb = if in_ch == out_ch {
+            fb.also(branch(in_ch, out_ch, stride, device)?)
         } else {
-            None
-        };
-        Ok(Block {
-            conv1: conv(in_ch, out_ch, 3, stride, 1)?,
-            bn1: BatchNorm2d::on_device(out_ch, device)?,
-            conv2: conv(out_ch, out_ch, 3, 1, 1)?,
-            bn2: BatchNorm2d::on_device(out_ch, device)?,
-            skip,
-        })
-    }
-
-    fn forward(&self, x: &Variable) -> Result<Variable> {
-        let identity = match &self.skip {
-            Some((conv, bn)) => bn.forward(&conv.forward(x)?)?,
-            None => x.clone(),
-        };
-        let out = self.bn1.forward(&self.conv1.forward(x)?)?.relu()?;
-        let out = self.bn2.forward(&self.conv2.forward(&out)?)?;
-        out.add(&identity)?.relu()
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        let mut params = Vec::new();
-        params.extend(self.conv1.parameters());
-        params.extend(self.bn1.parameters());
-        params.extend(self.conv2.parameters());
-        params.extend(self.bn2.parameters());
-        if let Some((conv, bn)) = &self.skip {
-            params.extend(conv.parameters());
-            params.extend(bn.parameters());
+            fb.also_with(
+                projection(in_ch, out_ch, stride, device)?,
+                branch(in_ch, out_ch, stride, device)?,
+            )
         }
-        params
-    }
-}
-
-/// ResNet-20 for 32x32 inputs (He et al. 2015): a stem and three stages of
-/// three basic blocks at 16, 32 and 64 channels.
-pub struct ResNet20 {
-    stem: Conv2d,
-    stem_bn: BatchNorm2d,
-    blocks: Vec<Block>,
-    fc: Linear,
-}
-
-impl ResNet20 {
-    pub fn new(device: Device) -> Result<Self> {
-        let stem = Conv2d::configure(3, 16, 3)
-            .with_padding(1)
-            .without_bias()
-            .on_device(device)
-            .done()?;
-        let mut blocks = Vec::new();
-        for (in_ch, out_ch, stride) in [(16, 16, 1), (16, 32, 2), (32, 64, 2)] {
-            blocks.push(Block::new(in_ch, out_ch, stride, device)?);
-            for _ in 1..3 {
-                blocks.push(Block::new(out_ch, out_ch, 1, device)?);
-            }
+        .through(ReLU);
+        for _ in 1..3 {
+            fb = fb.also(branch(out_ch, out_ch, 1, device)?).through(ReLU);
         }
-        Ok(ResNet20 {
-            stem,
-            stem_bn: BatchNorm2d::on_device(16, device)?,
-            blocks,
-            fc: Linear::on_device(64, 10, device)?,
-        })
     }
-
-    pub fn forward(&self, input: &Variable) -> Result<Variable> {
-        let mut x = self.stem_bn.forward(&self.stem.forward(input)?)?.relu()?;
-        for block in &self.blocks {
-            x = block.forward(&x)?;
-        }
-        let x = adaptive_avg_pool2d(&x, [1, 1])?;
-        let x = x.reshape(&[x.shape()[0], -1])?;
-        self.fc.forward(&x)
-    }
-
-    pub fn parameters(&self) -> Vec<Parameter> {
-        let mut params = Vec::new();
-        params.extend(self.stem.parameters());
-        params.extend(self.stem_bn.parameters());
-        for block in &self.blocks {
-            params.extend(block.parameters());
-        }
-        params.extend(self.fc.parameters());
-        params
-    }
+    fb.through(AdaptiveAvgPool2d::new([1, 1]))
+        .through(Flatten::default())
+        .through(Linear::on_device(64, 10, device)?)
+        .build()
 }
 
 pub fn run(device: Device) -> Result<BenchResult> {
@@ -125,9 +70,10 @@ pub fn run(device: Device) -> Result<BenchResult> {
         ..Default::default()
     };
 
-    let model = ResNet20::new(device)?;
+    let model = resnet20(device)?;
     let params = model.parameters();
     let mut optimizer = SGD::new(&params, 0.1, 0.9).weight_decay(1e-4);
+    model.train();
 
     let image_opts = TensorOptions { dtype: DType::Float32, device };
     let label_opts = TensorOptions { dtype: DType::Int64, device };

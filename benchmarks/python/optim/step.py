@@ -3,7 +3,9 @@
 The tensors are ResNet-20's 65 parameters with a fixed gradient set once,
 so a row prices what one `step()` costs for a model made of many small
 tensors. Each optimizer runs with PyTorch's defaults, which is what a user
-gets: the multi-tensor ("foreach") implementation on CUDA.
+gets: the multi-tensor ("foreach") implementation on CUDA. Adam and AdamW
+also have a `fused=True` row, PyTorch's fastest form and the one flodl's
+Adam always uses, so those two rows compare like with like.
 """
 
 import torch
@@ -21,6 +23,8 @@ OPTIMIZERS = {
     "optim_sgd": lambda p: torch.optim.SGD(p, lr=LR, momentum=0.9, weight_decay=1e-4),
     "optim_adam": lambda p: torch.optim.Adam(p, lr=LR),
     "optim_adamw": lambda p: torch.optim.AdamW(p, lr=LR, weight_decay=1e-2),
+    "optim_adam_fused": lambda p: torch.optim.Adam(p, lr=LR, fused=True),
+    "optim_adamw_fused": lambda p: torch.optim.AdamW(p, lr=LR, weight_decay=1e-2, fused=True),
     "optim_rmsprop": lambda p: torch.optim.RMSprop(p, lr=LR),
     "optim_adagrad": lambda p: torch.optim.Adagrad(p, lr=LR),
     "optim_nadam": lambda p: torch.optim.NAdam(p, lr=LR),

@@ -8,14 +8,23 @@
 
 use flodl::*;
 use crate::harness::{BenchConfig, BenchResult, run_benchmark};
-use crate::tier1::resnet20::ResNet20;
+use crate::tier1::resnet20::resnet20;
 
 /// Steps per measured "epoch". The comparison reports time per step.
 const STEPS: usize = 200;
 
 /// The optimizers measured, with the settings both sides use.
-pub const NAMES: &[&str] =
-    &["optim_sgd", "optim_adam", "optim_adamw", "optim_rmsprop", "optim_adagrad", "optim_nadam", "optim_radam"];
+pub const NAMES: &[&str] = &[
+    "optim_sgd",
+    "optim_adam",
+    "optim_adamw",
+    "optim_adam_fused",
+    "optim_adamw_fused",
+    "optim_rmsprop",
+    "optim_adagrad",
+    "optim_nadam",
+    "optim_radam",
+];
 
 fn build(name: &str, params: &[Parameter]) -> Box<dyn Optimizer> {
     // A small rate keeps the weights finite over tens of thousands of
@@ -23,8 +32,10 @@ fn build(name: &str, params: &[Parameter]) -> Box<dyn Optimizer> {
     let lr = 1e-6;
     match name {
         "optim_sgd" => Box::new(SGD::new(params, lr, 0.9).weight_decay(1e-4)),
-        "optim_adam" => Box::new(Adam::new(params, lr)),
-        "optim_adamw" => Box::new(AdamW::new(params, lr, 1e-2)),
+        // flodl's Adam is always the fused kernel, so the `_fused` rows
+        // run the same code against PyTorch's `fused=True`.
+        "optim_adam" | "optim_adam_fused" => Box::new(Adam::new(params, lr)),
+        "optim_adamw" | "optim_adamw_fused" => Box::new(AdamW::new(params, lr, 1e-2)),
         "optim_rmsprop" => Box::new(RMSprop::new(params, lr)),
         "optim_adagrad" => Box::new(Adagrad::new(params, lr)),
         "optim_nadam" => Box::new(NAdam::new(params, lr)),
@@ -41,7 +52,7 @@ pub fn run(name: &'static str, device: Device) -> Result<BenchResult> {
         ..Default::default()
     };
 
-    let params = ResNet20::new(device)?.parameters();
+    let params = resnet20(device)?.parameters();
 
     // One backward of sum(p * c) leaves grad(p) = c on every parameter.
     // The steps never zero it, so each one sees the same gradient.

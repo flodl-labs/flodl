@@ -1466,6 +1466,44 @@ unsafe extern "C" {
 
     pub fn flodl_foreach_sqrt_(tensors: *mut FlodlTensor, count: i32) -> *mut c_char;
 
+    pub fn flodl_foreach_sqrt(
+        tensors: *mut FlodlTensor,
+        count: i32,
+        results: *mut FlodlTensor,
+    ) -> *mut c_char;
+
+    pub fn flodl_foreach_add_list(
+        tensors1: *mut FlodlTensor,
+        tensors2: *mut FlodlTensor,
+        count: i32,
+        alpha: f64,
+        results: *mut FlodlTensor,
+    ) -> *mut c_char;
+
+    pub fn flodl_foreach_addcmul_(
+        this: *mut FlodlTensor,
+        tensors1: *mut FlodlTensor,
+        tensors2: *mut FlodlTensor,
+        count: i32,
+        value: f64,
+    ) -> *mut c_char;
+
+    pub fn flodl_foreach_addcdiv_(
+        this: *mut FlodlTensor,
+        tensors1: *mut FlodlTensor,
+        tensors2: *mut FlodlTensor,
+        count: i32,
+        value: f64,
+    ) -> *mut c_char;
+
+    pub fn flodl_foreach_addcdiv_scalars_(
+        this: *mut FlodlTensor,
+        tensors1: *mut FlodlTensor,
+        tensors2: *mut FlodlTensor,
+        count: i32,
+        values: *const f64,
+    ) -> *mut c_char;
+
     // --- Autograd diagnostics ---
 
     pub fn flodl_autograd_node_count(t: FlodlTensor) -> i64;
