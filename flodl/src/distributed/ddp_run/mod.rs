@@ -503,6 +503,19 @@ pub struct DdpRunConfig {
     /// spikes on any GPU are bounded before they propagate through
     /// AllReduce averaging.
     pub max_grad_norm: Option<f64>,
+    /// Numeric precision of each rank's training forward (default
+    /// [`Precision::F32`](crate::nn::Precision)). Mixed precision only:
+    /// parameters, gradients, averaging and checkpoints stay `f32`, and
+    /// evaluation always runs in `f32` so its metric means the same thing
+    /// in every arm. Applied on every rank as given, including a rank
+    /// whose card only emulates the type, which then says so at startup;
+    /// see [`Self::precision_fallback`] to keep such a rank in `f32`.
+    pub precision: crate::nn::Precision,
+    /// Keep a rank in `f32` when its device only emulates
+    /// [`Self::precision`] (default `false`). Averaging is unaffected,
+    /// since parameters are `f32` on every rank either way. Each rank
+    /// reports the precision it runs.
+    pub precision_fallback: bool,
     /// Enable the device-resident sample pool on rank workers: leftover
     /// VRAM (measured after the first training step) retains samples so
     /// later epochs gather them on device instead of re-uploading them.
@@ -732,6 +745,8 @@ impl DdpRunConfig {
             snapshot_timeout_secs: 5,
             progressive_dispatch: None,
             max_grad_norm: None,
+            precision: crate::nn::Precision::F32,
+            precision_fallback: false,
             vram_pool: crate::data::vram_pool::VRAM_POOL_DEFAULT,
             profile_graph: false,
             augment: 1,
@@ -977,6 +992,19 @@ impl DdpRunConfig {
     /// propagating through AllReduce.
     pub fn with_max_grad_norm(mut self, max_norm: f64) -> Self {
         self.max_grad_norm = Some(max_norm);
+        self
+    }
+
+    /// Set the training precision (see [`Self::precision`]).
+    pub fn with_precision(mut self, precision: crate::nn::Precision) -> Self {
+        self.precision = precision;
+        self
+    }
+
+    /// Keep a rank in `f32` where its device only emulates the requested
+    /// precision (see [`Self::precision_fallback`]).
+    pub fn with_precision_fallback(mut self, fallback: bool) -> Self {
+        self.precision_fallback = fallback;
         self
     }
 
@@ -1653,6 +1681,11 @@ pub struct WorkerConfig {
     pub epoch_splits: usize,
     /// Maximum gradient norm for clipping (None = no clipping).
     pub max_grad_norm: Option<f64>,
+    /// Requested training precision (see [`DdpRunConfig::precision`]).
+    pub precision: crate::nn::Precision,
+    /// Whether this worker stays in `f32` when its device only emulates
+    /// `precision` (see [`DdpRunConfig::precision_fallback`]).
+    pub precision_fallback: bool,
     /// Device-resident sample pool on this worker (see
     /// [`DdpRunConfig::vram_pool`]). `FLODL_VRAM_POOL=off` overrides at
     /// runtime.

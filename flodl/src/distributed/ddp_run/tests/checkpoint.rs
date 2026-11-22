@@ -247,6 +247,8 @@ fn shutdown_with_save_writes_model_and_optim_to_save_path() {
         seed: 42,
         epoch_splits: 1,
         max_grad_norm: None,
+        precision: crate::nn::Precision::F32,
+        precision_fallback: false,
         vram_pool: false,
         easgd_alpha: None,
         gamma: 1.0,

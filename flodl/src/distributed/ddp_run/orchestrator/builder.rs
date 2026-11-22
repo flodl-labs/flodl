@@ -473,6 +473,22 @@ where
         self
     }
 
+    /// Set the precision of each rank's training forward, e.g.
+    /// [`Precision::Bf16Mixed`](crate::nn::Precision). Parameters,
+    /// averaging, checkpoints and evaluation stay `f32`. Not available
+    /// through [`Self::into_worker`], where the forward is the caller's.
+    pub fn precision(mut self, precision: crate::nn::Precision) -> Self {
+        self.config = self.config.with_precision(precision);
+        self
+    }
+
+    /// Keep a rank in `f32` where its device only emulates the requested
+    /// precision, instead of applying it everywhere (the default).
+    pub fn precision_fallback(mut self, fallback: bool) -> Self {
+        self.config = self.config.with_precision_fallback(fallback);
+        self
+    }
+
     /// Augmentation multiplicity (see [`DdpRunConfig::augment`]).
     pub fn augment(mut self, k: usize) -> Self {
         self.config = self.config.with_augment(k);
@@ -915,6 +931,14 @@ where
     /// docs on `Worker` for the loop shape. The controller stays authoritative,
     /// so the trained model matches `run()`.
     pub fn into_worker(mut self) -> Result<crate::distributed::ddp_run::Worker<M>> {
+        if self.config.precision != crate::nn::Precision::F32 {
+            return Err(crate::tensor::TensorError::new(&format!(
+                "precision `{}` is set, but into_worker() does not run the forward pass: \
+                 the caller does. Leave the trainer's precision at f32 and wrap your own \
+                 forward and loss in `Precision::run(device, || ...)`.",
+                self.config.precision
+            )));
+        }
         let (dataset, batch_size, num_epochs) = self.finalize_and_extract()?;
         DdpHandle::into_worker(
             self.model_factory,

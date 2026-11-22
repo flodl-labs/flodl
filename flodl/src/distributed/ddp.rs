@@ -527,6 +527,9 @@ impl Trainer {
         if let Some(n) = cfg.max_grad_norm {
             b = b.max_grad_norm(n);
         }
+        b = b
+            .precision(cfg.precision)
+            .precision_fallback(cfg.precision_fallback);
         if let Some(t) = cfg.max_failure {
             b = b.max_failure(t);
         }

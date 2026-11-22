@@ -119,6 +119,31 @@ impl<M: Module> GpuWorker<M> {
             let _guard = compute_stream.as_ref().map(StreamGuard::new);
             model_factory(config.device)?
         };
+        // Resolve the precision this device runs. The default applies the
+        // request as given, so an emulating card is told, not overruled.
+        let precision = if config.precision.is_native_on(config.device) {
+            config.precision
+        } else if config.precision_fallback {
+            crate::msg!(
+                "rank {}: {} is emulated on this device, training in f32 \
+                 (precision_fallback)",
+                config.rank,
+                config.precision
+            );
+            crate::nn::Precision::F32
+        } else {
+            crate::msg!(
+                "rank {}: {} is emulated on this device and is likely slower \
+                 than f32 here; precision_fallback keeps such a rank in f32",
+                config.rank,
+                config.precision
+            );
+            config.precision
+        };
+        if precision != crate::nn::Precision::F32 {
+            crate::verbose!("rank {}: training precision {precision}", config.rank);
+        }
+
         if config.profile_graph {
             match (&model as &dyn Module).as_graph() {
                 Some(g) => g.enable_profiling(),
@@ -470,6 +495,7 @@ impl<M: Module> GpuWorker<M> {
             // never runs for a disabled pool.
             vram_pool_budget_sent: !vram_pool_enabled,
             max_grad_norm: config.max_grad_norm,
+            precision,
             // EASGD elastic blending is an Async-only concept: Sync and
             // Cadence MUST full-overwrite to the consensus each window. Gate
             // structurally on the worker's policy here -- the single point

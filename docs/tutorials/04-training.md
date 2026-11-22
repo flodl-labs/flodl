@@ -579,6 +579,46 @@ for (x, y) in &batches {
 }
 ```
 
+### Precision as a setting
+
+`Precision` names a training precision as one value, so a loop or the
+trainer can take it as configuration instead of hard-coding a guard:
+
+```rust
+use flodl::Precision;
+
+// Hand-written loop: forward and loss inside, backward outside.
+let precision = Precision::Bf16Mixed;
+let loss = precision.run(device, || {
+    let pred = model.forward(&input)?;
+    cross_entropy_loss(&pred, &target)
+})?;
+loss.backward()?;
+
+// Trainer: every rank's forward runs at this precision.
+let cfg = TrainerConfig::new(dataset).precision(Precision::Bf16Mixed);
+```
+
+`Bf16Mixed` needs no `GradScaler`, since bf16 keeps f32's exponent range.
+Parameters, gradients, averaging and checkpoints stay f32, and the trainer
+evaluates in f32 so the metric means the same thing with and without it.
+
+Whether it helps depends on the model and the card. Measured on one small
+transformer (OLMo, 1M tokens) and one small convolutional model
+(ResNet-20), training time in bf16 against f32:
+
+| Card | Transformer | Convolutional |
+|------|-------------|---------------|
+| RTX 5060 Ti (native bf16) | 1.81x faster | 1.3x slower |
+| GTX 1060 (emulated bf16) | 1.34x slower | 7.8x slower |
+
+So it is off by default. On NVIDIA, bf16 is native from compute
+capability 8.0 (Ampere) and emulated below; `Precision::is_native_on`
+answers for a device. On a cluster that mixes both, the trainer applies
+the precision on every rank and a rank that emulates it says so at
+startup; `.precision_fallback(true)` keeps such a rank in f32 instead,
+which changes nothing for averaging.
+
 ### Manual Dtype Conversion
 
 For cases where you need explicit control over parameter dtypes rather

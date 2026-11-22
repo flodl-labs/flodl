@@ -180,6 +180,19 @@ pub fn effective_lr(
 /// A model's short run: a few minutes on a mid-range card, and long enough
 /// that the loss still falls clearly. What that takes is the model's to
 /// say, since only it knows whether to cut passes or the data they cover.
+impl RunConfig {
+    /// The precision a hand-written loop runs on `device`: the requested
+    /// one, or f32 when the fallback is on and the device only emulates
+    /// it. The trainer makes the same decision per rank on its own.
+    pub fn precision_on(&self, device: flodl::tensor::Device) -> flodl::nn::Precision {
+        if self.precision_fallback {
+            self.precision.native_or_f32(device)
+        } else {
+            self.precision
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct QuickProfile {
     /// Data passes.
@@ -345,6 +358,12 @@ pub struct RunConfig {
     /// wire payloads; averaging still accumulates in f32. CPU averaging
     /// modes only — the builder errors loudly on nccl-* modes.
     pub bf16_wire: bool,
+    /// Precision of the training forward (`--precision`); evaluation
+    /// stays f32.
+    pub precision: flodl::nn::Precision,
+    /// Keep a rank in f32 where its device only emulates `precision`
+    /// (`--precision-fallback`).
+    pub precision_fallback: bool,
     /// Augmentation multiplicity (`--augment`): each sample appears k
     /// times per epoch as distinct schedule picks. 1 = off.
     pub augment: usize,

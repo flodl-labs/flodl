@@ -59,7 +59,7 @@ pub use activation::{
     PReLU, ReLU, SELU, SiLU, Sigmoid, Softmax, Softplus, SwiGLU, Tanh,
 };
 pub use amp::{
-    AutocastGuard, GradScaler, autocast, cast_parameters, is_autocast_enabled,
+    AutocastGuard, GradScaler, Precision, autocast, cast_parameters, is_autocast_enabled,
     is_autocast_enabled_for,
 };
 pub use attention::MultiheadAttention;
