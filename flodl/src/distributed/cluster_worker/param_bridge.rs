@@ -166,10 +166,18 @@ pub(super) fn param_bridge_loop(
             // Keep-local (zero realized mass): pre == post by
             // definition — the decoded payloads were meaningless, only
             // the pre sums are trusted.
-            let (d, post_n, pre_n) = if realized {
+            let triple = if realized {
                 accum.finish()
             } else {
                 accum.finish_keep_local()
+            };
+            let (d, post_n, pre_n) = match triple {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("cluster_worker: param bridge r{rank}: {e}");
+                    inject_shutdown();
+                    return;
+                }
             };
             (adopted, d, post_n, pre_n, realized)
         };

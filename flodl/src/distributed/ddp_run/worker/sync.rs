@@ -939,12 +939,15 @@ impl<M: Module> GpuWorker<M> {
                             post_sq += v * v;
                         }
 
-                        let post_norm = post_sq.sqrt();
-                        let div = if post_norm > 1e-10 {
-                            diff_sq.sqrt() / post_norm
-                        } else {
-                            0.0
-                        };
+                        // The ratio and the refusal of a non-finite model
+                        // have one definition, shared with the CPU path.
+                        let (div, post_norm) =
+                            match crate::distributed::divergence::triple_from_sums(
+                                pre_sq, diff_sq, post_sq,
+                            )? {
+                                (div, Some(post_norm), _) => (div, post_norm),
+                                (div, None, _) => (div, post_sq.sqrt()),
+                            };
 
                         crate::verbose!(
                             "  ddp-worker: rank {} sync divergence={:.6} \

@@ -1152,7 +1152,7 @@ fn armed_divergence_matches_post_hoc_reference() {
                         c.arm_divergence(&tensors);
                         let (adopted, realized) = sumcount_reduce(&mut c, &tensors, 1.0).unwrap();
                         assert!(realized, "both ranks carry mass 1.0");
-                        let streamed = c.take_divergence().expect("armed reply").finish();
+                        let streamed = c.take_divergence().expect("armed reply").finish().unwrap();
                         let reference = divergence_triple(&pre_copies, &adopted).unwrap();
                         (streamed, reference)
                     })
@@ -1210,11 +1210,11 @@ fn armed_divergence_keep_local_on_zero_mass_round() {
         let t1 = spawn(1, [6.0, 8.0]); // ||pre|| = 10
         (t0.join().unwrap(), t1.join().unwrap())
     });
-    let (d0, post0, pre0) = r0;
+    let (d0, post0, pre0) = r0.unwrap();
     assert_eq!(d0, 0.0);
     assert!((pre0.unwrap() - 5.0).abs() < 1e-6);
     assert!((post0.unwrap() - 5.0).abs() < 1e-6);
-    let (d1, post1, pre1) = r1;
+    let (d1, post1, pre1) = r1.unwrap();
     assert_eq!(d1, 0.0);
     assert!((pre1.unwrap() - 10.0).abs() < 1e-6);
     assert!((post1.unwrap() - 10.0).abs() < 1e-6);
