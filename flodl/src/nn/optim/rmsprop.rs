@@ -83,15 +83,6 @@ impl RMSprop {
     pub fn lr(&self) -> f64 {
         self.lr
     }
-
-    fn lr_for_param(&self, i: usize) -> f64 {
-        for g in &self.groups {
-            if g.range.contains(&i) {
-                return g.lr;
-            }
-        }
-        self.lr
-    }
 }
 
 /// Builder for RMSprop with customizable options.
@@ -147,54 +138,47 @@ impl Optimizer for RMSprop {
     fn lr(&self) -> f64 {
         self.lr
     }
+    /// One batched update per parameter group, PyTorch's multi-tensor
+    /// form: a handful of kernels for the whole group, where a
+    /// per-parameter loop costs several calls and temporaries for each
+    /// tensor.
     fn step(&mut self) -> Result<()> {
+        use crate::tensor::Tensor;
+
         no_grad(|| {
-            for (i, param) in self.params.iter().enumerate() {
-                if let Some(mut grad) = param.grad() {
-                    let lr = self.lr_for_param(i);
-                    let data = param.data().detach()?;
+            let (alpha, eps, momentum, wd) =
+                (self.alpha, self.eps, self.momentum, self.weight_decay);
+            for (range, lr) in super::lr_spans(&self.groups, self.params.len(), self.lr) {
+                let (idx, data, grads) = super::with_grads(&self.params, range)?;
+                if idx.is_empty() {
+                    continue;
+                }
+                // g += wd * p, into new tensors: the stored gradient is the
+                // caller's to read after the step.
+                let grads = if wd > 0.0 {
+                    Tensor::foreach_add_list(&grads, &data, wd)?
+                } else {
+                    grads
+                };
 
-                    // Weight decay: add wd * param to gradient
-                    if self.weight_decay > 0.0 {
-                        grad = grad.add(&data.mul_scalar(self.weight_decay)?)?;
-                    }
+                // v = alpha * v + (1 - alpha) * g^2
+                let v = super::state_list(&mut self.v, &idx, &grads)?;
+                Tensor::foreach_mul_scalar_(&v, alpha)?;
+                Tensor::foreach_addcmul_(&v, &grads, &grads, 1.0 - alpha)?;
 
-                    // Update running average of squared gradients
-                    // v = alpha * v + (1 - alpha) * grad^2
-                    let grad_sq = grad.mul(&grad)?;
-                    let v = match self.v[i].take() {
-                        Some(v) => {
-                            v.mul_scalar_(self.alpha)?;
-                            let scaled = grad_sq.mul_scalar(1.0 - self.alpha)?;
-                            v.add_(&scaled)?;
-                            v
-                        }
-                        None => grad_sq.mul_scalar(1.0 - self.alpha)?,
-                    };
+                // sqrt(v) + eps
+                let denom = Tensor::foreach_sqrt(&v)?;
+                Tensor::foreach_add_scalar_(&denom, eps)?;
 
-                    // Compute update: grad / (sqrt(v) + eps)
-                    let denom = v.sqrt()?.add_scalar(self.eps)?;
-                    let update = grad.div(&denom)?;
-
-                    if self.momentum > 0.0 {
-                        // buf = momentum * buf + update
-                        let b = match self.buf[i].take() {
-                            Some(b) => {
-                                b.mul_scalar_(self.momentum)?;
-                                b.add_(&update)?;
-                                b
-                            }
-                            None => update.copy()?,
-                        };
-                        let scaled = b.mul_scalar(lr)?;
-                        data.sub_(&scaled)?;
-                        self.buf[i] = Some(b);
-                    } else {
-                        let scaled = update.mul_scalar(lr)?;
-                        data.sub_(&scaled)?;
-                    }
-
-                    self.v[i] = Some(v);
+                if momentum > 0.0 {
+                    // buf = momentum * buf + g / denom; p -= lr * buf
+                    let buf = super::state_list(&mut self.buf, &idx, &grads)?;
+                    Tensor::foreach_mul_scalar_(&buf, momentum)?;
+                    Tensor::foreach_addcdiv_(&buf, &grads, &denom, 1.0)?;
+                    Tensor::foreach_add_list_(&data, &buf, -lr)?;
+                } else {
+                    // p -= lr * g / denom
+                    Tensor::foreach_addcdiv_(&data, &grads, &denom, -lr)?;
                 }
             }
             Ok(())
@@ -284,9 +268,102 @@ impl Stateful for RMSprop {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::make_param;
+    use super::super::test_helpers::{assert_close, make_param, set_grad, values};
     use super::*;
     use crate::tensor::Tensor;
+
+    fn pair() -> Parameter {
+        let dev = crate::tensor::test_device();
+        Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p")
+    }
+
+    #[test]
+    fn plain_rmsprop_matches_the_closed_form() {
+        // v = a*v + (1-a)*g^2; p -= lr * g / (sqrt(v) + eps), g = [1, 1].
+        let p = pair();
+        let mut opt = RMSprop::builder(std::slice::from_ref(&p), 0.1)
+            .alpha(0.5)
+            .build();
+
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        // v = 0.5, step = 0.1 / sqrt(0.5)
+        assert_close(&values(&p), &[0.858_579, 1.858_579]);
+
+        opt.zero_grad();
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        // v = 0.75, step = 0.1 / sqrt(0.75)
+        assert_close(&values(&p), &[0.743_109, 1.743_109]);
+    }
+
+    #[test]
+    fn momentum_rmsprop_matches_the_closed_form() {
+        // buf = m*buf + g / (sqrt(v) + eps); p -= lr * buf.
+        let p = pair();
+        let mut opt = RMSprop::builder(std::slice::from_ref(&p), 0.1)
+            .alpha(0.5)
+            .momentum(0.9)
+            .build();
+
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        // buf = 1.414214
+        assert_close(&values(&p), &[0.858_579, 1.858_579]);
+
+        opt.zero_grad();
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        // buf = 0.9 * 1.414214 + 1.154701 = 2.427493
+        assert_close(&values(&p), &[0.615_829, 1.615_829]);
+    }
+
+    #[test]
+    fn weight_decay_matches_the_closed_form_and_leaves_the_gradient() {
+        // g += wd * p feeds both v and the update, and must not be written
+        // into the stored gradient.
+        let p = pair();
+        let mut opt = RMSprop::builder(std::slice::from_ref(&p), 0.1)
+            .alpha(0.5)
+            .weight_decay(0.1)
+            .build();
+
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        assert_close(&values(&p), &[0.858_579, 1.858_579]);
+        assert_close(
+            &p.variable.grad().unwrap().to_f32_vec().unwrap(),
+            &[1.0, 1.0],
+        );
+
+        opt.zero_grad();
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        assert_close(&values(&p), &[0.743_610, 1.743_568]);
+    }
+
+    #[test]
+    fn a_parameter_without_a_gradient_is_left_alone() {
+        // Its value stays and its running average is not decayed while it
+        // sits out: its first gradient steps exactly like a first step.
+        let dev = crate::tensor::test_device();
+        let used = pair();
+        let idle = Parameter::new(Tensor::from_f32(&[3.0, 4.0], &[1, 2], dev).unwrap(), "idle");
+        let mut opt = RMSprop::builder(&[used.clone(), idle.clone()], 0.1)
+            .alpha(0.5)
+            .build();
+
+        set_grad(&used, &[1.0, 1.0]);
+        opt.step().unwrap();
+        assert_close(&values(&idle), &[3.0, 4.0]);
+
+        opt.zero_grad();
+        set_grad(&used, &[1.0, 1.0]);
+        set_grad(&idle, &[1.0, 1.0]);
+        opt.step().unwrap();
+        assert_close(&values(&used), &[0.743_109, 1.743_109]);
+        assert_close(&values(&idle), &[2.858_579, 3.858_579]);
+    }
 
     #[test]
     fn test_rmsprop_basic() {

@@ -628,6 +628,81 @@ fn test_foreach_sqrt() {
 }
 
 #[test]
+fn test_foreach_sqrt_out_of_place() {
+    let dev = test_device();
+    let a = Tensor::from_f32(&[4.0, 9.0], &[2], dev).unwrap();
+    let b = Tensor::from_f32(&[16.0], &[1], dev).unwrap();
+    let out = Tensor::foreach_sqrt(&[a.clone(), b.clone()]).unwrap();
+    assert_eq!(out[0].to_f32_vec().unwrap(), vec![2.0, 3.0]);
+    assert_eq!(out[1].to_f32_vec().unwrap(), vec![4.0]);
+    // Inputs untouched.
+    assert_eq!(a.to_f32_vec().unwrap(), vec![4.0, 9.0]);
+    assert_eq!(b.to_f32_vec().unwrap(), vec![16.0]);
+}
+
+#[test]
+fn test_foreach_add_list_out_of_place() {
+    let dev = test_device();
+    let a = Tensor::from_f32(&[1.0, 2.0], &[2], dev).unwrap();
+    let b = Tensor::from_f32(&[3.0], &[1], dev).unwrap();
+    let x = Tensor::from_f32(&[10.0, 20.0], &[2], dev).unwrap();
+    let y = Tensor::from_f32(&[30.0], &[1], dev).unwrap();
+    let out = Tensor::foreach_add_list(&[a.clone(), b.clone()], &[x, y], 0.5).unwrap();
+    assert_eq!(out[0].to_f32_vec().unwrap(), vec![6.0, 12.0]);
+    assert_eq!(out[1].to_f32_vec().unwrap(), vec![18.0]);
+    assert_eq!(a.to_f32_vec().unwrap(), vec![1.0, 2.0]);
+    assert_eq!(b.to_f32_vec().unwrap(), vec![3.0]);
+}
+
+#[test]
+fn test_foreach_addcmul() {
+    let dev = test_device();
+    let a = Tensor::from_f32(&[1.0, 1.0], &[2], dev).unwrap();
+    let b = Tensor::from_f32(&[0.0], &[1], dev).unwrap();
+    let x = Tensor::from_f32(&[2.0, 3.0], &[2], dev).unwrap();
+    let y = Tensor::from_f32(&[4.0], &[1], dev).unwrap();
+    Tensor::foreach_addcmul_(
+        &[a.clone(), b.clone()],
+        &[x.clone(), y.clone()],
+        &[x, y],
+        0.5,
+    )
+    .unwrap();
+    assert_eq!(a.to_f32_vec().unwrap(), vec![3.0, 5.5]);
+    assert_eq!(b.to_f32_vec().unwrap(), vec![8.0]);
+}
+
+#[test]
+fn test_foreach_addcdiv() {
+    let dev = test_device();
+    let a = Tensor::from_f32(&[1.0, 1.0], &[2], dev).unwrap();
+    let b = Tensor::from_f32(&[0.0], &[1], dev).unwrap();
+    let n1 = Tensor::from_f32(&[4.0, 9.0], &[2], dev).unwrap();
+    let n2 = Tensor::from_f32(&[8.0], &[1], dev).unwrap();
+    let d1 = Tensor::from_f32(&[2.0, 3.0], &[2], dev).unwrap();
+    let d2 = Tensor::from_f32(&[4.0], &[1], dev).unwrap();
+    Tensor::foreach_addcdiv_(&[a.clone(), b.clone()], &[n1, n2], &[d1, d2], -0.5).unwrap();
+    assert_eq!(a.to_f32_vec().unwrap(), vec![0.0, -0.5]);
+    assert_eq!(b.to_f32_vec().unwrap(), vec![-1.0]);
+}
+
+#[test]
+fn test_foreach_addcdiv_scalars() {
+    // One value per tensor: the two lists move by different factors.
+    let dev = test_device();
+    let a = Tensor::from_f32(&[1.0, 1.0], &[2], dev).unwrap();
+    let b = Tensor::from_f32(&[0.0], &[1], dev).unwrap();
+    let n1 = Tensor::from_f32(&[4.0, 9.0], &[2], dev).unwrap();
+    let n2 = Tensor::from_f32(&[8.0], &[1], dev).unwrap();
+    let d1 = Tensor::from_f32(&[2.0, 3.0], &[2], dev).unwrap();
+    let d2 = Tensor::from_f32(&[4.0], &[1], dev).unwrap();
+    Tensor::foreach_addcdiv_scalars_(&[a.clone(), b.clone()], &[n1, n2], &[d1, d2], &[1.0, -2.0])
+        .unwrap();
+    assert_eq!(a.to_f32_vec().unwrap(), vec![3.0, 4.0]);
+    assert_eq!(b.to_f32_vec().unwrap(), vec![-4.0]);
+}
+
+#[test]
 fn test_foreach_empty_list_is_noop() {
     // All foreach ops should handle empty lists gracefully
     Tensor::foreach_add_scalar_(&[], 1.0).unwrap();
@@ -637,6 +712,11 @@ fn test_foreach_empty_list_is_noop() {
     assert!(Tensor::foreach_norm(&[], 2.0).unwrap().is_empty());
     Tensor::foreach_lerp_scalar_(&[], &[], 0.5).unwrap();
     Tensor::foreach_sqrt_(&[]).unwrap();
+    assert!(Tensor::foreach_sqrt(&[]).unwrap().is_empty());
+    assert!(Tensor::foreach_add_list(&[], &[], 1.0).unwrap().is_empty());
+    Tensor::foreach_addcmul_(&[], &[], &[], 1.0).unwrap();
+    Tensor::foreach_addcdiv_(&[], &[], &[], 1.0).unwrap();
+    Tensor::foreach_addcdiv_scalars_(&[], &[], &[], &[]).unwrap();
 }
 
 #[test]

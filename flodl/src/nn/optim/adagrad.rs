@@ -111,32 +111,44 @@ impl Optimizer for Adagrad {
     fn lr(&self) -> f64 {
         self.lr
     }
+    /// One batched update for all parameters, PyTorch's multi-tensor
+    /// form: a handful of kernels for the whole list, where a
+    /// per-parameter loop costs several calls and temporaries for each
+    /// tensor.
     fn step(&mut self) -> Result<()> {
+        use crate::tensor::Tensor;
+
         no_grad(|| {
-            for (i, param) in self.params.iter().enumerate() {
-                if let Some(mut grad) = param.grad() {
-                    // Per-param step: the lr_decay schedule follows each
-                    // param's own update count, so a late-unfrozen param
-                    // starts its schedule fresh (PyTorch parity).
-                    self.steps[i] += 1;
-                    let clr = self.lr / (1.0 + (self.steps[i] - 1) as f64 * self.lr_decay);
-                    let data = param.data().detach()?;
-                    if self.weight_decay > 0.0 {
-                        grad = grad.add(&data.mul_scalar(self.weight_decay)?)?;
-                    }
-                    let grad2 = grad.mul(&grad)?;
-                    let ss = match self.state_sum[i].take() {
-                        Some(ss) => ss.add(&grad2)?,
-                        None => grad2,
-                    };
-                    let update = grad
-                        .div(&ss.sqrt()?.add_scalar(self.eps)?)?
-                        .mul_scalar(clr)?;
-                    data.sub_(&update)?;
-                    self.state_sum[i] = Some(ss);
-                }
+            let (idx, data, grads) = super::with_grads(&self.params, 0..self.params.len())?;
+            if idx.is_empty() {
+                return Ok(());
             }
-            Ok(())
+            // Per-param step: the lr_decay schedule follows each param's
+            // own update count, so a late-unfrozen param starts its
+            // schedule fresh (PyTorch parity). Hence one rate per tensor.
+            let minus_clr: Vec<f64> = idx
+                .iter()
+                .map(|&i| {
+                    self.steps[i] += 1;
+                    -self.lr / (1.0 + (self.steps[i] - 1) as f64 * self.lr_decay)
+                })
+                .collect();
+            // g += wd * p, into new tensors: the stored gradient is the
+            // caller's to read after the step.
+            let grads = if self.weight_decay > 0.0 {
+                Tensor::foreach_add_list(&grads, &data, self.weight_decay)?
+            } else {
+                grads
+            };
+
+            // state_sum += g^2
+            let sum = super::state_list(&mut self.state_sum, &idx, &grads)?;
+            Tensor::foreach_addcmul_(&sum, &grads, &grads, 1.0)?;
+
+            // p -= clr * g / (sqrt(state_sum) + eps)
+            let denom = Tensor::foreach_sqrt(&sum)?;
+            Tensor::foreach_add_scalar_(&denom, self.eps)?;
+            Tensor::foreach_addcdiv_scalars_(&data, &grads, &denom, &minus_clr)
         })
     }
 
@@ -216,9 +228,53 @@ impl Stateful for Adagrad {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{make_param, state_tmp};
+    use super::super::test_helpers::{assert_close, make_param, set_grad, state_tmp, values};
     use super::*;
     use crate::tensor::Tensor;
+
+    #[test]
+    fn adagrad_with_lr_decay_matches_the_closed_form() {
+        // sum += g^2; p -= clr * g / (sqrt(sum) + eps), with
+        // clr = lr / (1 + (step - 1) * lr_decay) counted per parameter.
+        let dev = crate::tensor::test_device();
+        let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
+        let late = Parameter::new(Tensor::from_f32(&[3.0, 4.0], &[1, 2], dev).unwrap(), "late");
+        let mut opt = Adagrad::builder(&[p.clone(), late.clone()], 0.5)
+            .lr_decay(0.5)
+            .build();
+
+        set_grad(&p, &[1.0, 2.0]);
+        opt.step().unwrap();
+        // sum = [1, 4], clr = 0.5: every element moves by 0.5.
+        assert_close(&values(&p), &[0.5, 1.5]);
+        assert_close(&values(&late), &[3.0, 4.0]);
+
+        opt.zero_grad();
+        set_grad(&p, &[1.0, 2.0]);
+        set_grad(&late, &[2.0, 2.0]);
+        opt.step().unwrap();
+        // p: second step, clr = 1/3, sum = [2, 8], g / sqrt(sum) = 0.707107.
+        assert_close(&values(&p), &[0.264_298, 1.264_298]);
+        // late: its own first step, clr = 0.5, in the same batched call.
+        assert_close(&values(&late), &[2.5, 3.5]);
+    }
+
+    #[test]
+    fn adagrad_weight_decay_leaves_the_gradient() {
+        let dev = crate::tensor::test_device();
+        let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
+        let mut opt = Adagrad::builder(std::slice::from_ref(&p), 0.5)
+            .weight_decay(0.1)
+            .build();
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        // g = [1.1, 1.2], sum = g^2: a first step moves by lr whatever g is.
+        assert_close(&values(&p), &[0.5, 1.5]);
+        assert_close(
+            &p.variable.grad().unwrap().to_f32_vec().unwrap(),
+            &[1.0, 1.0],
+        );
+    }
 
     #[test]
     fn test_adagrad_state_file_roundtrip() {

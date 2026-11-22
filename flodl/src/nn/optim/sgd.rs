@@ -70,20 +70,6 @@ impl SGD {
     pub fn lr(&self) -> f64 {
         self.lr
     }
-
-    /// The parameter ranges that share a learning rate: the declared
-    /// groups, or every parameter at the base rate when none were declared
-    /// ([`SGD::new`] declares none).
-    fn spans(&self) -> Vec<(std::ops::Range<usize>, f64)> {
-        if self.groups.is_empty() {
-            vec![(0..self.params.len(), self.lr)]
-        } else {
-            self.groups
-                .iter()
-                .map(|g| (g.range.clone(), g.lr))
-                .collect()
-        }
-    }
 }
 
 /// Builder for SGD with per-group learning rates.
@@ -149,54 +135,20 @@ impl Optimizer for SGD {
 
         no_grad(|| {
             let (momentum, wd) = (self.momentum, self.weight_decay);
-            for (range, lr) in self.spans() {
-                // Parameters without a gradient this step are left alone,
-                // velocity included.
-                let mut data = Vec::new();
-                let mut grads = Vec::new();
-                let mut idx = Vec::new();
-                for i in range {
-                    if let Some(grad) = self.params[i].grad() {
-                        data.push(self.params[i].data().detach()?);
-                        grads.push(grad);
-                        idx.push(i);
-                    }
-                }
-                if data.is_empty() {
+            for (range, lr) in super::lr_spans(&self.groups, self.params.len(), self.lr) {
+                let (idx, data, grads) = super::with_grads(&self.params, range)?;
+                if idx.is_empty() {
                     continue;
                 }
 
                 if momentum > 0.0 {
-                    // Split by whether the velocity exists yet: a fresh one
-                    // starts as a deep copy of the gradient (a shallow clone
-                    // would share its storage and corrupt it in place).
-                    let (mut seen_v, mut seen_g, mut seen_d) = (Vec::new(), Vec::new(), Vec::new());
-                    let (mut new_v, mut new_d) = (Vec::new(), Vec::new());
-                    let mut velocity = Vec::with_capacity(idx.len());
-                    for (k, &i) in idx.iter().enumerate() {
-                        match &self.velocity[i] {
-                            Some(v) => {
-                                seen_v.push(v.clone());
-                                seen_g.push(grads[k].clone());
-                                seen_d.push(data[k].clone());
-                                velocity.push(v.clone());
-                            }
-                            None => {
-                                let v = grads[k].copy()?;
-                                new_v.push(v.clone());
-                                new_d.push(data[k].clone());
-                                velocity.push(v.clone());
-                                self.velocity[i] = Some(v);
-                            }
-                        }
-                    }
-                    Tensor::foreach_mul_scalar_(&seen_v, momentum)?;
-                    Tensor::foreach_add_list_(&seen_v, &seen_g, 1.0)?;
+                    let v = super::state_list(&mut self.velocity, &idx, &grads)?;
+                    Tensor::foreach_mul_scalar_(&v, momentum)?;
+                    Tensor::foreach_add_list_(&v, &grads, 1.0)?;
                     if wd > 0.0 {
-                        Tensor::foreach_add_list_(&seen_v, &seen_d, wd)?;
-                        Tensor::foreach_add_list_(&new_v, &new_d, wd)?;
+                        Tensor::foreach_add_list_(&v, &data, wd)?;
                     }
-                    Tensor::foreach_add_list_(&data, &velocity, -lr)?;
+                    Tensor::foreach_add_list_(&data, &v, -lr)?;
                 } else {
                     // p -= lr * (g + wd * p), as p * (1 - lr * wd) - lr * g.
                     if wd > 0.0 {
@@ -282,35 +234,9 @@ impl Stateful for SGD {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::{assert_close, set_grad, values};
     use super::*;
     use crate::tensor::Tensor;
-
-    /// Backward a loss whose gradient with respect to `p` is exactly `c`.
-    fn set_grad(p: &Parameter, c: &[f32]) {
-        let dev = crate::tensor::test_device();
-        let c = Variable::new(
-            Tensor::from_f32(c, &[1, c.len() as i64], dev).unwrap(),
-            false,
-        );
-        p.variable
-            .mul(&c)
-            .unwrap()
-            .sum()
-            .unwrap()
-            .backward()
-            .unwrap();
-    }
-
-    fn values(p: &Parameter) -> Vec<f32> {
-        p.variable.data().to_f32_vec().unwrap()
-    }
-
-    fn assert_close(got: &[f32], want: &[f32]) {
-        assert_eq!(got.len(), want.len());
-        for (g, w) in got.iter().zip(want) {
-            assert!((g - w).abs() < 1e-5, "got {got:?}, want {want:?}");
-        }
-    }
 
     #[test]
     fn momentum_with_weight_decay_matches_the_closed_form() {
@@ -345,8 +271,8 @@ mod tests {
     #[test]
     fn a_parameter_without_a_gradient_is_left_alone() {
         // Batching must not sweep in a parameter that took no part in the
-        // loss: its value stays, and its velocity starts fresh the first
-        // time it does get a gradient, not from a stale or zero buffer.
+        // loss: its value stays, and its velocity is not decayed while it
+        // sits out, so its first gradient becomes its whole velocity.
         let dev = crate::tensor::test_device();
         let used = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "used");
         let idle = Parameter::new(Tensor::from_f32(&[3.0, 4.0], &[1, 2], dev).unwrap(), "idle");

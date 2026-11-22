@@ -739,6 +739,29 @@ char* flodl_foreach_lerp_scalar_(FlodlTensor* tensors1, FlodlTensor* tensors2,
 // In-place sqrt: tensors[i] = sqrt(tensors[i])
 char* flodl_foreach_sqrt_(FlodlTensor* tensors, int count);
 
+// sqrt into new tensors: results[i] = sqrt(tensors[i]). results must be a
+// pre-allocated array of count FlodlTensors (caller must free each).
+char* flodl_foreach_sqrt(FlodlTensor* tensors, int count, FlodlTensor* results);
+
+// List add into new tensors: results[i] = tensors1[i] + alpha * tensors2[i].
+// results as for flodl_foreach_sqrt.
+char* flodl_foreach_add_list(FlodlTensor* tensors1, FlodlTensor* tensors2,
+                              int count, double alpha, FlodlTensor* results);
+
+// In-place addcmul: self[i] += value * tensors1[i] * tensors2[i]
+char* flodl_foreach_addcmul_(FlodlTensor* self, FlodlTensor* tensors1,
+                              FlodlTensor* tensors2, int count, double value);
+
+// In-place addcdiv: self[i] += value * tensors1[i] / tensors2[i]
+char* flodl_foreach_addcdiv_(FlodlTensor* self, FlodlTensor* tensors1,
+                              FlodlTensor* tensors2, int count, double value);
+
+// In-place addcdiv with one value per tensor:
+// self[i] += values[i] * tensors1[i] / tensors2[i]
+char* flodl_foreach_addcdiv_scalars_(FlodlTensor* self, FlodlTensor* tensors1,
+                                      FlodlTensor* tensors2, int count,
+                                      const double* values);
+
 // --- Autograd diagnostics ---
 
 // Count unique autograd nodes reachable from this tensor's grad_fn.

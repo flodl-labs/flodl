@@ -1434,6 +1434,156 @@ impl Tensor {
         check_err(err)
     }
 
+    /// Fail unless every list has the length of the first.
+    fn same_len(op: &str, first: usize, others: &[usize]) -> Result<()> {
+        if others.iter().any(|&n| n != first) {
+            return Err(TensorError::new(&format!(
+                "{op}: list length mismatch ({first} vs {others:?})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Square roots into new tensors: `out[i] = sqrt(tensors[i])`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_sqrt(tensors: &[Tensor]) -> Result<Vec<Tensor>> {
+        if tensors.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut handles = Self::handles(tensors);
+        let mut results: Vec<FlodlTensor> = vec![ptr::null_mut(); tensors.len()];
+        let err = unsafe {
+            ffi::flodl_foreach_sqrt(
+                handles.as_mut_ptr(),
+                handles.len() as i32,
+                results.as_mut_ptr(),
+            )
+        };
+        check_err(err)?;
+        Ok(results.into_iter().map(Tensor::from_raw).collect())
+    }
+
+    /// List add into new tensors: `out[i] = tensors1[i] + alpha * tensors2[i]`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_add_list(
+        tensors1: &[Tensor],
+        tensors2: &[Tensor],
+        alpha: f64,
+    ) -> Result<Vec<Tensor>> {
+        Self::same_len("foreach_add_list", tensors1.len(), &[tensors2.len()])?;
+        if tensors1.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut h1 = Self::handles(tensors1);
+        let mut h2 = Self::handles(tensors2);
+        let mut results: Vec<FlodlTensor> = vec![ptr::null_mut(); tensors1.len()];
+        let err = unsafe {
+            ffi::flodl_foreach_add_list(
+                h1.as_mut_ptr(),
+                h2.as_mut_ptr(),
+                h1.len() as i32,
+                alpha,
+                results.as_mut_ptr(),
+            )
+        };
+        check_err(err)?;
+        Ok(results.into_iter().map(Tensor::from_raw).collect())
+    }
+
+    /// In-place addcmul: `tensors[i] += value * tensors1[i] * tensors2[i]`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_addcmul_(
+        tensors: &[Tensor],
+        tensors1: &[Tensor],
+        tensors2: &[Tensor],
+        value: f64,
+    ) -> Result<()> {
+        Self::same_len(
+            "foreach_addcmul_",
+            tensors.len(),
+            &[tensors1.len(), tensors2.len()],
+        )?;
+        if tensors.is_empty() {
+            return Ok(());
+        }
+        let mut h = Self::handles(tensors);
+        let mut h1 = Self::handles(tensors1);
+        let mut h2 = Self::handles(tensors2);
+        let err = unsafe {
+            ffi::flodl_foreach_addcmul_(
+                h.as_mut_ptr(),
+                h1.as_mut_ptr(),
+                h2.as_mut_ptr(),
+                h.len() as i32,
+                value,
+            )
+        };
+        check_err(err)
+    }
+
+    /// In-place addcdiv: `tensors[i] += value * tensors1[i] / tensors2[i]`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_addcdiv_(
+        tensors: &[Tensor],
+        tensors1: &[Tensor],
+        tensors2: &[Tensor],
+        value: f64,
+    ) -> Result<()> {
+        Self::same_len(
+            "foreach_addcdiv_",
+            tensors.len(),
+            &[tensors1.len(), tensors2.len()],
+        )?;
+        if tensors.is_empty() {
+            return Ok(());
+        }
+        let mut h = Self::handles(tensors);
+        let mut h1 = Self::handles(tensors1);
+        let mut h2 = Self::handles(tensors2);
+        let err = unsafe {
+            ffi::flodl_foreach_addcdiv_(
+                h.as_mut_ptr(),
+                h1.as_mut_ptr(),
+                h2.as_mut_ptr(),
+                h.len() as i32,
+                value,
+            )
+        };
+        check_err(err)
+    }
+
+    /// In-place addcdiv with one value per tensor:
+    /// `tensors[i] += values[i] * tensors1[i] / tensors2[i]`.
+    /// Single batched kernel on CUDA instead of N separate launches.
+    pub fn foreach_addcdiv_scalars_(
+        tensors: &[Tensor],
+        tensors1: &[Tensor],
+        tensors2: &[Tensor],
+        values: &[f64],
+    ) -> Result<()> {
+        Self::same_len(
+            "foreach_addcdiv_scalars_",
+            tensors.len(),
+            &[tensors1.len(), tensors2.len(), values.len()],
+        )?;
+        if tensors.is_empty() {
+            return Ok(());
+        }
+        let mut h = Self::handles(tensors);
+        let mut h1 = Self::handles(tensors1);
+        let mut h2 = Self::handles(tensors2);
+        let err = unsafe {
+            ffi::flodl_foreach_addcdiv_scalars_(
+                h.as_mut_ptr(),
+                h1.as_mut_ptr(),
+                h2.as_mut_ptr(),
+                h.len() as i32,
+                values.as_ptr(),
+            )
+        };
+        check_err(err)
+    }
+
     // --- Pinned memory ---
 
     /// Copy this CPU tensor into page-locked (pinned) memory.

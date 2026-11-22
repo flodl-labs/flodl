@@ -496,6 +496,17 @@ Tensor::foreach_sqrt_(&params)?;
 
 // Compute the L2 norm of each tensor - returns a Vec<Tensor> of scalars
 let norms: Vec<Tensor> = Tensor::foreach_norm(&params, 2.0)?;
+
+// state[i] += value * a[i] * b[i], and the division twin
+Tensor::foreach_addcmul_(&state, &grads, &grads, 0.01)?;
+Tensor::foreach_addcdiv_(&params, &grads, &denom, -0.01)?;
+
+// The same division with one value per tensor
+Tensor::foreach_addcdiv_scalars_(&params, &grads, &denom, &rates)?;
+
+// Out-of-place forms return new tensors and leave their inputs alone
+let roots: Vec<Tensor> = Tensor::foreach_sqrt(&state)?;
+let sums: Vec<Tensor> = Tensor::foreach_add_list(&grads, &params, 1e-4)?;
 ```
 
 You typically do not need to call these directly. flodl's fused optimizers

@@ -7,7 +7,7 @@
 
 use std::io::{Read, Write};
 
-use crate::tensor::Result;
+use crate::tensor::{Result, Tensor};
 
 mod adagrad;
 mod adam;
@@ -81,6 +81,53 @@ pub trait Optimizer {
 struct GroupMeta {
     lr: f64,
     range: std::ops::Range<usize>,
+}
+
+/// The parameter ranges that share a learning rate: the declared groups,
+/// or every parameter at the base rate when none were declared.
+fn lr_spans(groups: &[GroupMeta], n_params: usize, lr: f64) -> Vec<(std::ops::Range<usize>, f64)> {
+    if groups.is_empty() {
+        vec![(0..n_params, lr)]
+    } else {
+        groups.iter().map(|g| (g.range.clone(), g.lr)).collect()
+    }
+}
+
+/// The parameters of `range` that have a gradient this step, as parallel
+/// lists ready for the batched kernels: their index, their detached data
+/// and their gradient. A parameter without a gradient takes no part in the
+/// step, state included.
+fn with_grads(
+    params: &[crate::autograd::Variable],
+    range: std::ops::Range<usize>,
+) -> Result<(Vec<usize>, Vec<Tensor>, Vec<Tensor>)> {
+    let (mut idx, mut data, mut grads) = (Vec::new(), Vec::new(), Vec::new());
+    for i in range {
+        if let Some(grad) = params[i].grad() {
+            data.push(params[i].data().detach()?);
+            grads.push(grad);
+            idx.push(i);
+        }
+    }
+    Ok((idx, data, grads))
+}
+
+/// The state tensors of the parameters in `idx`, creating a missing one as
+/// zeros shaped like its entry in `like`. Starting from zero lets a first
+/// step run the same batched update as every later one (`m * 0 + g` is
+/// exactly `g`), so no step has to split the list by whether state exists.
+fn state_list(slots: &mut [Option<Tensor>], idx: &[usize], like: &[Tensor]) -> Result<Vec<Tensor>> {
+    idx.iter()
+        .zip(like)
+        .map(|(&i, t)| match &slots[i] {
+            Some(s) => Ok(s.clone()),
+            None => {
+                let s = Tensor::zeros_like(t)?;
+                slots[i] = Some(s.clone());
+                Ok(s)
+            }
+        })
+        .collect()
 }
 
 /// Serialize the group table: `count(u32) | (lr(f64), start(i64), end(i64))*`.
@@ -440,6 +487,33 @@ mod test_helpers {
         )
         .unwrap();
         Parameter::new(t, name)
+    }
+
+    /// Backward a loss whose gradient with respect to `p` is exactly `c`.
+    pub(super) fn set_grad(p: &Parameter, c: &[f32]) {
+        let dev = crate::tensor::test_device();
+        let c = crate::autograd::Variable::new(
+            Tensor::from_f32(c, &[1, c.len() as i64], dev).unwrap(),
+            false,
+        );
+        p.variable
+            .mul(&c)
+            .unwrap()
+            .sum()
+            .unwrap()
+            .backward()
+            .unwrap();
+    }
+
+    pub(super) fn values(p: &Parameter) -> Vec<f32> {
+        p.variable.data().to_f32_vec().unwrap()
+    }
+
+    pub(super) fn assert_close(got: &[f32], want: &[f32]) {
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-5, "got {got:?}, want {want:?}");
+        }
     }
 
     /// Per-process-unique temp path for `.optim` state-file round-trip tests.
