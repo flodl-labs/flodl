@@ -50,6 +50,12 @@ impl RAdam {
         }
     }
 
+    /// Set L2 weight decay (default 0.0), added to the gradient.
+    pub fn weight_decay(mut self, wd: f64) -> Self {
+        self.weight_decay = wd;
+        self
+    }
+
     /// Current learning rate.
     pub fn lr(&self) -> f64 {
         self.lr
@@ -102,15 +108,17 @@ impl Optimizer for RAdam {
                 let rho_t = rho_inf - 2.0 * t * b2t / (1.0 - b2t);
                 if rho_t > 5.0 {
                     // Variance is tractable: the rectified Adam update,
-                    // p -= lr * rect * (m / (1 - b1^t)) / denom
+                    // p -= lr * rect * (m / (1 - b1^t)) * sqrt(1 - b2^t) / (sqrt(v) + eps)
                     let rect = ((rho_t - 4.0) * (rho_t - 2.0) * rho_inf
                         / ((rho_inf - 4.0) * (rho_inf - 2.0) * rho_t))
                         .sqrt();
-                    // sqrt(v / (1 - b2^t)) + eps
+                    // sqrt(v) + eps; the bias correction of v goes into
+                    // the coefficient, which leaves eps unscaled as in
+                    // PyTorch.
                     let denom = Tensor::foreach_sqrt(&v)?;
-                    Tensor::foreach_mul_scalar_(&denom, 1.0 / (1.0 - b2t).sqrt())?;
                     Tensor::foreach_add_scalar_(&denom, eps)?;
-                    Tensor::foreach_addcdiv_(&p, &m, &denom, -lr * rect / (1.0 - b1t))?;
+                    let coeff = -lr * rect * (1.0 - b2t).sqrt() / (1.0 - b1t);
+                    Tensor::foreach_addcdiv_(&p, &m, &denom, coeff)?;
                 } else {
                     // Variance is intractable: p -= lr * m / (1 - b1^t)
                     Tensor::foreach_add_list_(&p, &m, -lr / (1.0 - b1t))?;
@@ -254,11 +262,34 @@ mod tests {
     }
 
     #[test]
-    fn radam_weight_decay_leaves_the_gradient() {
+    fn radam_adds_eps_outside_the_bias_correction() {
+        // PyTorch's rectified step divides by sqrt(v) + eps and corrects
+        // the bias of v in the numerator. An eps large enough to matter
+        // tells that apart from adding it to the corrected sqrt(v).
         let dev = crate::tensor::test_device();
         let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
         let mut opt = RAdam::new(std::slice::from_ref(&p), 0.1);
-        opt.weight_decay = 0.1;
+        opt.eps = 0.1;
+        for step in 1..=7 {
+            opt.zero_grad();
+            set_grad(
+                &p,
+                if step % 2 == 1 {
+                    &[1.0, 2.0]
+                } else {
+                    &[0.5, -1.0]
+                },
+            );
+            opt.step().unwrap();
+        }
+        assert_close(&values(&p), &[0.586_938, 1.533_547]);
+    }
+
+    #[test]
+    fn radam_weight_decay_leaves_the_gradient() {
+        let dev = crate::tensor::test_device();
+        let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
+        let mut opt = RAdam::new(std::slice::from_ref(&p), 0.1).weight_decay(0.1);
         set_grad(&p, &[1.0, 1.0]);
         opt.step().unwrap();
         assert_close(

@@ -13,16 +13,28 @@ use crate::nn::parameter::Parameter;
 
 use super::{Optimizer, Stateful};
 
-/// NAdam optimizer (Dozat, 2016).
+/// NAdam optimizer (Dozat, 2016), in PyTorch's form.
 ///
-/// Incorporates Nesterov momentum into Adam. Equivalent to Adam with
-/// a look-ahead gradient, providing faster convergence on some tasks.
+/// Adam with Nesterov momentum: the update looks one step ahead along the
+/// first moment. The momentum coefficient follows a schedule that starts
+/// near `beta1 / 2` and rises towards `beta1` over thousands of steps, at
+/// a pace set by `momentum_decay`.
 ///
-/// Update rule:
+/// Update rule, with `t` a parameter's own step count:
+///   mu_t = beta1 * (1 - 0.5 * 0.96^(t * momentum_decay))
 ///   m = beta1 * m + (1 - beta1) * grad
 ///   v = beta2 * v + (1 - beta2) * grad^2
-///   m_hat = beta1 * m / (1 - beta1^(t+1)) + (1 - beta1) * grad / (1 - beta1^t)
-///   param -= lr * m_hat / (sqrt(v / (1 - beta2^t)) + eps)
+///   denom = sqrt(v / (1 - beta2^t)) + eps
+///   param -= lr * (1 - mu_t) / (1 - prod(mu_1..mu_t)) * grad / denom
+///   param -= lr * mu_(t+1) / (1 - prod(mu_1..mu_(t+1))) * m / denom
+///
+/// ```ignore
+/// let mut optim = NAdam::new(&model.parameters(), 2e-3);
+/// // Or with options:
+/// let mut optim = NAdam::new(&model.parameters(), 2e-3)
+///     .weight_decay(1e-4)
+///     .momentum_decay(4e-3);
+/// ```
 pub struct NAdam {
     params: Vec<Variable>,
     lr: f64,
@@ -30,16 +42,20 @@ pub struct NAdam {
     beta2: f64,
     eps: f64,
     weight_decay: f64,
+    momentum_decay: f64,
     m: Vec<Option<crate::tensor::Tensor>>,
     v: Vec<Option<crate::tensor::Tensor>>,
     /// Per-param step counts, incremented only when the param has a grad
-    /// (the Nesterov bias-correction schedule is per-param).
+    /// (the momentum schedule and bias correction are per-param).
     steps: Vec<i64>,
+    /// Per-param product of the momentum schedule up to its step count.
+    /// Derived from `steps`, so it is rebuilt on load and not stored.
+    mu_products: Vec<f64>,
 }
 
 impl NAdam {
-    /// Create a new NAdam optimizer with default betas (0.9, 0.999), eps (1e-8),
-    /// and no weight decay.
+    /// Create a new NAdam optimizer with PyTorch's defaults: betas
+    /// (0.9, 0.999), eps 1e-8, no weight decay, momentum decay 4e-3.
     pub fn new(params: &[Parameter], lr: f64) -> Self {
         let n = params.len();
         NAdam {
@@ -49,15 +65,36 @@ impl NAdam {
             beta2: 0.999,
             eps: 1e-8,
             weight_decay: 0.0,
+            momentum_decay: 4e-3,
             m: vec![None; n],
             v: vec![None; n],
             steps: vec![0; n],
+            mu_products: vec![1.0; n],
         }
+    }
+
+    /// Set L2 weight decay (default 0.0), added to the gradient.
+    pub fn weight_decay(mut self, wd: f64) -> Self {
+        self.weight_decay = wd;
+        self
+    }
+
+    /// Set the pace of the momentum schedule (default 4e-3, PyTorch's).
+    /// It is not part of the saved state: a resumed run takes it from
+    /// here, as it takes its model.
+    pub fn momentum_decay(mut self, momentum_decay: f64) -> Self {
+        self.momentum_decay = momentum_decay;
+        self
     }
 
     /// Current learning rate.
     pub fn lr(&self) -> f64 {
         self.lr
+    }
+
+    /// The momentum coefficient at step `t`.
+    fn mu(&self, t: f64) -> f64 {
+        self.beta1 * (1.0 - 0.5 * 0.96f64.powf(t * self.momentum_decay))
     }
 }
 
@@ -96,7 +133,7 @@ impl Optimizer for NAdam {
 
             for (t, at) in super::advance_steps(&mut self.steps, &idx) {
                 let t = t as f64;
-                let (b1t, b2t) = (b1.powf(t), b2.powf(t));
+                let b2t = b2.powf(t);
                 let (p, g, m, v) = (
                     super::pick(&data, &at),
                     super::pick(&grads, &at),
@@ -107,19 +144,30 @@ impl Optimizer for NAdam {
                 let denom = Tensor::foreach_sqrt(&v)?;
                 Tensor::foreach_mul_scalar_(&denom, 1.0 / (1.0 - b2t).sqrt())?;
                 Tensor::foreach_add_scalar_(&denom, eps)?;
-                // The Nesterov-corrected first moment, as its two terms:
-                // p -= lr * (b1 * m / (1 - b1^(t+1)) + (1 - b1) * g / (1 - b1^t)) / denom
-                let b1t1 = b1.powf(t + 1.0);
-                Tensor::foreach_addcdiv_(&p, &m, &denom, -lr * b1 / (1.0 - b1t1))?;
-                Tensor::foreach_addcdiv_(&p, &g, &denom, -lr * (1.0 - b1) / (1.0 - b1t))?;
+                // Every parameter of a bucket has taken the same steps,
+                // so they share one product of the schedule.
+                let (mu, mu_next) = (self.mu(t), self.mu(t + 1.0));
+                for &k in &at {
+                    self.mu_products[idx[k]] *= mu;
+                }
+                let product = self.mu_products[idx[at[0]]];
+
+                // The gradient term, then the look-ahead momentum term.
+                Tensor::foreach_addcdiv_(&p, &g, &denom, -lr * (1.0 - mu) / (1.0 - product))?;
+                Tensor::foreach_addcdiv_(
+                    &p,
+                    &m,
+                    &denom,
+                    -lr * mu_next / (1.0 - product * mu_next),
+                )?;
             }
             Ok(())
         })
     }
 
     fn reset_state(&mut self) {
-        // Moment estimates back to fresh, step counts to 0 (Nesterov
-        // momentum schedule restarts). Lengths preserved for per-param indexing.
+        // Moment estimates back to fresh, step counts to 0 (the momentum
+        // schedule restarts). Lengths preserved for per-param indexing.
         for slot in &mut self.m {
             *slot = None;
         }
@@ -127,6 +175,7 @@ impl Optimizer for NAdam {
             *slot = None;
         }
         self.steps.fill(0);
+        self.mu_products.fill(1.0);
     }
 
     fn zero_grad(&self) {
@@ -187,6 +236,10 @@ impl Stateful for NAdam {
             self.v[i] = read_tensor_state(r, dev)?;
             self.steps[i] = read_i64_le(r)?;
         }
+        // The schedule's product is a function of the step count alone.
+        for i in 0..self.params.len() {
+            self.mu_products[i] = (1..=self.steps[i]).map(|t| self.mu(t as f64)).product();
+        }
         let groups = super::read_groups(r, self.params.len(), "NAdam")?;
         if !groups.is_empty() {
             return Err(crate::tensor::TensorError::new(
@@ -230,16 +283,16 @@ mod tests {
             opt.step().unwrap();
             match step {
                 2 => {
-                    assert_close(&values(&p), &[0.760_519, 1.869_118]);
+                    assert_close(&values(&p), &[0.841_962, 1.935_466]);
                     assert_close(&values(&late), &[3.0, 4.0]);
                 }
                 5 => {
-                    assert_close(&values(&p), &[0.456_265, 1.716_571]);
-                    assert_close(&values(&late), &[2.629_078, 3.629_078]);
+                    assert_close(&values(&p), &[0.624_140, 1.814_397]);
+                    assert_close(&values(&late), &[2.742_765, 3.742_765]);
                 }
                 7 => {
-                    assert_close(&values(&p), &[0.265_355, 1.649_059]);
-                    assert_close(&values(&late), &[2.421_342, 3.421_342]);
+                    assert_close(&values(&p), &[0.479_873, 1.766_508]);
+                    assert_close(&values(&late), &[2.595_059, 3.595_059]);
                 }
                 _ => {}
             }
@@ -248,11 +301,62 @@ mod tests {
     }
 
     #[test]
+    fn nadam_momentum_decay_sets_the_pace_of_the_schedule() {
+        // Same reference, with a schedule fast enough to show in 7 steps.
+        let dev = crate::tensor::test_device();
+        let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
+        let mut opt = NAdam::new(std::slice::from_ref(&p), 0.1).momentum_decay(0.5);
+        for step in 1..=7 {
+            opt.zero_grad();
+            set_grad(
+                &p,
+                if step % 2 == 1 {
+                    &[1.0, 2.0]
+                } else {
+                    &[0.5, -1.0]
+                },
+            );
+            opt.step().unwrap();
+        }
+        assert_close(&values(&p), &[0.488_590, 1.770_153]);
+    }
+
+    #[test]
+    fn nadam_resumes_its_schedule_from_a_state_file() {
+        // The schedule's running product is not stored: a loaded optimizer
+        // rebuilds it from the step counts and must continue exactly as
+        // the one that never stopped.
+        let dev = crate::tensor::test_device();
+        let make = || Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
+        let (a, b) = (make(), make());
+        let mut opt_a = NAdam::new(std::slice::from_ref(&a), 0.1);
+        let mut opt_b = NAdam::new(std::slice::from_ref(&b), 0.1);
+        for _ in 0..3 {
+            for (p, opt) in [(&a, &mut opt_a), (&b, &mut opt_b)] {
+                opt.zero_grad();
+                set_grad(p, &[1.0, 2.0]);
+                opt.step().unwrap();
+            }
+        }
+        let mut bytes = Vec::new();
+        opt_b.save_state(&mut bytes).unwrap();
+        let mut resumed = NAdam::new(std::slice::from_ref(&b), 0.5);
+        resumed
+            .load_state(&mut std::io::Cursor::new(&bytes))
+            .unwrap();
+        for (p, opt) in [(&a, &mut opt_a), (&b, &mut resumed)] {
+            opt.zero_grad();
+            set_grad(p, &[0.5, -1.0]);
+            opt.step().unwrap();
+        }
+        assert_eq!(values(&a), values(&b));
+    }
+
+    #[test]
     fn nadam_weight_decay_leaves_the_gradient() {
         let dev = crate::tensor::test_device();
         let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
-        let mut opt = NAdam::new(std::slice::from_ref(&p), 0.1);
-        opt.weight_decay = 0.1;
+        let mut opt = NAdam::new(std::slice::from_ref(&p), 0.1).weight_decay(0.1);
         set_grad(&p, &[1.0, 1.0]);
         opt.step().unwrap();
         assert_close(

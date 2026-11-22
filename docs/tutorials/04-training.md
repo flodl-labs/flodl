@@ -117,7 +117,17 @@ Rectified Adam (variance-aware warmup) and Nesterov-accelerated Adam:
 ```rust
 let optimizer = RAdam::new(&params, 0.001);  // auto-warmup via variance rectification
 let optimizer = NAdam::new(&params, 0.001);  // Nesterov momentum with Adam
+
+// Both take L2 weight decay; NAdam's momentum schedule has PyTorch's
+// default pace (momentum_decay = 4e-3).
+let optimizer = NAdam::new(&params, 0.002)
+    .weight_decay(1e-4)
+    .momentum_decay(4e-3);
 ```
+
+Both follow PyTorch's update rule, so a recipe written for
+`torch.optim.NAdam` or `torch.optim.RAdam` carries over with the same
+hyperparameters.
 
 ### Fused CUDA Optimizers
 
