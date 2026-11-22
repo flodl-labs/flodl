@@ -404,8 +404,9 @@ fastest. PyTorch's TunableOp times them once and records the winner. On a
 Strix Halo APU (gfx1151), a 1M-token OLMo run went from 410 s to 198 s of
 training with the same loss, and an eval pass from 17.3 s to 7.7 s
 (measured by a contributor, 23 shapes tuned). The gain depends on the
-card and the model: convolution-heavy models spend their time in MIOpen
-and have little to gain.
+card and the model: the same run on a Radeon AI PRO R9700 (gfx1201) gained
+nothing, and convolution-heavy models spend their time in MIOpen and have
+little to gain.
 
 Tune once, which is slow because every new shape is timed:
 

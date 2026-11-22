@@ -44,7 +44,8 @@ pub fn probe_local(
     // what the box would train on (no other device, or an AMD libtorch
     // is the active one), which is the view `fdl setup` provisions from.
     // A cluster host is judged on what it has now, so not there.
-    let awaiting_runtime = if !rank_host && crate::util::docker::has_docker() {
+    let has_docker = crate::util::docker::has_docker();
+    let awaiting_runtime = if !rank_host && has_docker {
         flodl_hw::amd_gpus_awaiting_runtime()
     } else {
         Vec::new()
@@ -151,9 +152,8 @@ pub fn probe_local(
     // image, which carries its own, so its absence is a warning there --
     // the same split `fdl setup` makes.
     let tools = requirements::missing_host_tools();
-    let docker = crate::util::system::has_command("docker");
     let (hard, native_only): (Vec<&str>, Vec<&str>) =
-        tools.iter().partition(|t| !(docker && **t == "g++"));
+        tools.iter().partition(|t| !(has_docker && **t == "g++"));
     if !hard.is_empty() {
         let packages: Vec<String> = hard.iter().map(|t| t.to_string()).collect();
         issues.push(format!(
