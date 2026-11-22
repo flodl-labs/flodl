@@ -1427,6 +1427,15 @@ unsafe extern "C" {
         total_norm_out: *mut f64,
     ) -> *mut c_char;
 
+    // --- Fused gradient unscale (loss-scaled training) ---
+
+    pub fn flodl_amp_unscale_grads(
+        params: *mut FlodlTensor,
+        count: i32,
+        inv_scale: f64,
+        found_inf_out: *mut i32,
+    ) -> *mut c_char;
+
     // --- Multi-tensor foreach operations ---
 
     pub fn flodl_foreach_add_scalar_(

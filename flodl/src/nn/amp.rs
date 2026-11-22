@@ -115,18 +115,28 @@ pub enum Precision {
     /// `bf16` forward under autocast, `f32` parameters. Needs no
     /// gradient scaler: `bf16` keeps `f32`'s exponent range.
     Bf16Mixed,
+    /// `f16` forward under autocast, `f32` parameters, with the loss
+    /// scaled before `backward` and the gradients unscaled before the
+    /// optimizer step ([`GradScaler`]): `f16`'s narrow exponent range
+    /// would otherwise round small gradients to zero. The trainer does
+    /// the scaling; a hand-written loop drives a [`GradScaler`] itself.
+    /// Often the fastest choice on convolutional models, where `bf16`
+    /// can lose to `f32`.
+    F16Mixed,
 }
 
 impl Precision {
     /// Every variant, in declaration order.
-    pub const ALL: &'static [Precision] = &[Precision::F32, Precision::Bf16Mixed];
+    pub const ALL: &'static [Precision] =
+        &[Precision::F32, Precision::Bf16Mixed, Precision::F16Mixed];
 
     /// The name used on command lines and in run metadata (`f32`,
-    /// `bf16-mixed`). Round-trips through [`FromStr`](std::str::FromStr).
+    /// `bf16-mixed`, `f16-mixed`). Round-trips through [`FromStr`](std::str::FromStr).
     pub fn as_str(self) -> &'static str {
         match self {
             Precision::F32 => "f32",
             Precision::Bf16Mixed => "bf16-mixed",
+            Precision::F16Mixed => "f16-mixed",
         }
     }
 
@@ -135,7 +145,16 @@ impl Precision {
         match self {
             Precision::F32 => None,
             Precision::Bf16Mixed => Some(DType::BFloat16),
+            Precision::F16Mixed => Some(DType::Float16),
         }
+    }
+
+    /// Whether training at this precision needs the loss scaled and the
+    /// gradients unscaled around `backward` (a [`GradScaler`]). True for
+    /// `f16` only: its smallest normal value is about 6e-5, and gradients
+    /// below that vanish unless the loss is scaled up first.
+    pub fn needs_grad_scaler(self) -> bool {
+        matches!(self, Precision::F16Mixed)
     }
 
     /// Whether `device` computes this precision natively, as opposed to
@@ -157,6 +176,10 @@ impl Precision {
                     .is_none_or(|(major, _)| major >= 8),
                 Device::CPU => true,
             },
+            // Every CUDA and ROCm card computes `f16`. Cards without
+            // tensor cores do it slowly, which is a speed matter the
+            // caller measures, not an emulation this can detect.
+            Precision::F16Mixed => true,
         }
     }
 
@@ -250,6 +273,10 @@ pub struct GradScaler {
     interval: i64,
     steps_since_growth: i64,
     found_inf: bool,
+    /// Whether this step's gradients were already unscaled, so that
+    /// [`Self::step`] after an explicit [`Self::unscale_`] does not divide
+    /// them twice. Cleared by [`Self::update`].
+    unscaled: bool,
     /// Lower bound on `scale`. Loss scaling only ever scales *up* (to lift
     /// small fp16 gradients out of underflow), so the scale should never
     /// need to drop below 1.0. Without a floor, sustained inf/NaN gradients
@@ -269,6 +296,7 @@ impl Default for GradScaler {
             interval: 2000,
             steps_since_growth: 0,
             found_inf: false,
+            unscaled: false,
             min_scale: 1.0,
         }
     }
@@ -292,6 +320,33 @@ impl GradScaler {
         self.scale
     }
 
+    /// Divide the gradients of `params` by the current scale, in place,
+    /// and record whether any of them is NaN or infinite. Returns `true`
+    /// when they are all finite.
+    ///
+    /// Call it after `backward` on the scaled loss when something has to
+    /// see the true gradients before the optimizer does, gradient clipping
+    /// above all: a clip applied to scaled gradients cuts them down to a
+    /// norm the unscale then divides by the scale again. [`Self::step`]
+    /// unscales by itself when this was not called, and does not unscale a
+    /// second time when it was.
+    ///
+    /// The whole list costs one kernel and one host read.
+    pub fn unscale_(&mut self, params: &[Parameter]) -> Result<bool> {
+        if self.unscaled {
+            return Ok(!self.found_inf);
+        }
+        let with_grad: Vec<Tensor> = params
+            .iter()
+            .filter(|p| p.variable.grad().is_some())
+            .map(|p| p.variable.data())
+            .collect();
+        let found_inf = Tensor::amp_unscale_grads_(&with_grad, 1.0 / self.scale)?;
+        self.found_inf |= found_inf;
+        self.unscaled = true;
+        Ok(!self.found_inf)
+    }
+
     /// Unscale gradients, check for inf/nan, and step the optimizer.
     ///
     /// Returns true if the step was taken (all gradients finite).
@@ -301,31 +356,9 @@ impl GradScaler {
         params: &[Parameter],
         step_fn: &mut dyn FnMut() -> Result<()>,
     ) -> Result<bool> {
-        let inv_scale = 1.0 / self.scale;
-
-        // Unscale and check all gradients
-        let mut unscaled_grads: Vec<Option<Tensor>> = Vec::with_capacity(params.len());
-        for p in params {
-            if let Some(grad) = p.variable.grad() {
-                let unscaled = grad.mul_scalar(inv_scale)?;
-                if !unscaled.all_finite()? {
-                    self.found_inf = true;
-                    return Ok(false);
-                }
-                unscaled_grads.push(Some(unscaled));
-            } else {
-                unscaled_grads.push(None);
-            }
+        if !self.unscale_(params)? {
+            return Ok(false);
         }
-
-        // Replace gradients with unscaled versions
-        for (p, ug) in params.iter().zip(unscaled_grads) {
-            if let Some(g) = ug {
-                p.variable.set_grad(g);
-            }
-        }
-
-        // Step the optimizer
         step_fn()?;
         Ok(true)
     }
@@ -347,6 +380,7 @@ impl GradScaler {
             }
         }
         self.found_inf = false;
+        self.unscaled = false;
     }
 }
 
@@ -479,6 +513,128 @@ mod tests {
         assert!(stepped);
     }
 
+    fn param(values: &[f32]) -> Parameter {
+        let t = Tensor::from_f32(values, &[values.len() as i64], test_device()).unwrap();
+        Parameter {
+            variable: Variable::new(t, true),
+            name: "w".into(),
+        }
+    }
+
+    #[test]
+    fn the_scaler_returns_the_true_gradients_of_a_scaled_loss() {
+        // loss = sum(p * p), so d loss / d p = 2p. The scaled loss gives
+        // gradients 65536 times that; unscaling brings them back.
+        let mut scaler = GradScaler::new();
+        let (a, b, untouched) = (param(&[1.0, 2.0]), param(&[-3.0]), param(&[5.0]));
+        let loss = a
+            .variable
+            .mul(&a.variable)
+            .unwrap()
+            .sum()
+            .unwrap()
+            .add(&b.variable.mul(&b.variable).unwrap().sum().unwrap())
+            .unwrap();
+        scaler.scale(&loss).unwrap().backward().unwrap();
+        let scaled = a.variable.grad().unwrap().to_f32_vec().unwrap();
+        assert_eq!(scaled, vec![2.0 * 65536.0, 4.0 * 65536.0]);
+
+        let params = [a.clone(), b.clone(), untouched.clone()];
+        assert!(scaler.unscale_(&params).unwrap(), "finite gradients");
+        assert_eq!(
+            a.variable.grad().unwrap().to_f32_vec().unwrap(),
+            vec![2.0, 4.0]
+        );
+        assert_eq!(b.variable.grad().unwrap().to_f32_vec().unwrap(), vec![-6.0]);
+        // A parameter the loss never reached has no gradient, before or after.
+        assert!(untouched.variable.grad().is_none());
+        scaler.update();
+        assert_eq!(scaler.scale_factor(), 65536.0);
+    }
+
+    #[test]
+    fn one_bad_gradient_among_many_skips_the_step_and_backs_the_scale_off() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut scaler = GradScaler::new();
+            let params = [param(&[1.0, 2.0]), param(&[3.0]), param(&[4.0])];
+            let dev = test_device();
+            params[0]
+                .variable
+                .set_grad(Tensor::from_f32(&[0.5, 0.5], &[2], dev).unwrap());
+            params[1]
+                .variable
+                .set_grad(Tensor::from_f32(&[bad], &[1], dev).unwrap());
+            params[2]
+                .variable
+                .set_grad(Tensor::from_f32(&[0.5], &[1], dev).unwrap());
+
+            let mut stepped = false;
+            let ok = scaler
+                .step(&params, &mut || {
+                    stepped = true;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(!ok && !stepped, "{bad}: the step must be skipped");
+            scaler.update();
+            assert_eq!(scaler.scale_factor(), 32768.0, "{bad}: one backoff");
+            // The flag is per step: a clean step afterwards goes through.
+            for p in &params {
+                p.variable
+                    .set_grad(Tensor::from_f32(&[0.5], &[1], dev).unwrap());
+            }
+            assert!(scaler.step(&params, &mut || Ok(())).unwrap());
+        }
+    }
+
+    #[test]
+    fn unscaling_before_a_clip_is_not_repeated_by_the_step() {
+        let mut scaler = GradScaler::new();
+        let p = param(&[1.0, 2.0]);
+        let loss = p.variable.mul(&p.variable).unwrap().sum().unwrap();
+        scaler.scale(&loss).unwrap().backward().unwrap();
+
+        let params = [p.clone()];
+        assert!(scaler.unscale_(&params).unwrap());
+        // Where a clip would go: the gradients are the true ones.
+        assert_eq!(
+            p.variable.grad().unwrap().to_f32_vec().unwrap(),
+            vec![2.0, 4.0]
+        );
+        let mut seen = Vec::new();
+        assert!(
+            scaler
+                .step(&params, &mut || {
+                    seen = p.variable.grad().unwrap().to_f32_vec().unwrap();
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(seen, vec![2.0, 4.0], "the step must not unscale again");
+        scaler.update();
+
+        // The next step unscales afresh.
+        p.variable
+            .set_grad(Tensor::from_f32(&[65536.0, 65536.0], &[2], test_device()).unwrap());
+        assert!(scaler.step(&params, &mut || Ok(())).unwrap());
+        assert_eq!(
+            p.variable.grad().unwrap().to_f32_vec().unwrap(),
+            vec![1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn precision_names_round_trip_and_only_f16_needs_a_scaler() {
+        for &p in Precision::ALL {
+            assert_eq!(p.as_str().parse::<Precision>().unwrap(), p);
+        }
+        assert_eq!(Precision::F16Mixed.as_str(), "f16-mixed");
+        assert_eq!(Precision::F16Mixed.autocast_dtype(), Some(DType::Float16));
+        assert!(Precision::F16Mixed.needs_grad_scaler());
+        assert!(!Precision::Bf16Mixed.needs_grad_scaler());
+        assert!(!Precision::F32.needs_grad_scaler());
+    }
+
     #[test]
     fn test_grad_scaler_scale_floors_and_never_dies() {
         // Regression: sustained inf must NOT drive the scale to 0.0 (which
@@ -533,6 +689,7 @@ mod tests {
             interval: 3,
             steps_since_growth: 2,
             found_inf: false,
+            unscaled: false,
             min_scale: 1.0,
         };
         scaler.update(); // steps_since_growth becomes 3 >= interval

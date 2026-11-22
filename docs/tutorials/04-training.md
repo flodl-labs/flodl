@@ -561,6 +561,24 @@ let stepped = scaler.step(&params, &mut || optimizer.step())?;
 scaler.update();  // adjust scale factor -- call after every step()
 ```
 
+The unscale and the check are one kernel and one host read for the whole
+parameter list.
+
+Anything that reads the gradients before the optimizer does, gradient
+clipping above all, has to see them unscaled. Call `unscale_` first; the
+`step` that follows does not unscale a second time:
+
+```rust
+scaler.unscale_(&params)?;
+clip_grad_norm(&params, 1.0)?;
+scaler.step(&params, &mut || optimizer.step())?;
+scaler.update();
+```
+
+A clip applied to the scaled gradients would cut them to its norm and
+the unscale would then divide that by the scale again, leaving an update
+tens of thousands of times too small.
+
 ### Complete Mixed Precision Loop
 
 ```rust
@@ -582,7 +600,9 @@ for (x, y) in &batches {
     optimizer.zero_grad();
     scaled.backward()?;
 
-    // Unscale gradients, check for inf/nan, clip, and step
+    // Unscale first so the clip sees the true gradients, then step
+    // (skipped when a gradient is not finite) and adjust the scale.
+    scaler.unscale_(&params)?;
     clip_grad_norm(&params, 1.0)?;
     let stepped = scaler.step(&params, &mut || optimizer.step())?;
     scaler.update();
@@ -610,6 +630,15 @@ let cfg = TrainerConfig::new(dataset).precision(Precision::Bf16Mixed);
 ```
 
 `Bf16Mixed` needs no `GradScaler`, since bf16 keeps f32's exponent range.
+`F16Mixed` does: f16 cannot represent a gradient below about 6e-5. The
+trainer runs the scaler for you, one per rank: it scales the loss,
+unscales before the clip and the optimizer step, and skips a step whose
+gradients are not finite. In a hand-written loop `Precision::run` covers
+the forward only, and the `GradScaler` calls above are yours;
+`precision.needs_grad_scaler()` tells a generic loop which case it is in.
+The trainer's scaler is not part of a checkpoint: a resumed run starts
+at the default scale and finds its level again within a few steps.
+
 Parameters, gradients, averaging and checkpoints stay f32, and the trainer
 evaluates in f32 so the metric means the same thing with and without it.
 
@@ -621,6 +650,21 @@ transformer (OLMo, 1M tokens) and one small convolutional model
 |------|-------------|---------------|
 | RTX 5060 Ti (native bf16) | 1.81x faster | 1.3x slower |
 | GTX 1060 (emulated bf16) | 1.34x slower | 7.8x slower |
+
+f16 against f32, same two models. The AMD rows were measured by a
+contributor on their own hardware:
+
+| Card | Transformer | Convolutional |
+|------|-------------|---------------|
+| RTX 5060 Ti | 1.72x faster | 1.24x slower |
+| Radeon AI PRO R9700 | 1.8x faster | 2.4x faster |
+| Strix Halo (gfx1151, integrated) | 3.2x faster | 1.6x faster |
+
+On the transformer the two reduced precisions are within a few percent
+of each other. On the convolutional model f16 beat bf16 on all three
+cards, and whether either beats f32 depends on the card. Loss and eval
+stayed within run-to-run noise of f32 in every cell. Measure on the
+hardware you train on.
 
 So it is off by default. On NVIDIA, bf16 is native from compute
 capability 8.0 (Ampere) and emulated below; `Precision::is_native_on`

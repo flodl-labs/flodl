@@ -973,6 +973,34 @@ impl Tensor {
         Ok(total_norm)
     }
 
+    /// Multiply the gradient of every tensor in `params` by `inv_scale`,
+    /// in place, and report whether any gradient holds a NaN or an
+    /// infinity. Parameters without a gradient are skipped.
+    ///
+    /// One kernel and one host read for the whole list, where a loop of
+    /// `mul_scalar` and `all_finite` costs a kernel and a blocking read
+    /// per parameter. This is libtorch's
+    /// `_amp_foreach_non_finite_check_and_unscale_`, the kernel behind
+    /// PyTorch's `GradScaler`. The gradients are unscaled whatever the
+    /// answer; a caller that gets `true` skips its optimizer step.
+    pub fn amp_unscale_grads_(params: &[Tensor], inv_scale: f64) -> Result<bool> {
+        if params.is_empty() {
+            return Ok(false);
+        }
+        let mut handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
+        let mut found_inf: i32 = 0;
+        let err = unsafe {
+            ffi::flodl_amp_unscale_grads(
+                handles.as_mut_ptr(),
+                handles.len() as i32,
+                inv_scale,
+                &mut found_inf,
+            )
+        };
+        check_err(err)?;
+        Ok(found_inf != 0)
+    }
+
     /// Whether this tensor is a leaf in the autograd graph.
     /// A tensor is a leaf if it was created by the user (not by an op)
     /// or if it doesn't require grad.

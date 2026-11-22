@@ -710,6 +710,15 @@ void flodl_zero_grad_set_to_none(FlodlTensor t);
 char* flodl_clip_grad_norm(FlodlTensor* params, int count,
                            double max_norm, double* total_norm_out);
 
+// --- Fused gradient unscale for loss-scaled (f16) training ---
+
+// Multiply every defined param grad by inv_scale in place and report
+// whether any of them holds a non-finite value, in one kernel and one
+// host read (libtorch's _amp_foreach_non_finite_check_and_unscale_).
+// *found_inf_out is 1 when a NaN or infinity was seen, 0 otherwise.
+char* flodl_amp_unscale_grads(FlodlTensor* params, int count,
+                              double inv_scale, int* found_inf_out);
+
 // --- Multi-tensor foreach operations ---
 // Use libtorch's _foreach_* ops: batch multiple tensors into fewer kernel
 // launches on CUDA. Falls back to per-tensor loops on CPU.

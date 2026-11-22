@@ -230,6 +230,7 @@ fn the_trainer_step_runs_the_forward_at_the_configured_precision() {
 
     for (precision, expect) in [
         (crate::nn::Precision::Bf16Mixed, true),
+        (crate::nn::Precision::F16Mixed, true),
         (crate::nn::Precision::F32, false),
     ] {
         let (mut w, _c) = make_det_worker_with(16, precision);
@@ -251,6 +252,74 @@ fn the_trainer_step_runs_the_forward_at_the_configured_precision() {
         );
         assert!(loss.is_finite(), "{precision}: loss {loss}");
     }
+}
+
+// `f16-mixed` trains through a loss scaler. A clean step moves the
+// weights by what the true gradients say, and a step whose gradients are
+// not finite is skipped: weights untouched, scale halved, step counted.
+#[test]
+fn an_f16_worker_scales_the_loss_and_skips_a_step_with_bad_gradients() {
+    let opts = crate::tensor::test_opts();
+    let batch = vec![
+        Tensor::full(&[4, 4], 0.5, opts).unwrap(),
+        Tensor::full(&[4, 2], 0.25, opts).unwrap(),
+    ];
+    let weights = |w: &GpuWorker<Linear>| -> Vec<f32> {
+        w.model()
+            .parameters()
+            .iter()
+            .flat_map(|p| p.variable.data().to_f32_vec().unwrap())
+            .collect()
+    };
+
+    assert_eq!(
+        make_det_worker_with(16, crate::nn::Precision::F32)
+            .0
+            .grad_scale(),
+        None,
+        "f32 needs no scaler"
+    );
+    let (mut w, _c) = make_det_worker_with(16, crate::nn::Precision::F16Mixed);
+    assert_eq!(w.grad_scale(), Some(65536.0));
+
+    // A clean step: the same update an f32 worker makes from the same
+    // start, to within what an f16 forward costs.
+    let (mut reference, _rc) = make_det_worker_with(16, crate::nn::Precision::F32);
+    sync_params(&mut reference, &mut w);
+    let before = weights(&w);
+    w.train_step(&batch, &mse_train).unwrap();
+    reference.train_step(&batch, &mse_train).unwrap();
+    let (after, want) = (weights(&w), weights(&reference));
+    assert_ne!(before, after, "the step must move the weights");
+    for (got, want) in after.iter().zip(&want) {
+        assert!(
+            (got - want).abs() < 1e-3,
+            "an unscaled update: got {got}, f32 reference {want}"
+        );
+    }
+    assert_eq!(w.grad_scale(), Some(65536.0));
+    assert_eq!(w.local_step(), 1);
+
+    // Gradients that overflow: the step is skipped and the scale backs off.
+    let before = weights(&w);
+    let (loss, _ms) = w
+        .train_step(&batch, &|m: &Linear, b: &[Tensor]| {
+            mse_train(m, b)?.mul_scalar(f64::INFINITY)
+        })
+        .unwrap();
+    assert!(!loss.is_finite());
+    assert_eq!(
+        weights(&w),
+        before,
+        "a skipped step leaves the weights alone"
+    );
+    assert_eq!(w.grad_scale(), Some(32768.0));
+    assert_eq!(w.local_step(), 2, "the batch still counts");
+
+    // And training goes on.
+    w.train_step(&batch, &mse_train).unwrap();
+    assert_ne!(weights(&w), before);
+    assert!(weights(&w).iter().all(|v| v.is_finite()));
 }
 
 #[test]
