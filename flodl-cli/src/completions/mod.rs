@@ -391,21 +391,6 @@ pub fn autocomplete(project: Option<(&ProjectConfig, &Path)>) {
     );
     eprintln!("{}  Target: {}", style::green("*"), style::bold(&rc_path));
 
-    // Check if already installed.
-    if let Ok(content) = std::fs::read_to_string(&rc_path)
-        && content.contains(MARKER)
-    {
-        eprintln!(
-            "{}  Completions already installed. Updating...",
-            style::yellow("*")
-        );
-        let cleaned = remove_completion_block(&content);
-        if let Err(e) = std::fs::write(&rc_path, cleaned) {
-            cli_error!("cannot write {rc_path}: {e}");
-            return;
-        }
-    }
-
     // Ensure target dir exists (needed for fish's config.fish).
     if let Some(parent) = std::path::Path::new(&rc_path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -418,23 +403,32 @@ pub fn autocomplete(project: Option<(&ProjectConfig, &Path)>) {
     };
     let _ = project; // project is only needed by generate(); install shells re-run fdl at load time
 
-    let block = format!("\n{MARKER}\n{script}{MARKER} end\n");
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&rc_path)
-    {
-        Ok(mut file) => {
-            use std::io::Write;
-            if let Err(e) = file.write_all(block.as_bytes()) {
-                cli_error!("cannot append to {rc_path}: {e}");
-                return;
-            }
-        }
+    // The whole new file is composed first and swapped in with one
+    // rename: a shell rc is not a file to leave half written.
+    let existing = match std::fs::read_to_string(&rc_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
-            cli_error!("cannot open {rc_path}: {e}");
+            cli_error!("cannot read {rc_path}: {e}");
             return;
         }
+    };
+    let kept = if existing.contains(MARKER) {
+        eprintln!(
+            "{}  Completions already installed. Updating...",
+            style::yellow("*")
+        );
+        remove_completion_block(&existing)
+    } else {
+        existing
+    };
+    // One blank line before the block, however many updates came before.
+    let kept = kept.trim_end_matches('\n');
+    let lead = if kept.is_empty() { "" } else { "\n\n" };
+    let content = format!("{kept}{lead}{MARKER}\n{script}{MARKER} end\n");
+    if let Err(e) = replace_file(std::path::Path::new(&rc_path), &content) {
+        cli_error!("cannot write {rc_path}: {e}");
+        return;
     }
 
     eprintln!("{}  Completions installed.", style::green("*"));
@@ -464,23 +458,49 @@ fn detect_shell() -> String {
     "bash".into()
 }
 
+/// Replace `path`'s content in one step: write a sibling, then rename it
+/// over the target. A symlinked rc (a dotfiles checkout) is followed, so
+/// the link survives and the file it points to is the one replaced.
+fn replace_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut tmp = target.clone().into_os_string();
+    tmp.push(format!(".fdl-tmp-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, content)?;
+    // Keep the mode the file had; a fresh file would take the umask's.
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, &target).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Drop every installed completion block, and nothing else.
+///
+/// A block runs from the marker line to its end marker. A marker with no
+/// end marker after it is a block someone edited by hand: only the marker
+/// line itself goes then, because everything below it is the user's own
+/// shell configuration.
 fn remove_completion_block(content: &str) -> String {
     let marker_end = format!("{MARKER} end");
+    let lines: Vec<&str> = content.lines().collect();
     let mut result = String::new();
-    let mut skipping = false;
-    for line in content.lines() {
-        if line.trim() == MARKER {
-            skipping = true;
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() == MARKER {
+            let end = lines[i + 1..]
+                .iter()
+                // A second start marker before any end marker means this
+                // block was never closed.
+                .take_while(|l| l.trim() != MARKER)
+                .position(|l| l.trim() == marker_end);
+            i += end.map_or(1, |offset| offset + 2);
             continue;
         }
-        if line.trim() == marker_end {
-            skipping = false;
-            continue;
-        }
-        if !skipping {
-            result.push_str(line);
-            result.push('\n');
-        }
+        result.push_str(lines[i]);
+        result.push('\n');
+        i += 1;
     }
     result
 }
@@ -495,6 +515,64 @@ mod tests {
     use super::{bash::emit_bash, fish::emit_fish, zsh::emit_zsh};
     use crate::config::{ArgSpec, OptionSpec, Schema};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn removing_the_block_never_takes_what_follows_it() {
+        let end = format!("{MARKER} end");
+        // A closed block goes whole; the lines around it stay.
+        let closed = format!("export A=1\n{MARKER}\neval x\n{end}\nexport B=2\n");
+        assert_eq!(remove_completion_block(&closed), "export A=1\nexport B=2\n");
+        // No end marker: only the marker line goes.
+        let open = format!("export A=1\n{MARKER}\neval x\nexport B=2\n");
+        assert_eq!(
+            remove_completion_block(&open),
+            "export A=1\neval x\nexport B=2\n"
+        );
+        // An unclosed block followed by a closed one: the first does not
+        // borrow the second's end marker.
+        let mixed = format!("{MARKER}\nexport KEEP=1\n{MARKER}\neval x\n{end}\nexport B=2\n");
+        assert_eq!(
+            remove_completion_block(&mixed),
+            "export KEEP=1\nexport B=2\n"
+        );
+        // Two closed blocks both go.
+        let twice = format!("{MARKER}\na\n{end}\nmid\n{MARKER}\nb\n{end}\n");
+        assert_eq!(remove_completion_block(&twice), "mid\n");
+        assert_eq!(remove_completion_block("plain\n"), "plain\n");
+    }
+
+    #[test]
+    fn replacing_a_file_swaps_the_content_and_leaves_no_sibling() {
+        let dir = std::env::temp_dir().join(format!("fdl-rc-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rc = dir.join("rc");
+        // A file that does not exist yet is created.
+        replace_file(&rc, "one\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "one\n");
+        replace_file(&rc, "two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "two\n");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("rc")]);
+        // Through a symlink, the link stays a link.
+        #[cfg(unix)]
+        {
+            let link = dir.join("link");
+            std::os::unix::fs::symlink(&rc, &link).unwrap();
+            replace_file(&link, "three\n").unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read_to_string(&rc).unwrap(), "three\n");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn make_cmd_with_schema() -> CommandData {
         let mut options = BTreeMap::new();

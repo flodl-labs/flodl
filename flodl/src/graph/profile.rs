@@ -447,13 +447,27 @@ impl Graph {
         self.profiling.set(true);
     }
 
-    /// Reverse tag lookup: node_idx → first tag name.
+    /// Reverse tag lookup: node_idx → the one tag that names the node.
+    ///
+    /// A node can carry several tags, and the choice has to be the same
+    /// in every process: it prefixes parameter and buffer names, so a
+    /// checkpoint saved under one tag does not load under another. The
+    /// tag map has no stable order of its own, hence an explicit rule: a
+    /// tag the user wrote wins over a generated one, and among those the
+    /// smallest name wins.
     pub(crate) fn tags_by_node(&self) -> HashMap<usize, String> {
-        let mut m = HashMap::new();
+        let mut m: HashMap<usize, &String> = HashMap::new();
         for (name, &(ni, _)) in &self.tag_names {
-            m.entry(ni).or_insert_with(|| name.clone());
+            let rank = |t: &String| (self.internal_tags.contains(t), t.clone());
+            m.entry(ni)
+                .and_modify(|best| {
+                    if rank(name) < rank(best) {
+                        *best = name;
+                    }
+                })
+                .or_insert(name);
         }
-        m
+        m.into_iter().map(|(ni, tag)| (ni, tag.clone())).collect()
     }
 
     /// Make the event pool ready for `device`, returning whether the GPU

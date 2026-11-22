@@ -79,6 +79,11 @@ impl Graph {
         for (name, &(ni, _)) in &self.tag_names {
             node_tags.entry(ni).or_default().push(name.clone());
         }
+        // The tag map has no stable order; a rendering should not change
+        // from one process to the next.
+        for tags in node_tags.values_mut() {
+            tags.sort();
+        }
 
         // Identify input/output nodes.
         let mut input_nodes: HashMap<usize, bool> = HashMap::new();
