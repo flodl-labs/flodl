@@ -130,6 +130,30 @@ fn state_list(slots: &mut [Option<Tensor>], idx: &[usize], like: &[Tensor]) -> R
         .collect()
 }
 
+/// Advance the step count of every parameter in `idx` and bucket their
+/// list positions by the new count, in ascending count order. Optimizers
+/// whose coefficients depend on a parameter's own step count update each
+/// bucket with plain scalars; parameters that have always stepped
+/// together, the usual case, form a single bucket.
+fn advance_steps(steps: &mut [i64], idx: &[usize]) -> Vec<(i64, Vec<usize>)> {
+    let mut buckets = std::collections::BTreeMap::<i64, Vec<usize>>::new();
+    for (k, &i) in idx.iter().enumerate() {
+        steps[i] += 1;
+        buckets.entry(steps[i]).or_default().push(k);
+    }
+    buckets.into_iter().collect()
+}
+
+/// The entries of `list` at `positions`: borrowed as is when that is the
+/// whole list, cloned (shallow handles) when it is a subset.
+fn pick<'a>(list: &'a [Tensor], positions: &[usize]) -> std::borrow::Cow<'a, [Tensor]> {
+    if positions.len() == list.len() {
+        std::borrow::Cow::Borrowed(list)
+    } else {
+        std::borrow::Cow::Owned(positions.iter().map(|&k| list[k].clone()).collect())
+    }
+}
+
 /// Serialize the group table: `count(u32) | (lr(f64), start(i64), end(i64))*`.
 /// One codec for every grouped optimizer's `save_state`.
 fn write_groups<W: Write>(w: &mut W, groups: &[GroupMeta]) -> Result<()> {

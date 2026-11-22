@@ -140,7 +140,7 @@ impl Optimizer for Adam {
         self.lr
     }
     fn step(&mut self) -> Result<()> {
-        self.adam_update(0.0)
+        self.adam_update(0.0, false)
     }
 
     fn reset_state(&mut self) {
@@ -180,7 +180,10 @@ impl Optimizer for Adam {
 }
 
 impl Adam {
-    fn adam_update(&mut self, weight_decay: f64) -> Result<()> {
+    /// The shared update. `decoupled` selects AdamW's kernel, where the
+    /// decay shrinks the weights directly; Adam's own kernel folds a decay
+    /// into the gradient, and with none skips the term.
+    fn adam_update(&mut self, weight_decay: f64, decoupled: bool) -> Result<()> {
         no_grad(|| {
             // Determine effective groups (single group if none configured)
             let effective_groups: Vec<(f64, std::ops::Range<usize>)> = if self.groups.is_empty() {
@@ -222,7 +225,12 @@ impl Adam {
 
                 if !p_tensors.is_empty() {
                     // Single fused kernel for all params in this group
-                    crate::tensor::Tensor::fused_adamw_(
+                    let fused = if decoupled {
+                        crate::tensor::Tensor::fused_adamw_
+                    } else {
+                        crate::tensor::Tensor::fused_adam_
+                    };
+                    fused(
                         &p_tensors,
                         &g_tensors,
                         &m_tensors,
@@ -393,7 +401,7 @@ impl Optimizer for AdamW {
         self.adam.lr
     }
     fn step(&mut self) -> Result<()> {
-        self.adam.adam_update(self.weight_decay)
+        self.adam.adam_update(self.weight_decay, true)
     }
 
     fn reset_state(&mut self) {
