@@ -208,8 +208,10 @@ pub fn probe(entry: &str, cmd_dir: &Path, docker_service: Option<&str>) -> Resul
     }
 
     let inner = format!("{entry} --fdl-schema");
+    let mut wrapped_in_docker = false;
     let (invocation, run_cwd) = match docker_service {
         Some(svc) if !inside_docker() => {
+            wrapped_in_docker = true;
             let compose_root = find_docker_compose_root(cmd_dir).ok_or_else(|| {
                 format!(
                     "cannot probe schema: docker:{svc} declared but no \
@@ -245,6 +247,15 @@ pub fn probe(entry: &str, cmd_dir: &Path, docker_service: Option<&str>) -> Resul
     };
     if let Ok(env_vars) = crate::run::libtorch_env(&env_root) {
         for (key, val) in &env_vars {
+            cmd.env(key, val);
+        }
+    }
+    // The probe is often the first container a fresh box starts (`fdl
+    // ddp-bench ...` reads the entry's options before running it). Without
+    // the host env, docker creates the flodl-home bind source itself, as
+    // root, and every later run fails to write its dataset cache there.
+    if wrapped_in_docker {
+        for (key, val) in crate::run::docker_host_env(&env_root) {
             cmd.env(key, val);
         }
     }
