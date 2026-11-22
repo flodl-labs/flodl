@@ -66,6 +66,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::distributed::controller::{self, RoundKind, TensorPayload};
+use crate::distributed::stage_timer::{self, Stage, timed};
 use crate::distributed::wire::SessionSalt;
 use crate::tensor::{Result, TensorError};
 
@@ -631,12 +632,14 @@ impl FoldCtx {
                      (rank↔relay ping-pong violated; stream desynced)"
                 )));
             }
-            HostFold::accumulate(&mut inner.fold, rank, blob, &self.salt)?;
+            timed(Stage::Sum, blob.len(), || {
+                HostFold::accumulate(&mut inner.fold, rank, blob, &self.salt)
+            })?;
             self.bytes_in
                 .fetch_add(blob.len() as u64, Ordering::Relaxed);
             self.take_if_complete(&mut inner)
         };
-        self.fold_and_ship(taken, tx)
+        timed(Stage::Encode, 0, || self.fold_and_ship(taken, tx))
     }
 
     /// Remove `rank` from the fold barrier (loopback EOF or
@@ -652,7 +655,7 @@ impl FoldCtx {
             // is what decides acceptance across hosts.
             self.take_if_complete(&mut inner)
         };
-        self.fold_and_ship(taken, tx)
+        timed(Stage::Encode, 0, || self.fold_and_ship(taken, tx))
     }
 
     /// Under the lock: if every local alive rank has deposited (and at
@@ -952,6 +955,7 @@ fn rank_reader(
                         shutdown.store(true, Ordering::SeqCst);
                         break;
                     }
+                    stage_timer::report(&format!("relay, rank {rank} up"));
                 }
             },
             Ok(LenFramedRead::WouldBlock) => {
@@ -1006,6 +1010,7 @@ fn outbound_writer(
                     shutdown.store(true, Ordering::SeqCst);
                     break;
                 }
+                stage_timer::report("relay, uplink");
             }
             Err(RecvTimeoutError::Timeout) => {
                 if shutdown.load(Ordering::SeqCst) {
@@ -1047,7 +1052,10 @@ fn upstream_reader(
             }
             Ok(MuxRead::Record(MuxRecord::Broadcast { payload })) => {
                 match &fold {
-                    Some(ctx) => ctx.fan_out(&payload, &mut rank_writes),
+                    Some(ctx) => {
+                        ctx.fan_out(&payload, &mut rank_writes);
+                        stage_timer::report("relay, downlink");
+                    }
                     None => {
                         // Broadcast is a data-channel record; on the
                         // control channel it means a desynced peer.

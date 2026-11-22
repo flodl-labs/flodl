@@ -66,7 +66,7 @@ use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 
-use hmac_sha256::HMAC;
+use crate::hash::HmacSha256;
 use serde::{Deserialize, Serialize};
 
 use crate::tensor::{Result, TensorError};
@@ -555,12 +555,10 @@ pub type SessionSalt = [u8; SESSION_SALT_BYTES];
 /// HMAC-SHA256 over `bytes` keyed by `salt`, truncated to the leading
 /// 64 bits (little-endian).
 ///
-/// Replaces the original xxh3-based integrity tag with a real
-/// cryptographic MAC. Reuses the existing `hmac-sha256` workspace dep
-/// (already pulled in for graph hashing) so no new external crate is
-/// introduced. SHA-256 throughput is on the order of GB/s on modern
-/// CPUs; for the control-channel's small payloads and the data-
-/// channel's once-per-K-batch RoundFrames the overhead is negligible.
+/// A real cryptographic MAC, not an integrity checksum. The data
+/// channel authenticates a model-sized frame at every hop, so the
+/// throughput of [`crate::hash`]'s backend is a visible share of a
+/// CPU-averaging reduce.
 ///
 /// Truncation to 64 bits gives 2^-64 forgery probability per attempt
 /// without the salt, which is sufficient for session isolation and
@@ -571,7 +569,22 @@ pub type SessionSalt = [u8; SESSION_SALT_BYTES];
 /// Not a substitute for encryption: payloads remain visible to anyone
 /// on the wire.
 pub fn hmac_sha256_64(salt: &SessionSalt, bytes: &[u8]) -> u64 {
-    let full: [u8; 32] = HMAC::mac(bytes, salt.as_slice());
+    hmac_sha256_64_parts(salt, &[bytes])
+}
+
+/// [`hmac_sha256_64`] over the concatenation of `parts`, without joining
+/// them: a header and a model-sized payload are authenticated together
+/// with no copy of the payload.
+pub(crate) fn hmac_sha256_64_parts(salt: &SessionSalt, parts: &[&[u8]]) -> u64 {
+    use crate::distributed::stage_timer::{Stage, timed};
+    let len = parts.iter().map(|p| p.len()).sum();
+    let full: [u8; 32] = timed(Stage::Mac, len, || {
+        let mut mac = HmacSha256::new(salt.as_slice());
+        for part in parts {
+            mac.update(part);
+        }
+        mac.finalize()
+    });
     u64::from_le_bytes(full[0..8].try_into().unwrap())
 }
 
@@ -582,11 +595,14 @@ pub fn hmac_sha256_64(salt: &SessionSalt, bytes: &[u8]) -> u64 {
 /// the payload-only MAC left both outside the envelope. Mirrors
 /// `hmac_sha256_64_2`'s header-coverage discipline on the mux layer.
 fn frame_mac(salt: &SessionSalt, kind: MsgKind, payload: &[u8]) -> u64 {
-    let mut macd = Vec::with_capacity(8 + payload.len());
-    macd.extend_from_slice(&(kind as u32).to_le_bytes());
-    macd.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    macd.extend_from_slice(payload);
-    hmac_sha256_64(salt, &macd)
+    hmac_sha256_64_parts(
+        salt,
+        &[
+            &(kind as u32).to_le_bytes(),
+            &(payload.len() as u32).to_le_bytes(),
+            payload,
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------

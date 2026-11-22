@@ -84,7 +84,7 @@ getrandom = "0.4"
 # a resolution error, not a silent fallback, which is how the rename was
 # found.
 hf-hub = { version = "1.0", default-features = false, features = ["blocking", "rustls-tls"] }
-hmac-sha256 = "1"
+hmac = "0.13"
 indexmap = "2"
 libc = "0.2"
 proc-macro2 = "1"
@@ -93,6 +93,7 @@ rand = "0.10"
 safetensors = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 serde_yaml_ng = "0.10"
 syn = { version = "2", features = ["full"] }
 tokenizers = "0.23"

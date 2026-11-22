@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use hmac_sha256::Hash as Sha256;
+use crate::hash::Sha256;
 
 use super::graph::Graph;
 use crate::tensor::{Result, TensorError};

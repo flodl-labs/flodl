@@ -16,8 +16,8 @@
 //!
 //! [`CONTROL_PROTOCOL_VERSION`]: crate::distributed::wire::CONTROL_PROTOCOL_VERSION
 
+use crate::hash::Sha256;
 use crate::nn::{Buffer, Parameter};
-use hmac_sha256::Hash as Sha256;
 
 /// Hash the manifest in declaration order. Averaging is
 /// position-addressed (`parameters()` order IS the reduce order), so an
