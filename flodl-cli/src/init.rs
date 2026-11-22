@@ -499,6 +499,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Compose only passes variables listed here into the container —
       # without this line that spelling breaks inside every service.
       - FDL_GPU_FEATURE
+      # The device mask `fdl --gpus N` sets on the host. Compose passes
+      # only the variables listed here, so without these the container
+      # sees every card and `--gpus` does nothing.
+      - CUDA_VISIBLE_DEVICES
+      - HIP_VISIBLE_DEVICES
     deploy:
       resources:
         reservations:
@@ -555,6 +560,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Compose only passes variables listed here into the container —
       # without this line that spelling breaks inside every service.
       - FDL_GPU_FEATURE
+      # The device mask `fdl --gpus N` sets on the host. Compose passes
+      # only the variables listed here, so without these the container
+      # sees every card and `--gpus` does nothing.
+      - CUDA_VISIBLE_DEVICES
+      - HIP_VISIBLE_DEVICES
       # Upstream switches read by libtorch and the HIP runtime, passed
       # through when set on the host: TunableOp (picks the fastest GEMM
       # routine per shape) and the kernel-serialization level a HIP
@@ -640,6 +650,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Compose only passes variables listed here into the container —
       # without this line that spelling breaks inside every service.
       - FDL_GPU_FEATURE
+      # The device mask `fdl --gpus N` sets on the host. Compose passes
+      # only the variables listed here, so without these the container
+      # sees every card and `--gpus` does nothing.
+      - CUDA_VISIBLE_DEVICES
+      - HIP_VISIBLE_DEVICES
       # Names the mounted libtorch variant. The mount point is fixed, so
       # this is what lets flodl-sys notice a variant switch and rebuild.
       - LIBTORCH_HOST_PATH
@@ -697,6 +712,11 @@ fn docker_compose_template(crate_name: &str, baked: bool) -> String {
       # Compose only passes variables listed here into the container —
       # without this line that spelling breaks inside every service.
       - FDL_GPU_FEATURE
+      # The device mask `fdl --gpus N` sets on the host. Compose passes
+      # only the variables listed here, so without these the container
+      # sees every card and `--gpus` does nothing.
+      - CUDA_VISIBLE_DEVICES
+      - HIP_VISIBLE_DEVICES
       # Names the mounted libtorch variant. The mount point is fixed, so
       # this is what lets flodl-sys notice a variant switch and rebuild.
       - LIBTORCH_HOST_PATH

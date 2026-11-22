@@ -142,6 +142,11 @@ services:
     # outside the container.
     network_mode: host
     environment:
+      # The device mask `fdl --gpus N` sets on the host. Compose passes
+      # only the variables listed here, so without these the container
+      # sees every card and `--gpus` does nothing.
+      - CUDA_VISIBLE_DEVICES
+      - HIP_VISIBLE_DEVICES
       - FLODL_VERBOSITY
       - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
@@ -278,6 +283,11 @@ services:
     hostname: ${HOSTNAME:-}
     network_mode: host
     environment:
+      # The device mask `fdl --gpus N` sets on the host. Compose passes
+      # only the variables listed here, so without these the container
+      # sees every card and `--gpus` does nothing.
+      - CUDA_VISIBLE_DEVICES
+      - HIP_VISIBLE_DEVICES
       - FLODL_VERBOSITY
       - FLODL_HOME=/flodl-home
       - FLODL_NET_TIMEOUT_SCALE
