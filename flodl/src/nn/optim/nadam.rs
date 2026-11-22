@@ -65,49 +65,53 @@ impl Optimizer for NAdam {
     fn lr(&self) -> f64 {
         self.lr
     }
+    /// One batched update for all parameters: a handful of multi-tensor
+    /// kernels, where a per-parameter loop costs several calls and
+    /// temporaries for each tensor. Bias correction follows each
+    /// parameter's own step count, so parameters are updated in buckets
+    /// of equal count (one bucket unless some joined late).
     fn step(&mut self) -> Result<()> {
-        let b1 = self.beta1;
-        let b2 = self.beta2;
+        use crate::tensor::Tensor;
 
+        let (b1, b2, eps, lr) = (self.beta1, self.beta2, self.eps, self.lr);
         no_grad(|| {
-            for (i, param) in self.params.iter().enumerate() {
-                if let Some(mut grad) = param.grad() {
-                    // Per-param step: the Nesterov bias-correction schedule
-                    // restarts for a late-unfrozen param.
-                    self.steps[i] += 1;
-                    let t = self.steps[i] as f64;
-                    let b1t = b1.powf(t);
-                    let b2t = b2.powf(t);
-                    let b1t1 = b1.powf(t + 1.0);
-                    let data = param.data().detach()?;
-                    if self.weight_decay > 0.0 {
-                        grad = grad.add(&data.mul_scalar(self.weight_decay)?)?;
-                    }
+            let (idx, data, grads) = super::with_grads(&self.params, 0..self.params.len())?;
+            if idx.is_empty() {
+                return Ok(());
+            }
+            // g += wd * p, into new tensors: the stored gradient is the
+            // caller's to read after the step.
+            let grads = if self.weight_decay > 0.0 {
+                Tensor::foreach_add_list(&grads, &data, self.weight_decay)?
+            } else {
+                grads
+            };
 
-                    let m_new = match self.m[i].take() {
-                        Some(m) => m.mul_scalar(b1)?.add(&grad.mul_scalar(1.0 - b1)?)?,
-                        None => grad.mul_scalar(1.0 - b1)?,
-                    };
-                    let grad2 = grad.mul(&grad)?;
-                    let v_new = match self.v[i].take() {
-                        Some(v) => v.mul_scalar(b2)?.add(&grad2.mul_scalar(1.0 - b2)?)?,
-                        None => grad2.mul_scalar(1.0 - b2)?,
-                    };
+            // m = b1 * m + (1 - b1) * g;  v = b2 * v + (1 - b2) * g^2
+            let m = super::state_list(&mut self.m, &idx, &grads)?;
+            let v = super::state_list(&mut self.v, &idx, &grads)?;
+            Tensor::foreach_lerp_scalar_(&m, &grads, 1.0 - b1)?;
+            Tensor::foreach_mul_scalar_(&v, b2)?;
+            Tensor::foreach_addcmul_(&v, &grads, &grads, 1.0 - b2)?;
 
-                    // Nesterov-corrected first moment
-                    let m_hat = m_new
-                        .mul_scalar(b1 / (1.0 - b1t1))?
-                        .add(&grad.mul_scalar((1.0 - b1) / (1.0 - b1t))?)?;
-                    let v_hat = v_new.mul_scalar(1.0 / (1.0 - b2t))?;
-
-                    let update = m_hat
-                        .div(&v_hat.sqrt()?.add_scalar(self.eps)?)?
-                        .mul_scalar(self.lr)?;
-                    data.sub_(&update)?;
-
-                    self.m[i] = Some(m_new);
-                    self.v[i] = Some(v_new);
-                }
+            for (t, at) in super::advance_steps(&mut self.steps, &idx) {
+                let t = t as f64;
+                let (b1t, b2t) = (b1.powf(t), b2.powf(t));
+                let (p, g, m, v) = (
+                    super::pick(&data, &at),
+                    super::pick(&grads, &at),
+                    super::pick(&m, &at),
+                    super::pick(&v, &at),
+                );
+                // sqrt(v / (1 - b2^t)) + eps
+                let denom = Tensor::foreach_sqrt(&v)?;
+                Tensor::foreach_mul_scalar_(&denom, 1.0 / (1.0 - b2t).sqrt())?;
+                Tensor::foreach_add_scalar_(&denom, eps)?;
+                // The Nesterov-corrected first moment, as its two terms:
+                // p -= lr * (b1 * m / (1 - b1^(t+1)) + (1 - b1) * g / (1 - b1^t)) / denom
+                let b1t1 = b1.powf(t + 1.0);
+                Tensor::foreach_addcdiv_(&p, &m, &denom, -lr * b1 / (1.0 - b1t1))?;
+                Tensor::foreach_addcdiv_(&p, &g, &denom, -lr * (1.0 - b1) / (1.0 - b1t))?;
             }
             Ok(())
         })
@@ -196,9 +200,67 @@ impl Stateful for NAdam {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::{make_param, state_tmp};
+    use super::super::test_helpers::{assert_close, make_param, set_grad, state_tmp, values};
     use super::*;
     use crate::tensor::Tensor;
+
+    #[test]
+    fn nadam_matches_a_reference_over_seven_steps() {
+        // Values from a float64 transcription of the update rule. `late`
+        // gets its first gradient at step 3, so from then on the two
+        // parameters sit at different step counts in one batched call.
+        let dev = crate::tensor::test_device();
+        let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
+        let late = Parameter::new(Tensor::from_f32(&[3.0, 4.0], &[1, 2], dev).unwrap(), "late");
+        let mut opt = NAdam::new(&[p.clone(), late.clone()], 0.1);
+
+        for step in 1..=7 {
+            opt.zero_grad();
+            set_grad(
+                &p,
+                if step % 2 == 1 {
+                    &[1.0, 2.0]
+                } else {
+                    &[0.5, -1.0]
+                },
+            );
+            if step >= 3 {
+                set_grad(&late, &[2.0, 1.0]);
+            }
+            opt.step().unwrap();
+            match step {
+                2 => {
+                    assert_close(&values(&p), &[0.760_519, 1.869_118]);
+                    assert_close(&values(&late), &[3.0, 4.0]);
+                }
+                5 => {
+                    assert_close(&values(&p), &[0.456_265, 1.716_571]);
+                    assert_close(&values(&late), &[2.629_078, 3.629_078]);
+                }
+                7 => {
+                    assert_close(&values(&p), &[0.265_355, 1.649_059]);
+                    assert_close(&values(&late), &[2.421_342, 3.421_342]);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(opt.steps, vec![7, 5]);
+    }
+
+    #[test]
+    fn nadam_weight_decay_leaves_the_gradient() {
+        let dev = crate::tensor::test_device();
+        let p = Parameter::new(Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(), "p");
+        let mut opt = NAdam::new(std::slice::from_ref(&p), 0.1);
+        opt.weight_decay = 0.1;
+        set_grad(&p, &[1.0, 1.0]);
+        opt.step().unwrap();
+        assert_close(
+            &p.variable.grad().unwrap().to_f32_vec().unwrap(),
+            &[1.0, 1.0],
+        );
+        assert_ne!(values(&p), vec![1.0, 2.0]);
+    }
 
     #[test]
     fn test_nadam_state_file_roundtrip() {
