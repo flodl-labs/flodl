@@ -1160,6 +1160,12 @@ impl Tensor {
         weight_decay: f64,
         step: i64,
     ) -> Result<()> {
+        // Every list is read `params.len()` entries deep on the C++ side.
+        Self::same_len(
+            "adam_step_batched",
+            params.len(),
+            &[grads.len(), ms.len(), vs.len(), lrs.len()],
+        )?;
         let count = params.len() as i32;
         let mut p_handles: Vec<FlodlTensor> = params.iter().map(|t| t.handle).collect();
         let mut g_handles: Vec<FlodlTensor> = grads.iter().map(|t| t.handle).collect();
@@ -1215,13 +1221,12 @@ impl Tensor {
         if params.is_empty() {
             return Ok(());
         }
-        if steps.len() != params.len() {
-            return Err(TensorError::new(&format!(
-                "fused_adam_: steps length {} does not match params length {}",
-                steps.len(),
-                params.len()
-            )));
-        }
+        // Every list is read `params.len()` entries deep on the C++ side.
+        Self::same_len(
+            "fused_adam_",
+            params.len(),
+            &[grads.len(), exp_avgs.len(), exp_avg_sqs.len(), steps.len()],
+        )?;
         let count = params.len() as i32;
         let mut p = Self::handles(params);
         let mut g = Self::handles(grads);
@@ -1272,13 +1277,12 @@ impl Tensor {
         if params.is_empty() {
             return Ok(());
         }
-        if steps.len() != params.len() {
-            return Err(TensorError::new(&format!(
-                "fused_adamw_: steps length {} does not match params length {}",
-                steps.len(),
-                params.len()
-            )));
-        }
+        // Every list is read `params.len()` entries deep on the C++ side.
+        Self::same_len(
+            "fused_adamw_",
+            params.len(),
+            &[grads.len(), exp_avgs.len(), exp_avg_sqs.len(), steps.len()],
+        )?;
         let count = params.len() as i32;
         let mut p = Self::handles(params);
         let mut g = Self::handles(grads);

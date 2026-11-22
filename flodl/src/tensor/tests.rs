@@ -503,6 +503,62 @@ fn test_fused_adam_multi_step() {
 }
 
 #[test]
+fn adam_kernels_reject_lists_of_different_lengths() {
+    // The C++ side reads every list `params.len()` entries deep, so a
+    // short list must be an error here and never a read past its end.
+    let dev = test_device();
+    let t = || Tensor::from_f32(&[1.0, 2.0], &[2], dev).unwrap();
+    let (two, one) = (vec![t(), t()], vec![t()]);
+    type Kernel = fn(
+        &[Tensor],
+        &[Tensor],
+        &[Tensor],
+        &[Tensor],
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        &[i64],
+        Option<&Tensor>,
+        Option<&Tensor>,
+    ) -> Result<()>;
+    for kernel in [
+        Tensor::fused_adam_ as Kernel,
+        Tensor::fused_adamw_ as Kernel,
+    ] {
+        let call = |g: &[Tensor], m: &[Tensor], v: &[Tensor], steps: &[i64]| {
+            kernel(
+                &two, g, m, v, 1e-3, 0.9, 0.999, 1e-8, 0.0, steps, None, None,
+            )
+        };
+        assert!(call(&one, &two, &two, &[1, 1]).is_err(), "short grads");
+        assert!(call(&two, &one, &two, &[1, 1]).is_err(), "short exp_avgs");
+        assert!(
+            call(&two, &two, &one, &[1, 1]).is_err(),
+            "short exp_avg_sqs"
+        );
+        assert!(call(&two, &two, &two, &[1]).is_err(), "short steps");
+    }
+    let batched = |g: &[Tensor], m: &[Tensor], v: &[Tensor], lrs: &mut [f64]| {
+        Tensor::adam_step_batched(&two, g, m, v, lrs, 0.9, 0.999, 1e-8, 0.0, 1)
+    };
+    assert!(
+        batched(&one, &two, &two, &mut [1e-3, 1e-3]).is_err(),
+        "short grads"
+    );
+    assert!(
+        batched(&two, &one, &two, &mut [1e-3, 1e-3]).is_err(),
+        "short ms"
+    );
+    assert!(
+        batched(&two, &two, &one, &mut [1e-3, 1e-3]).is_err(),
+        "short vs"
+    );
+    assert!(batched(&two, &two, &two, &mut [1e-3]).is_err(), "short lrs");
+}
+
+#[test]
 fn test_fused_adam_empty_is_noop() {
     Tensor::fused_adamw_(
         &[],

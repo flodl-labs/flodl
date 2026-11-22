@@ -411,6 +411,27 @@ mod tests {
     }
 
     #[test]
+    fn a_cast_parameter_still_trains() {
+        // The cast runs with gradients enabled, so its result is a
+        // tracked non-leaf. Installed as is, the parameter would never
+        // receive a gradient and the model would be silently frozen.
+        let dev = crate::tensor::test_device();
+        let p = crate::nn::parameter::Parameter::new(
+            Tensor::from_f32(&[1.0, 2.0], &[1, 2], dev).unwrap(),
+            "p",
+        );
+        cast_parameters(std::slice::from_ref(&p), DType::Float64).unwrap();
+        assert!(p.variable.data().is_leaf());
+        let loss = p.variable.mul(&p.variable).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+        let grad = p
+            .variable
+            .grad()
+            .expect("a cast parameter must receive a gradient");
+        assert_eq!(grad.to_f64_vec().unwrap(), vec![2.0, 4.0]);
+    }
+
+    #[test]
     fn test_cast_parameters_noop_same_dtype() {
         let t = Tensor::ones(&[4], test_opts()).unwrap();
         let p = Parameter {

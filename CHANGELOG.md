@@ -122,6 +122,11 @@ AMD support in this cycle was verified on real hardware by @dhekimian (gfx1151 S
 - **Two hosts of one run can share a box.** Every host's relay bound the same two loopback ports, so a second walk-in in the same network namespace died on `Address already in use`. That is the shape of a box holding a card from each vendor, one container per vendor. The ports are now distinct per host.
 - **A coordinator that fails to start no longer leaves a walk-in cohort hanging.** The controller and every connected agent waited on each other forever. The launcher now tells the connected hosts to tear down and exits with the coordinator's error, and formation stops waiting once a rank is reported dead before its relay dialed in.
 
+#### Training
+
+- **`cast_parameters` and `Parameter::to_device` no longer freeze the model.** Both ran their conversion with gradient tracking on and installed the result as the parameter. That result carries autograd history, so it is not a leaf and never receives a gradient: training ran, the loss stayed constant, and nothing reported it. The shipped `mixed_precision` example trained nothing for this reason. A parameter's replacement tensor is now detached from its history first. `Module::move_to_device` already did this and was not affected.
+- **The Adam kernels reject lists of different lengths.** `Tensor::fused_adam_`, `fused_adamw_` and `adam_step_batched` checked the step counts only, and the C++ side reads every list as deep as the parameter list, so a shorter gradient or moment list was read past its end: undefined behaviour from safe code. The optimizers always built equal lists, so this affected direct callers. They now return an error.
+
 #### Walk-ins and `fdl join-config`
 
 - **A walk-in's first dial no longer dies on `Host key verification failed`.** Every ssh a `fdl join` makes is non-interactive, so a box that had never seen the controller failed on first contact. `StrictHostKeyChecking=accept-new` is now the default: the key is recorded on first use and a changed one is refused. An explicit setting in `ssh.options` still wins.

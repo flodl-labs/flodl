@@ -216,7 +216,12 @@ impl Variable {
         Variable::wrap(detached)
     }
 
-    /// Move to a different device. Returns a new leaf variable.
+    /// Move to a different device. As in PyTorch, the move is part of the
+    /// graph when this variable requires gradients: a backward through
+    /// the result reaches this variable, and the result is not a leaf.
+    /// To move a parameter, use
+    /// [`Parameter::to_device`](crate::nn::Parameter::to_device) or
+    /// [`Module::move_to_device`](crate::nn::Module::move_to_device).
     pub fn to_device(&self, device: Device) -> Result<Variable> {
         if self.device() == device {
             return Ok(self.clone());
@@ -225,13 +230,24 @@ impl Variable {
         Ok(Variable::new(moved, self.requires_grad()))
     }
 
-    /// Replace the underlying tensor data (used by optimizers).
-    /// Preserves the `requires_grad` flag from the current tensor.
+    /// Replace the underlying tensor data (checkpoint load, dtype cast,
+    /// device move). Preserves the `requires_grad` flag from the current
+    /// tensor, and the variable stays a leaf: a replacement that carries
+    /// autograd history (the result of an op on a tracked tensor) is
+    /// detached from it first. Installed as is, it would never receive a
+    /// gradient, and the parameter would be silently frozen.
     /// Bumps [`data_generation`](Self::data_generation) so caches built
     /// from the old tensor can detect the replacement.
     pub fn set_data(&self, data: Tensor) {
         let rg = self.requires_grad();
         let data = if rg {
+            let data = if data.is_leaf() {
+                data
+            } else {
+                data.detach().unwrap_or_else(|e| {
+                    panic!("Variable::set_data: cannot detach the replacement tensor: {e}")
+                })
+            };
             // Silently dropping tracking here would freeze this parameter.
             data.set_requires_grad(true).unwrap_or_else(|e| {
                 panic!("Variable::set_data: cannot keep gradient tracking on the replacement tensor: {e}")
