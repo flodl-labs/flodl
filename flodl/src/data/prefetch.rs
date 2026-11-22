@@ -374,9 +374,10 @@ fn worker_loop(
     augment: usize,
     stop: &AtomicBool,
 ) {
-    // Create a dedicated CUDA stream for H2D transfers (lives across epochs).
+    // Create a dedicated CUDA stream for H2D transfers (lives across epochs),
+    // except on an integrated GPU: see `synchronous_upload`.
     #[cfg(feature = "gpu")]
-    let copy_stream = if device.is_cuda() {
+    let copy_stream = if device.is_cuda() && !synchronous_upload(device) {
         crate::tensor::cuda_stream::GpuStream::new(device, false).ok()
     } else {
         None
@@ -1142,6 +1143,21 @@ fn transfer_batch(
     }
 }
 
+/// Whether batches reach `device` synchronously, with no copy stream and
+/// no pinned staging, instead of the pinned async upload.
+///
+/// True on an integrated GPU (an APU): host and device share the same
+/// memory, so a page-locked staging copy buys nothing there. And on Strix
+/// Halo (gfx1151) the pinned async upload, with the compute stream waiting
+/// on the copy stream's event every batch, hung the GPU under the trainer:
+/// 4 of 4 runs at 20M tokens and 20 splits, while the synchronous upload
+/// completed the same run at the same per-split speed (flodl#80). Unknown
+/// answers keep the async path, which is what a discrete card wants.
+#[cfg(feature = "gpu")]
+fn synchronous_upload(device: Device) -> bool {
+    device.is_cuda() && crate::tensor::gpu_is_integrated(device.index() as i32) == Some(true)
+}
+
 /// Device-side batch assembly through the sample pool: gather pooled
 /// rows, upload only the misses, stitch back to caller row order, and
 /// capture the fresh rows. With the pool dormant this is exactly the
@@ -1154,12 +1170,15 @@ fn assemble_on_device(
     pool: &mut VramSamplePool,
     async_copy: bool,
 ) -> Result<Vec<Tensor>> {
+    // Pinning pays only for an async copy: it is what lets the upload
+    // overlap compute. A synchronous upload copies straight from pageable
+    // memory rather than first staging the batch in a fresh page-locked
+    // buffer, which costs a copy and a GPU memory registration per batch.
     let upload = |t: &Tensor| -> Result<Tensor> {
-        let pinned = t.pin_memory()?;
         if async_copy {
-            pinned.to_device_async(device)
+            t.pin_memory()?.to_device_async(device)
         } else {
-            pinned.to_device(device)
+            t.to_device(device)
         }
     };
 
