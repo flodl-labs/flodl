@@ -12,7 +12,7 @@
 //! thread then hands each `Model` frame to the forge, which **accumulates**
 //! them (params' tensors then buffers') until it holds the full model, pairs
 //! the held static [`ModelSchema`] names to the accumulated tensors, and writes
-//! a loadable `.fdl` on a **detached** thread so the reduce loop never blocks.
+//! a loadable `.fdl` on its own thread so the reduce loop never blocks.
 //!
 //! Two properties matter:
 //! - **Async**: frames are scattered to ranks *before* the forge tap, and the
@@ -42,7 +42,7 @@ use crate::tensor::{DType, Result, TensorError};
 /// Built at launch by [`consensus_checkpoint_fn`] around the user's
 /// `checkpoint_fn` (CPU backend only — NCCL fires the user callback on the
 /// elected rank, whose post-collective model IS the consensus) and installed
-/// on the forge, which fires it on its **detached** writer thread when an
+/// on the forge, which fires it on its writer thread when an
 /// armed cycle's accumulation completes — the reduce loop never blocks on it
 /// (the coordinator must never go heartbeat-silent). Type-erased so the
 /// controller plumbing stays model-agnostic: the closure owns the only
@@ -191,7 +191,7 @@ pub struct CheckpointForge {
     /// captured (factory failure) → model writes are skipped (meta-only).
     schema: Option<ModelSchema>,
     /// Consensus-model callback (the launch-wrapped user `checkpoint_fn`),
-    /// fired on the detached writer thread when an armed cycle with a
+    /// fired on the writer thread when an armed cycle with a
     /// `user_version` completes. `None` when no callback is configured or on
     /// the NCCL path (elected-rank fire).
     consensus_fn: Option<ConsensusModelFn>,
@@ -202,8 +202,47 @@ pub struct CheckpointForge {
     /// armed, armed but the cycle's frame never completed the accumulation,
     /// or handed to a writer that has not finished yet.
     arms_taken: std::sync::atomic::AtomicUsize,
-    /// Lifetime count of detached writer threads successfully spawned.
+    /// Lifetime count of writer threads successfully spawned.
     writers_spawned: std::sync::atomic::AtomicUsize,
+    /// Writer threads not yet joined, and the outcome of the latest bundle
+    /// write among those already joined.
+    writers: Mutex<WriterLedger>,
+    /// The same ledger for the `<stem>.meta.json` writers. Kept apart
+    /// because a cycle's meta and model are written by different threads
+    /// in no fixed order: folded into one ledger, a model write that
+    /// lands last would hide a failed meta write.
+    meta_writers: Mutex<WriterLedger>,
+}
+
+/// What a writer thread reports: `None` when its cycle had no bundle to
+/// write (a callback-only fire), otherwise how the bundle write went.
+type BundleOutcome = Option<std::result::Result<(), String>>;
+
+#[derive(Default)]
+struct WriterLedger {
+    /// In spawn order, which is also the order the bundles supersede each
+    /// other in.
+    handles: Vec<std::thread::JoinHandle<BundleOutcome>>,
+    /// Outcome of the latest bundle write joined so far.
+    last_bundle: BundleOutcome,
+}
+
+impl WriterLedger {
+    /// Join every writer for which `ready` holds, in spawn order, stopping
+    /// at the first that is not: outcomes must be folded in order for
+    /// `last_bundle` to mean the latest.
+    fn reap(&mut self, ready: impl Fn(&std::thread::JoinHandle<BundleOutcome>) -> bool) {
+        let n = self.handles.iter().take_while(|h| ready(h)).count();
+        for h in self.handles.drain(..n) {
+            match h.join() {
+                Ok(None) => {}
+                Ok(outcome) => self.last_bundle = outcome,
+                Err(_) => {
+                    self.last_bundle = Some(Err("the checkpoint writer thread panicked".into()))
+                }
+            }
+        }
+    }
 }
 
 /// One armed consensus capture: what to do with the cycle's materialized
@@ -245,6 +284,8 @@ impl CheckpointForge {
             inner: Mutex::new(ForgeState::default()),
             arms_taken: std::sync::atomic::AtomicUsize::new(0),
             writers_spawned: std::sync::atomic::AtomicUsize::new(0),
+            writers: Mutex::new(WriterLedger::default()),
+            meta_writers: Mutex::new(WriterLedger::default()),
         })
     }
 
@@ -256,6 +297,45 @@ impl CheckpointForge {
             self.writers_spawned
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
+    }
+
+    /// Wait for every writer thread and report how the latest bundle write
+    /// went. Call it once no further reduce can arrive and before the run
+    /// reports its result: a writer is a plain thread, and a process that
+    /// exits while one is still running leaves `<stem>.fdl.tmp` and no
+    /// `<stem>.fdl`.
+    ///
+    /// Only the latest write of each piece counts, the model and its
+    /// `.meta.json`. Each bundle supersedes the one before it, so an
+    /// earlier failed write that a later one replaced cost nothing, while
+    /// a failed last write means the run's final state is not on disk, or
+    /// is there without the index a resume reads. Consensus-callback
+    /// errors are reported where they happen and never surface here.
+    pub fn finish(&self) -> std::result::Result<(), String> {
+        let latest = |ledger: &Mutex<WriterLedger>| {
+            let mut ledger = ledger.lock().expect("checkpoint forge mutex poisoned");
+            ledger.reap(|_| true);
+            ledger.last_bundle.clone().unwrap_or(Ok(()))
+        };
+        // Both are joined before either verdict is returned.
+        let model = latest(&self.writers);
+        let meta = latest(&self.meta_writers);
+        model.and(meta)
+    }
+
+    /// Hand over the thread writing a cycle's `<stem>.meta.json`, so
+    /// [`Self::finish`] waits for it and reports its outcome. The thread
+    /// returns `Some(result)` of its write.
+    pub fn track_meta_writer(
+        &self,
+        handle: std::thread::JoinHandle<Option<std::result::Result<(), String>>>,
+    ) {
+        let mut ledger = self
+            .meta_writers
+            .lock()
+            .expect("checkpoint forge mutex poisoned");
+        ledger.reap(|h| h.is_finished());
+        ledger.handles.push(handle);
     }
 
     /// Whether a consensus callback is installed (the coordinator's gate for
@@ -320,7 +400,7 @@ impl CheckpointForge {
     /// accumulation. The frame is **moved** in (no clone). When the gathered
     /// tensor count reaches the schema's total (params + the f32 buffer
     /// subset), take the armed capture + accumulated tensors and spawn a
-    /// **detached** writer — bundle write, consensus-callback fire, or both —
+    /// writer thread — bundle write, consensus-callback fire, or both —
     /// returning immediately so the reduce loop keeps scattering. No-op when
     /// not armed or no schema was captured.
     ///
@@ -362,7 +442,7 @@ impl CheckpointForge {
             return;
         }
         // Validate the outer momentum count here (on the reduce thread, where
-        // the error is actionable) before handing it to the detached writer:
+        // the error is actionable) before handing it to the writer thread:
         // it is model-sized (one tensor per parameter), so it must match the
         // schema's param count. A mismatch drops just the `.outer.fdl` (the
         // consensus model still writes); a stateless outer optimizer passes
@@ -388,12 +468,16 @@ impl CheckpointForge {
         let spawn = std::thread::Builder::new()
             .name("flodl-ckpt-writer".to_string())
             .spawn(move || {
+                let mut bundle: BundleOutcome = None;
                 if let Some(path) = armed.path.as_ref() {
+                    bundle = Some(Ok(()));
                     if let Err(e) = write_consensus_fdl(&schema, &payloads, path) {
-                        eprintln!(
-                            "flodl ddp: consensus checkpoint write to {} failed: {e}",
+                        let why = format!(
+                            "consensus checkpoint write to {} failed: {e}",
                             path.display(),
                         );
+                        eprintln!("flodl ddp: {why}");
+                        bundle = Some(Err(why));
                     }
                     // Outer-optimizer momentum rides the same writer:
                     // `<stem>.fdl` -> `<stem>.outer.fdl`, same atomic-rename
@@ -402,10 +486,16 @@ impl CheckpointForge {
                     if let Some(outer_payloads) = outer {
                         let outer_path = path.with_extension("outer.fdl");
                         if let Err(e) = write_outer_momentum_fdl(&outer_payloads, &outer_path) {
-                            eprintln!(
-                                "flodl ddp: outer-momentum checkpoint write to {} failed: {e}",
+                            let why = format!(
+                                "outer-momentum checkpoint write to {} failed: {e}",
                                 outer_path.display(),
                             );
+                            eprintln!("flodl ddp: {why}");
+                            // The model's own failure, if any, stays the
+                            // one reported.
+                            if bundle == Some(Ok(())) {
+                                bundle = Some(Err(why));
+                            }
                         }
                     }
                 }
@@ -419,11 +509,20 @@ impl CheckpointForge {
                 {
                     eprintln!("flodl ddp: checkpoint_fn (v{version}, consensus) failed: {e}");
                 }
+                bundle
             });
         match spawn {
-            Ok(_) => {
+            Ok(handle) => {
                 self.writers_spawned
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Fold the writers that already finished so a long run
+                // does not keep one handle per checkpoint.
+                let mut ledger = self
+                    .writers
+                    .lock()
+                    .expect("checkpoint forge mutex poisoned");
+                ledger.reap(|h| h.is_finished());
+                ledger.handles.push(handle);
             }
             Err(e) => {
                 eprintln!("flodl ddp: failed to spawn checkpoint writer thread: {e}");
@@ -1060,6 +1159,60 @@ mod tests {
         assert!(meta_path.exists());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finish_waits_for_the_writers_and_reports_the_latest_bundle() {
+        let schema = ModelSchema {
+            param_names: vec!["w".to_string()],
+            buffer_names: vec![],
+            f32_buffer_idx: vec![],
+        };
+        let forge = CheckpointForge::new(Some(schema), None);
+        let w = cpu_tensor(&[1.0, 2.0], &[2]);
+        let cycle = |path: PathBuf| {
+            forge.arm(Some(path), None);
+            forge.accumulate(tensors_to_round_frame(&[&w], DTYPE_F32).unwrap());
+        };
+
+        // Nothing written yet is not a failure.
+        assert_eq!(forge.finish(), Ok(()));
+
+        let dir = std::env::temp_dir().join(format!("flodl_forge_finish_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("consensus.fdl");
+        // A regular file where a directory is needed: fails for any user
+        // on any platform.
+        std::fs::write(dir.join("blocker"), b"x").unwrap();
+        let bad = dir.join("blocker").join("consensus.fdl");
+
+        // No polling: once `finish` returns, the file is there.
+        cycle(good.clone());
+        assert_eq!(forge.finish(), Ok(()));
+        assert!(good.exists());
+
+        // A failed last write is the verdict.
+        cycle(bad.clone());
+        let err = forge.finish().unwrap_err();
+        assert!(err.contains("blocker"), "{err}");
+
+        // A later good write supersedes an earlier failed one.
+        cycle(bad);
+        cycle(good);
+        assert_eq!(forge.finish(), Ok(()));
+
+        // A failed meta write is a verdict of its own: the good model
+        // write above does not cover for it.
+        let meta = |outcome: std::result::Result<(), String>| {
+            forge.track_meta_writer(std::thread::spawn(move || Some(outcome)));
+        };
+        meta(Err("meta lost".to_string()));
+        assert_eq!(forge.finish(), Err("meta lost".to_string()));
+        meta(Ok(()));
+        assert_eq!(forge.finish(), Ok(()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

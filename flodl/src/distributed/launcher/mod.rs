@@ -2031,6 +2031,11 @@ pub fn run_launcher_with_config(
     // not expected to have reached its last epoch.
     let cancelled = abort.swap(true, std::sync::atomic::Ordering::SeqCst);
     let coord_end = coord_driver.take().map(|h| h.join());
+    // The controller's reduce thread and the coordinator are both gone, so
+    // no further checkpoint writer can start: wait for the ones still
+    // running. Without this the process can return while the final bundle
+    // is half written.
+    let checkpoint_end = checkpoint_forge.finish();
     // Completion verdict. Supervision only knows how the children exited,
     // and ranks that bail out (coordinator silent, peers gone) exit clean:
     // without the coordinator's word a run that stopped at epoch 42 of 200
@@ -2050,6 +2055,16 @@ pub fn run_launcher_with_config(
             membership_state.phase = membership::ClusterPhase::Failed;
             status_board.publish(&membership_state);
         }
+    }
+    // A run that trained to the end but could not persist its last bundle
+    // did not deliver what `save_path` asked for.
+    if any_failure.is_none()
+        && !cancelled
+        && let Err(why) = checkpoint_end
+    {
+        any_failure = Some(TensorError::new(&format!(
+            "cluster launcher: the run completed but its last checkpoint was not written: {why}"
+        )));
     }
     if let Some(h) = rdv_driver.take() {
         let _ = h.join();
