@@ -983,8 +983,8 @@ impl ClusterCoordinator {
         )
         .with_elche_state(elche_state)
         .with_coverage(coverage);
-        // Detach the meta file write so the checkpoint never touches the
-        // training clock (matches the forge's detached `.fdl` write). The
+        // The meta file is written off-thread so the checkpoint never
+        // touches the training clock (as the forge's `.fdl` write is). The
         // meta is built synchronously from coordinator state above (cheap);
         // only the serialize + atomic disk write runs off-thread. Ownership
         // of `meta` + `meta_path` moves into the writer.
@@ -992,17 +992,31 @@ impl ClusterCoordinator {
         let spawn = std::thread::Builder::new()
             .name("flodl-ckpt-meta".to_string())
             .spawn(move || match meta.write_to_file(&meta_path) {
-                Ok(()) => crate::verbose!(
-                    "  ddp: checkpoint meta written {} (epoch {epoch}, version {version})",
-                    meta_path.display(),
-                ),
-                Err(e) => eprintln!(
-                    "flodl ddp: checkpoint meta write to {} failed: {e}",
-                    meta_path.display(),
-                ),
+                Ok(()) => {
+                    crate::verbose!(
+                        "  ddp: checkpoint meta written {} (epoch {epoch}, version {version})",
+                        meta_path.display(),
+                    );
+                    Some(Ok(()))
+                }
+                Err(e) => {
+                    let why = format!(
+                        "checkpoint meta write to {} failed: {e}",
+                        meta_path.display()
+                    );
+                    eprintln!("flodl ddp: {why}");
+                    Some(Err(why))
+                }
             });
-        if let Err(e) = spawn {
-            eprintln!("flodl ddp: failed to spawn checkpoint meta writer thread: {e}");
+        match spawn {
+            // The forge owns the run's checkpoint writers: the launcher
+            // waits on it before the run reports its result.
+            Ok(handle) => {
+                if let Some(forge) = self.checkpoint_forge.as_ref() {
+                    forge.track_meta_writer(handle);
+                }
+            }
+            Err(e) => eprintln!("flodl ddp: failed to spawn checkpoint meta writer thread: {e}"),
         }
         // NCCL consensus MODEL write: the consensus is on-device across ranks
         // (no controller-side frame to tap), so dispatch the elected rank to
