@@ -1010,6 +1010,39 @@ extern "C" char* flodl_clip_grad_norm(FlodlTensor* params, int count,
     }
 }
 
+extern "C" char* flodl_amp_unscale_grads(FlodlTensor* params, int count,
+                                          double inv_scale, int* found_inf_out) {
+    try {
+        *found_inf_out = 0;
+        std::vector<at::Tensor> grads;
+        grads.reserve(count);
+        for (int i = 0; i < count; i++) {
+            auto& p = unwrap(params[i]);
+            if (p.grad().defined()) {
+                grads.push_back(p.mutable_grad());
+            }
+        }
+        if (grads.empty()) {
+            return nullptr;
+        }
+        // The kernel wants its two scalars as tensors on the gradients'
+        // device. Filled there: a host scalar copied over would be a
+        // blocking upload on every step.
+        auto opts = at::TensorOptions().dtype(at::kFloat).device(grads[0].device());
+        auto found_inf = torch::zeros({1}, opts);
+        auto inv = torch::full({1}, inv_scale, opts);
+        at::_amp_foreach_non_finite_check_and_unscale_(grads, found_inf, inv);
+        // The one host read of the step: the caller has to know whether
+        // to apply the update.
+        *found_inf_out = found_inf.item<float>() != 0.0f ? 1 : 0;
+        return nullptr;
+    } catch (const std::exception& e) {
+        return make_error(e.what());
+    } catch (...) {
+        return make_error("flodl: non-standard C++ exception");
+    }
+}
+
 // --- Multi-tensor foreach operations ---
 
 extern "C" char* flodl_foreach_add_scalar_(FlodlTensor* tensors, int count, double scalar) {

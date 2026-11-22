@@ -349,6 +349,11 @@ pub struct GpuWorker<M: Module> {
     /// The precision this worker's training forward runs: the requested
     /// one, or `F32` when the fallback applied on this device.
     precision: crate::nn::Precision,
+    /// Loss scaler for a precision that needs one (`f16-mixed`); `None`
+    /// otherwise. Local to the rank: its scale adapts to this device's
+    /// gradients and is not averaged or checkpointed, and a resumed run
+    /// finds its level again within a few steps.
+    grad_scaler: Option<crate::nn::GradScaler>,
     /// EASGD elastic averaging weight (0, 1]. `None` = full overwrite
     /// (current behavior; uses fast non-blocking copy_). When `Some(α)`,
     /// `load_averaged` blends `W_local := (1-α)·W_local + α·W_avg` instead
@@ -566,6 +571,13 @@ impl<M: Module> GpuWorker<M> {
     /// Current local step count.
     pub fn local_step(&self) -> usize {
         self.local_step
+    }
+
+    /// Test-only window into the loss scaler: its current scale, `None`
+    /// when this worker's precision needs no scaler.
+    #[cfg(test)]
+    pub(crate) fn grad_scale(&self) -> Option<f64> {
+        self.grad_scaler.as_ref().map(|s| s.scale_factor())
     }
 
     /// Test-only window into the mass counter (see `steps_at_snapshot`).

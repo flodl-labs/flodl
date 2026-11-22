@@ -159,7 +159,7 @@ The learning rate is the model's default at any run length, with one exception. 
 
 ## Precision
 
-`--precision bf16-mixed` runs the training forward under bf16 autocast in every mode: through `TrainerConfig::precision` in the trainer modes, and by hand in the `solo-N` loop. Parameters, averaging, checkpoints and evaluation stay f32, and the run's banner and metadata record the arm. It pays on the transformer models (gpt-nano, OLMo) on a card with native bf16 and can slow the small convolutional ones. `--precision-fallback` keeps a rank in f32 when its card only emulates bf16 (NVIDIA below compute capability 8.0). It is unrelated to `--bf16-wire`, which is the wire format of the CPU averaging plane.
+`--precision bf16-mixed` runs the training forward under bf16 autocast in every mode: through `TrainerConfig::precision` in the trainer modes, and by hand in the `solo-N` loop. `--precision f16-mixed` does the same in f16, with the loss scaled and the gradients unscaled around `backward` (the trainer's own scaler in the trainer modes, a `GradScaler` in the `solo-N` loop); it is often the faster of the two on the convolutional models. Parameters, averaging, checkpoints and evaluation stay f32, and the run's banner and metadata record the arm. It pays on the transformer models (gpt-nano, OLMo) on a card with native bf16 and can slow the small convolutional ones. `--precision-fallback` keeps a rank in f32 when its card only emulates bf16 (NVIDIA below compute capability 8.0). It is unrelated to `--bf16-wire`, which is the wire format of the CPU averaging plane.
 
 ## LR Scaling for Multi-GPU
 

@@ -1211,8 +1211,12 @@ impl<M: Module> GpuWorker<M> {
             .run(self.device, || train_fn(&self.model, batch))?;
         let loss_val: f64 = loss.data().item()?;
 
-        // Backward
-        loss.backward()?;
+        // Backward, on the scaled loss when this precision needs it: the
+        // gradients come out scaled and the tail below unscales them.
+        match self.grad_scaler.as_ref() {
+            Some(scaler) => scaler.scale(&loss)?.backward()?,
+            None => loss.backward()?,
+        }
 
         // Gradient clip + LR schedule + optimizer step + zero_grad + counters.
         self.optimizer_step_and_bookkeep()?;
@@ -1239,8 +1243,20 @@ impl<M: Module> GpuWorker<M> {
     pub(crate) fn optimizer_step_and_bookkeep(&mut self) -> Result<()> {
         let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
 
+        // Loss-scaled precision: bring the gradients back to their true
+        // size first, so the clip below sees real norms, and learn whether
+        // they are usable. A NaN or infinite gradient here is what a scale
+        // set too high produces; the step is skipped and the scale backs
+        // off, which is how the scaler finds its level.
+        let finite = match self.grad_scaler.as_mut() {
+            Some(scaler) => scaler.unscale_(&self.model.parameters())?,
+            None => true,
+        };
+
         // Per-worker gradient clipping (before optimizer step).
-        if let Some(max_norm) = self.max_grad_norm {
+        if let Some(max_norm) = self.max_grad_norm
+            && finite
+        {
             let params: Vec<Tensor> = self
                 .model
                 .parameters()
@@ -1264,9 +1280,16 @@ impl<M: Module> GpuWorker<M> {
         }
 
         // Optimizer step (GPU-local Adam, ~0.1ms fused kernel)
-        self.optimizer.step()?;
+        if finite {
+            self.optimizer.step()?;
+        }
         self.optimizer.zero_grad();
+        if let Some(scaler) = self.grad_scaler.as_mut() {
+            scaler.update();
+        }
 
+        // A skipped step still counts: the batch was consumed, and the
+        // step clock is what the schedule and the averaging are built on.
         self.local_step += 1;
         self.steps_since_avg += 1;
         Ok(())

@@ -732,6 +732,7 @@ fn eval_weighted(
 /// scalar loss. Shared by `run_baseline_solo`'s real-data and pooled-batch
 /// loops so the step logic (LR-schedule point, grad-reset order) can't
 /// drift between them and skew the published solo baseline.
+#[allow(clippy::too_many_arguments)]
 fn train_step(
     model: &dyn Module,
     optimizer: &mut dyn Optimizer,
@@ -740,6 +741,7 @@ fn train_step(
     batch: &[Tensor],
     global_batch: usize,
     precision: flodl::nn::Precision,
+    scaler: Option<(&mut flodl::nn::GradScaler, &[flodl::nn::Parameter])>,
 ) -> Result<f64> {
     let device = batch.first().map_or(Device::CPU, |t| t.device());
     let loss = precision.run(device, || train_fn(model, batch))?;
@@ -748,8 +750,20 @@ fn train_step(
         optimizer.set_lr(sched.lr(global_batch));
     }
     optimizer.zero_grad();
-    loss.backward()?;
-    optimizer.step()?;
+    match scaler {
+        // A loss-scaled precision (f16-mixed): backward on the scaled
+        // loss, then the scaler unscales, skips the step on a non-finite
+        // gradient, and adjusts its scale. The trainer does the same.
+        Some((scaler, params)) => {
+            scaler.scale(&loss)?.backward()?;
+            scaler.step(params, &mut || optimizer.step())?;
+            scaler.update();
+        }
+        None => {
+            loss.backward()?;
+            optimizer.step()?;
+        }
+    }
     Ok(loss_val)
 }
 
@@ -791,6 +805,9 @@ fn run_baseline_solo(
     let model = (model_def.build)(device)?;
     let params = model.parameters();
     let mut optimizer = (model_def.optimizer)(&params, config.lr);
+    let mut scaler = precision
+        .needs_grad_scaler()
+        .then(flodl::nn::GradScaler::new);
     // Per-batch scheduling: total_steps = batches * epochs (matches nanoGPT etc.).
     // Solo: world_size=1.
     let solo_batches = if real_data {
@@ -863,6 +880,7 @@ fn run_baseline_solo(
                     &batch,
                     global_batch,
                     precision,
+                    scaler.as_mut().map(|s| (s, params.as_slice())),
                 )?;
                 batch_count += 1;
                 global_batch += 1;
@@ -939,6 +957,7 @@ fn run_baseline_solo(
                     batch,
                     global_batch,
                     precision,
+                    scaler.as_mut().map(|s| (s, params.as_slice())),
                 )?;
                 global_batch += 1;
             }

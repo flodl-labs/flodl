@@ -255,12 +255,14 @@ struct Cli {
     #[option]
     bf16_wire: bool,
 
-    /// Precision of the training forward. `bf16-mixed` runs it under
-    /// bfloat16 autocast while parameters, averaging, checkpoints and
-    /// evaluation stay f32. It pays on transformers on a card with native
-    /// bf16; a small convolutional model can get slower. Unrelated to
-    /// `--bf16-wire`, which is the averaging plane's wire format.
-    #[option(default = "f32", choices = &["f32", "bf16-mixed"])]
+    /// Precision of the training forward. `bf16-mixed` and `f16-mixed` run
+    /// it under autocast while parameters, averaging, checkpoints and
+    /// evaluation stay f32; `f16-mixed` also scales the loss and unscales
+    /// the gradients. bf16 pays on transformers on a card with native
+    /// bf16, and a small convolutional model can get slower; f16 is often
+    /// the faster of the two on convolutions. Unrelated to `--bf16-wire`,
+    /// which is the averaging plane's wire format.
+    #[option(default = "f32", choices = &["f32", "bf16-mixed", "f16-mixed"])]
     precision: String,
 
     /// Keep a rank in f32 when its card only emulates `--precision`

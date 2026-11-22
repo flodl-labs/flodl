@@ -496,6 +496,9 @@ impl<M: Module> GpuWorker<M> {
             vram_pool_budget_sent: !vram_pool_enabled,
             max_grad_norm: config.max_grad_norm,
             precision,
+            grad_scaler: precision
+                .needs_grad_scaler()
+                .then(crate::nn::GradScaler::new),
             // EASGD elastic blending is an Async-only concept: Sync and
             // Cadence MUST full-overwrite to the consensus each window. Gate
             // structurally on the worker's policy here -- the single point
