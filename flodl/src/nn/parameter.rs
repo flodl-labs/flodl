@@ -21,7 +21,10 @@ impl Parameter {
     /// Preserves the current requires_grad state (frozen params stay frozen).
     pub fn to_device(&self, device: Device) -> Result<Parameter> {
         let rg = self.variable.requires_grad();
-        let moved = self.variable.data().to_device(device)?;
+        // Detached first: a move of a tracked tensor is itself tracked,
+        // and a parameter built on that result would not be a leaf and
+        // would never receive a gradient.
+        let moved = self.variable.data().detach()?.to_device(device)?;
         Ok(Parameter {
             variable: Variable::new(moved, rg),
             name: self.name.clone(),
@@ -55,6 +58,28 @@ impl std::fmt::Debug for Parameter {
 mod tests {
     use super::*;
     use crate::tensor::TensorOptions;
+
+    #[test]
+    fn a_moved_parameter_still_trains() {
+        // Starts on the CPU on purpose: the move to the test device is
+        // what is under test, and on a GPU run it is a real one.
+        let cpu = TensorOptions {
+            dtype: crate::tensor::DType::Float32,
+            device: Device::CPU,
+        };
+        let p = Parameter::new(Tensor::ones(&[2], cpu).unwrap(), "p");
+        let moved = p.to_device(crate::tensor::test_device()).unwrap();
+        assert!(moved.variable.data().is_leaf());
+        let loss = moved.variable.mul(&moved.variable).unwrap().sum().unwrap();
+        loss.backward().unwrap();
+        let grad = moved
+            .variable
+            .grad()
+            .expect("a moved parameter must receive a gradient");
+        assert_eq!(grad.to_f32_vec().unwrap(), vec![2.0, 2.0]);
+        // The source parameter is a separate leaf and saw none of it.
+        assert!(p.variable.grad().is_none());
+    }
 
     fn make_param(name: &str) -> Parameter {
         let t = Tensor::randn(
