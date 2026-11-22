@@ -16,3 +16,4 @@ pub(crate) use handle::clean_process_exit;
 
 #[cfg(test)]
 pub(super) use coord_config::build_coord_config_from_builder;
+pub(super) use single_host::{final_bundle_lost, write_solo_checkpoint};

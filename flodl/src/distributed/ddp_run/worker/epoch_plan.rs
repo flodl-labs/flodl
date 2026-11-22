@@ -813,6 +813,13 @@ impl<M: Module> GpuWorker<M> {
     /// disk/permission failure should surface in logs, never deadlock the
     /// cluster.
     pub(super) fn write_model_to_fdl(&self, stem: &str) {
+        if let Err(e) = self.try_write_model_to_fdl(stem) {
+            eprintln!("ddp-worker: rank {} {e}", self.rank);
+        }
+    }
+
+    /// [`Self::write_model_to_fdl`] for a caller that acts on the outcome.
+    fn try_write_model_to_fdl(&self, stem: &str) -> Result<()> {
         use crate::distributed::CheckpointBundle;
         use crate::distributed::checkpoint_forge::{consensus_buffer_key, consensus_param_key};
         let model_path = CheckpointBundle::model_path(stem);
@@ -835,21 +842,47 @@ impl<M: Module> GpuWorker<M> {
             .enumerate()
             .map(|(j, b)| (consensus_buffer_key(j), b))
             .collect();
-        match model_path.to_str() {
+        let path_str = model_path.to_str().ok_or_else(|| {
+            TensorError::new(&format!(
+                "model path is not utf-8: {}",
+                model_path.display()
+            ))
+        })?;
+        crate::nn::save_checkpoint_file(path_str, &params, &buffers, None)
+            .map_err(|e| TensorError::new(&format!("model save to {path_str} failed: {e}")))
+    }
+
+    /// Single-device bundle: `<stem>.fdl` in the consensus layout, so it
+    /// loads the same way a multi-GPU run's bundle does, plus
+    /// `<stem>.optim`. The model decides the outcome. An optimizer that
+    /// cannot serialize its state costs the `.optim` only, with a warning.
+    pub(crate) fn write_solo_bundle(&self, stem: &str) -> Result<()> {
+        use crate::distributed::CheckpointBundle;
+        self.try_write_model_to_fdl(stem)?;
+        let optim_path = CheckpointBundle::optim_path(stem);
+        match optim_path.to_str() {
             Some(path_str) => {
-                if let Err(e) = crate::nn::save_checkpoint_file(path_str, &params, &buffers, None) {
-                    eprintln!(
-                        "ddp-worker: rank {} model save to {path_str} failed: {e}",
-                        self.rank,
-                    );
+                if let Err(e) = self.optimizer.save_state_to(path_str) {
+                    eprintln!("  ddp: optimizer state not saved to {path_str}: {e}");
                 }
             }
             None => eprintln!(
-                "ddp-worker: rank {} model path is not utf-8: {}",
-                self.rank,
-                model_path.display(),
+                "  ddp: optimizer state not saved, path is not utf-8: {}",
+                optim_path.display()
             ),
         }
+        Ok(())
+    }
+
+    /// Batches trained so far, the scheduler's clock.
+    pub(crate) fn trained_steps(&self) -> usize {
+        self.global_step + self.steps_since_avg
+    }
+
+    /// Start the scheduler's clock at `step` (a resumed run).
+    pub(crate) fn set_trained_steps(&mut self, step: usize) {
+        self.global_step = step;
+        self.steps_since_avg = 0;
     }
 
     /// Write this rank's replicated outer-optimizer momentum to

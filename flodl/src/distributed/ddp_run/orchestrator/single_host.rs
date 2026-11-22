@@ -37,6 +37,105 @@ pub(super) fn warn_dashboard_unwritten(config: &ddp_run::DdpRunConfig) {
     }
 }
 
+/// Where a single device picks a saved run up: `(epoch, partial)`.
+///
+/// A bundle written at an epoch boundary carries no coverage block and its
+/// `epoch` counts the epochs done. A cluster's bundle instead names the
+/// epoch it was in and lists what that epoch still owed: nothing owed means
+/// the epoch is done, anything owed means it restarts whole (`partial`),
+/// since this path has no way to train a remainder.
+fn solo_resume_epoch(meta: &crate::distributed::CheckpointMeta) -> (usize, bool) {
+    let Some(coverage) = meta.coverage.as_ref() else {
+        return (meta.epoch, false);
+    };
+    let unfinished = coverage
+        .per_epoch
+        .iter()
+        .filter(|e| !e.uncovered_ranges.is_empty())
+        .map(|e| e.epoch)
+        .min();
+    match unfinished {
+        Some(epoch) => (epoch, true),
+        None => {
+            let last = coverage.per_epoch.iter().map(|e| e.epoch).max();
+            (last.map_or(meta.epoch, |e| e + 1), false)
+        }
+    }
+}
+
+/// What a single device takes from the bundle it resumes.
+pub(crate) struct SoloResume {
+    /// First epoch to train.
+    pub(crate) start_epoch: usize,
+    /// Batches the saved run had trained, the scheduler's clock.
+    pub(crate) global_step: usize,
+}
+
+/// Read the bundle a single-device run resumes from, and say where it
+/// picks up. The meta carries where the saved run stood; the model and the
+/// optimizer state are the factories' to load, as on a cluster. An
+/// unreadable meta is an error, not a fresh start: the caller asked to
+/// continue something.
+pub(crate) fn solo_resume(
+    resume_from: Option<&str>,
+    num_epochs: usize,
+) -> Result<Option<SoloResume>> {
+    let Some(stem) = resume_from else {
+        return Ok(None);
+    };
+    let meta = crate::distributed::CheckpointMeta::read_from_file(
+        &crate::distributed::CheckpointBundle::meta_path(stem),
+    )?;
+    let (start_epoch, partial) = solo_resume_epoch(&meta);
+    eprintln!(
+        "  ddp: resuming from {stem} at epoch {start_epoch} of {num_epochs}, step {}",
+        meta.global_step,
+    );
+    if partial {
+        eprintln!(
+            "  ddp: that checkpoint was taken inside epoch {start_epoch}; a single \
+             device restarts it from its beginning",
+        );
+    }
+    Ok(Some(SoloResume {
+        start_epoch,
+        global_step: meta.global_step,
+    }))
+}
+
+/// Say where a relative bundle stem lands, as the cluster path does.
+pub(crate) fn announce_solo_stem(save_path: Option<&str>) {
+    if let Some(stem) = save_path {
+        let p = std::path::Path::new(stem);
+        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        eprintln!(
+            "  ddp: checkpoint bundle stem resolves to {}",
+            abs.display()
+        );
+    }
+}
+
+/// One single-device bundle: model and optimizer state from the worker,
+/// then the meta, last, as the commit marker a resume reads.
+pub(crate) fn write_solo_checkpoint<M: Module>(
+    worker: &GpuWorker<M>,
+    stem: &str,
+    epochs_done: usize,
+    reason: crate::distributed::SaveReason,
+) -> Result<()> {
+    worker.write_solo_bundle(stem)?;
+    crate::distributed::CheckpointMeta::new(epochs_done, worker.trained_steps(), 0, 1, reason)
+        .write_to_file(&crate::distributed::CheckpointBundle::meta_path(stem))
+}
+
+/// The error a run returns when it trained to the end and could not
+/// persist what `save_path` asked for.
+pub(crate) fn final_bundle_lost(e: crate::tensor::TensorError) -> crate::tensor::TensorError {
+    crate::tensor::TensorError::new(&format!(
+        "ddp: the run completed but its final checkpoint was not written: {e}"
+    ))
+}
+
 impl DdpHandle {
     /// Single-GPU fallback: run training on the main thread.
     ///
@@ -76,6 +175,8 @@ impl DdpHandle {
         eval_dataset: Option<Arc<dyn BatchDataSet>>,
         eval_every_epochs: Option<usize>,
         eval_result_fn: Option<EvalResultFn>,
+        save_path: Option<String>,
+        resume_from: Option<String>,
     ) -> Result<Self>
     where
         F: Fn(Device) -> Result<M>,
@@ -85,6 +186,10 @@ impl DdpHandle {
         T: Fn(&M, &[Tensor]) -> Result<Variable>,
     {
         crate::verbose!("  ddp: single device ({device:?}) | no coordination");
+
+        let resume = solo_resume(resume_from.as_deref(), num_epochs)?;
+        let start_epoch = resume.as_ref().map_or(0, |r| r.start_epoch);
+        announce_solo_stem(save_path.as_deref());
 
         let total_samples = pick_space(dataset.len(), augment);
         let tmp_model = model_factory(device)?;
@@ -126,7 +231,7 @@ impl DdpHandle {
             augment: augment.max(1),
             epoch_splits: epoch_splits.max(1),
             transform,
-            seed: crate::distributed::ddp_run::SHUFFLE_BASE_SEED,
+            seed: ddp_run::resolve_shuffle_seed(resume_from.as_deref())?,
             max_grad_norm,
             precision,
             precision_fallback,
@@ -148,6 +253,9 @@ impl DdpHandle {
             bf16_wire: false,
             timeline: None,
             policy: ApplyPolicy::Sync, // single-GPU fallback: no divergence measurement
+            // The worker's own `save_path` serves a coordinator's
+            // save-and-shutdown order. This path has no coordinator and
+            // writes its bundles from the loop below.
             save_path: None,
             // Inert on this thread-based GpuWorker path (no TCP inbound loop).
             coord_liveness_timeout_secs:
@@ -190,6 +298,32 @@ impl DdpHandle {
         if let Some(sched) = scheduler {
             worker.set_scheduler(sched);
         }
+        if let Some(r) = resume.as_ref() {
+            worker.set_trained_steps(r.global_step);
+        }
+
+        // Runs `eval_fn` on the live model and hands the metric on.
+        let run_eval = |worker: &GpuWorker<M>, epochs_done: usize| {
+            let (Some(efn), Some(ds)) = (&eval_fn, &eval_dataset) else {
+                return;
+            };
+            worker.model().eval();
+            let result = efn(worker.model(), ds.as_ref());
+            worker.model().train();
+            match result {
+                Ok(metric) => {
+                    if let Some(rf) = &eval_result_fn
+                        && let Err(e) = rf(epochs_done, metric)
+                    {
+                        eprintln!(
+                            "  ddp: eval_result_fn returned error (epoch {epochs_done}): {e}"
+                        );
+                    }
+                }
+                Err(e) => eprintln!("  ddp: eval_fn returned error (epoch {epochs_done}): {e}"),
+            }
+        };
+        let mut last_eval_at: Option<usize> = None;
 
         // Epoch-metrics channel for the returned DdpHandle, mirroring multi-GPU.
         let (epoch_metrics_tx, epoch_metrics_rx) =
@@ -201,7 +335,7 @@ impl DdpHandle {
         let device_indices = vec![device_index];
 
         // Train directly on this thread (no coordinator, local epoch management)
-        for epoch in 0..num_epochs {
+        for epoch in start_epoch..num_epochs {
             // Set current_epoch before epoch_fn so
             // worker.current_epoch() is correct inside the callback.
             worker.current_epoch = epoch;
@@ -245,34 +379,54 @@ impl DdpHandle {
                 eprintln!("  ddp: checkpoint failed (epoch {}): {e}", epoch + 1);
             }
 
+            // Periodic bundle, on the same cadence. Each one supersedes
+            // the last, and the end of the run writes its own, so a failure
+            // here is reported and training goes on.
+            if let (Some(every), Some(stem)) = (checkpoint_every, save_path.as_deref())
+                && every > 0
+                && (epoch + 1) % every == 0
+                && epoch + 1 < num_epochs
+                && let Err(e) = write_solo_checkpoint(
+                    &worker,
+                    stem,
+                    epoch + 1,
+                    crate::distributed::SaveReason::Checkpoint,
+                )
+            {
+                eprintln!(
+                    "  ddp: checkpoint bundle write failed (epoch {}): {e}",
+                    epoch + 1
+                );
+            }
+
             // Single-GPU eval cadence: mirrors the cluster controller's
             // dispatch. Fire after epoch N at (N+1) % every == 0 so the
             // semantic matches "evaluate the model at end of this epoch".
             // The framework flips train/eval mode; user supplies the
             // batch iteration inside the closure.
-            if let (Some(every), Some(efn), Some(ds)) = (eval_every_epochs, &eval_fn, &eval_dataset)
+            if let Some(every) = eval_every_epochs
                 && every > 0
                 && (epoch + 1) % every == 0
             {
-                worker.model().eval();
-                let result = efn(worker.model(), ds.as_ref());
-                worker.model().train();
-                match result {
-                    Ok(metric) => {
-                        if let Some(rf) = &eval_result_fn
-                            && let Err(e) = rf(epoch + 1, metric)
-                        {
-                            eprintln!(
-                                "  ddp: eval_result_fn returned error (epoch {}): {e}",
-                                epoch + 1,
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("  ddp: eval_fn returned error (epoch {}): {e}", epoch + 1,);
-                    }
-                }
+                run_eval(&worker, epoch + 1);
+                last_eval_at = Some(epoch + 1);
             }
+        }
+        // Final eval: the finished model is scored once, as on a cluster.
+        // Skipped when the cadence already scored it after the last epoch.
+        if num_epochs > 0 && last_eval_at != Some(num_epochs) {
+            run_eval(&worker, num_epochs);
+        }
+        // Final bundle. A run that trained to the end but cannot persist
+        // what `save_path` asked for has not delivered it.
+        if let Some(stem) = save_path.as_deref() {
+            write_solo_checkpoint(
+                &worker,
+                stem,
+                num_epochs.max(start_epoch),
+                crate::distributed::SaveReason::GracefulShutdown,
+            )
+            .map_err(final_bundle_lost)?;
         }
         // Drop the sender so next_metrics() returns None after the queue drains.
         drop(epoch_metrics_tx);
@@ -338,6 +492,9 @@ impl DdpHandle {
         scheduler: Option<Arc<dyn crate::nn::Scheduler>>,
         eval_fn: Option<EvalFn<M>>,
         eval_dataset: Option<Arc<dyn BatchDataSet>>,
+        checkpoint_every: Option<usize>,
+        save_path: Option<String>,
+        resume_from: Option<String>,
     ) -> Result<Worker<M>>
     where
         F: Fn(Device) -> Result<M>,
@@ -372,7 +529,7 @@ impl DdpHandle {
             augment: augment.max(1),
             epoch_splits: epoch_splits.max(1),
             transform,
-            seed: crate::distributed::ddp_run::SHUFFLE_BASE_SEED,
+            seed: ddp_run::resolve_shuffle_seed(resume_from.as_deref())?,
             max_grad_norm,
             precision,
             precision_fallback,
@@ -428,7 +585,76 @@ impl DdpHandle {
         if let Some(sched) = scheduler {
             worker.set_scheduler(sched);
         }
+        // Bundles and resume work as on the managed single-device path: the
+        // user owns the loop, the worker still owns what `save_path` and
+        // `resume_from` promise.
+        let resume = solo_resume(resume_from.as_deref(), num_epochs)?;
+        if let Some(r) = resume.as_ref() {
+            worker.set_trained_steps(r.global_step);
+        }
+        announce_solo_stem(save_path.as_deref());
 
-        Ok(Worker::single(worker, num_epochs, total_samples))
+        Ok(Worker::single(
+            worker,
+            num_epochs,
+            total_samples,
+            resume.map_or(0, |r| r.start_epoch),
+            save_path,
+            checkpoint_every,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::solo_resume_epoch;
+    use crate::distributed::{CheckpointMeta, CoverageBlock, EpochCoverage, SaveReason};
+
+    /// `(epoch, uncovered ranges)` per pool in flight.
+    type Pools = Vec<(usize, Vec<(usize, usize)>)>;
+
+    fn meta(epoch: usize, per_epoch: Option<Pools>) -> CheckpointMeta {
+        let meta = CheckpointMeta::new(epoch, 0, 0, 2, SaveReason::Checkpoint);
+        match per_epoch {
+            None => meta,
+            Some(list) => meta.with_coverage(CoverageBlock {
+                seed: 42,
+                epoch_splits: 1,
+                batch_size: 4,
+                per_epoch: list
+                    .into_iter()
+                    .map(|(epoch, uncovered_ranges)| EpochCoverage {
+                        epoch,
+                        total_samples: 64,
+                        uncovered_ranges,
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_single_device_resumes_after_what_the_bundle_covered() {
+        // A boundary save: `epoch` counts the epochs done.
+        assert_eq!(solo_resume_epoch(&meta(3, None)), (3, false));
+        // A cluster's bundle with its epoch fully covered: that epoch is done.
+        assert_eq!(
+            solo_resume_epoch(&meta(4, Some(vec![(4, vec![])]))),
+            (5, false)
+        );
+        // Something still owed: the epoch restarts whole.
+        assert_eq!(
+            solo_resume_epoch(&meta(4, Some(vec![(4, vec![(32, 16)])]))),
+            (4, true)
+        );
+        // Two pools in flight: the earliest unfinished one decides.
+        assert_eq!(
+            solo_resume_epoch(&meta(5, Some(vec![(4, vec![(0, 8)]), (5, vec![(0, 64)])]))),
+            (4, true)
+        );
+        assert_eq!(
+            solo_resume_epoch(&meta(5, Some(vec![(4, vec![]), (5, vec![(0, 64)])]))),
+            (5, true)
+        );
     }
 }

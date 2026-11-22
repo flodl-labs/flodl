@@ -658,3 +658,173 @@ fn single_device_epoch_splits_slice_the_pass_and_fire_per_slice() {
         );
     }
 }
+
+/// Scratch stem for a single-device bundle test.
+fn solo_stem(tag: &str) -> (std::path::PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("flodl_solo_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let stem = dir.join("ck").to_str().unwrap().to_string();
+    (dir, stem)
+}
+
+// A single device honors `save_path` and `resume_from`: the run leaves a
+// bundle whose meta says where it stood, and a resumed run trains only what
+// is left, on the same step clock.
+#[test]
+fn single_device_saves_a_bundle_and_resumes_from_it() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return; // auto-promote path; this pins the in-process fallback
+    }
+    use crate::distributed::{CheckpointBundle, CheckpointMeta, SaveReason};
+    let (dir, stem) = solo_stem("resume");
+    let meta_of = |stem: &str| CheckpointMeta::read_from_file(&CheckpointBundle::meta_path(stem));
+
+    // 100 samples at batch 4: 25 steps an epoch.
+    let run = |epochs: usize, resume: bool| {
+        let batches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let epochs_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let evals = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (b, s, e) = (
+            Arc::clone(&batches),
+            Arc::clone(&epochs_seen),
+            Arc::clone(&evals),
+        );
+        let mut builder = crate::distributed::Trainer::builder(
+            |dev| Linear::on_device(4, 2, dev),
+            |params| crate::nn::SGD::new(params, 0.01, 0.0),
+            move |model: &Linear, batch: &[Tensor]| {
+                b.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                mse_train(model, batch)
+            },
+        )
+        .dataset(Arc::new(TestDataset { n: 100 }))
+        .batch_size(4)
+        .num_epochs(epochs)
+        .backend(AverageBackend::Cpu)
+        .metrics_fn(move |m| {
+            s.lock().unwrap().push(m.epoch);
+            Ok(())
+        })
+        // No eval cadence: only the final eval can fire.
+        .eval_dataset(Arc::new(TestDataset { n: 8 }))
+        .eval_fn(|_model, _ds| Ok(1.0))
+        .eval_result_fn(move |epoch, _| {
+            e.lock().unwrap().push(epoch);
+            Ok(())
+        })
+        .checkpoint_every(2)
+        .save_path(stem.clone());
+        if resume {
+            builder = builder.resume_from(stem.clone());
+        }
+        builder.run().unwrap().join().unwrap();
+        (
+            batches.load(std::sync::atomic::Ordering::Relaxed),
+            epochs_seen.lock().unwrap().clone(),
+            evals.lock().unwrap().clone(),
+        )
+    };
+
+    let (batches, epochs_seen, evals) = run(4, false);
+    assert_eq!(batches, 100);
+    assert_eq!(epochs_seen, vec![0, 1, 2, 3]);
+    assert_eq!(evals, vec![4], "the finished model is scored once");
+    assert!(CheckpointBundle::model_path(&stem).exists());
+    let meta = meta_of(&stem).unwrap();
+    assert_eq!((meta.epoch, meta.global_step), (4, 100));
+    assert_eq!(meta.world_size_at_save, 1);
+    assert_eq!(meta.save_reason, SaveReason::GracefulShutdown);
+
+    // Two more epochs, and only those.
+    let (batches, epochs_seen, evals) = run(6, true);
+    assert_eq!(batches, 50);
+    assert_eq!(epochs_seen, vec![4, 5]);
+    assert_eq!(evals, vec![6]);
+    let meta = meta_of(&stem).unwrap();
+    assert_eq!((meta.epoch, meta.global_step), (6, 150));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// The periodic bundle is on disk while training continues, and says
+// which epoch it closed.
+#[test]
+fn single_device_writes_periodic_bundles() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return;
+    }
+    use crate::distributed::{CheckpointBundle, CheckpointMeta, SaveReason};
+    let (dir, stem) = solo_stem("periodic");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (s, meta_path) = (Arc::clone(&seen), CheckpointBundle::meta_path(&stem));
+
+    crate::distributed::Trainer::builder(
+        |dev| Linear::on_device(4, 2, dev),
+        |params| crate::nn::SGD::new(params, 0.01, 0.0),
+        mse_train,
+    )
+    .dataset(Arc::new(TestDataset { n: 16 }))
+    .batch_size(4)
+    .num_epochs(5)
+    .backend(AverageBackend::Cpu)
+    .checkpoint_every(2)
+    .save_path(stem.clone())
+    // Runs at the start of each epoch: reads what the epochs before left.
+    .epoch_fn(move |epoch, _worker| {
+        let meta = CheckpointMeta::read_from_file(&meta_path).ok();
+        s.lock()
+            .unwrap()
+            .push((epoch, meta.map(|m| (m.epoch, m.save_reason))));
+    })
+    .run()
+    .unwrap()
+    .join()
+    .unwrap();
+
+    let ck = |e| Some((e, SaveReason::Checkpoint));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(0, None), (1, None), (2, ck(2)), (3, ck(2)), (4, ck(4))],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// A run that cannot write its final bundle, or cannot read the one it was
+// asked to resume, says so instead of returning a clean result.
+#[test]
+fn single_device_fails_on_a_lost_final_bundle_or_an_unreadable_resume() {
+    if crate::tensor::usable_gpu_devices().len() >= 2 {
+        return;
+    }
+    let (dir, _) = solo_stem("fail");
+    // A regular file where a directory is needed: fails for any user on
+    // any platform.
+    std::fs::write(dir.join("blocker"), b"x").unwrap();
+    let bad = dir.join("blocker").join("ck").to_str().unwrap().to_string();
+
+    let builder = || {
+        crate::distributed::Trainer::builder(
+            |dev| Linear::on_device(4, 2, dev),
+            |params| crate::nn::SGD::new(params, 0.01, 0.0),
+            mse_train,
+        )
+        .dataset(Arc::new(TestDataset { n: 16 }))
+        .batch_size(4)
+        .num_epochs(1)
+        .backend(AverageBackend::Cpu)
+    };
+    let err = |r: crate::tensor::Result<_>| match r {
+        Ok::<crate::distributed::ddp_run::DdpHandle, _>(_) => panic!("expected an error"),
+        Err(e) => e.to_string(),
+    };
+
+    let msg = err(builder().save_path(bad).run());
+    assert!(msg.contains("final checkpoint was not written"), "{msg}");
+
+    let missing = dir.join("never-saved").to_str().unwrap().to_string();
+    let msg = err(builder().resume_from(missing).run());
+    assert!(msg.contains("never-saved"), "{msg}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

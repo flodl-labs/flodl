@@ -115,6 +115,12 @@ enum WorkerInner<M: Module> {
         num_epochs: usize,
         total_samples: usize,
         next_epoch: usize,
+        /// First epoch this run trains (non-zero on a resume).
+        start_epoch: usize,
+        /// Bundle stem: written at `finish`, and every `checkpoint_every`
+        /// epochs when that is set.
+        save_path: Option<String>,
+        checkpoint_every: Option<usize>,
     },
     /// Coordinator-driven rank (multi-GPU / cluster). The `ClusterWorker` owns
     /// the bridge threads; the plan cursor (`wait_for_epoch_plan` +
@@ -127,13 +133,23 @@ impl<M: Module + 'static> Worker<M> {
     /// Wrap a bare [`GpuWorker`] as a single-device cooperative worker.
     /// No coordinator; epoch plans are synthesized locally over the whole
     /// dataset for `num_epochs`.
-    pub(crate) fn single(worker: GpuWorker<M>, num_epochs: usize, total_samples: usize) -> Self {
+    pub(crate) fn single(
+        worker: GpuWorker<M>,
+        num_epochs: usize,
+        total_samples: usize,
+        start_epoch: usize,
+        save_path: Option<String>,
+        checkpoint_every: Option<usize>,
+    ) -> Self {
         Worker {
             inner: WorkerInner::Single {
                 worker,
                 num_epochs,
                 total_samples,
-                next_epoch: 0,
+                next_epoch: start_epoch,
+                start_epoch,
+                save_path,
+                checkpoint_every,
             },
             epoch_state: None,
             pending_plan: None,
@@ -336,7 +352,30 @@ impl<M: Module + 'static> Worker<M> {
                 num_epochs,
                 total_samples,
                 next_epoch,
+                start_epoch,
+                save_path,
+                checkpoint_every,
             } => {
+                // The epochs before `next_epoch` are closed. Periodic bundle
+                // on that boundary; `finish` writes the final one, so a
+                // failure here is reported and the loop goes on.
+                if let (Some(every), Some(stem)) = (*checkpoint_every, save_path.as_deref())
+                    && every > 0
+                    && *next_epoch > *start_epoch
+                    && (*next_epoch).is_multiple_of(every)
+                    && *next_epoch < *num_epochs
+                    && let Err(e) = super::orchestrator::write_solo_checkpoint(
+                        worker,
+                        stem,
+                        *next_epoch,
+                        crate::distributed::SaveReason::Checkpoint,
+                    )
+                {
+                    eprintln!(
+                        "  ddp: checkpoint bundle write failed (epoch {}): {e}",
+                        *next_epoch
+                    );
+                }
                 if *next_epoch >= *num_epochs {
                     None
                 } else {
@@ -345,7 +384,6 @@ impl<M: Module + 'static> Worker<M> {
                     // begin_epoch (run lazily by next_batch) sets current_epoch;
                     // the synth plan covers the whole dataset (no partitioning
                     // on a single device).
-                    let _ = worker;
                     Some(EpochPlan {
                         epoch,
                         partition_offset: 0,
@@ -474,6 +512,10 @@ impl<M: Module + 'static> Worker<M> {
     pub fn finish(mut self) -> Result<TrainedState> {
         // Release any lingering per-batch guard before the final accounting.
         self.active_guard = None;
+        // An epoch still open here was left before its last batch, or was
+        // planned and never started: it does not count as done in the
+        // bundle's meta.
+        let left_open = self.epoch_state.is_some() || self.pending_plan.is_some();
         if let Some(mut st) = self.epoch_state.take()
             && !st.shutdown()
         {
@@ -483,7 +525,24 @@ impl<M: Module + 'static> Worker<M> {
         // Borrow (never move) self.inner — `Worker` has a Drop impl, so moving
         // a field out is illegal; teardown / snapshot both take `&mut`.
         let state = match &mut self.inner {
-            WorkerInner::Single { worker, .. } => {
+            WorkerInner::Single {
+                worker,
+                next_epoch,
+                start_epoch,
+                save_path,
+                ..
+            } => {
+                // Final bundle, as the managed single-device run writes it.
+                if let Some(stem) = save_path.as_deref() {
+                    let started = *next_epoch - usize::from(left_open);
+                    super::orchestrator::write_solo_checkpoint(
+                        worker,
+                        stem,
+                        started.max(*start_epoch),
+                        crate::distributed::SaveReason::GracefulShutdown,
+                    )
+                    .map_err(super::orchestrator::final_bundle_lost)?;
+                }
                 let snap = worker.snapshot_params();
                 TrainedState {
                     params: snap

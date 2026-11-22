@@ -626,6 +626,14 @@ pub struct DdpRunConfig {
     /// A host-local path scatters the bundle and breaks resume. On a
     /// genuine multi-host launch the framework prints a one-time reminder;
     /// single-box multi-GPU is unaffected (one host owns every piece).
+    ///
+    /// **Single device:** the run writes the same bundle at its end, and
+    /// every `checkpoint_every` epochs when that is set: `<save_path>.fdl`
+    /// in the consensus layout, `.optim`, and a `.meta.json` recording the
+    /// epochs done and the step count. A final bundle that cannot be
+    /// written fails the run. The cooperative `Worker` writes the periodic
+    /// ones as the loop asks for its next epoch and the final one in
+    /// `finish`.
     pub save_path: Option<String>,
 
     /// Threshold for declaring a cluster run unrecoverable. When the
@@ -716,6 +724,12 @@ pub struct DdpRunConfig {
     /// Multi-host: like [`Self::save_path`], this stem must resolve to
     /// shared storage visible to every host (the controller reads the
     /// meta on its host; ranks re-seed from the same stem on theirs).
+    ///
+    /// **Single device:** the run starts at the first epoch the bundle
+    /// did not finish, with the scheduler's step clock restored. Bundles
+    /// from a single device and from a cluster resume on either. A cluster
+    /// bundle taken inside an epoch restarts that epoch whole here, and
+    /// says so.
     ///
     /// `None` = fresh run. Builder sugar: [`DdpBuilder::resume_from`].
     pub resume_from: Option<String>,
