@@ -48,7 +48,9 @@ pub fn download_file(url: &str, dest: &Path) -> Result<(), String> {
 
     let status = match dl {
         Downloader::Curl => Command::new("curl")
-            .args(["-L", "--progress-bar", "-o", dest_str, url])
+            // `--fail`: without it an HTTP error page is saved as the file and
+            // the failure surfaces later as an unreadable archive.
+            .args(["-L", "--fail", "--progress-bar", "-o", dest_str, url])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status(),

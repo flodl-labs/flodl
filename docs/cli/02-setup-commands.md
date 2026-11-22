@@ -43,7 +43,7 @@ fdl libtorch download --cuda 12.8  # CUDA 12.8 / cu128 (~2GB)
 fdl libtorch download --cuda 12.6  # CUDA 12.6 / cu126 (~2GB)
 fdl libtorch download --rocm 7.0   # AMD ROCm 7.0 (~5GB, Linux only)
 fdl libtorch download --rocm 7.1   # AMD ROCm 7.1 (same GPUs, newer runtime)
-fdl libtorch download --path ~/lib # install to a custom directory
+fdl libtorch download --path ~/libtorch-cpu # install INTO this directory (new, empty, or an older libtorch)
 fdl libtorch download --no-activate # install but do not switch `.active`
 fdl libtorch download --dry-run    # show what would happen
 ```
