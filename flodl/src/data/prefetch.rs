@@ -5,9 +5,10 @@
 //!
 //! # Pipeline shape
 //!
-//! Single-stage (CPU targets, distributed `LoadBatch`): one worker
+//! Single-stage (CPU and MPS targets, distributed `LoadBatch`): one worker
 //! thread fetches from the dataset and forwards on the batch channel;
-//! the channel itself is the read-ahead buffer.
+//! the channel itself is the read-ahead buffer. MPS still uploads in
+//! that stage; it has no CUDA copy stream to overlap with a reader ring.
 //!
 //! Two-stage (CUDA targets, `ring_slots > 0`): a reader thread fetches
 //! batches from the dataset into a bounded pageable-RAM ring; the
@@ -989,6 +990,8 @@ fn pooled_transfer_with_retry(
     pool: &mut VramSamplePool,
     #[cfg(feature = "gpu")] copy_stream: Option<&crate::tensor::cuda_stream::GpuStream>,
 ) -> Result<PrefetchedBatch> {
+    // OOM retry and the sample pool are CUDA allocator policy. MPS still
+    // uploads: `transfer_batch` is the "data leaves the host" step.
     if !device.is_cuda() {
         return transfer_batch(
             picks,
@@ -1082,7 +1085,8 @@ fn fetch_and_transfer(
 /// rows are captured into the pool on the way out (all on the copy
 /// stream, so the delivery event covers gathers and captures too).
 /// On a CPU target this is a pass-through (shallow clones: refcount
-/// bumps on shared storage, no data copy).
+/// bumps on shared storage, no data copy). On MPS it is a synchronous
+/// upload: no pinned staging, no copy stream, no CUDA event.
 fn transfer_batch(
     picks: &[usize],
     samples: &[usize],
@@ -1091,9 +1095,24 @@ fn transfer_batch(
     pool: &mut VramSamplePool,
     #[cfg(feature = "gpu")] copy_stream: Option<&crate::tensor::cuda_stream::GpuStream>,
 ) -> Result<PrefetchedBatch> {
-    if !device.is_cuda() {
+    if !device.is_accelerator() {
         return Ok(PrefetchedBatch {
             tensors: tensors.to_vec(),
+            picks: picks.to_vec(),
+            #[cfg(feature = "gpu")]
+            ready_event: None,
+        });
+    }
+
+    // Accelerator without a CUDA runtime. MPS lands here: the data has
+    // to leave the host, and pinning / streams / events do not apply.
+    if !device.is_cuda() {
+        let on_device = tensors
+            .iter()
+            .map(|t| t.to_device(device))
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(PrefetchedBatch {
+            tensors: on_device,
             picks: picks.to_vec(),
             #[cfg(feature = "gpu")]
             ready_event: None,

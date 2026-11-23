@@ -100,6 +100,36 @@ fn test_profiling_basic() {
     assert!(graph.profile().is_none());
 }
 
+/// MPS profiling must not time the launch. The forward drains the MPS
+/// queue around each host read and reports the host clock, not CUDA
+/// events. Skips where MPS is absent.
+#[test]
+fn test_mps_profiling_synchronizes_around_the_host_clock() {
+    if !crate::tensor::mps_available() {
+        return;
+    }
+    let dev = crate::tensor::Device::MPS;
+    let graph = FlowBuilder::from(Linear::on_device(8, 8, dev).unwrap())
+        .tag("enc")
+        .through(ReLU::new())
+        .through(Linear::on_device(8, 4, dev).unwrap())
+        .tag("dec")
+        .build()
+        .unwrap();
+    graph.enable_profiling();
+    let x = Variable::new(
+        crate::tensor::Tensor::from_f32(&[0.5; 8], &[1, 8], dev).unwrap(),
+        false,
+    );
+    graph.forward(&x).unwrap();
+    let p = graph.profile().unwrap();
+    assert_eq!(p.source, ProfileSource::HostWallClock);
+    assert!(p.total.as_nanos() > 0);
+    assert!(p.timing("enc").as_nanos() > 0);
+    assert!(p.timing("dec").as_nanos() > 0);
+    assert_eq!(graph.forward(&x).unwrap().data().device(), dev);
+}
+
 #[test]
 fn test_profiling_gpu_event_telescoping() {
     if !crate::tensor::test_device().is_cuda() {
