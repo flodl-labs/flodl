@@ -296,10 +296,16 @@ fn test_device_enum_basics() {
     assert!(!Device::CPU.is_cuda());
     assert!(Device::CUDA(0).is_cuda());
     assert!(Device::CUDA(1).is_cuda());
+    assert!(!Device::MPS.is_cuda());
+    assert!(Device::MPS.is_mps());
+    assert!(!Device::CPU.is_accelerator());
+    assert!(Device::CUDA(0).is_accelerator());
+    assert!(Device::MPS.is_accelerator());
 
     assert_eq!(Device::CPU.index(), 0);
     assert_eq!(Device::CUDA(0).index(), 0);
     assert_eq!(Device::CUDA(1).index(), 1);
+    assert_eq!(Device::MPS.index(), 0);
 }
 
 #[test]
@@ -307,6 +313,17 @@ fn test_device_display() {
     assert_eq!(format!("{}", Device::CPU), "cpu");
     assert_eq!(format!("{}", Device::CUDA(0)), "cuda");
     assert_eq!(format!("{}", Device::CUDA(1)), "cuda:1");
+    assert_eq!(format!("{}", Device::MPS), "mps");
+}
+
+/// The default MPS hook throws, and that throw reaches `flodl_fatal`.
+/// Synchronize must ask first and return on a host with no backend.
+#[test]
+fn test_mps_synchronize_is_safe_when_unavailable() {
+    if crate::tensor::mps_available() {
+        return;
+    }
+    crate::tensor::mps_synchronize();
 }
 
 #[test]
@@ -316,6 +333,7 @@ fn test_device_ffi_roundtrip() {
         Device::CUDA(0),
         Device::CUDA(1),
         Device::CUDA(7),
+        Device::MPS,
     ];
     for dev in &devices {
         let (dt, di) = dev.to_ffi();

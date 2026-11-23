@@ -69,17 +69,23 @@ static inline torch::Device to_device(int device_type, int device_index) {
     if (device_type == FLODL_CUDA) {
         return torch::Device(torch::kCUDA, (c10::DeviceIndex)device_index);
     }
+    if (device_type == FLODL_MPS) {
+        // Compiled on every host. libtorch refuses a kMPS tensor itself
+        // where the backend is absent; mps_available() is the runtime check.
+        return torch::Device(torch::kMPS, (c10::DeviceIndex)device_index);
+    }
     return torch::Device(torch::kCPU);
 }
 
 // Helper: convert torch::Device back to our (type, index) pair.
 static inline int from_device_type(const torch::Device& dev) {
     if (dev.is_cuda()) return FLODL_CUDA;
+    if (dev.is_mps()) return FLODL_MPS;
     return FLODL_CPU;
 }
 
 static inline int from_device_index(const torch::Device& dev) {
-    if (dev.is_cuda()) return (int)dev.index();
+    if (dev.is_cuda() || dev.is_mps()) return (int)dev.index();
     return 0;
 }
 

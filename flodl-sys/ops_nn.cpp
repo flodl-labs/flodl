@@ -7,6 +7,8 @@
 
 #include "helpers.h"
 
+#include <torch/mps.h>
+
 #ifdef FLODL_BUILD_GPU
 #include "gpu_compat.h"
 #include <ATen/detail/CUDAHooksInterface.h>
@@ -488,6 +490,29 @@ extern "C" int flodl_gpu_is_available(void) {
         flodl_fatal("flodl_gpu_is_available", e.what());
     } catch (...) {
         flodl_fatal("flodl_gpu_is_available", nullptr);
+    }
+}
+
+extern "C" int flodl_mps_is_available(void) {
+    try {
+        return torch::mps::is_available() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" void flodl_mps_synchronize(void) {
+    try {
+        // The default MPS hook throws where there is no backend, and
+        // that throw reaches flodl_fatal. Same guard as
+        // flodl_gpu_synchronize: ask first, then wait.
+        if (torch::mps::is_available()) {
+            torch::mps::synchronize();
+        }
+    } catch (const std::exception& e) {
+        flodl_fatal("flodl_mps_synchronize", e.what());
+    } catch (...) {
+        flodl_fatal("flodl_mps_synchronize", nullptr);
     }
 }
 

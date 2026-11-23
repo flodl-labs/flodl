@@ -331,6 +331,11 @@ pub fn probe_device(device: Device) -> Result<()> {
     let idx = match device {
         Device::CUDA(i) => i,
         Device::CPU => return Ok(()),
+        Device::MPS => {
+            return Err(TensorError::new(
+                "probe_device supports CUDA devices only; use mps_available for MPS",
+            ));
+        }
     };
     let opts = TensorOptions {
         dtype: DType::Float32,
