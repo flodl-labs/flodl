@@ -274,7 +274,11 @@ case "$HOST" in
         # a Mach-O host build and a Linux container build can share one
         # checkout (bare `cpu` stays the Linux x86_64 reference).
         LT_FLAG="--cpu"; LT_DIR=cpu-macos; LT_LIB="lib/libtorch.dylib"
-        COMPILE=1
+        # The CPU archive carries the MPS backend. The shim always
+        # compiles those calls, and the suite below is where they meet
+        # an Apple GPU: the MPS tests run when Metal is present and
+        # return immediately when it is not.
+        COMPILE=1; CPU_TESTS=1
         REFUSE_FLAG="--cuda 12.8"; REFUSE_MSG="macOS only supports CPU libtorch"
         ;;
     windows-x86_64)
