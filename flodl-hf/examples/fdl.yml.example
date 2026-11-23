@@ -11,6 +11,10 @@ commands:
     run: cargo run --release --example bert_classify
     docker: dev
 
+  bert-mps-bench:
+    description: TinyBERT CPU vs Apple MPS throughput. Native macOS only (no docker service). Prints a CSV; the tree does not store timings.
+    run: cargo run --release --example bert_mps_bench
+
   bert-ner:
     description: Named-entity recognition — download a NER checkpoint and tag tokens
     run: cargo run --release --example bert_ner

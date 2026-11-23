@@ -16,6 +16,9 @@ commands:
     run: cargo test
     append: -- --nocapture --skip leakcheck
     docker: dev
+  test-mps:
+    description: Native Apple MPS tests (autograd, resident and streaming DataLoader, graph profiling). Skips where MPS is absent. No docker service, so fdl runs host cargo against the active libtorch.
+    run: cargo test -p flodl --lib mps_ -- --nocapture --skip leakcheck
   bench-test:
     description: Run ddp-bench's own unit tests (workspace-excluded, so `test` misses them)
     run: cd ddp-bench && cargo test
