@@ -235,15 +235,30 @@ python3 flodl-hf/examples/plot_mps_bench.py mps-tinybert.csv \
     --caption "M5 Pro · macOS 26.5.1"
 ```
 
-`test-mps` runs the MPS autograd, resident DataLoader, streaming
-DataLoader and graph-profiling tests. `bert-mps-bench` prints a CSV
-(device, batch size, sequence length, median milliseconds per step,
-examples per second) for a small BERT. Each timed stretch is a warmup,
-then several rounds of steps bracketed by a device synchronize, so the
-median includes the kernels. `plot_mps_bench.py` reads that CSV, prints
-the markdown table (CPU and MPS step time, the speedup, and both
-throughputs), and writes the chart. The repository does not check a
-CSV, chart or table in; those are produced from a run.
+`test-mps` runs the tests whose names contain `test_mps`: the MPS
+forward/backward, the resident and streaming DataLoader, graph
+profiling, and synchronize-when-absent. The filter is `test_mps`, not
+`mps_`, which also matches unrelated `clamps_*` tests. Where MPS is
+absent those tests return without failing.
+
+`bert-mps-bench` prints a CSV (device, batch size, sequence length,
+median milliseconds per step, examples per second). Each reported
+figure is the median of 3 rounds of 10 steps, and each round is
+bracketed by a device synchronize, after 2 untimed warmup steps.
+`plot_mps_bench.py` reads that CSV, prints the markdown table, and
+writes the chart.
+
+Measured on an Apple M5 Pro (20-core GPU), macOS 26.5.1, LibTorch
+2.10.0, TinyBERT (`jason-zhoou/tiny-bert-sst2`), sequence length 128:
+
+| Batch | CPU ms / step | MPS ms / step | MPS speedup | CPU examples / s | MPS examples / s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 15.656 | 6.606 | 2.37× | 1022.0 | 2421.9 |
+| 64 | 51.672 | 10.611 | 4.87× | 1238.6 | 6031.5 |
+| 256 | 208.193 | 41.628 | 5.00× | 1229.6 | 6149.7 |
+| 512 | 423.821 | 89.302 | 4.75× | 1208.1 | 5733.3 |
+
+![CPU and Apple MPS TinyBERT training throughput and step time](charts/mps-tinybert.svg)
 
 The container commands (`./fdl test`, `./fdl build`) stay the Linux
 arm64 CPU path. They do not see MPS.

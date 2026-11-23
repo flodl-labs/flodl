@@ -12,9 +12,9 @@
 //!     --svg docs/charts/mps-tinybert.svg --caption "M5 Pro · macOS …"
 //! ```
 //!
-//! The CSV on stdout is the only measurement. `plot_mps_bench.py` prints
-//! the markdown table and, with `--svg`, writes the chart. Neither file
-//! is checked in until a run on real hardware replaces it. The first run
+//! The CSV on stdout is the measurement. `plot_mps_bench.py` prints the
+//! markdown table and, with `--svg`, writes the chart. The published
+//! M5 Pro numbers live in `docs/mac-apple-silicon.md`. The first run
 //! downloads the checkpoint.
 
 use std::time::Instant;
