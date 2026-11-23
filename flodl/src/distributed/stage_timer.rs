@@ -126,18 +126,23 @@ mod tests {
         // process state a test must not depend on.
         let nap = std::time::Duration::from_millis(20);
         TOTALS.with(|t| *t.borrow_mut() = Default::default());
+        let start = Instant::now();
         charge(Stage::Parse, 0, || {
             std::thread::sleep(nap);
             charge(Stage::Mac, 5, || std::thread::sleep(nap));
         });
+        let wall = start.elapsed().as_nanos() as u64;
         let totals = TOTALS.with(|t| std::mem::take(&mut *t.borrow_mut()));
         let (parse, mac) = (totals[Stage::Parse as usize], totals[Stage::Mac as usize]);
         assert!(mac.nanos >= 20_000_000 && mac.bytes == 5 && mac.calls == 1);
-        // The outer stage keeps its own 20 ms, not the 40 ms it spanned.
         assert!(parse.nanos >= 20_000_000, "outer lost its own time");
+        // Exclusive times add up to the time that passed. Were the inner
+        // stage still counted in the outer one, the sum would exceed the
+        // wall time by the inner stage. A sleep may overrun by any
+        // amount, so no bound is put on either stage alone.
         assert!(
-            parse.nanos < mac.nanos + 15_000_000,
-            "outer {} ns still includes the inner {} ns",
+            parse.nanos + mac.nanos <= wall,
+            "outer {} ns + inner {} ns exceed the {wall} ns that passed",
             parse.nanos,
             mac.nanos
         );
