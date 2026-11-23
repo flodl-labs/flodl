@@ -284,8 +284,29 @@ fn an_f16_worker_scales_the_loss_and_skips_a_step_with_bad_gradients() {
 
     // A clean step: the same update an f32 worker makes from the same
     // start, to within what an f16 forward costs.
+    //
+    // The start is fixed, not drawn. At the initial scale of 65536 the
+    // f16 bias gradient is 65536 * (y - t), which passes f16's largest
+    // value (65504) once an output sits about 1 away from its target. A
+    // default init reaches that for some draws, and the scaler then skips
+    // this step, correctly. Here y - t = -0.05.
     let (mut reference, _rc) = make_det_worker_with(16, crate::nn::Precision::F32);
-    sync_params(&mut reference, &mut w);
+    let start = reference.snapshot_params();
+    let fixed = [0.1, 0.0]; // weight, bias
+    reference
+        .load_averaged(&AveragedParams {
+            params: start
+                .params
+                .iter()
+                .zip(fixed)
+                .map(|(p, v)| Tensor::full_like(p, v).unwrap())
+                .collect(),
+            buffers: start.buffers,
+            version: 0,
+            realized: true,
+        })
+        .unwrap();
+    sync_params(&mut w, &mut reference);
     let before = weights(&w);
     w.train_step(&batch, &mse_train).unwrap();
     reference.train_step(&batch, &mse_train).unwrap();
