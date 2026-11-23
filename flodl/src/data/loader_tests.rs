@@ -325,6 +325,69 @@ fn test_device_aware_loading() {
     assert_eq!(b[1].device(), dev);
 }
 
+/// Resident MPS loader: the dataset is uploaded, and the permutation
+/// `index_select` runs on that device rather than mixing a CPU source
+/// with an MPS index. Skips where MPS is absent.
+#[test]
+fn test_mps_resident_batches_arrive_on_device() {
+    if !crate::tensor::mps_available() {
+        return;
+    }
+    let dev = Device::MPS;
+    let mut loader = DataLoader::from_dataset(SequentialData { n: 20 })
+        .batch_size(5)
+        .device(dev)
+        .build()
+        .unwrap();
+
+    assert!(
+        loader.is_resident(),
+        "a small MPS set takes the resident path"
+    );
+    let batches: Vec<Batch> = loader.epoch(0).map(|b| b.unwrap()).collect();
+    assert_eq!(batches.len(), 4);
+    let mut vals = Vec::new();
+    for b in &batches {
+        assert_eq!(b[0].device(), dev);
+        vals.extend(b[0].to_f32_vec().unwrap());
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(
+        vals,
+        (0..20).map(|i| i as f32).collect::<Vec<_>>(),
+        "resident index_select must gather the uploaded rows"
+    );
+}
+
+/// Streaming MPS loader: `transfer_batch` uploads instead of handing the
+/// CPU tensors through. Skips where MPS is absent.
+#[test]
+fn test_mps_streaming_batches_arrive_on_device() {
+    if !crate::tensor::mps_available() {
+        return;
+    }
+    let dev = Device::MPS;
+    let mut loader = DataLoader::from_dataset(SequentialData { n: 22 })
+        .batch_size(5)
+        .drop_last(false)
+        .device(dev)
+        .streaming()
+        .build()
+        .unwrap();
+
+    assert!(!loader.is_resident());
+    let batches: Vec<Batch> = loader.epoch(0).map(|b| b.unwrap()).collect();
+    assert_eq!(batches.len(), 5);
+    assert_eq!(batches[4][0].shape(), &[2, 1]);
+    let mut vals = Vec::new();
+    for b in &batches {
+        assert_eq!(b[0].device(), dev);
+        vals.extend(b[0].to_f32_vec().unwrap());
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(vals, (0..22).map(|i| i as f32).collect::<Vec<_>>());
+}
+
 #[test]
 fn test_multi_target_dataset() {
     struct FbrlLike {

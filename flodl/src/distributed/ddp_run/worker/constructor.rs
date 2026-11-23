@@ -308,6 +308,9 @@ impl<M: Module> GpuWorker<M> {
         // shared parse with the solo loader (audit D7).
         let pool_off = crate::data::vram_pool::vram_pool_env_off();
         let vram_pool_enabled = config.vram_pool && !pool_off;
+        // Prefetch depth, the copy stream and the VRAM probe are a CUDA
+        // runtime. MPS takes the sync path in the epoch plan, which
+        // still uploads each batch.
         let (prefetch, per_sample_bytes) = if config.device.is_cuda() && total_batches > 1 {
             let sample = dataset.get_batch(&[0])?;
             let psb: usize = sample.iter().map(|t| t.nbytes()).sum();

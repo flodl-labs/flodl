@@ -246,6 +246,9 @@ pub(crate) fn unified_adjusted_available(
     device: Device,
     gpu_ram_share: Option<f64>,
 ) -> u64 {
+    // MPS shares the host's memory too, but the correction below is the
+    // CUDA/APU probe (driver aperture, overlap measurement). Applying it
+    // to MPS is a separate change; this PR leaves the gate on `is_cuda`.
     if !device.is_cuda() {
         return available;
     }

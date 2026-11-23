@@ -12,6 +12,7 @@
 mod cuda;
 pub mod cuda_event;
 pub mod cuda_stream;
+mod mps;
 mod nn_ops;
 mod ops;
 mod shape;
@@ -19,6 +20,7 @@ mod shape;
 pub use cuda::*;
 pub use cuda_event::{GpuEvent, GpuEventFlags};
 pub use cuda_stream::{GpuStream, StreamGuard};
+pub use mps::{mps_available, mps_synchronize};
 
 // Deprecated `cuda_*` / `Cuda*` spellings, re-exported here because
 // `pub use cuda::*` above used to carry them at this path. See
@@ -101,11 +103,13 @@ impl DType {
 /// Device represents where a tensor's data lives.
 ///
 /// `Device::CPU` is the host. `Device::CUDA(n)` is GPU index `n`.
-/// Most single-GPU code uses `Device::CUDA(0)`.
+/// Most single-GPU code uses `Device::CUDA(0)`. `Device::MPS` is the
+/// Apple Silicon GPU (one device; libtorch's own device type, not CUDA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Device {
     CPU,
     CUDA(u8),
+    MPS,
 }
 
 impl Device {
@@ -114,6 +118,7 @@ impl Device {
         match self {
             Device::CPU => (ffi::FLODL_CPU, 0),
             Device::CUDA(idx) => (ffi::FLODL_CUDA, idx as i32),
+            Device::MPS => (ffi::FLODL_MPS, 0),
         }
     }
 
@@ -121,19 +126,35 @@ impl Device {
     pub(crate) fn from_ffi(device_type: i32, device_index: i32) -> Self {
         match device_type {
             ffi::FLODL_CUDA => Device::CUDA(device_index as u8),
+            ffi::FLODL_MPS => Device::MPS,
             _ => Device::CPU,
         }
     }
 
-    /// Whether this is a CUDA device.
+    /// Whether a CUDA runtime exists for this device: streams, events,
+    /// VRAM probes, pinned staging. MPS is not CUDA.
     pub fn is_cuda(&self) -> bool {
         matches!(self, Device::CUDA(_))
     }
 
-    /// Device index (0 for CPU, GPU index for CUDA).
+    /// Whether this is the Apple MPS device.
+    pub fn is_mps(&self) -> bool {
+        matches!(self, Device::MPS)
+    }
+
+    /// Whether tensor data must leave the host to live here.
+    ///
+    /// CUDA and MPS are accelerators. `is_cuda` is the narrower question
+    /// (a CUDA runtime). Transfers follow this; streams, events, VRAM
+    /// probes and pinning stay on `is_cuda`.
+    pub fn is_accelerator(&self) -> bool {
+        matches!(self, Device::CUDA(_) | Device::MPS)
+    }
+
+    /// Device index (0 for CPU and MPS, GPU index for CUDA).
     pub fn index(&self) -> u8 {
         match self {
-            Device::CPU => 0,
+            Device::CPU | Device::MPS => 0,
             Device::CUDA(idx) => *idx,
         }
     }
@@ -145,6 +166,7 @@ impl fmt::Display for Device {
             Device::CPU => write!(f, "cpu"),
             Device::CUDA(0) => write!(f, "cuda"),
             Device::CUDA(idx) => write!(f, "cuda:{}", idx),
+            Device::MPS => write!(f, "mps"),
         }
     }
 }
@@ -771,6 +793,11 @@ impl Tensor {
     /// f16/bf16/f32/i32, and exact up to 2^53 for Int64 (the f64
     /// mantissa limit).
     pub fn to_f64_vec(&self) -> Result<Vec<f64>> {
+        // MPS has no Float64 kernel. Move to the host before the cast
+        // so the conversion does not run on the device.
+        if self.device().is_mps() {
+            return self.to_device(Device::CPU)?.to_f64_vec();
+        }
         if self.dtype() != DType::Float64 {
             return self.to_dtype(DType::Float64)?.to_f64_vec();
         }
@@ -811,6 +838,10 @@ impl Tensor {
     /// println!("loss: {:.4}", loss_val);
     /// ```
     pub fn item(&self) -> Result<f64> {
+        // `.item()` casts to f64. MPS cannot, so read the scalar on CPU.
+        if self.device().is_mps() {
+            return self.to_device(Device::CPU)?.item();
+        }
         if self.numel() != 1 {
             return Err(TensorError::new(&format!(
                 "item() requires exactly 1 element, got {} (shape {:?})",

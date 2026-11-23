@@ -259,7 +259,15 @@ fn find_project_mount(volumes: &[serde_yaml_ng::Value]) -> Option<String> {
 ///   LIBTORCH_CPU_PATH  = ./libtorch/precompiled/(per-arch cpu dir)
 ///   CUDA_VERSION, CUDA_TAG from .arch metadata
 ///   FDL_GPU_FEATURE   = the cargo feature the active variant needs
-pub(crate) fn libtorch_env(project_root: &Path) -> Result<Vec<(String, String)>, String> {
+pub(crate) fn libtorch_env(start: &Path) -> Result<Vec<(String, String)>, String> {
+    // A nested `run:` (`fdl flodl-hf example bert-mps-bench`) executes
+    // with cwd inside the child project. That directory has no
+    // `libtorch/.active`. Resolving only there skips this whole block,
+    // so a macOS binary is linked `@rpath/libtorch.dylib` with no
+    // LC_RPATH even when the parent shell already exported
+    // `LIBTORCH_PATH` (the build finds the headers; dyld does not find
+    // the library). Walk up to the checkout that owns the install.
+    let project_root = libtorch_checkout(start);
     let mut env = Vec::new();
 
     // CPU path is per-architecture: the container runs the host's arch,
@@ -270,7 +278,7 @@ pub(crate) fn libtorch_env(project_root: &Path) -> Result<Vec<(String, String)>,
         crate::libtorch::detect::container_cpu_path(),
     ));
 
-    if let Some((info, host_path)) = resolve_libtorch(project_root)? {
+    if let Some((info, host_path)) = resolve_libtorch(&project_root)? {
         env.push(("LIBTORCH_HOST_PATH".into(), host_path.clone()));
 
         // Native commands: fill what the docker services get from their
@@ -283,7 +291,9 @@ pub(crate) fn libtorch_env(project_root: &Path) -> Result<Vec<(String, String)>,
         // linked binary load at runtime, vendor-ordered — on ROCm the
         // system runtime must precede libtorch's bundled copy.
         let abs_path = if Path::new(&host_path).is_relative() {
-            project_root.join(&host_path).display().to_string()
+            normalize_path(&project_root.join(&host_path))
+                .display()
+                .to_string()
         } else {
             host_path
         };
@@ -361,6 +371,40 @@ pub(crate) fn libtorch_env(project_root: &Path) -> Result<Vec<(String, String)>,
     }
 
     Ok(env)
+}
+
+/// Checkout that owns `libtorch/.active` (or `.active.<case>`), walking
+/// up from `start`. `start` itself when nothing above it has one.
+fn libtorch_checkout(start: &Path) -> PathBuf {
+    let marker = active_pointer_name();
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join("libtorch").join(&marker).is_file() {
+            return dir;
+        }
+        if !dir.pop() {
+            return start.to_path_buf();
+        }
+    }
+}
+
+/// `.active`, or `.active.<case>` when `FDL_LIBTORCH_CASE` is set.
+/// Same pointer [`libtorch::detect::read_active`] reads, so the walk
+/// stops on the file that function will actually open.
+/// Drop `.` components so a relative `./libtorch/...` joined onto the
+/// checkout does not leave `root/./libtorch` in `LIBTORCH_PATH` or the
+/// macOS rpath.
+fn normalize_path(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect()
+}
+
+fn active_pointer_name() -> String {
+    match std::env::var("FDL_LIBTORCH_CASE") {
+        Ok(case) if !case.trim().is_empty() => format!(".active.{}", case.trim()),
+        _ => ".active".to_string(),
+    }
 }
 
 /// Resolve `(LibtorchInfo, host_path)` for `libtorch_env`.
@@ -2306,6 +2350,76 @@ mod tests {
         // never lands on a command line.
         assert!(!arg.contains("always"), "got: {arg:?}");
         unsafe { std::env::remove_var("CARGO_TERM_COLOR") };
+    }
+
+    #[test]
+    fn a_nested_run_dir_anchors_libtorch_at_the_checkout() {
+        // flodl-hf/examples has no libtorch. The macOS rpath has to name
+        // the checkout's lib directory anyway, or dyld loads nothing.
+        let s = Scratch::new();
+        let lt = s.path().join("libtorch");
+        let variant = lt.join("precompiled/cpu-macos");
+        std::fs::create_dir_all(variant.join("lib")).unwrap();
+        std::fs::write(
+            variant.join(".arch"),
+            "torch=2.10.0\ncuda=none\nsource=test\n",
+        )
+        .unwrap();
+        std::fs::write(lt.join(".active"), "precompiled/cpu-macos\n").unwrap();
+        let nested = s.path().join("flodl-hf/examples");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(libtorch_checkout(&nested), s.path());
+        assert_eq!(libtorch_checkout(s.path()), s.path());
+
+        let _guard = env_lock();
+        let saved_lt = std::env::var_os("LIBTORCH_PATH");
+        let saved_rustflags = std::env::var_os("RUSTFLAGS");
+        let saved_case = std::env::var_os("FDL_LIBTORCH_CASE");
+        unsafe {
+            std::env::remove_var("LIBTORCH_PATH");
+            std::env::remove_var("RUSTFLAGS");
+            std::env::remove_var("FDL_LIBTORCH_CASE");
+        }
+        let env = libtorch_env(&nested).unwrap();
+        unsafe {
+            match saved_lt {
+                Some(v) => std::env::set_var("LIBTORCH_PATH", v),
+                None => std::env::remove_var("LIBTORCH_PATH"),
+            }
+            match saved_rustflags {
+                Some(v) => std::env::set_var("RUSTFLAGS", v),
+                None => std::env::remove_var("RUSTFLAGS"),
+            }
+            match saved_case {
+                Some(v) => std::env::set_var("FDL_LIBTORCH_CASE", v),
+                None => std::env::remove_var("FDL_LIBTORCH_CASE"),
+            }
+        }
+        let variant = s.path().join("libtorch/precompiled/cpu-macos");
+        let lib = variant.join("lib");
+        let path = env
+            .iter()
+            .find(|(k, _)| k == "LIBTORCH_PATH")
+            .map(|(_, v)| v.as_str())
+            .expect("LIBTORCH_PATH");
+        assert_eq!(
+            std::fs::canonicalize(path).unwrap(),
+            std::fs::canonicalize(&variant).unwrap(),
+            "nested cwd must not invent a libtorch under flodl-hf/"
+        );
+        let rpath = format!("-C link-arg=-Wl,-rpath,{}", lib.display());
+        if cfg!(target_os = "macos") {
+            assert!(
+                env.iter().any(|(k, v)| k == "RUSTFLAGS" && v == &rpath),
+                "macOS rpath missing from {env:?}"
+            );
+        } else {
+            assert!(
+                env.iter().all(|(k, _)| k != "RUSTFLAGS"),
+                "Linux must not set RUSTFLAGS"
+            );
+        }
     }
 
     #[test]

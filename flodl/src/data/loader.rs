@@ -28,6 +28,11 @@ const VRAM_MAX_USAGE: f64 = 0.90;
 /// For CPU targets, always returns true (RAM is plentiful).
 /// For CUDA targets, probes free VRAM and checks if the dataset fits
 /// within the headroom budget.
+///
+/// MPS is an accelerator but the probe below is a CUDA VRAM query, and
+/// the unified-memory correction is out of scope here. A modest MPS
+/// dataset therefore takes the resident path (and is uploaded); a
+/// caller who wants the streaming path says `.streaming()`.
 fn can_fit_resident(n: usize, per_sample_bytes: usize, device: Device) -> bool {
     if !device.is_cuda() {
         return true;
@@ -689,11 +694,18 @@ fn build_resident(
         ));
     }
 
-    let gpu_data = if device.is_cuda() {
+    // Upload when the target is off the host. Pinning is a CUDA runtime
+    // concern (page-locked staging for the copy stream); MPS gets a
+    // plain synchronous transfer.
+    let gpu_data = if device.is_accelerator() {
         let mut on_device = Vec::with_capacity(tensors.len());
         for t in &tensors {
-            let pinned = t.pin_memory()?;
-            on_device.push(pinned.to_device(device)?);
+            if device.is_cuda() {
+                let pinned = t.pin_memory()?;
+                on_device.push(pinned.to_device(device)?);
+            } else {
+                on_device.push(t.to_device(device)?);
+            }
         }
         on_device
     } else {
@@ -1215,13 +1227,14 @@ impl StreamingLoader {
             )
         });
 
-        // Reader-ring sizing: CUDA targets only. On CPU targets the
-        // batch channel itself is the read-ahead buffer (no transfer
-        // stage to overlap), so the pipeline stays single-stage. The
-        // mechanism in the worker is device-agnostic; this is policy.
-        // While the sample cache is active the ring is capped to a
-        // flow-buffer depth: jitter absorption saturates fast, retained
-        // samples pay again every later epoch.
+        // Reader-ring sizing: CUDA targets only. The ring exists to
+        // overlap the fetch with an async copy stream, which MPS does
+        // not have; MPS stays single-stage and `transfer_batch` still
+        // uploads. On CPU the batch channel itself is the read-ahead
+        // buffer. The mechanism in the worker is device-agnostic; this
+        // is policy. While the sample cache is active the ring is
+        // capped to a flow-buffer depth: jitter absorption saturates
+        // fast, retained samples pay again every later epoch.
         let ring_slots = if self.device.is_cuda() {
             let sized = ring_slots_from_ram(
                 self.per_sample_bytes,

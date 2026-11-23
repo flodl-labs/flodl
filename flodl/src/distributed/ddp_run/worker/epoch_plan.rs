@@ -614,8 +614,10 @@ impl<M: Module> GpuWorker<M> {
             st.batch_done += 1;
             Ok(Some(tensors))
         } else {
-            // Sync path: load one batch at a time, move to device if needed.
-            // Used for CPU devices, or CUDA when VRAM is too tight for prefetch.
+            // Sync path: load one batch at a time, move to device if the
+            // target is off the host. Used for CPU, for MPS (no CUDA copy
+            // stream, so prefetch stays off), and for CUDA when VRAM is
+            // too tight for prefetch.
             let _stream_guard = self.compute_stream.as_ref().map(StreamGuard::new);
 
             let batch_idx = st.batch_done;
@@ -629,7 +631,7 @@ impl<M: Module> GpuWorker<M> {
             let data_start = Instant::now();
             let batch = self.dataset.get_batch(&samples)?;
 
-            let batch: Vec<Tensor> = if self.device.is_cuda() {
+            let batch: Vec<Tensor> = if self.device.is_accelerator() {
                 batch
                     .into_iter()
                     .map(|t| t.to_device(self.device))

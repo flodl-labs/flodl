@@ -10,9 +10,11 @@ use crate::tensor::{Device, GpuEvent, GpuEventFlags};
 /// Which clock produced a [`Profile`]'s timings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileSource {
-    /// Host `Instant` around each node call. Honest on CPU; on a GPU it
-    /// would time the kernel *launch*, not the execution (launches are
-    /// async), which is why CUDA forwards use [`ProfileSource::GpuEvents`].
+    /// Host `Instant` around each node call. Honest on CPU. On MPS the
+    /// forward drains the device queue around each read, so the clock
+    /// includes the kernels rather than only the launch. On CUDA a host
+    /// clock would time the launch, which is why those forwards use
+    /// [`ProfileSource::GpuEvents`].
     HostWallClock,
     /// Device-side boundary events (CUDA/ROCm): the elapsed device time
     /// between the events bracketing each node, i.e. actual execution.

@@ -38,11 +38,18 @@ impl Graph {
         }
         // On CUDA, host clocks time the kernel launch, not the execution
         // (launches are async), so bracket nodes with device events instead.
+        // MPS launches are async too and this tree has no MPS event pool,
+        // so a profiled MPS forward drains the queue around each host read.
         let use_gpu_events = is_profiling
             && !graph_inputs.is_empty()
             && graph_inputs[0].device().is_cuda()
             && self.ensure_gpu_profile_pool(graph_inputs[0].device());
+        let sync_mps_profile =
+            is_profiling && !graph_inputs.is_empty() && graph_inputs[0].device().is_mps();
         let host_profiling = is_profiling && !use_gpu_events;
+        if sync_mps_profile {
+            crate::tensor::mps_synchronize();
+        }
 
         let forward_start = if host_profiling {
             Some(Instant::now())
@@ -172,6 +179,9 @@ impl Graph {
                 };
                 let node_outputs = (node.run)(&inputs)?;
                 record_boundary(&mut gpu_pool, &mut gpu_seq, &mut gpu_failed);
+                if sync_mps_profile {
+                    crate::tensor::mps_synchronize();
+                }
                 if host_profiling {
                     let elapsed = node_start.unwrap().elapsed();
                     level_sum_ns += elapsed.as_nanos() as u64;

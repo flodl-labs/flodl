@@ -1,9 +1,27 @@
 # Upgrading floDl
 
-Five upgrades are documented here, newest first: the 0.9.0
-consensus-artifact + observability pass, the 0.8.0 multi-vendor GPU
-pass, the 0.7.0 monitor record surface, the 0.6.0 process-model
-distributed rewrite, then the 0.5.0 CLI maturity pass.
+Six upgrades are documented here, newest first: the unreleased Apple MPS
+device, the 0.9.0 consensus-artifact + observability pass, the 0.8.0
+multi-vendor GPU pass, the 0.7.0 monitor record surface, the 0.6.0
+process-model distributed rewrite, then the 0.5.0 CLI maturity pass.
+
+---
+
+## Unreleased: `Device::MPS`
+
+`Device` is no longer `{CPU, CUDA}`. Exhaustive `match`es on `Device`
+need an arm for `Device::MPS` (the Apple Silicon GPU; one device, index
+0, displayed as `mps`). The FFI device type gained `FLODL_MPS = 2`
+beside `FLODL_CPU = 0` and `FLODL_CUDA = 1`.
+
+Two questions used to share `is_cuda()`:
+
+| Question | Method | MPS |
+|---|---|---|
+| A CUDA runtime exists (streams, events, VRAM probes, pinned staging) | `is_cuda()` | no |
+| Data must leave the host | `is_accelerator()` | yes |
+
+`NcclComms` and `GpuStream` still require CUDA and name `Device::CPU | Device::MPS` in the match, so the next variant has to decide. There is no `mps` Cargo feature: the shim compiles the MPS calls everywhere, `mps_available()` is the runtime query, and `mps_synchronize()` returns without waiting when that query is false. Creating a `Device::MPS` tensor on a host with no MPS backend fails inside libtorch.
 
 ---
 

@@ -174,7 +174,10 @@ impl Precision {
             Precision::Bf16Mixed => match device {
                 Device::CUDA(idx) => crate::tensor::cuda_compute_capability(idx as i32)
                     .is_none_or(|(major, _)| major >= 8),
-                Device::CPU => true,
+                // No compute-capability query. MPS counts as native: Apple
+                // GPUs run bf16, and a device that cannot answer is not
+                // treated as emulating.
+                Device::CPU | Device::MPS => true,
             },
             // Every CUDA and ROCm card computes `f16`. Cards without
             // tensor cores do it slowly, which is a speed matter the
